@@ -301,7 +301,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
         determinism_policy = _graphml_determinism_policy()
         if determinism_policy == GRAPHML_DETERMINISM_POLICY_BEST_EFFORT:
-            logger.warning(
+            logger.debug(
                 "GraphML serialization is deterministic only as best-effort "
                 "on this NetworkX version (%s).",
                 nx.__version__,

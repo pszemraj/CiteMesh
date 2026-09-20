@@ -6,6 +6,7 @@ import csv
 import html
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -245,7 +246,9 @@ def _build_hostile_graph(
 
 
 def test_exporter_serialization_contracts_and_determinism(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
@@ -267,8 +270,9 @@ def test_exporter_serialization_contracts_and_determinism(
     graphml_again_path = tmp_path / "graph-again.graphml"
 
     exporter.to_json(json_path)
-    exporter.to_graphml(graphml_path)
-    exporter.to_graphml(graphml_again_path)
+    with caplog.at_level(logging.DEBUG):
+        exporter.to_graphml(graphml_path)
+        exporter.to_graphml(graphml_again_path)
 
     payload = json.loads(json_path.read_text())
     assert payload["kind"] == "citemesh-graph"
@@ -314,6 +318,15 @@ def test_exporter_serialization_contracts_and_determinism(
         assert _canonicalize_graphml(graphml_path) == _canonicalize_graphml(
             graphml_again_path
         )
+        determinism_logs = [
+            record
+            for record in caplog.records
+            if record.getMessage().startswith(
+                "GraphML serialization is deterministic only as best-effort"
+            )
+        ]
+        assert len(determinism_logs) == 2
+        assert all(record.levelno == logging.DEBUG for record in determinism_logs)
 
     captured: dict[str, object] = {}
 
