@@ -8,7 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from citemesh.core import Paper
-from citemesh.services import SemanticScholarUnavailableError
+from citemesh.services import (
+    SemanticScholarRequestError,
+    SemanticScholarUnavailableError,
+)
 from citemesh.services.arxiv import ArxivClient
 from citemesh.services.semantic_scholar.disk_cache import (
     _persist_paper,
@@ -116,11 +119,11 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
     assert "Recovered 1 references" in caplog.text
 
 
-def test_local_and_disk_metadata_avoid_remote_metadata(providers: tuple) -> None:
-    """An entry's cached arXiv/DOI aliases do not cause duplicate requests.
+def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -> None:
+    """Local metadata gains S2 counts while cached S2 metadata is reused.
 
     :param tuple providers: Mock services.
-    :return None: Checks local-first resolution and known citation count.
+    :return None: Checks local-first resolution and citation-count enrichment.
     """
     client, bibliography, metadata = providers
     bibliography.return_value = [
@@ -131,9 +134,13 @@ def test_local_and_disk_metadata_avoid_remote_metadata(providers: tuple) -> None
     local = paper(
         "local-record", arxiv_id="1706.03762", doi="10.1234/test", is_local_corpus=True
     )
+    overlapping_cache = paper("s2-overlap", arxiv_id="1706.03762", citation_count=42)
     cached = paper("s2-record", arxiv_id="2303.08774", citation_count=42)
+    enriched = paper("s2-local", arxiv_id="1706.03762", citation_count=99)
+    _persist_paper(overlapping_cache, "arxiv:1706.03762")
     _persist_paper(cached, "arxiv:2303.08774")
     lookup = MagicMock(return_value={"arxiv:1706.03762": local})
+    client.get_papers.return_value = {"arxiv:1706.03762": enriched}
     results = fetch_seed_references(
         client, paper("arxiv:2608.27147"), 3, local_lookup=lookup
     )
@@ -141,8 +148,32 @@ def test_local_and_disk_metadata_avoid_remote_metadata(providers: tuple) -> None
         "local-record",
         "s2-record",
     ]
+    assert results[-1].papers[0].citation_count == 99
     assert results[-1].papers[1].citation_count == 42
-    client.get_papers.assert_not_called()
+    client.get_papers.assert_called_once_with(
+        ["arxiv:1706.03762"], raise_on_unavailable=True
+    )
+    metadata.assert_not_called()
+
+
+def test_local_metadata_survives_s2_enrichment_rejection(providers: tuple) -> None:
+    """Optional S2 enrichment cannot discard a recovered local reference.
+
+    :param tuple providers: Mock services.
+    :return None: Checks local metadata remains usable after a rejected request.
+    """
+    client, bibliography, metadata = providers
+    bibliography.return_value = [("arxiv:1706.03762",)]
+    local = paper("local-record", arxiv_id="1706.03762", is_local_corpus=True)
+    client.get_papers.side_effect = SemanticScholarRequestError("rejected")
+    results = fetch_seed_references(
+        client,
+        paper("arxiv:2608.27147"),
+        1,
+        local_lookup=MagicMock(return_value={"arxiv:1706.03762": local}),
+    )
+    assert results[-1].state.value == "complete"
+    assert results[-1].papers == (local,)
     metadata.assert_not_called()
 
 

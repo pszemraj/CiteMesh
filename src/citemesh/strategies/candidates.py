@@ -267,7 +267,10 @@ def fetch_seed_references(
     :param Callable | None local_lookup: Read from an already prepared corpus.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
     """
-    from citemesh.services import SemanticScholarUnavailableError
+    from citemesh.services import (
+        SemanticScholarRequestError,
+        SemanticScholarUnavailableError,
+    )
     from citemesh.services.arxiv import ArxivClient, arxiv_identifier
     from citemesh.services.semantic_scholar.disk_cache import _load_cached_paper
 
@@ -353,6 +356,8 @@ def fetch_seed_references(
         ]
         if local_lookup is not None:
             remember(list(local_lookup(missing).values()))
+            bind_entry_aliases()
+            missing = [value for value in missing if value not in aliases]
         if not client.refresh_paper_cache:
             for value in missing:
                 cached = _load_cached_paper(value)
@@ -365,7 +370,10 @@ def fetch_seed_references(
             metadata_requested = True
             try:
                 records = client.get_papers(missing, raise_on_unavailable=True)
-            except SemanticScholarUnavailableError as exc:
+            except (
+                SemanticScholarRequestError,
+                SemanticScholarUnavailableError,
+            ) as exc:
                 logger.debug("S2 metadata unavailable during arXiv recovery: %s", exc)
                 records = {}
             else:
@@ -416,6 +424,36 @@ def fetch_seed_references(
         len(entries),
         len(recovered),
     )
+    local_targets = [
+        (paper, lookup_id)
+        for paper in recovered
+        if paper.is_local_corpus
+        and (lookup_id := provider_lookup_identifier(paper.paper_id, paper)) is not None
+    ]
+    if local_targets:
+        try:
+            s2_records = client.get_papers(
+                [lookup_id for _paper, lookup_id in local_targets],
+                raise_on_unavailable=True,
+            )
+        except (SemanticScholarRequestError, SemanticScholarUnavailableError) as exc:
+            logger.debug(
+                "S2 metadata enrichment unavailable during arXiv recovery: %s", exc
+            )
+        else:
+            for local_paper, lookup_id in local_targets:
+                s2_paper = s2_records.get(normalize_paper_id(lookup_id))
+                if s2_paper is None:
+                    s2_paper = next(
+                        (
+                            candidate
+                            for candidate in s2_records.values()
+                            if candidate_records_match(local_paper, candidate)
+                        ),
+                        None,
+                    )
+                if s2_paper is not None:
+                    merge_paper_metadata(local_paper, s2_paper)
     if recovered:
         logger.info(
             "Recovered %d references from the arXiv bibliography.", len(recovered)
