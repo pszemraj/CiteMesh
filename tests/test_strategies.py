@@ -3081,6 +3081,7 @@ def test_degree_capping_preserves_per_node_limit(
     [
         lambda: CitationGraphBuilder(max_papers=5, client=MagicMock()),
         lambda: RecommendationGraphBuilder(max_papers=5, client=MagicMock()),
+        lambda: EmbeddingGraphBuilder(max_papers=5, top_k=1, client=MagicMock()),
     ],
 )
 def test_capped_strategies_log_final_edge_count(
@@ -3103,6 +3104,12 @@ def test_capped_strategies_log_final_edge_count(
     assert "Graph constructed: 5 nodes, 10 edges" in caplog.text
     assert f"Graph complete: 5 nodes, {graph.number_of_edges()} edges" in caplog.text
     assert "Graph complete: 5 nodes, 10 edges" not in caplog.text
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.INFO
+        and record.message.startswith("Graph complete:")
+    ]
 
 
 @pytest.mark.parametrize(

@@ -1608,7 +1608,7 @@ class EmbeddingGraphBuilder(
             graph, self.top_k, seed_id=actual_seed_id
         )
 
-        logger.info(
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),
