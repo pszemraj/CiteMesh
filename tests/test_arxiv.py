@@ -250,7 +250,7 @@ def test_get_papers_maps_atom_metadata_and_ignores_unrequested_entries(
 def test_get_papers_rejects_bad_atom_responses_without_requesting_again(
     monkeypatch: pytest.MonkeyPatch, content: str
 ) -> None:
-    """Malformed metadata responses are optional-source misses, not failures.
+    """Malformed metadata responses preserve provider unavailability.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture that replaces Requests.
     :param str content: Malformed Atom response body.
@@ -259,7 +259,7 @@ def test_get_papers_rejects_bad_atom_responses_without_requesting_again(
     get = MagicMock(return_value=_Response(content))
     monkeypatch.setattr(arxiv_module.requests, "get", get)
 
-    assert ArxivClient().get_papers(["arxiv:2608.27147"]) == {}
+    assert ArxivClient().get_papers(["arxiv:2608.27147"]) is None
     get.assert_called_once()
 
 

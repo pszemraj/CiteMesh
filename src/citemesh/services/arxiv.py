@@ -221,11 +221,11 @@ class ArxivClient:
         html = self._get(f"https://arxiv.org/html/{identifier}")
         return extract_reference_identifiers(html) if html is not None else None
 
-    def get_papers(self, identifiers: list[str]) -> dict[str, Paper]:
+    def get_papers(self, identifiers: list[str]) -> dict[str, Paper] | None:
         """Fetch exact arXiv metadata in one Atom request.
 
         :param list[str] identifiers: Canonical arxiv-prefixed identifiers.
-        :return dict[str, Paper]: Available records keyed by canonical arXiv ID.
+        :return dict[str, Paper] | None: Available records, or unavailable metadata.
         """
         if not identifiers:
             return {}
@@ -237,12 +237,12 @@ class ArxivClient:
             },
         )
         if content is None:
-            return {}
+            return None
         try:
             feed = ET.fromstring(content)
         except ET.ParseError:
             logger.debug("arXiv metadata response was not valid Atom XML.")
-            return {}
+            return None
         papers = {}
         for entry in feed.findall("a:entry", _ATOM):
             identifier = arxiv_identifier(entry.findtext("a:id", "", _ATOM))

@@ -191,6 +191,31 @@ def test_html_failure_preserves_s2_failure_or_empty(
         require_available_candidate_source(results, context="test")
 
 
+def test_metadata_outage_marks_recovery_unavailable(
+    providers: tuple, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Successful HTML extraction cannot hide metadata-provider outages.
+
+    :param tuple providers: Mock services.
+    :param pytest.LogCaptureFixture caplog: Recorded warning.
+    :return None: Checks unavailable recovery status and one aggregate warning.
+    """
+    client, bibliography, metadata = providers
+    bibliography.return_value = [("arxiv:1706.03762",)]
+    client.get_papers.side_effect = SemanticScholarUnavailableError("offline")
+    metadata.return_value = None
+
+    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    assert [result.state.value for result in results] == ["empty", "unavailable"]
+    with caplog.at_level(logging.WARNING):
+        require_available_candidate_source(results, context="test")
+    warnings = [
+        record for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "arxiv_references" in warnings[0].message
+
+
 def test_citation_reuses_recovery_without_persisting_partial_bibliography(
     providers: tuple,
 ) -> None:

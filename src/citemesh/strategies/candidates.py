@@ -313,6 +313,8 @@ def fetch_seed_references(
     aliases: dict[str, Paper] = {}
     recovered: list[Paper] = []
     attempted: set[str] = set()
+    metadata_requested = False
+    metadata_completed = False
 
     def remember(records: Sequence[Paper]) -> None:
         """Index available records by explicit aliases.
@@ -360,11 +362,14 @@ def fetch_seed_references(
         bind_entry_aliases()
         missing = [value for value in missing if value not in aliases]
         if missing:
+            metadata_requested = True
             try:
                 records = client.get_papers(missing, raise_on_unavailable=True)
             except SemanticScholarUnavailableError as exc:
                 logger.debug("S2 metadata unavailable during arXiv recovery: %s", exc)
                 records = {}
+            else:
+                metadata_completed = True
             remember(list(records.values()))
             for requested_id, paper in records.items():
                 aliases[normalize_paper_id(requested_id).lower()] = paper
@@ -374,7 +379,11 @@ def fetch_seed_references(
                 for value in missing
                 if value.startswith("arxiv:") and value not in aliases
             ]
-            remember(list(arxiv.get_papers(missing_arxiv).values()))
+            if missing_arxiv:
+                arxiv_records = arxiv.get_papers(missing_arxiv)
+                if arxiv_records is not None:
+                    metadata_completed = True
+                    remember(list(arxiv_records.values()))
             bind_entry_aliases()
         attempted.update(ids)
         for entry in batch:
@@ -412,12 +421,22 @@ def fetch_seed_references(
             "Recovered %d references from the arXiv bibliography.", len(recovered)
         )
     # COMPLETE describes an evaluated source, not exhaustive bibliography coverage.
+    if recovered:
+        state = CandidateSourceState.COMPLETE
+        error = None
+    elif metadata_requested and not metadata_completed:
+        state = CandidateSourceState.UNAVAILABLE
+        error = "Reference metadata unavailable during arXiv recovery"
+    else:
+        state = CandidateSourceState.EMPTY
+        error = None
     return (
         original,
         CandidateSourceResult(
             "arxiv_references",
-            CandidateSourceState.COMPLETE if recovered else CandidateSourceState.EMPTY,
+            state,
             papers=tuple(recovered),
+            error=error,
         ),
     )
 
