@@ -31,10 +31,14 @@ Every node carries a consistent attribute payload, which keeps visualization and
 
 `errors.py` (request and availability errors) · `retry.py` (backoff and `Retry-After`) · `disk_cache.py` (canonical paper metadata, identifier lookups, and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (fresh discovery, pagination, and cache-aware metadata acquisition) · `client.py` (HTTP requests, rate limiting, shared recovery budget, `get_client`). The [API request policy](../guides/cli.md#appendix-b-troubleshooting) defines retry and recovery behavior.
 
+### `services/arxiv.py` - conditional seed-reference recovery
+
+Fetches an arXiv HTML article when Semantic Scholar returns no usable seed references, parses only its bibliography for explicit arXiv IDs and DOIs, and resolves remaining arXiv records through the batched Atom API. It uses the standard library and has no extra install dependency. The [CLI guide](../guides/cli.md#missing-semantic-scholar-references) defines its scope and limitations.
+
 ### `strategies/` - candidate acquisition and scoring
 
 - `base.py` - `GraphBuilderStrategy`: the template method and its four hooks, the shared temporal/citation/bibliographic scorers, `deterministic_sort_key`, edge capping
-- `candidates.py` - pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, exact paper-ID matching, explicit corpus/S2 identifier matching, `scope_candidate_collection`
+- `candidates.py` - pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, exact paper-ID matching, explicit corpus/S2 identifier matching, conditional arXiv seed-reference recovery, `scope_candidate_collection`
 - `similarity.py` - `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity
 - `citation.py`, `recommendation.py`, `hybrid.py` - the concrete strategies
 - `embedding/` - `deps` (lazy dependency guards) · `runtime` (device resolution, probes) · `model_runtime` (load, fallback, precision validation, TF32 and compile guards) · `precision` · `text` (`EmbeddingTask`, formatters) · `records` · `config` · `fingerprint` · `hydration` (corpus selection, calibration, resume) · `builder`
@@ -85,4 +89,4 @@ The viewer rebuilds its Plotly figure client-side from the embedded payload, so 
 
 ## External dependencies
 
-The Semantic Scholar API is the only network dependency of the core CLI. Everything torch- or Plotly-shaped lives behind the `embeddings` and `viz` extras; h5py, NetworkX, Matplotlib, scikit-learn, and Rich ship in the base install.
+The core CLI uses the Semantic Scholar API and, only when seed-reference discovery is empty or unavailable, arXiv HTML and its metadata API. The arXiv fallback uses the standard library and adds no package dependency. Everything torch- or Plotly-shaped lives behind the `embeddings` and `viz` extras; h5py, NetworkX, Matplotlib, scikit-learn, and Rich ship in the base install.

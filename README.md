@@ -27,7 +27,7 @@ Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly expor
 
 Python >= 3.10. For embedding dependencies and device requirements, see [Embedding Runtime](docs/reference/embedding-runtime.md#dependency-floor).
 
-For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#appendix-b-troubleshooting).
+For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#appendix-b-troubleshooting). When Semantic Scholar omits a seed's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
 
 ### Run one graph
 
