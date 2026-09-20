@@ -1647,6 +1647,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "min-height: 160px;\n      flex: 1 0 160px;",
         "#detail-pane { grid-area: detail; min-height: 620px; }",
         ".toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }",
+        "grid-template-columns: minmax(240px, 9fr) minmax(420px, 15fr) minmax(300px, 11fr);",
         "@media (max-width: 640px) {\n      #dashboard-toolbar {\n        position: static;\n        margin: 8px 8px 0;",
         "@media (max-width: 768px), (max-width: 900px) and (max-height: 500px) {",
         ".nav-btn[disabled] {\n      opacity: 0.45;\n      cursor: default;",

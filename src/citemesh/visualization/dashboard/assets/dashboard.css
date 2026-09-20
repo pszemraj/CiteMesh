@@ -591,7 +591,7 @@
     }
     @media (max-width: 1280px) {
       #dashboard-root {
-        grid-template-columns: minmax(240px, 30vw) minmax(420px, 1fr) minmax(300px, 34vw);
+        grid-template-columns: minmax(240px, 9fr) minmax(420px, 15fr) minmax(300px, 11fr);
       }
       .toolbar-row.primary { grid-template-columns: 1fr 168px 152px; }
       .toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }
