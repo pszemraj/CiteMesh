@@ -628,6 +628,24 @@
       #paper-list-pane { grid-area: list; min-height: 360px; }
       #__PLOTLY_DIV_ID__ { min-height: 500px; }
     }
+    @media (max-width: 768px), (max-width: 900px) and (max-height: 500px) {
+      input,
+      select,
+      button {
+        min-height: 44px;
+        font-size: 16px;
+      }
+      .nav-btn,
+      .chip,
+      #detail-actions button {
+        min-height: 44px;
+        font-size: 14px;
+      }
+      #detail-links a {
+        width: 44px;
+        height: 44px;
+      }
+    }
     @media (max-width: 640px) {
       #dashboard-toolbar {
         position: static;
@@ -647,18 +665,6 @@
         width: 100%;
         min-width: 0;
         max-width: none;
-      }
-      input,
-      select,
-      button {
-        min-height: 44px;
-        font-size: 16px;
-      }
-      .nav-btn,
-      .chip,
-      #detail-actions button {
-        min-height: 44px;
-        font-size: 14px;
       }
       .toolbar-row.primary,
       .toolbar-row.secondary {
@@ -680,10 +686,6 @@
       #year-timeline {
         width: 100%;
         grid-template-columns: auto minmax(0, 1fr) auto;
-      }
-      #detail-links a {
-        width: 44px;
-        height: 44px;
       }
     }
     @media (max-width: 420px) {
