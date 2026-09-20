@@ -87,12 +87,12 @@ class SemanticScholarClient(_EndpointsMixin):
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
-            logger.info("Using Semantic Scholar API key")
+            logger.debug("Using Semantic Scholar API key")
         else:
             global _anonymous_pool_announced
             if not _anonymous_pool_announced:
                 _anonymous_pool_announced = True
-                logger.info(
+                logger.debug(
                     "No S2_API_KEY set; using the shared anonymous Semantic Scholar pool."
                 )
 
@@ -123,7 +123,7 @@ class SemanticScholarClient(_EndpointsMixin):
                 state.depth -= 1
                 if owns_state and state.depth == 0:
                     if state.reference_cache_hits:
-                        logger.info(
+                        logger.debug(
                             "Reused cached reference enrichment for %d lookups.",
                             state.reference_cache_hits,
                         )
@@ -514,26 +514,15 @@ class SemanticScholarClient(_EndpointsMixin):
                     cause=last_error,
                 )
                 return self._handle_unavailable(exhausted, raise_on_unavailable)
-            if delay >= retry._LONG_RETRY_WARNING_SECONDS:
-                logger.warning(
-                    "Semantic Scholar unavailable while %s (attempt %d/%d); "
-                    "waiting %.0fs: %s",
-                    context,
-                    attempt,
-                    API_CONFIG.max_retries,
-                    delay,
-                    last_error,
-                )
-            else:
-                logger.debug(
-                    "Semantic Scholar request failed while %s (attempt %d/%d); "
-                    "retrying in %.1fs: %s",
-                    context,
-                    attempt,
-                    API_CONFIG.max_retries,
-                    delay,
-                    last_error,
-                )
+            logger.debug(
+                "Semantic Scholar request failed while %s (attempt %d/%d); "
+                "retrying in %.1fs: %s",
+                context,
+                attempt,
+                API_CONFIG.max_retries,
+                delay,
+                last_error,
+            )
             sleep_started_at = monotonic()
             try:
                 time.sleep(delay)

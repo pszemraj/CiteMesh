@@ -36,7 +36,7 @@ from .runtime import (
     _parse_major_minor,
     _require_transformers_compatibility,
     _suppress_expected_fa2_load_dtype_warning,
-    _suppress_transformers_progress_for_non_tty,
+    _suppress_transformers_progress_when_hidden,
 )
 
 logger = logging.getLogger(__name__)
@@ -741,7 +741,7 @@ class _ModelRuntimeMixin:
         if self.model_revision is not None:
             st_kwargs["revision"] = self.model_revision
         try:
-            with _suppress_transformers_progress_for_non_tty():
+            with _suppress_transformers_progress_when_hidden():
                 with _suppress_expected_fa2_load_dtype_warning(
                     enabled=(
                         self._attention_implementation_hint == "flash_attention_2"
@@ -764,7 +764,7 @@ class _ModelRuntimeMixin:
             # downgrade reaches the retry without rebuilding the kwargs.
             self._attention_implementation_hint = "sdpa"
             model_kwargs["attn_implementation"] = "sdpa"
-            with _suppress_transformers_progress_for_non_tty():
+            with _suppress_transformers_progress_when_hidden():
                 loaded_model = sentence_transformer_cls(candidate_model, **st_kwargs)
         self._validate_loaded_model_precision(loaded_model, candidate_model)
         self._validate_loaded_model_contract(loaded_model, candidate_model)
@@ -917,7 +917,7 @@ class _ModelRuntimeMixin:
         logger.debug("Will scope TF32 to CUDA matmul/conv encode calls (Ampere+ GPU).")
 
     def _log_runtime_summary(self) -> None:
-        """Emit concise one-time runtime summary at info level."""
+        """Emit one-time runtime configuration details at debug level."""
         if self._runtime_summary_logged:
             return
 
@@ -929,7 +929,7 @@ class _ModelRuntimeMixin:
         if self._autocast_enabled:
             compute_dtype_label = f"{compute_dtype_label}+autocast"
         attention_label = self._attention_implementation_hint or "auto"
-        logger.info(
+        logger.debug(
             "%s runtime: device=%s, dim=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
             self.device,

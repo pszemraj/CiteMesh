@@ -159,7 +159,7 @@ class _CorpusHydrationMixin:
                 if rescored_embeddings is not None
                 else "unknown"
             )
-            logger.info(
+            logger.debug(
                 "Semantic cache search compared against %s embeddings "
                 "(rescored=%s, prefilter=%s).",
                 compared_label,
@@ -210,7 +210,7 @@ class _CorpusHydrationMixin:
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         if cached_dataset_source == self.dataset_source:
             if self.embedding_cache.prepare_corpus_identity_reconciliation():
-                logger.info(
+                logger.debug(
                     "Rechecking legacy corpus membership by stable content "
                     "identity while preserving existing paper IDs and vectors."
                 )
@@ -326,7 +326,7 @@ class _CorpusHydrationMixin:
             )
             return True, cached_dataset_source
 
-        logger.warning(
+        logger.debug(
             "Hydrated cache revalidation invalidated source=%s for split=%s corpus_size=%s; "
             "performing full source revalidation.",
             cached_dataset_source or "unknown",
@@ -391,7 +391,7 @@ class _CorpusHydrationMixin:
             use_streaming,
         )
         if self.corpus_size is not None:
-            logger.info(
+            logger.debug(
                 "Capped corpus hydration selects the %d most recently "
                 "submitted papers (by arXiv ID chronology). Use --all-corpus "
                 "for full coverage.",
@@ -490,7 +490,7 @@ class _CorpusHydrationMixin:
                 mark_complete=True,
             )
             if not rows_reconciled:
-                logger.info(
+                logger.debug(
                     "Initial full-corpus hydration for %s/%s completed with "
                     "cache_rows=%d and upstream_rows=%d; recording the expected "
                     "duplicate-ID row-count deficit.",
@@ -530,7 +530,7 @@ class _CorpusHydrationMixin:
         ):
             return
 
-        logger.info("Refreshing cached corpus metadata from %s.", source)
+        logger.debug("Refreshing cached corpus metadata from %s.", source)
         # A capped cache retains its original paper selection. Inspect the full
         # selected split so older cached papers can still receive metadata fixes.
         dataset = deps._import_datasets_module().load_dataset(
@@ -872,7 +872,7 @@ class _CorpusHydrationMixin:
         if stats.hydration_complete and stats.hydration_corpus_size == recorded_token:
             return
 
-        logger.warning(
+        logger.debug(
             "Restoring the reused corpus for %s/%s to complete at %s after an "
             "unfinished refresh; its cached rows still serve this request.",
             source,
@@ -915,7 +915,7 @@ class _CorpusHydrationMixin:
         requested_token = _corpus_size_token(self.corpus_size)
         upstream_rows = self._resolve_dataset_split_row_count(source)
         cached_paper_ids = self._cached_corpus_paper_ids()
-        logger.info(
+        logger.debug(
             "Extending cached corpus for %s/%s from %s to %s; reusing %d cached "
             "rows and encoding only the newly selected papers.",
             source,
@@ -979,7 +979,7 @@ class _CorpusHydrationMixin:
                     upstream_rows=upstream_rows,
                     cached_rows=updated_rows,
                 )
-        logger.info(
+        logger.debug(
             "Extended cached corpus for %s/%s from %s to %s "
             "(reused=%d, encoded=%d, cache_rows=%d).",
             source,
@@ -1020,7 +1020,7 @@ class _CorpusHydrationMixin:
             else None
         )
         cached_paper_ids = self._cached_corpus_paper_ids()
-        logger.info(
+        logger.debug(
             "Resuming incomplete selected-corpus cache for %s/%s from cached_rows=%d.",
             source,
             self.dataset_split,
@@ -1041,7 +1041,7 @@ class _CorpusHydrationMixin:
             corpus_size=resumed_corpus_size,
         )
         if not (resume_result.source_exhausted or resume_result.row_cap_reached):
-            logger.warning(
+            logger.debug(
                 "Incomplete selected-corpus resume for %s/%s did not exhaust "
                 "its source; performing full rebuild.",
                 source,
@@ -1087,7 +1087,7 @@ class _CorpusHydrationMixin:
                     upstream_rows=capped_upstream_rows,
                     cached_rows=updated_rows,
                 )
-        logger.info(
+        logger.debug(
             "Resumed incomplete selected-corpus cache for %s/%s "
             "(source_rows=%d, added=%d, cache_rows=%d).",
             source,
@@ -1418,7 +1418,7 @@ class _CorpusHydrationMixin:
         if not self._needs_explicit_int8_calibration():
             return
 
-        logger.info(
+        logger.debug(
             "Initializing representative int8 calibration ranges from %s (sample_size=%d).",
             dataset_source,
             self.calibration_sample_size,
@@ -1644,7 +1644,7 @@ class _CorpusHydrationMixin:
                     dataset_source,
                     len(selected) - len(chronology_keys),
                 )
-            logger.info(
+            logger.debug(
                 "Selected the %d most recently submitted rows from %s by "
                 "arXiv ID chronology (submission window %04d-%02d..%04d-%02d).",
                 len(chronology_keys),
@@ -1691,7 +1691,7 @@ class _CorpusHydrationMixin:
             parsed = int(num_examples)
             return parsed if parsed >= 0 else None
         except Exception as exc:  # pragma: no cover - source/network dependent
-            logger.warning(
+            logger.debug(
                 "Could not resolve split row count for %s/%s: %s",
                 dataset_source,
                 self.dataset_split,
@@ -1848,7 +1848,7 @@ class _CorpusHydrationMixin:
             corpus_size=refreshed_corpus_size,
         ):
             if upstream_rows is None:
-                logger.info(
+                logger.debug(
                     "Capped corpus for %s/%s already holds the newest %d "
                     "submissions upstream (cache_rows=%d); the source does not "
                     "publish a row count, so the next build will scan it again.",
@@ -1858,7 +1858,7 @@ class _CorpusHydrationMixin:
                     cached_rows,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "Capped corpus for %s/%s already holds the newest %d submissions "
                     "upstream (cache_rows=%d, upstream_rows=%d); memoizing this "
                     "state so the next build skips the source scan.",
@@ -2006,7 +2006,7 @@ class _CorpusHydrationMixin:
             the pass does not rank the whole source a second time.
         :return None: Mutates cache rows and the reconciliation marker in-place.
         """
-        logger.info(
+        logger.debug(
             "Capped corpus for %s/%s is missing rows from the newest-%d "
             "selection upstream holds; %s that selection over %d cached rows "
             "and encoding only the papers the cache does not have.",
@@ -2056,7 +2056,7 @@ class _CorpusHydrationMixin:
                 upstream_rows=upstream_rows,
                 cached_rows=updated_rows,
             )
-        logger.info(
+        logger.debug(
             "Admitted %d newer upstream papers into the capped corpus for %s/%s "
             "(cache_rows=%d, upstream_rows=%s).",
             refresh.hydrated_records,
@@ -2101,7 +2101,7 @@ class _CorpusHydrationMixin:
             self.embedding_cache.get_hydration_rowcount_reconciliation()
         )
         if previous_reconciliation == (upstream_rows, cached_rows):
-            logger.info(
+            logger.debug(
                 "Skipping incremental refresh for %s/%s: prior reconciliation already "
                 "verified this row-count delta (cache_rows=%d, upstream_rows=%d).",
                 source,

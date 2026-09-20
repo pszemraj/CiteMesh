@@ -19,7 +19,7 @@ citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -o out/report.dashboard
 
 # Embedding graph over a corpus slice, with a debug trace
 citemesh build "arxiv:1810.04805" -s embedding --dataset-split "train[:2%]" \
-  -e plotly --log-level debug --log-file out/run.log
+  -e plotly --verbose --log-file out/run.log
 ```
 
 Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
@@ -74,7 +74,16 @@ See [User Configuration](configuration.md) for saved defaults and [cache mainten
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
 
-`--log-level debug --log-file out/run.log` adds option routing, effective embedding configuration, retry attempts, model provenance, and namespace decisions. `info` keeps phase progress and one-time runtime summaries; warnings mark degraded operations, recovery, and material cache clears.
+`--verbose` is shorthand for `--log-level debug`; it works before or after a subcommand. When several verbosity options are present, the last one wins. `--log-level debug --log-file out/run.log` adds option routing, cache and provider details, runtime configuration, retry attempts, and namespace decisions.
+
+| Level | Output |
+| --- | --- |
+| `error` | The requested operation failed. |
+| `warning` | A result was materially degraded or an explicitly requested runtime feature could not be used. |
+| `info` | Brief build phases, useful outcomes, and saved output locations. |
+| `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
+
+Progress bars appear only on an interactive terminal at `info` or `debug`.
 
 ## Flag reference
 
@@ -96,6 +105,7 @@ Build options are strategy-scoped: an explicit flag unsupported by the selected 
 | `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` checks environment hints before macOS appearance | `dark` |
 | `--output`, `-o` | File or directory, following the [output-location rules](../reference/output-artifacts.md#output-location) | automatic |
 | `--log-level` | `debug`, `info`, `warning`, `error` | `info` |
+| `--verbose` | Shorthand for `--log-level debug` | disabled |
 | `--log-width` | Console wrap width in columns; `0` means terminal width on a TTY, a stable fallback when redirected | `0` |
 | `--log-file` | Plain-text log file path, overwriting an existing file | disabled |
 

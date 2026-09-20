@@ -13,9 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
-from citemesh._runtime import stderr_isatty
 from citemesh.core import Paper
-from citemesh.progress import progress_iterator
+from citemesh.progress import progress_enabled, progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -234,7 +233,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :return None: Updates paper records and the in-memory reference cache.
         """
         if self.fetch_references:
-            logger.info("Hydrating reference lists for %d papers...", len(papers))
+            logger.debug("Hydrating reference lists for %d papers...", len(papers))
 
         provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         if seed.references:
@@ -244,7 +243,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         progress_bar = None
         paper_items = papers.items()
-        if self.fetch_references and stderr_isatty() and len(papers) > 25:
+        if self.fetch_references and progress_enabled() and len(papers) > 25:
             progress_bar = progress_iterator(
                 paper_items,
                 description="Hydrating reference lists",
@@ -337,17 +336,17 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
 
-        logger.info("Seed: %s", seed.title)
+        logger.debug("Seed: %s", seed.title)
 
         # Step 2: Fetch references (older papers)
-        progress_enabled = stderr_isatty()
+        show_progress = progress_enabled()
         remaining = self.max_papers - len(papers)
         reference_limit = min(
             remaining,
             self.max_references,
         )
         if reference_limit > 0 and provider_seed_id is not None:
-            logger.info(f"Fetching up to {reference_limit} references...")
+            logger.info("Collecting references and citations...")
             reference_result = fetch_candidate_source(
                 "references",
                 lambda: self.client.get_paper_references(
@@ -361,7 +360,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 papers,
                 seed,
                 list(reference_result.papers),
-                progress_enabled=progress_enabled,
+                progress_enabled=show_progress,
                 progress_description="Downloading references",
             )
             self._record_seed_relations(reference_ids, "referenced_by_seed")
@@ -373,7 +372,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             self.max_citations,
         )
         if citation_limit > 0 and provider_seed_id is not None:
-            logger.info(f"Fetching up to {citation_limit} citations...")
+            logger.debug(f"Fetching up to {citation_limit} citations...")
             citation_result = fetch_candidate_source(
                 "citations",
                 lambda: self.client.get_paper_citations(
@@ -387,7 +386,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 papers,
                 seed,
                 list(citation_result.papers),
-                progress_enabled=progress_enabled,
+                progress_enabled=show_progress,
                 progress_description="Downloading citations",
             )
             self._record_seed_relations(citation_ids, "cites_seed")
@@ -436,7 +435,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             sorted(self.candidate_source_status.items())
         )
         filtered_graph = build_capped_undirected_graph(graph, 3, seed_id=actual_seed_id)
-        logger.info(
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),

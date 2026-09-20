@@ -963,7 +963,8 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         if record.levelno == logging.DEBUG
     ]
 
-    assert any("runtime: device=" in message for message in info_messages)
+    assert not any("runtime: device=" in message for message in info_messages)
+    assert any("runtime: device=" in message for message in debug_messages)
     assert not any(
         "Adds recommended retrieval-query, retrieval-document, and symmetric" in message
         for message in info_messages
@@ -7993,7 +7994,7 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
 def test_embedding_candidate_search_logs_comparison_counts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Candidate search should log compared/rescored embedding counts."""
+    """Candidate search should debug-log compared/rescored embedding counts."""
 
     builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
     _pin_model_fingerprint(monkeypatch, builder)
@@ -8013,7 +8014,7 @@ def test_embedding_candidate_search_logs_comparison_counts(
     )
 
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         candidates = builder._select_candidates(
             np.asarray([1.0, 0.0], dtype=np.float32),
             use_streaming=False,
@@ -8125,7 +8126,12 @@ def test_embedding_citation_enrichment_skips_invalid_batch_rows(
 
     assert papers["valid"].citation_count == 77
     assert papers["invalid"].citation_count == 2
-    assert "Skipping malformed batch paper for invalid." in caplog.text
+    assert "Paper metadata skipped 1 malformed records." in caplog.text
+    assert "Skipping malformed batch paper for invalid." not in caplog.text
+    assert (
+        len([record for record in caplog.records if record.levelno >= logging.WARNING])
+        == 1
+    )
 
 
 @pytest.mark.parametrize("seed_id", ["content:abc123", "arxiv_7", "local-source-42"])

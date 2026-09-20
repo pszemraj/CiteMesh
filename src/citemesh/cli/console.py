@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from citemesh._runtime import stderr_isatty, stdout_isatty
-from citemesh.progress import set_progress_console
+from citemesh.progress import set_progress_console, set_progress_enabled
 
 DEFAULT_LOG_WIDTH = 0
 
@@ -93,6 +93,7 @@ def _configure_logging(
     _size_console(output_console, log_width, interactive=stdout_isatty())
     # Progress bars share the logging console so records render above a live bar.
     set_progress_console(log_console)
+    set_progress_enabled(resolved_level <= logging.INFO)
     console_handler = RichHandler(
         console=log_console,
         show_time=False,

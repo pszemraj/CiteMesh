@@ -30,6 +30,7 @@ from ._runtime import stderr_isatty
 T = TypeVar("T")
 
 _progress_console: Console | None = None
+_progress_enabled = True
 
 
 def set_progress_console(console: Console) -> None:
@@ -40,6 +41,24 @@ def set_progress_console(console: Console) -> None:
     """
     global _progress_console
     _progress_console = console
+
+
+def set_progress_enabled(enabled: bool) -> None:
+    """Enable or suppress progress displays configured by the CLI.
+
+    :param bool enabled: Whether interactive progress bars may render.
+    :return None: Stores the process-level display policy.
+    """
+    global _progress_enabled
+    _progress_enabled = bool(enabled)
+
+
+def progress_enabled() -> bool:
+    """Return whether the CLI currently permits progress displays.
+
+    :return bool: ``True`` when the active verbosity allows progress output.
+    """
+    return _progress_enabled
 
 
 def _resolve_console() -> Console:
@@ -146,7 +165,7 @@ def progress_task(
         bar only when stderr is interactive.
     :return Iterator[ProgressTask]: Handle used to advance the task.
     """
-    show = stderr_isatty() if enabled is None else bool(enabled)
+    show = _progress_enabled and (stderr_isatty() if enabled is None else bool(enabled))
     progress = Progress(
         *_columns(),
         console=_resolve_console(),

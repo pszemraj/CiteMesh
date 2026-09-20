@@ -183,7 +183,7 @@ def _resolve_run_output_paths(
             strategy=args.strategy,
         )
     if dashboard_package_path is not None:
-        logger.info(
+        logger.debug(
             "Dashboard collection mode: viewer=%s package=%s graph=%s.",
             output_paths["dashboard"],
             dashboard_package_path,
@@ -482,41 +482,37 @@ def _log_run_summary(
     graph_config_path: Path | None,
     dashboard_package_path: Path | None,
 ) -> None:
-    """Log where the run's artifacts landed and how large the graph is.
+    """Log one user-facing completion result and auxiliary paths for debugging.
 
     :param nx.Graph graph: Constructed graph being summarized.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
     :param Path | None graph_config_path: Sidecar path, if one was written.
     :param Path | None dashboard_package_path: Collection package path, if any.
-    :return None: Emits the closing informational log lines.
+    :return None: Emits the closing informational and debug log lines.
     """
-    artifact_paths = dict(output_paths)
-    if graph_config_path is not None:
-        artifact_paths["config"] = graph_config_path
-    if dashboard_package_path is not None:
-        artifact_paths["dashboard_package"] = dashboard_package_path
-    saved_artifact_count = len(artifact_paths)
-    output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
-    if saved_artifact_count:
-        if len(output_dirs) == 1:
-            logger.info(
-                "%d export artifacts saved to:\t%s",
-                saved_artifact_count,
-                output_dirs[0],
-            )
-        else:
-            logger.info(
-                "%d export artifacts saved across %d directories: %s",
-                saved_artifact_count,
-                len(output_dirs),
-                ", ".join(output_dirs),
-            )
-
+    primary_outputs = ", ".join(
+        f"{format_name}={path}" for format_name, path in sorted(output_paths.items())
+    )
     logger.info(
-        "Graph summary: nodes=%d, edges=%d",
+        "Build complete: nodes=%d, edges=%d; outputs: %s",
         graph.number_of_nodes(),
         graph.number_of_edges(),
+        primary_outputs,
     )
+
+    auxiliary_paths: dict[str, Path] = {}
+    if graph_config_path is not None:
+        auxiliary_paths["config"] = graph_config_path
+    if dashboard_package_path is not None:
+        auxiliary_paths["dashboard_package"] = dashboard_package_path
+    if auxiliary_paths:
+        logger.debug(
+            "Build auxiliary artifacts: %s",
+            ", ".join(
+                f"{artifact_name}={path}"
+                for artifact_name, path in sorted(auxiliary_paths.items())
+            ),
+        )
 
 
 def run_build_command(

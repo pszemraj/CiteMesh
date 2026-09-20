@@ -34,6 +34,7 @@ Clear stale output before building locally (`rm -rf build dist && python -m buil
 - Follow the [dependency rules](docs/internals/architecture.md#rules), including lazy imports for optional dependencies.
 - Shared CLI/config vocabularies live in `core/choices.py`; import them instead of maintaining duplicate literals.
 - Update the matching guide or reference when changing a CLI flag, default, cache layout, or environment variable. Do not hard-wrap Markdown.
+- Use INFO only for brief phases and outcomes. Use WARNING when results are materially degraded or an explicitly requested runtime capability is unavailable. Put cache, provider, runtime, and scoring details at DEBUG; reproduce them with `--verbose` or `--log-level debug`.
 - Use release notes for change history; do not maintain a separate changelog.
 
 Agent environment and Git instructions: [AGENTS.md](AGENTS.md).

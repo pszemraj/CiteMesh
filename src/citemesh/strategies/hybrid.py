@@ -822,7 +822,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if "citation" in tags:
                 self.seed_relations.setdefault(paper_id, "citation")
 
-        logger.info("Added %s semantic papers", added_semantic)
+        logger.debug("Added %s semantic papers", added_semantic)
 
         return papers
 
@@ -948,7 +948,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:
-            logger.info(
+            logger.debug(
                 "Graph complete: %s nodes, %s edges",
                 graph.number_of_nodes(),
                 graph.number_of_edges(),
@@ -959,12 +959,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             graph, max_edges, seed_id=actual_seed_id
         )
 
-        logger.info(
+        logger.debug(
             "Hybrid edge cap applied: %s -> %s edges",
             graph.number_of_edges(),
             filtered_graph.number_of_edges(),
         )
-        logger.info(
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),

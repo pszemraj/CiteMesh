@@ -351,6 +351,14 @@ def _add_logging_arguments(
         help="Console verbosity: debug, info, warning, error (default: info)",
     )
     group.add_argument(
+        "--verbose",
+        dest="log_level",
+        action="store_const",
+        const="debug",
+        default=argparse.SUPPRESS,
+        help="Enable debug logging (same as --log-level debug)",
+    )
+    group.add_argument(
         "--log-width",
         metavar="COLS",
         type=_non_negative_int,

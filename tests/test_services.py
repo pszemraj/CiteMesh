@@ -383,7 +383,7 @@ def test_get_papers_splits_arbitrary_missing_count_at_500() -> None:
 def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A failed metadata batch reports the current and remaining skipped records.
+    """A failed metadata batch emits one actionable availability warning.
 
     :param pytest.MonkeyPatch monkeypatch: Makes retry waits unaffordable.
     :param pytest.LogCaptureFixture caplog: Captured warning log.
@@ -408,10 +408,13 @@ def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
     assert [
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500]
-    assert (
-        "Paper metadata: stopped after an unavailable batch; 501 missing records "
-        "were not fetched." in caplog.text
-    )
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "batch fetching 500 papers" in warnings[0]
 
 
 def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
@@ -431,12 +434,46 @@ def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
                 _MockResponse(400, {"error": "Bad fields"}),
             ]
         )
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             assert list(client.get_papers(["ok", "missing", "bad"])) == ["ok"]
         assert client.get_papers(["unknown"]) == {}
         with pytest.raises(SemanticScholarRequestError, match="HTTP 400"):
             client.get_papers(["rejected"])
     assert "Skipping malformed batch paper" in caplog.text
+    assert "Paper metadata skipped 1 malformed records." in caplog.text
+
+
+def test_get_papers_aggregates_malformed_rows_into_one_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Metadata batches summarize malformed rows while preserving debug details.
+
+    :param pytest.LogCaptureFixture caplog: Captured provider logs.
+    :return None: Verifies one user-facing warning represents the degraded batch.
+    """
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            return_value=_MockResponse(
+                200, [{"title": "bad one"}, {"title": "bad two"}]
+            )
+        )
+        with caplog.at_level(logging.DEBUG):
+            assert client.get_papers(["one", "two"]) == {}
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    debug_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+    ]
+    assert warnings == ["Paper metadata skipped 2 malformed records."]
+    assert debug_messages.count("Skipping malformed batch paper for one.") == 1
+    assert debug_messages.count("Skipping malformed batch paper for two.") == 1
 
 
 @pytest.mark.parametrize(

@@ -144,6 +144,7 @@ class _EndpointsMixin:
                     papers[paper_id] = cached
         missing = [paper_id for paper_id in normalized_ids if paper_id not in papers]
         reused_count = len(papers)
+        malformed_records = 0
 
         for offset in range(0, len(missing), PAPER_BATCH_SIZE):
             batch_ids = missing[offset : offset + PAPER_BATCH_SIZE]
@@ -156,7 +157,7 @@ class _EndpointsMixin:
                 retry_not_found=True,
             )
             if response is None:
-                logger.warning(
+                logger.debug(
                     "Paper metadata: stopped after an unavailable batch; %d "
                     "missing records were not fetched.",
                     len(missing) - offset,
@@ -171,17 +172,20 @@ class _EndpointsMixin:
                     continue
                 paper = payloads._convert_api_paper(record)
                 if paper is None:
-                    logger.warning(
-                        "Skipping malformed batch paper for %s.", requested_id
-                    )
+                    malformed_records += 1
+                    logger.debug("Skipping malformed batch paper for %s.", requested_id)
                     continue
                 papers[requested_id] = paper
                 disk_cache._persist_paper(paper, requested_id)
-        logger.info(
+        logger.debug(
             "Paper metadata: reused %d cached records; fetched %d missing records.",
             reused_count,
             len(papers) - reused_count,
         )
+        if malformed_records:
+            logger.warning(
+                "Paper metadata skipped %d malformed records.", malformed_records
+            )
         return {
             paper_id: papers[paper_id]
             for paper_id in normalized_ids
@@ -316,7 +320,7 @@ class _EndpointsMixin:
                     f"Semantic Scholar returned invalid {relation} pagination offset."
                 )
             offset = next_offset
-        logger.info(
+        logger.debug(
             "Checked %s discovery upstream for %s: %d IDs.",
             relation,
             paper_id,
@@ -452,23 +456,25 @@ class _EndpointsMixin:
 
     def _papers_from_records(
         self, records: Iterable[Any], *, cache_full_metadata: bool
-    ) -> list[Paper]:
-        """Convert records, warning on malformed rows and optionally caching them.
+    ) -> tuple[list[Paper], int]:
+        """Convert records, count malformed rows, and optionally cache them.
 
         :param Iterable[Any] records: API paper records.
         :param bool cache_full_metadata: Whether records carry default full metadata.
-        :return list[Paper]: Converted records.
+        :return tuple[list[Paper], int]: Converted records and malformed-row count.
         """
         papers: list[Paper] = []
+        malformed_records = 0
         for record in records:
             paper = payloads._convert_recommendation(record)
             if paper is None:
-                logger.warning("Skipping malformed Semantic Scholar paper row.")
+                malformed_records += 1
+                logger.debug("Skipping malformed Semantic Scholar paper row.")
                 continue
             papers.append(paper)
             if cache_full_metadata:
                 disk_cache._persist_paper(paper, paper.paper_id)
-        return papers
+        return papers, malformed_records
 
     @_scoped_endpoint
     def get_recommended_papers(
@@ -502,6 +508,7 @@ class _EndpointsMixin:
         if custom_projection and "paperId" not in requested_fields:
             requested_fields.append("paperId")
 
+        skipped_records = 0
         for pool in ("recent", "all-cs"):
             params: dict[str, Any] = {
                 "fields": ",".join(requested_fields)
@@ -531,17 +538,25 @@ class _EndpointsMixin:
                     "Semantic Scholar returned malformed recommendation data."
                 )
             records = response["recommendedPapers"]
-            logger.info(
+            logger.debug(
                 "Checked recommendations discovery upstream for %s, %s pool: %d rows.",
                 normalized_id,
                 pool,
                 len(records),
             )
             if custom_projection:
-                papers = self._papers_from_records(
+                papers, malformed_records = self._papers_from_records(
                     records, cache_full_metadata=cache_full_metadata
                 )
+                skipped_records += malformed_records
                 if papers:
+                    if skipped_records:
+                        logger.warning(
+                            "Recommendations for %s skipped %d malformed or "
+                            "unresolved records.",
+                            normalized_id,
+                            skipped_records,
+                        )
                     return papers[:parsed_limit]
                 continue
 
@@ -550,7 +565,8 @@ class _EndpointsMixin:
             for record in records:
                 raw_id = payloads._payload_get(record, "paperId")
                 if not isinstance(raw_id, str) or not raw_id.strip():
-                    logger.warning("Skipping malformed recommendation row.")
+                    skipped_records += 1
+                    logger.debug("Skipping malformed recommendation row.")
                     continue
                 candidate = normalize_paper_id(raw_id)
                 if candidate not in seen_ids:
@@ -566,14 +582,22 @@ class _EndpointsMixin:
                 for paper_id in paper_ids
                 if paper_id in materialized
             ]
-            if len(papers) != len(paper_ids):
-                logger.warning(
-                    "Recommendations for %s skipped %d unresolved IDs.",
-                    normalized_id,
-                    len(paper_ids) - len(papers),
-                )
+            skipped_records += len(paper_ids) - len(papers)
             if papers:
+                if skipped_records:
+                    logger.warning(
+                        "Recommendations for %s skipped %d malformed or "
+                        "unresolved records.",
+                        normalized_id,
+                        skipped_records,
+                    )
                 return papers[:parsed_limit]
+        if skipped_records:
+            logger.warning(
+                "Recommendations for %s skipped %d malformed or unresolved records.",
+                normalized_id,
+                skipped_records,
+            )
         return []
 
     @_scoped_endpoint
@@ -605,6 +629,7 @@ class _EndpointsMixin:
 
         records: list[Any] = []
         seen_ids: set[str] = set()
+        malformed_records = 0
         offset = 0
         while len(records) < parsed_limit:
             response = self._request_json(
@@ -637,7 +662,8 @@ class _EndpointsMixin:
             for record in page:
                 raw_id = payloads._payload_get(record, "paperId")
                 if not isinstance(raw_id, str) or not raw_id.strip():
-                    logger.warning("Skipping malformed search row.")
+                    malformed_records += 1
+                    logger.debug("Skipping malformed search row.")
                     continue
                 paper_id = normalize_paper_id(raw_id)
                 if paper_id not in seen_ids:
@@ -657,6 +683,14 @@ class _EndpointsMixin:
                     "Semantic Scholar returned invalid search pagination offset."
                 )
             offset = next_offset
-        return self._papers_from_records(
+        papers, conversion_malformed_records = self._papers_from_records(
             records[:parsed_limit], cache_full_metadata=cache_full_metadata
         )
+        malformed_records += conversion_malformed_records
+        if malformed_records:
+            logger.warning(
+                "Search for %r skipped %d malformed records.",
+                normalized_query,
+                malformed_records,
+            )
+        return papers

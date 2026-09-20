@@ -1061,7 +1061,8 @@ def test_citation_collect_populates_reference_cache_and_summary(
         call("ref1", force_refresh=False),
         call("cit1", force_refresh=False),
     ]
-    assert "Hydrating reference lists for 3 papers..." in caplog.text
+    assert "Hydrating reference lists" not in caplog.text
+    assert "Collecting references and citations" in caplog.text
 
 
 def test_citation_reference_hydration_reports_interactive_progress() -> None:
@@ -1080,7 +1081,7 @@ def test_citation_reference_hydration_reports_interactive_progress() -> None:
     builder = CitationGraphBuilder(fetch_references=True, client=client)
 
     with (
-        patch("citemesh.strategies.citation.stderr_isatty", return_value=True),
+        patch("citemesh.strategies.citation.progress_enabled", return_value=True),
         patch("citemesh.strategies.citation.progress_iterator", progress),
     ):
         builder.hydrate_collected_references(papers, seed)
@@ -2717,7 +2718,7 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
         lambda self, seed_id, **kwargs: (graph, "seed"),
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         out_graph, out_seed = builder.build_graph("seed")
 
     assert out_seed == "seed"
@@ -3094,7 +3095,7 @@ def test_capped_strategies_log_final_edge_count(
     """
     builder, _ = _make_constant_similarity_builder(builder_factory, monkeypatch)
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         graph, _ = builder.build_graph("seed")
 
     assert "Graph constructed: 5 nodes, 10 edges" in caplog.text

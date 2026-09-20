@@ -106,7 +106,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {}
         self._reference_source_unavailable = False
 
-        logger.info("Fetching seed paper: %s", seed_id)
+        logger.debug("Fetching seed paper: %s", seed_id)
         seed = self.client.get_paper(
             seed_id,
             raise_on_unavailable=True,
@@ -197,7 +197,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             sorted(self.candidate_source_status.items())
         )
         filtered_graph = build_capped_undirected_graph(graph, 3, seed_id=actual_seed_id)
-        logger.info(
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),

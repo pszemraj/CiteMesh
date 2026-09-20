@@ -280,7 +280,7 @@ def _drop_ignored_corpus_config_defaults(context: _BuildContractContext) -> None
     source = (
         str(context.config_path) if context.config_path is not None else "config.toml"
     )
-    logger.info(
+    logger.debug(
         "Ignoring corpus-only config default(s) %s from %s because "
         "the effective semantic source is candidates; set "
         "defaults.semantic_source='arxiv-corpus' to apply them.",

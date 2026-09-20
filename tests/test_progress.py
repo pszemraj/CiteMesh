@@ -31,6 +31,7 @@ def progress_console(monkeypatch: pytest.MonkeyPatch) -> Console:
     # Registering the global with monkeypatch first makes the public setter's
     # mutation revert at teardown, which the setter itself cannot undo.
     monkeypatch.setattr(progress_module, "_progress_console", None)
+    monkeypatch.setattr(progress_module, "_progress_enabled", True)
     progress_module.set_progress_console(console)
     return console
 
@@ -207,6 +208,23 @@ def test_progress_iterator_disabled_yields_items_without_rendering(
     assert progress_console.export_text() == ""
     assert display.live.is_started is False
     assert display.tasks[0].completed == 3
+
+
+def test_progress_severity_policy_suppresses_explicitly_enabled_bars(
+    progress_console: Console,
+    recorded_displays: list[Progress],
+) -> None:
+    """Warning and error output must not leave dependency-style bars live."""
+    progress_module.set_progress_enabled(False)
+
+    items = list(
+        progress_module.progress_iterator([1, 2, 3], description="scan", enabled=True)
+    )
+
+    display = recorded_displays[0]
+    assert items == [1, 2, 3]
+    assert progress_console.export_text() == ""
+    assert display.live.is_started is False
 
 
 def test_progress_iterator_close_after_break_stops_display(

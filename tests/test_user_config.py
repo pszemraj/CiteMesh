@@ -1129,7 +1129,8 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     )
 
     assert "Loaded config defaults" in str(debug.call_args_list)
-    messages = str(info.call_args_list)
+    info.assert_not_called()
+    messages = str(debug.call_args_list)
     assert "Ignoring corpus-only config default(s)" in messages
     assert "defaults.corpus_size" in messages
     assert "defaults.dataset_source" in messages

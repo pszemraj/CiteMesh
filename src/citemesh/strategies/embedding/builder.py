@@ -1259,7 +1259,7 @@ class EmbeddingGraphBuilder(
                 item[0], item[1], stable_index=item[4]
             )
         )
-        logger.info(
+        logger.debug(
             "Candidate semantic search ranked %d of %d pooled papers.",
             len(scored),
             len(pool.papers),

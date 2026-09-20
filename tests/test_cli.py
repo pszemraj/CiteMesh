@@ -892,6 +892,45 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected_level"),
+    [
+        (["--verbose", "build", "arxiv:1706.03762"], "debug"),
+        (
+            [
+                "--log-level",
+                "warning",
+                "build",
+                "arxiv:1706.03762",
+                "--verbose",
+            ],
+            "debug",
+        ),
+        (
+            [
+                "--verbose",
+                "build",
+                "arxiv:1706.03762",
+                "--log-level",
+                "error",
+            ],
+            "error",
+        ),
+        (["cache", "scan", "--verbose"], "debug"),
+    ],
+)
+def test_cli_verbose_alias_is_position_agnostic_and_last_option_wins(
+    argv: list[str], expected_level: str
+) -> None:
+    """`--verbose` should share `--log-level` precedence across command nesting."""
+    parser, _, _, _ = parser_module._create_parser()
+
+    parsed = parser.parse_args(argv)
+
+    assert parsed.log_level == expected_level
+    assert parser_module._pop_tracked_option_dests(parsed) == {"log_level"}
+
+
 def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
     """TTY streams should default Rich consoles to auto width."""
     assert console_module._resolve_console_width(0, interactive=True) is None
@@ -904,6 +943,32 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
         == cli_module.REDIRECTED_LOG_WIDTH
     )
     assert console_module._resolve_console_width(96, interactive=True) == 96
+
+
+@pytest.mark.parametrize(
+    ("log_level", "expected_progress"),
+    [("debug", True), ("info", True), ("warning", False), ("error", False)],
+)
+def test_configure_logging_sets_progress_policy_from_severity(
+    monkeypatch: pytest.MonkeyPatch,
+    log_level: str,
+    expected_progress: bool,
+) -> None:
+    """Progress bars should appear only for normal and verbose CLI output."""
+    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
+    progress_policy: list[bool] = []
+    monkeypatch.setattr(
+        console_module,
+        "set_progress_enabled",
+        lambda enabled: progress_policy.append(enabled),
+    )
+
+    try:
+        console_module._configure_logging(log_level=log_level)
+    finally:
+        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+
+    assert progress_policy == [expected_progress]
 
 
 @pytest.mark.parametrize("preconfigured", [False, True])
@@ -4470,10 +4535,10 @@ def test_dashboard_package_migrates_safe_legacy_results_non_destructively(
 def test_dashboard_collection_mode_logs_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Collection-mode dashboard exports should log their extra saved-artifact flow."""
+    """Collection-mode dashboard exports should debug-log planning details."""
     graph = build_seed_graph("seed")
-    info_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    debug_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
@@ -4504,10 +4569,46 @@ def test_dashboard_collection_mode_logs_side_effects(
         )
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    info_messages = [
-        str(call.args[0]) for call in info_mock.call_args_list if call.args
+    debug_messages = [
+        str(call.args[0]) for call in debug_mock.call_args_list if call.args
     ]
-    assert any("Dashboard collection mode:" in msg for msg in info_messages)
+    assert any("Dashboard collection mode:" in msg for msg in debug_messages)
+
+
+def test_build_run_summary_reports_requested_outputs_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The closing INFO record should contain graph counts and requested paths."""
+    info_mock = MagicMock()
+    debug_mock = MagicMock()
+    monkeypatch.setattr(build_module.logger, "info", info_mock)
+    monkeypatch.setattr(build_module.logger, "debug", debug_mock)
+    graph = build_seed_graph("seed")
+    output_paths = {
+        "dashboard": tmp_path / "dashboard.html",
+        "json": tmp_path / "graph.json",
+    }
+
+    build_module._log_run_summary(
+        graph,
+        output_paths=output_paths,
+        graph_config_path=tmp_path / "graph.config.json",
+        dashboard_package_path=tmp_path / "dashboard.citemesh.json",
+    )
+
+    info_mock.assert_called_once_with(
+        "Build complete: nodes=%d, edges=%d; outputs: %s",
+        1,
+        0,
+        f"dashboard={output_paths['dashboard']}, json={output_paths['json']}",
+    )
+    debug_mock.assert_called_once_with(
+        "Build auxiliary artifacts: %s",
+        "config="
+        f"{tmp_path / 'graph.config.json'}, dashboard_package="
+        f"{tmp_path / 'dashboard.citemesh.json'}",
+    )
 
 
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
@@ -4579,7 +4680,9 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "edges": 0,
         "theme": "dark",
     }
-    assert any("export artifacts saved" in message for message in logged)
+    assert any(
+        "Build complete: nodes=1, edges=0; outputs:" in message for message in logged
+    )
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)
     assert all("Creating visualization..." not in message for message in logged)

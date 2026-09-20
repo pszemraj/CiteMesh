@@ -520,7 +520,7 @@ class _H5LayoutMixin:
             compression != self.compression
             or compression_level != self.compression_level
         ):
-            logger.info(
+            logger.debug(
                 "Using existing embedding cache compression %s level %d for %s; "
                 "requested %s level %d applies after the cache is rebuilt.",
                 compression,

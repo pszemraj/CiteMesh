@@ -297,7 +297,7 @@ class GraphBuilderStrategy(ABC):
             logger.info(summary)
         else:
             logger.info("Collected %s papers", len(self.papers))
-        logger.info("Seed paper: %s", seed_paper.title)
+        logger.debug("Seed paper: %s", seed_paper.title)
         self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes
@@ -338,7 +338,7 @@ class GraphBuilderStrategy(ABC):
                     graph.add_edge(p1.paper_id, p2.paper_id, weight=similarity)
                     edges_created += 1
 
-        logger.info(
+        logger.debug(
             "Graph constructed: %s nodes, %s edges",
             graph.number_of_nodes(),
             edges_created,
