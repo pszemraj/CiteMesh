@@ -67,7 +67,7 @@ _PAPER_ROW_COLUMNS = (
     "paper_id, text_hash, row_idx, title, abstract, year, authors_json, "
     "categories_json, venue, arxiv_id, doi"
 )
-_PAPER_ROW_LOOKUP_COLUMNS = {"paper_id", "row_idx"}
+_PAPER_ROW_LOOKUP_COLUMNS = {"paper_id", "row_idx", "arxiv_id", "doi"}
 
 
 def _resolve_cache_lock_timeout_seconds() -> float:

@@ -29,7 +29,7 @@ from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Pa
 from citemesh.core.paper_ids import (
     is_local_corpus_paper_id as _is_local_corpus_paper_id,
 )
-from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -1214,13 +1214,35 @@ class EmbeddingGraphBuilder(
         """Resolve exact references from the corpus already prepared by hybrid.
 
         :param list[str] identifiers: Canonical bibliography identifiers.
-        :return dict[str, Paper]: Available local papers without model/provider work.
+        :return dict[str, Paper]: Unambiguous local papers keyed by requested alias.
         """
-        return {
+        candidates = {
             paper_id: self._paper_from_cached_metadata(paper_id, metadata)
-            for paper_id, metadata in self.embedding_cache.get_paper_metadata_batch(
+            for paper_id, metadata in self.embedding_cache.get_paper_metadata_alias_candidates(
                 identifiers
             ).items()
+        }
+        requested_aliases = {
+            normalize_paper_id(identifier).lower() for identifier in identifiers
+        }
+        matches_by_alias: dict[str, set[str]] = {
+            alias: set() for alias in requested_aliases
+        }
+        for paper_id, paper in candidates.items():
+            aliases = {
+                normalize_paper_id(alias).lower()
+                for alias in paper_identifier_aliases(
+                    paper_id=paper.paper_id,
+                    arxiv_id=paper.arxiv_id,
+                    doi=paper.doi,
+                )
+            }
+            for alias in requested_aliases & aliases:
+                matches_by_alias[alias].add(paper_id)
+        return {
+            alias: candidates[next(iter(matches))]
+            for alias, matches in matches_by_alias.items()
+            if len(matches) == 1
         }
 
     def _candidate_pool_budgets(self) -> tuple[int, int, int]:

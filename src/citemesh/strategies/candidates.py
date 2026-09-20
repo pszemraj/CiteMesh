@@ -264,7 +264,8 @@ def fetch_seed_references(
     :param Paper seed: Resolved seed, supplying external identifiers.
     :param int limit: Maximum usable references; zero disables discovery.
     :param str | None seed_identifier: Original input, retaining arXiv version.
-    :param Callable | None local_lookup: Read from an already prepared corpus.
+    :param Callable | None local_lookup: Read unambiguous requested aliases from an
+        already prepared corpus, keyed by normalized request identifier.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
     """
     from citemesh.services import (
@@ -354,10 +355,14 @@ def fetch_seed_references(
             value for value in ids if value not in aliases and value not in attempted
         ]
         if local_lookup is not None:
-            remember(list(local_lookup(missing).values()))
+            local_records = local_lookup(missing)
+            for requested_id, paper in local_records.items():
+                normalized_id = normalize_paper_id(requested_id).lower()
+                if normalized_id in missing:
+                    aliases[normalized_id] = paper
             bind_entry_aliases()
             missing = [value for value in missing if value not in aliases]
-        if not client.refresh_paper_cache:
+        if missing and not client.refresh_paper_cache:
             cached_records = client.get_cached_papers(missing)
             remember(list(cached_records.values()))
             aliases.update(cached_records)
@@ -432,29 +437,36 @@ def fetch_seed_references(
         and (lookup_id := provider_lookup_identifier(paper.paper_id, paper)) is not None
     ]
     if local_targets:
-        try:
-            s2_records = client.get_papers(
-                [lookup_id for _paper, lookup_id in local_targets],
-                raise_on_unavailable=True,
-            )
-        except (SemanticScholarRequestError, SemanticScholarUnavailableError) as exc:
-            logger.debug(
-                "S2 metadata enrichment unavailable during arXiv recovery: %s", exc
-            )
+        lookup_ids = [lookup_id for _paper, lookup_id in local_targets]
+        if client.refresh_paper_cache:
+            try:
+                s2_records = client.get_papers(lookup_ids, raise_on_unavailable=True)
+            except (
+                SemanticScholarRequestError,
+                SemanticScholarUnavailableError,
+            ) as exc:
+                logger.debug(
+                    "S2 metadata enrichment unavailable during arXiv recovery: %s",
+                    exc,
+                )
+                s2_records = {}
         else:
-            for local_paper, lookup_id in local_targets:
-                s2_paper = s2_records.get(normalize_paper_id(lookup_id))
-                if s2_paper is None:
-                    s2_paper = next(
-                        (
-                            candidate
-                            for candidate in s2_records.values()
-                            if candidate_records_match(local_paper, candidate)
-                        ),
-                        None,
-                    )
-                if s2_paper is not None:
-                    merge_paper_metadata(local_paper, s2_paper)
+            # A local record is already sufficient recovery. Avoid spending the
+            # shared retry budget unless the caller explicitly requested refresh.
+            s2_records = client.get_cached_papers(lookup_ids)
+        for local_paper, lookup_id in local_targets:
+            s2_paper = s2_records.get(normalize_paper_id(lookup_id))
+            if s2_paper is None:
+                s2_paper = next(
+                    (
+                        candidate
+                        for candidate in s2_records.values()
+                        if candidate_records_match(local_paper, candidate)
+                    ),
+                    None,
+                )
+            if s2_paper is not None:
+                merge_paper_metadata(local_paper, s2_paper)
     if recovered:
         if identifiable_entries > len(recovered) and len(recovered) >= limit:
             logger.info(

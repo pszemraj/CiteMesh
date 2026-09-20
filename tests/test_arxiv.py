@@ -244,7 +244,7 @@ def test_get_papers_maps_atom_metadata_and_ignores_unrequested_entries(
     get = MagicMock(return_value=_Response(atom))
     monkeypatch.setattr(arxiv_module.requests, "get", get)
 
-    papers = ArxivClient().get_papers(["arxiv:2608.27147"])
+    papers = ArxivClient().get_papers(["arxiv:2608.27147v2"])
 
     assert list(papers) == ["arxiv:2608.27147"]
     paper = papers["arxiv:2608.27147"]
@@ -257,7 +257,7 @@ def test_get_papers_maps_atom_metadata_and_ignores_unrequested_entries(
     assert paper.venue == "Example Journal"
     assert paper.categories == ["cs.LG", "stat.ML"]
     assert get.call_args.kwargs["params"] == {
-        "id_list": "2608.27147",
+        "id_list": "2608.27147v2",
         "max_results": 1,
     }
 

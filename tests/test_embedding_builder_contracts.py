@@ -3828,6 +3828,38 @@ def test_corpus_metadata_keeps_first_source_doi(source_doi: str, expected: str) 
     assert metadata["doi"] == expected
 
 
+def test_cached_reference_metadata_resolves_only_unambiguous_aliases() -> None:
+    """DOI lookup should reuse one local row without guessing among duplicates.
+
+    :return None: Checks secondary-key lookup and ambiguity handling.
+    """
+    builder = object.__new__(EmbeddingGraphBuilder)
+    builder.embedding_cache = MagicMock()
+    builder.embedding_cache.get_paper_metadata_alias_candidates.return_value = {
+        "local-unique": {
+            "title": "Unique",
+            "arxiv_id": "1706.03762",
+            "doi": "10.1000/unique",
+        },
+        "local-ambiguous-a": {
+            "title": "Ambiguous A",
+            "doi": "10.1000/ambiguous",
+        },
+        "local-ambiguous-b": {
+            "title": "Ambiguous B",
+            "doi": "10.1000/ambiguous",
+        },
+    }
+
+    resolved = builder.cached_reference_metadata(
+        ["10.1000/UNIQUE", "10.1000/ambiguous"]
+    )
+
+    assert set(resolved) == {"10.1000/unique"}
+    assert resolved["10.1000/unique"].paper_id == "local-unique"
+    assert resolved["10.1000/unique"].is_local_corpus
+
+
 def test_fresh_hydration_resume_skips_metadata_backfill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

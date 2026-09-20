@@ -242,6 +242,10 @@ class ArxivClient:
         """
         if not identifiers:
             return {}
+        requested_ids = {
+            f"arxiv:{strip_arxiv_version(value.split(':', 1)[1]).lower()}"
+            for value in identifiers
+        }
         content = self._get(
             "https://export.arxiv.org/api/query",
             params={
@@ -262,7 +266,7 @@ class ArxivClient:
             if not identifier:
                 continue
             paper_id = f"arxiv:{strip_arxiv_version(identifier).lower()}"
-            if paper_id not in identifiers:
+            if paper_id not in requested_ids:
                 continue
             title = " ".join(entry.findtext("a:title", "", _ATOM).split())
             if not title:

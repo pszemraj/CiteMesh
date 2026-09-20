@@ -109,6 +109,18 @@ class _H5LayoutMixin:
                 "CREATE INDEX IF NOT EXISTS idx_papers_chronology_key "
                 "ON papers(chronology_key)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_papers_paper_id_nocase "
+                "ON papers(paper_id COLLATE NOCASE)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_papers_arxiv_id_nocase "
+                "ON papers(arxiv_id COLLATE NOCASE)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_papers_doi_nocase "
+                "ON papers(doi COLLATE NOCASE)"
+            )
             conn.execute(_metadata_table_create_sql())
             conn.execute(REPLACEMENT_JOURNAL_TABLE_CREATE_SQL)
 
@@ -883,12 +895,14 @@ class _H5LayoutMixin:
         lookup_values: Sequence[Any],
         *,
         lookup_column: str,
+        case_insensitive: bool = False,
     ) -> Iterator[tuple[Any, ...]]:
         """Yield common paper rows for batched SQLite key lookups.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :param Sequence[Any] lookup_values: Values for the selected lookup column.
         :param str lookup_column: ``papers`` column used for the ``IN`` lookup.
+        :param bool case_insensitive: Compare text values with SQLite ``NOCASE``.
         :return Iterator[Tuple[Any, ...]]: Rows in the shared paper-column layout.
         :raises ValueError: If the requested lookup column is not supported.
         """
@@ -897,9 +911,12 @@ class _H5LayoutMixin:
 
         for value_chunk in _chunked(lookup_values, SQLITE_QUERY_BATCH_SIZE):
             placeholders = ",".join("?" for _ in value_chunk)
+            lookup_expression = (
+                f"{lookup_column} COLLATE NOCASE" if case_insensitive else lookup_column
+            )
             query = PAPER_ROW_QUERY_SQL_TEMPLATE.format(
                 columns=_PAPER_ROW_COLUMNS,
-                lookup_column=lookup_column,
+                lookup_column=lookup_expression,
                 placeholders=placeholders,
             )
             for row in conn.execute(query, value_chunk):

@@ -156,13 +156,11 @@ def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -
     local = paper(
         "local-record", arxiv_id="1706.03762", doi="10.1234/test", is_local_corpus=True
     )
-    overlapping_cache = paper("s2-overlap", arxiv_id="1706.03762", citation_count=42)
+    overlapping_cache = paper("s2-overlap", arxiv_id="1706.03762", citation_count=99)
     cached = paper("s2-record", arxiv_id="2303.08774", citation_count=42)
-    enriched = paper("s2-local", arxiv_id="1706.03762", citation_count=99)
     _persist_paper(overlapping_cache, "arxiv:1706.03762")
     _persist_paper(cached, "arxiv:2303.08774")
     lookup = MagicMock(return_value={"arxiv:1706.03762": local})
-    client.get_papers.return_value = {"arxiv:1706.03762": enriched}
     results = fetch_seed_references(
         client, paper("arxiv:2608.27147"), 3, local_lookup=lookup
     )
@@ -172,15 +170,16 @@ def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -
     ]
     assert results[-1].papers[0].citation_count == 99
     assert results[-1].papers[1].citation_count == 42
-    client.get_papers.assert_called_once_with(
-        ["arxiv:1706.03762"], raise_on_unavailable=True
-    )
-    client.get_cached_papers.assert_called_once_with(["arxiv:2303.08774"])
+    client.get_papers.assert_not_called()
+    assert [call.args[0] for call in client.get_cached_papers.call_args_list] == [
+        ["arxiv:2303.08774"],
+        ["arxiv:1706.03762"],
+    ]
     metadata.assert_not_called()
 
 
-def test_local_metadata_survives_s2_enrichment_rejection(providers: tuple) -> None:
-    """Optional S2 enrichment cannot discard a recovered local reference.
+def test_local_metadata_does_not_request_live_s2_enrichment(providers: tuple) -> None:
+    """Optional enrichment cannot preempt later candidate discovery.
 
     :param tuple providers: Mock services.
     :return None: Checks local metadata remains usable after a rejected request.
@@ -197,6 +196,73 @@ def test_local_metadata_survives_s2_enrichment_rejection(providers: tuple) -> No
     )
     assert results[-1].state.value == "complete"
     assert results[-1].papers == (local,)
+    client.get_papers.assert_not_called()
+    metadata.assert_not_called()
+
+
+def test_refresh_enriches_local_metadata_from_live_s2(providers: tuple) -> None:
+    """An explicit cache refresh also refreshes recovered local metadata.
+
+    :param tuple providers: Mock services.
+    :return None: Checks refresh preserves its documented live-read behavior.
+    """
+    client, bibliography, metadata = providers
+    client.refresh_paper_cache = True
+    bibliography.return_value = [("arxiv:1706.03762",)]
+    local = paper("local-record", arxiv_id="1706.03762", is_local_corpus=True)
+    fresh = paper("s2-record", arxiv_id="1706.03762", citation_count=99)
+    client.get_papers.return_value = {"arxiv:1706.03762": fresh}
+
+    results = fetch_seed_references(
+        client,
+        paper("arxiv:2608.27147"),
+        1,
+        local_lookup=MagicMock(return_value={"arxiv:1706.03762": local}),
+    )
+
+    assert results[-1].papers[0].citation_count == 99
+    client.get_papers.assert_called_once_with(
+        ["arxiv:1706.03762"], raise_on_unavailable=True
+    )
+    client.get_cached_papers.assert_not_called()
+    metadata.assert_not_called()
+
+
+def test_local_alias_ambiguity_does_not_cross_bibliography_entries(
+    providers: tuple,
+) -> None:
+    """Resolving one alias must not claim a separately ambiguous DOI entry.
+
+    :param tuple providers: Mock services.
+    :return None: Checks local lookup results remain keyed by requested alias.
+    """
+    client, bibliography, metadata = providers
+    bibliography.return_value = [
+        ("arxiv:1706.03762",),
+        ("10.1000/shared",),
+    ]
+    local = paper(
+        "local-a",
+        arxiv_id="1706.03762",
+        doi="10.1000/shared",
+        is_local_corpus=True,
+    )
+    remote = paper("remote-doi", doi="10.1000/shared")
+    client.get_papers.return_value = {"10.1000/shared": remote}
+
+    results = fetch_seed_references(
+        client,
+        paper("arxiv:2608.27147"),
+        2,
+        local_lookup=MagicMock(return_value={"arxiv:1706.03762": local}),
+    )
+
+    # DOI identity deduplication keeps one graph record, but the ambiguous DOI
+    # still required its own provider resolution instead of borrowing local-a.
+    assert [item.paper_id for item in results[-1].papers] == ["local-a"]
+    client.get_papers.assert_called_once_with(
+        ["10.1000/shared"], raise_on_unavailable=True
+    )
     metadata.assert_not_called()
 
 
