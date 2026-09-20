@@ -8,6 +8,7 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,7 @@ from citemesh.strategies.candidates import (
     CandidateSourceResult,
     candidate_records_match,
     fetch_candidate_source,
+    fetch_seed_references,
     merge_paper_metadata,
     merge_seed_relation,
     provider_lookup_identifier,
@@ -290,6 +292,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         validate_source_availability: bool = True,
         hydrate_references: bool = True,
         seed_paper: Paper | None = None,
+        reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]]
+        | None = None,
         **kwargs: Any,
     ) -> dict[str, Paper]:
         """
@@ -302,6 +306,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             enrichment before returning.
         :param Optional[Paper] seed_paper: Pre-resolved seed metadata. When its
             primary identifier is local, only an external alias is sent upstream.
+        :param Callable | None reference_metadata_lookup: Read metadata from an
+            already prepared corpus for HTML reference recovery.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -345,25 +351,31 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             remaining,
             self.max_references,
         )
-        if reference_limit > 0 and provider_seed_id is not None:
+        if reference_limit > 0:
             logger.info("Collecting references and citations...")
-            reference_result = fetch_candidate_source(
-                "references",
-                lambda: self.client.get_paper_references(
-                    provider_seed_id,
-                    limit=reference_limit,
-                    raise_on_unavailable=True,
-                ),
+            reference_results = fetch_seed_references(
+                self.client,
+                seed,
+                reference_limit,
+                seed_identifier=seed_id,
+                local_lookup=reference_metadata_lookup,
             )
-            source_results.append(reference_result)
+            source_results.extend(reference_results)
             reference_ids = self._ingest_relation_batch(
                 papers,
                 seed,
-                list(reference_result.papers),
+                [paper for result in reference_results for paper in result.papers],
                 progress_enabled=show_progress,
                 progress_description="Downloading references",
             )
             self._record_seed_relations(reference_ids, "referenced_by_seed")
+            if any(result.source == "arxiv_references" for result in reference_results):
+                # Reuse partial recovery only within this build. Never persist it
+                # as the complete S2 bibliography or repeat the empty discovery.
+                # Candidate relations remain available, but this capped subset
+                # must not drive shared-reference coupling as a full bibliography.
+                self.reference_cache[seed.paper_id] = []
+                seed.references = []
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - len(papers)
@@ -407,7 +419,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if hydrate_references:
             self.hydrate_collected_references(papers, seed)
 
-        reference_lists = len(self.reference_cache)
+        reference_lists = sum(
+            bool(references) for references in self.reference_cache.values()
+        )
         summary = (
             f"Collected {len(papers)} papers ({reference_lists} with reference lists)"
         )

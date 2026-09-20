@@ -36,6 +36,8 @@ from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 from tests._helpers import disable_embedding_dep_checks
 
+pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
 
 @pytest.fixture(autouse=True)
 def _disable_embedding_optional_deps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1965,8 +1967,8 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
     client.get_recommended_papers.assert_not_called()
     assert (
-        "Continuing hybrid corpus acquisition for seed with partial Semantic Scholar "
-        "evidence (references: offline; citations: offline)." in caplog.text
+        "Continuing with unavailable candidate sources: references, citations."
+        in caplog.text
     )
 
 

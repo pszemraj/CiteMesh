@@ -79,6 +79,8 @@ from tests._helpers import (
     run_captured_cli,
 )
 
+pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
 
 def run_cli_command(args: list[str]) -> SimpleNamespace:
     """Run CLI in-process and capture stdout/stderr.

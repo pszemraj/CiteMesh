@@ -70,6 +70,12 @@ citemesh cache scan
 
 See [User Configuration](configuration.md) for saved defaults and [cache maintenance](caching.md#inspecting-and-clearing) for scan and reset behavior.
 
+### Missing Semantic Scholar references
+
+If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection; corpus-only embedding search does not fetch HTML. Nonempty S2 reference results are unchanged.
+
+Recovery uses explicit arXiv IDs and DOIs in bibliography entries, resolves available local metadata before S2, and uses arXiv's metadata API for remaining arXiv IDs. It respects reference and total-paper limits. A supplied arXiv version selects that HTML version, while graph identities remain version-independent. Missing HTML and unresolved references leave other available sources usable. Recovery finds outgoing references, not incoming citations, and does not imply complete bibliography coverage. Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists. No PDF/LaTeX extraction or extra dependency is required.
+
 ### Help and console output
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.

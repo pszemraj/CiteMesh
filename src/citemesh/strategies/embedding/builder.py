@@ -905,7 +905,7 @@ class EmbeddingGraphBuilder(
 
         if self.semantic_source != "arxiv-corpus":
             self._collect_candidate_pool_papers(
-                papers, seed_embedding, resolved_seed_paper
+                papers, seed_embedding, resolved_seed_paper, seed_identifier=seed_id
             )
             return papers
 
@@ -1116,16 +1116,21 @@ class EmbeddingGraphBuilder(
         papers: dict[str, Paper],
         seed_embedding: np.ndarray,
         seed_paper: Paper,
+        *,
+        seed_identifier: str | None = None,
     ) -> None:
         """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
         :param np.ndarray seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Resolved seed paper used to fetch the pool.
+        :param str | None seed_identifier: Original arXiv input including version.
         :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
         """
         logger.debug("Using candidate-pool semantic search...")
-        pool_candidates = self._select_candidates_from_pool(seed_embedding, seed_paper)
+        pool_candidates = self._select_candidates_from_pool(
+            seed_embedding, seed_paper, seed_identifier=seed_identifier
+        )
         for paper_id, paper, embedding in pool_candidates:
             if len(papers) >= self.max_papers:
                 break
@@ -1204,6 +1209,19 @@ class EmbeddingGraphBuilder(
             is_local_corpus=True,
         )
 
+    def cached_reference_metadata(self, identifiers: list[str]) -> dict[str, Paper]:
+        """Resolve exact references from the corpus already prepared by hybrid.
+
+        :param list[str] identifiers: Canonical bibliography identifiers.
+        :return dict[str, Paper]: Available local papers without model/provider work.
+        """
+        return {
+            paper_id: self._paper_from_cached_metadata(paper_id, metadata)
+            for paper_id, metadata in self.embedding_cache.get_paper_metadata_batch(
+                identifiers
+            ).items()
+        }
+
     def _candidate_pool_budgets(self) -> tuple[int, int, int]:
         """Split the candidate pool size into per-source fetch budgets.
 
@@ -1218,12 +1236,17 @@ class EmbeddingGraphBuilder(
         return max_references, max_citations, max_recommendations
 
     def _select_candidates_from_pool(
-        self, seed_embedding: np.ndarray, seed_paper: Paper
+        self,
+        seed_embedding: np.ndarray,
+        seed_paper: Paper,
+        *,
+        seed_identifier: str | None = None,
     ) -> list[tuple[str, Paper, np.ndarray]]:
         """Rank S2 candidate-pool papers by cosine similarity to the seed.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
         :param Paper seed_paper: Resolved seed paper (S2-backed or query seed).
+        :param str | None seed_identifier: Original arXiv input including version.
         :return List[Tuple[str, Paper, np.ndarray]]: Ranked candidate tuples.
         """
         max_references, max_citations, max_recommendations = (
@@ -1235,6 +1258,7 @@ class EmbeddingGraphBuilder(
             max_references=max_references,
             max_citations=max_citations,
             max_recommendations=max_recommendations,
+            seed_identifier=seed_identifier,
         )
         self.candidate_source_status = dict(pool.source_status)
         if not pool.papers:

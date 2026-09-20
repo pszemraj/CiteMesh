@@ -39,3 +39,15 @@ def _forbid_external_model_resolution(
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", blocked)
 
     monkeypatch.setattr(transformers_hub, "hf_hub_download", blocked)
+
+
+@pytest.fixture
+def arxiv_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep existing provider-focused tests independent of live arXiv HTML.
+
+    :param pytest.MonkeyPatch monkeypatch: Test-scoped transport replacement.
+    :return None: Makes the optional HTML source unavailable.
+    """
+    from citemesh.services.arxiv import ArxivClient
+
+    monkeypatch.setattr(ArxivClient, "get_bibliography", lambda self, identifier: None)

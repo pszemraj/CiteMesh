@@ -34,6 +34,7 @@ from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
     CandidateAcquisitionError,
+    CandidateSourceResult,
     CandidateSourceState,
     candidate_records_match,
     fetch_candidate_source,
@@ -649,6 +650,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 validate_source_availability=False,
                 hydrate_references=False,
                 seed_paper=cached_corpus_seed,
+                reference_metadata_lookup=(
+                    (lambda ids: self.embedding_builder.cached_reference_metadata(ids))
+                    if corpus_prepared
+                    else None
+                ),
             )
         else:
             citation_papers = self.citation_builder.collect_papers(seed_id)
@@ -723,25 +729,19 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         try:
             if self.semantic_source == "arxiv-corpus":
-                citation_source_results = self.citation_builder.candidate_source_results
-                if citation_source_results and all(
-                    result.state is CandidateSourceState.UNAVAILABLE
-                    for result in citation_source_results
-                ):
-                    details = "; ".join(
-                        f"{result.source}: {result.error or 'unavailable'}"
-                        for result in citation_source_results
-                    )
-                    logger.warning(
-                        "Continuing hybrid corpus acquisition for %s with partial "
-                        "Semantic Scholar evidence (%s).",
-                        seed_paper.paper_id,
-                        details,
-                    )
                 semantic_papers = self.embedding_builder.collect_papers(
                     seed_id,
                     seed_paper=seed_paper,
                     _corpus_prepared=corpus_prepared,
+                )
+                require_available_candidate_source(
+                    [
+                        *self.citation_builder.candidate_source_results,
+                        CandidateSourceResult(
+                            "arxiv_corpus", CandidateSourceState.COMPLETE
+                        ),
+                    ],
+                    context=f"hybrid corpus acquisition for {seed_paper.paper_id}",
                 )
             else:
                 # Candidate mode: the citation branch already covers references

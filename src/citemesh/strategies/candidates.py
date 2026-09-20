@@ -27,6 +27,7 @@ from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     is_local_corpus_paper_id,
     normalize_paper_id,
+    paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
 
@@ -249,6 +250,178 @@ def fetch_candidate_source(
     )
 
 
+def fetch_seed_references(
+    client: SemanticScholarClient,
+    seed: Paper,
+    limit: int,
+    *,
+    seed_identifier: str | None = None,
+    local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
+) -> tuple[CandidateSourceResult, ...]:
+    """Recover an empty seed-reference source using its arXiv bibliography.
+
+    :param SemanticScholarClient client: Existing metadata and discovery client.
+    :param Paper seed: Resolved seed, supplying external identifiers.
+    :param int limit: Maximum usable references; zero disables discovery.
+    :param str | None seed_identifier: Original input, retaining arXiv version.
+    :param Callable | None local_lookup: Read from an already prepared corpus.
+    :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
+    """
+    from citemesh.services import SemanticScholarUnavailableError
+    from citemesh.services.arxiv import ArxivClient, arxiv_identifier
+    from citemesh.services.semantic_scholar.disk_cache import _load_cached_paper
+
+    if limit <= 0:
+        return ()
+    provider_id = provider_lookup_identifier(seed.paper_id, seed)
+    original = (
+        fetch_candidate_source(
+            "references",
+            lambda: client.get_paper_references(
+                provider_id, limit=limit, raise_on_unavailable=True
+            ),
+        )
+        if provider_id is not None
+        else CandidateSourceResult("references", CandidateSourceState.UNAVAILABLE)
+    )
+    if original.papers:
+        return (original,)
+    identifier = next(
+        (
+            value
+            for raw in (seed_identifier or "", seed.arxiv_id, seed.paper_id)
+            if (value := arxiv_identifier(raw))
+        ),
+        None,
+    )
+    if identifier is None:
+        return (original,) if provider_id is not None else ()
+    arxiv = ArxivClient()
+    entries = arxiv.get_bibliography(identifier)
+    if entries is None:
+        return (
+            original,
+            CandidateSourceResult(
+                "arxiv_references",
+                CandidateSourceState.UNAVAILABLE,
+                error="No usable arXiv HTML",
+            ),
+        )
+
+    # Alias maps are request-local. Partial bibliography evidence is never saved
+    # in Semantic Scholar's complete-reference cache.
+    aliases: dict[str, Paper] = {}
+    recovered: list[Paper] = []
+    attempted: set[str] = set()
+
+    def remember(records: Sequence[Paper]) -> None:
+        """Index available records by explicit aliases.
+
+        :param Sequence[Paper] records: Resolved metadata.
+        :return None: Updates the request-local alias map.
+        """
+        for paper in records:
+            for alias in paper_identifier_aliases(
+                paper_id=paper.paper_id, arxiv_id=paper.arxiv_id, doi=paper.doi
+            ):
+                aliases[normalize_paper_id(alias).lower()] = paper
+
+    # Metadata batches are independent of the admission cap: a request for one
+    # reference must not make one paced HTTP call per unresolved bibliography row.
+    for offset in range(0, len(entries), 50):
+        batch = entries[offset : offset + 50]
+        ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
+
+        def bind_entry_aliases() -> None:
+            """Reuse a resolved entry across its explicit identifier spellings.
+
+            :return None: Updates aliases for entries in the current batch.
+            """
+            for entry in batch:
+                paper = next(
+                    (aliases[value] for value in entry if value in aliases), None
+                )
+                if paper is not None:
+                    for value in entry:
+                        aliases.setdefault(value, paper)
+
+        bind_entry_aliases()
+        missing = [
+            value for value in ids if value not in aliases and value not in attempted
+        ]
+        if local_lookup is not None:
+            remember(list(local_lookup(missing).values()))
+        if not client.refresh_paper_cache:
+            for value in missing:
+                cached = _load_cached_paper(value)
+                if cached is not None:
+                    remember([cached])
+                    aliases[value] = cached
+        bind_entry_aliases()
+        missing = [value for value in missing if value not in aliases]
+        if missing:
+            try:
+                records = client.get_papers(missing, raise_on_unavailable=True)
+            except SemanticScholarUnavailableError as exc:
+                logger.debug("S2 metadata unavailable during arXiv recovery: %s", exc)
+                records = {}
+            remember(list(records.values()))
+            for requested_id, paper in records.items():
+                aliases[normalize_paper_id(requested_id).lower()] = paper
+            bind_entry_aliases()
+            missing_arxiv = [
+                value
+                for value in missing
+                if value.startswith("arxiv:") and value not in aliases
+            ]
+            remember(list(arxiv.get_papers(missing_arxiv).values()))
+            bind_entry_aliases()
+        attempted.update(ids)
+        for entry in batch:
+            paper = next((aliases[value] for value in entry if value in aliases), None)
+            if (
+                paper is None
+                or paper.paper_id == seed.paper_id
+                or candidate_records_match(seed, paper)
+            ):
+                continue
+            existing = next(
+                (
+                    item
+                    for item in recovered
+                    if item.paper_id == paper.paper_id
+                    or candidate_records_match(item, paper)
+                ),
+                None,
+            )
+            if existing is not None:
+                merge_paper_metadata(existing, paper)
+            else:
+                recovered.append(paper)
+            if len(recovered) >= limit:
+                break
+        if len(recovered) >= limit:
+            break
+    logger.debug(
+        "arXiv bibliography: %d entries; %d references materialized.",
+        len(entries),
+        len(recovered),
+    )
+    if recovered:
+        logger.info(
+            "Recovered %d references from the arXiv bibliography.", len(recovered)
+        )
+    # COMPLETE describes an evaluated source, not exhaustive bibliography coverage.
+    return (
+        original,
+        CandidateSourceResult(
+            "arxiv_references",
+            CandidateSourceState.COMPLETE if recovered else CandidateSourceState.EMPTY,
+            papers=tuple(recovered),
+        ),
+    )
+
+
 def require_available_candidate_source(
     results: Sequence[CandidateSourceResult],
     *,
@@ -266,8 +439,14 @@ def require_available_candidate_source(
     """
     if not results:
         return
+    recovered_references = any(
+        result.source == "arxiv_references" and result.papers for result in results
+    )
     unavailable = [
-        result for result in results if result.state is CandidateSourceState.UNAVAILABLE
+        result
+        for result in results
+        if result.state is CandidateSourceState.UNAVAILABLE
+        and not (recovered_references and result.source == "references")
     ]
     if len(unavailable) == len(results):
         sources = ", ".join(result.source for result in unavailable)
@@ -284,10 +463,10 @@ def require_available_candidate_source(
             f"{result.source}: {result.error or 'unavailable'}"
             for result in unavailable
         )
+        logger.debug("Unavailable candidate-source details: %s", details)
         logger.warning(
-            "Continuing %s with partial Semantic Scholar evidence (%s).",
-            context,
-            details,
+            "Continuing with unavailable candidate sources: %s.",
+            ", ".join(result.source for result in unavailable),
         )
 
 
@@ -454,6 +633,7 @@ def fetch_candidate_pool(
     max_references: int = 0,
     max_citations: int = 0,
     max_recommendations: int = 0,
+    seed_identifier: str | None = None,
 ) -> CandidatePool:
     """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
 
@@ -465,6 +645,7 @@ def fetch_candidate_pool(
     :param int max_references: Maximum seed references to fetch (0 disables).
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :param str | None seed_identifier: Original input, retaining an arXiv version.
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     with client.candidate_operation_scope():
@@ -474,6 +655,7 @@ def fetch_candidate_pool(
             max_references=max_references,
             max_citations=max_citations,
             max_recommendations=max_recommendations,
+            seed_identifier=seed_identifier,
         )
 
 
@@ -484,6 +666,7 @@ def _fetch_candidate_pool(
     max_references: int = 0,
     max_citations: int = 0,
     max_recommendations: int = 0,
+    seed_identifier: str | None = None,
 ) -> CandidatePool:
     """Fetch candidates while an outer operation scope is active.
 
@@ -492,6 +675,7 @@ def _fetch_candidate_pool(
     :param int max_references: Maximum seed references to fetch (0 disables).
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :param str | None seed_identifier: Original input, retaining an arXiv version.
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     pool = CandidatePool(seed=seed_paper)
@@ -526,17 +710,13 @@ def _fetch_candidate_pool(
     else:
         anchor_ids = [seed_id]
         if max_references > 0:
-            reference_result = fetch_candidate_source(
-                "references",
-                lambda: client.get_paper_references(
-                    seed_id,
-                    limit=max_references,
-                    raise_on_unavailable=True,
-                ),
+            reference_results = fetch_seed_references(
+                client, seed_paper, max_references, seed_identifier=seed_identifier
             )
-            source_results.append(reference_result)
-            for paper in reference_result.papers:
-                pool.add(paper, source="reference", relation="referenced_by_seed")
+            source_results.extend(reference_results)
+            for result in reference_results:
+                for paper in result.papers:
+                    pool.add(paper, source="reference", relation="referenced_by_seed")
         if max_citations > 0:
             citation_result = fetch_candidate_source(
                 "citations",

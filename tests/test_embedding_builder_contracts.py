@@ -69,6 +69,9 @@ _REAL_DEP_CHECK_TESTS = {
 }
 
 
+pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
+
 @pytest.fixture(autouse=True)
 def _disable_embedding_optional_deps(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
