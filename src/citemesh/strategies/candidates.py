@@ -419,7 +419,15 @@ def fetch_seed_references(
                 break
         if len(recovered) >= limit:
             break
-    identifiable_entries = sum(bool(entry) for entry in entries)
+    identifiable_entries = len({frozenset(entry) for entry in entries if entry})
+    logger.debug(
+        "arXiv bibliography extraction: entries=%d, identifiable=%d, "
+        "materialized=%d, reference_limit=%d.",
+        len(entries),
+        identifiable_entries,
+        len(recovered),
+        limit,
+    )
     local_targets = [
         (paper, lookup_id)
         for paper in recovered
@@ -451,14 +459,20 @@ def fetch_seed_references(
                 if s2_paper is not None:
                     merge_paper_metadata(local_paper, s2_paper)
     if recovered:
-        logger.info(
-            "Recovered %d references from the arXiv bibliography "
-            "(%d of %d entries contain arXiv/DOI IDs; reference limit: %d).",
-            len(recovered),
-            identifiable_entries,
-            len(entries),
-            limit,
-        )
+        if identifiable_entries > len(recovered) and len(recovered) >= limit:
+            logger.info(
+                "Recovered %d reference identifiers from the arXiv bibliography; "
+                "keeping %d (reference limit: %d).",
+                identifiable_entries,
+                len(recovered),
+                limit,
+            )
+        else:
+            logger.info(
+                "Recovered %d reference%s from the arXiv bibliography.",
+                len(recovered),
+                "" if len(recovered) == 1 else "s",
+            )
     # COMPLETE describes an evaluated source, not exhaustive bibliography coverage.
     if recovered:
         state = CandidateSourceState.COMPLETE

@@ -99,7 +99,7 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
         client.get_papers.side_effect = SemanticScholarUnavailableError("offline")
     bibliography.return_value = [("arxiv:1706.03762",)]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         results = fetch_seed_references(
             client,
             paper("seed", arxiv_id="2608.27147"),
@@ -116,10 +116,23 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
     assert not [
         record for record in caplog.records if record.levelno >= logging.WARNING
     ]
-    assert (
-        "Recovered 1 references from the arXiv bibliography "
-        "(1 of 1 entries contain arXiv/DOI IDs; reference limit: 2)." in caplog.text
+    recovery_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Recovered 1 reference")
+    ]
+    assert len(recovery_logs) == 1
+    assert recovery_logs[0].levelno == logging.INFO
+    assert recovery_logs[0].getMessage() == (
+        "Recovered 1 reference from the arXiv bibliography."
     )
+    extraction_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("arXiv bibliography extraction:")
+    ]
+    assert len(extraction_logs) == 1
+    assert extraction_logs[0].levelno == logging.DEBUG
 
 
 def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -> None:
@@ -180,10 +193,13 @@ def test_local_metadata_survives_s2_enrichment_rejection(providers: tuple) -> No
     metadata.assert_not_called()
 
 
-def test_unresolved_entries_do_not_exhaust_admission_limit(providers: tuple) -> None:
+def test_unresolved_entries_do_not_exhaust_admission_limit(
+    providers: tuple, caplog: pytest.LogCaptureFixture
+) -> None:
     """Missing DOI records are skipped and later bibliography entries are tried.
 
     :param tuple providers: Mock services.
+    :param pytest.LogCaptureFixture caplog: Recorded recovery summary.
     :return None: Checks ordering, deduplication, and bounded graph admission.
     """
     client, bibliography, metadata = providers
@@ -195,11 +211,23 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(providers: tuple) -> 
         ("arxiv:2401.12345",),
     ]
     metadata.side_effect = lambda ids: {value: paper(value) for value in ids}
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 2)
+    with caplog.at_level(logging.INFO):
+        results = fetch_seed_references(client, paper("arxiv:2608.27147"), 2)
     assert [item.paper_id for item in results[-1].papers] == [
         "arxiv:1706.03762",
         "arxiv:2303.08774",
     ]
+    recovery_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Recovered 4 reference identifiers")
+    ]
+    assert len(recovery_logs) == 1
+    assert recovery_logs[0].levelno == logging.INFO
+    assert recovery_logs[0].getMessage() == (
+        "Recovered 4 reference identifiers from the arXiv bibliography; "
+        "keeping 2 (reference limit: 2)."
+    )
     metadata.assert_called_once()
 
 
