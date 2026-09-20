@@ -1509,7 +1509,7 @@ class EmbeddingGraphBuilder(
         if not targets:
             return
 
-        logger.info(
+        logger.debug(
             "Fetching citation counts from Semantic Scholar for up to %d papers...",
             len(targets),
         )

@@ -8068,18 +8068,20 @@ def test_embedding_citation_enrichment_logs_target_count(
     }
 
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         builder._update_citation_counts(papers)
 
     assert papers["paper-1"].citation_count == 77
     client.get_papers.assert_called_once_with(["paper-1"])
     client.get_paper.assert_not_called()
-    log_messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "Fetching citation counts from Semantic Scholar for up to 1 papers..."
-        in message
-        for message in log_messages
-    )
+    target_logs = [
+        record
+        for record in caplog.records
+        if "Fetching citation counts from Semantic Scholar for up to 1 papers..."
+        in record.getMessage()
+    ]
+    assert len(target_logs) == 1
+    assert target_logs[0].levelno == logging.DEBUG
 
 
 def test_embedding_citation_enrichment_skips_invalid_batch_rows(
