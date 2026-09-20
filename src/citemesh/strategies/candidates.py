@@ -419,11 +419,7 @@ def fetch_seed_references(
                 break
         if len(recovered) >= limit:
             break
-    logger.debug(
-        "arXiv bibliography: %d entries; %d references materialized.",
-        len(entries),
-        len(recovered),
-    )
+    identifiable_entries = sum(bool(entry) for entry in entries)
     local_targets = [
         (paper, lookup_id)
         for paper in recovered
@@ -456,7 +452,12 @@ def fetch_seed_references(
                     merge_paper_metadata(local_paper, s2_paper)
     if recovered:
         logger.info(
-            "Recovered %d references from the arXiv bibliography.", len(recovered)
+            "Recovered %d references from the arXiv bibliography "
+            "(%d of %d entries contain arXiv/DOI IDs; reference limit: %d).",
+            len(recovered),
+            identifiable_entries,
+            len(entries),
+            limit,
         )
     # COMPLETE describes an evaluated source, not exhaustive bibliography coverage.
     if recovered:

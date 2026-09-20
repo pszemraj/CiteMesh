@@ -116,7 +116,10 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
     assert not [
         record for record in caplog.records if record.levelno >= logging.WARNING
     ]
-    assert "Recovered 1 references" in caplog.text
+    assert (
+        "Recovered 1 references from the arXiv bibliography "
+        "(1 of 1 entries contain arXiv/DOI IDs; reference limit: 2)." in caplog.text
+    )
 
 
 def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -> None:
