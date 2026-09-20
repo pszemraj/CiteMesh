@@ -88,8 +88,11 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         except SemanticScholarUnavailableError as exc:
             self._reference_source_unavailable = True
             logger.warning(
-                "Reference IDs unavailable for recommendation %s; continuing "
-                "without further reference hydration for this collection: %s",
+                "Reference hydration unavailable; continuing with available "
+                "reference data."
+            )
+            logger.debug(
+                "Reference hydration failed for recommendation %s: %s",
                 paper.paper_id,
                 exc,
             )
@@ -121,7 +124,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         seed = replace(seed, is_seed=True)
         papers[seed.paper_id] = seed
 
-        logger.info("Fetching recommendations for %s", seed.paper_id)
+        logger.info("Collecting recommendations...")
+        logger.debug("Recommendation seed: %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(

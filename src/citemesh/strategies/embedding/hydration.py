@@ -384,8 +384,9 @@ class _CorpusHydrationMixin:
         :param bool use_streaming: Whether hydration mode is streaming.
         :return None: Leaves an empty namespace marked incomplete.
         """
-        logger.info(
-            "Hydrating embedding cache for split=%s corpus_size=%s (streaming=%s).",
+        logger.info("Hydrating embedding cache...")
+        logger.debug(
+            "Embedding cache hydration: split=%s, corpus_size=%s, streaming=%s.",
             self.dataset_split,
             "all" if self.corpus_size is None else self.corpus_size,
             use_streaming,

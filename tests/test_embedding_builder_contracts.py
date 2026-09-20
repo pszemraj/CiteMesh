@@ -1965,15 +1965,28 @@ def test_embedding_default_model_loads_with_fallback_chain(
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         builder._load_model()
 
     assert init_log["attempts"] == [DEFAULT_EMBEDDING_MODEL_NAME, fallback_model]
     assert init_log["model_name"] == fallback_model
-    log_messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "Using fallback embedding checkpoint:" in message for message in log_messages
-    )
+    fallback_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Requested embedding checkpoint")
+    ]
+    assert len(fallback_logs) == 1
+    assert fallback_logs[0].levelno == logging.WARNING
+    assert fallback_model in fallback_logs[0].getMessage()
+    failure_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith(
+            "Embedding checkpoint failures before fallback:"
+        )
+    ]
+    assert len(failure_logs) == 1
+    assert failure_logs[0].levelno == logging.DEBUG
 
 
 @pytest.mark.parametrize(

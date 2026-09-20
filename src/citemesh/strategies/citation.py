@@ -132,8 +132,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         except SemanticScholarUnavailableError as exc:
             self._reference_source_unavailable = True
             logger.warning(
-                "Reference IDs unavailable for related paper %s; continuing "
-                "without further reference hydration for this collection: %s",
+                "Reference hydration unavailable; continuing with available "
+                "reference data."
+            )
+            logger.debug(
+                "Reference hydration failed for related paper %s: %s",
                 paper_id,
                 exc,
             )
@@ -324,7 +327,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # Step 1: Fetch seed paper
         seed = seed_paper
         if seed is None:
-            logger.info(f"Fetching seed paper: {seed_id}")
+            logger.debug("Fetching seed paper: %s", seed_id)
             seed = self.client.get_paper(
                 seed_id,
                 raise_on_unavailable=True,
@@ -344,6 +347,17 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         logger.debug("Seed: %s", seed.title)
 
+        if self.max_papers > len(papers) and (
+            self.max_references > 0 or self.max_citations > 0
+        ):
+            logger.info("Collecting related papers...")
+            logger.debug(
+                "Related-paper limits: references=%d, citations=%d, max_papers=%d.",
+                self.max_references,
+                self.max_citations,
+                self.max_papers,
+            )
+
         # Step 2: Fetch references (older papers)
         show_progress = progress_enabled()
         remaining = self.max_papers - len(papers)
@@ -352,7 +366,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             self.max_references,
         )
         if reference_limit > 0:
-            logger.info("Collecting references and citations...")
             reference_results = fetch_seed_references(
                 self.client,
                 seed,
@@ -422,8 +435,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         reference_lists = sum(
             bool(references) for references in self.reference_cache.values()
         )
-        summary = (
-            f"Collected {len(papers)} papers ({reference_lists} with reference lists)"
+        summary = f"Collected {len(papers)} papers"
+        logger.debug(
+            "Collected-paper reference hydration: %d of %d papers have reference lists.",
+            reference_lists,
+            len(papers),
         )
         self._abstract_index.build(papers)
         self._set_collection_summary(summary)

@@ -396,7 +396,10 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     assert set(papers) == {"seed", "first", "second"}
     client.get_reference_ids.assert_called_once_with("first", force_refresh=False)
     assert len(caplog.records) == 1
-    assert "without further reference hydration" in caplog.text
+    assert (
+        "Reference hydration unavailable; continuing with available reference data."
+        in caplog.text
+    )
     client.get_reference_ids.reset_mock(side_effect=True)
     client.get_reference_ids.return_value = ["restored"]
 
@@ -1055,16 +1058,13 @@ def test_citation_collect_populates_reference_cache_and_summary(
     assert set(papers) == {"seed", "ref1", "cit1"}
     assert papers["ref1"].references == ["ref1-ref"]
     assert papers["cit1"].references == ["cit1-ref"]
-    assert (
-        builder.get_collection_summary()
-        == "Collected 3 papers (3 with reference lists)"
-    )
+    assert builder.get_collection_summary() == "Collected 3 papers"
     assert client.get_reference_ids.call_args_list == [
         call("ref1", force_refresh=False),
         call("cit1", force_refresh=False),
     ]
     assert "Hydrating reference lists" not in caplog.text
-    assert "Collecting references and citations" in caplog.text
+    assert "Collecting related papers" in caplog.text
 
 
 def test_citation_reference_hydration_reports_interactive_progress() -> None:
@@ -1786,7 +1786,10 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
         semantic_candidate.paper_id,
     }
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
-    assert "Reference IDs unavailable for related paper seed" in caplog.text
+    assert (
+        "Reference hydration unavailable; continuing with available reference data."
+        in caplog.text
+    )
 
 
 def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:

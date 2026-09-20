@@ -465,7 +465,7 @@ class EmbeddingGraphBuilder(
         """
         if not force_rebuild_cache:
             return None
-        logger.info(
+        logger.debug(
             "Embedding cache rebuild requested; deferring clear until the "
             "runtime-active model namespace is resolved."
         )
@@ -1068,7 +1068,8 @@ class EmbeddingGraphBuilder(
             return replace(resolved_seed_paper, is_seed=True)
 
         # Treat as text query
-        logger.info(f"Using '{seed_id}' as text query")
+        logger.info("Using text query as seed.")
+        logger.debug("Text-query seed: %s", seed_id)
         # Create dummy seed paper
         return Paper(
             paper_id=_query_seed_id(seed_id),

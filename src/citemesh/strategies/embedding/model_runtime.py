@@ -691,13 +691,6 @@ class _ModelRuntimeMixin:
                 model_errors.append((candidate_model, exc))
                 has_more_candidates = idx + 1 < len(load_candidates)
                 if has_more_candidates:
-                    logger.warning(
-                        "Failed to load embedding model %s (%s: %s). "
-                        "Trying fallback checkpoint...",
-                        candidate_model,
-                        type(exc).__name__,
-                        exc,
-                    )
                     continue
                 summary = "; ".join(
                     f"{model_id}: {type(error).__name__}: {error}"
@@ -709,10 +702,17 @@ class _ModelRuntimeMixin:
                 ) from exc
 
             if candidate_model != self.model_name:
-                logger.info(
-                    "Using fallback embedding checkpoint: requested=%s active=%s.",
+                logger.warning(
+                    "Requested embedding checkpoint %s could not be loaded; using %s.",
                     self.model_name,
                     candidate_model,
+                )
+                logger.debug(
+                    "Embedding checkpoint failures before fallback: %s",
+                    "; ".join(
+                        f"{model_id}: {type(error).__name__}: {error}"
+                        for model_id, error in model_errors
+                    ),
                 )
             if self._active_model_name != candidate_model:
                 self._resolved_model_fingerprint = None
@@ -1053,7 +1053,7 @@ class _ModelRuntimeMixin:
         self._inner_model_compiled = True
         self._compile_status_reason = None
         if self.device == "mps":
-            logger.info(
+            logger.debug(
                 "torch.compile on MPS (Inductor/Metal) is experimental; the first "
                 "encode will retry from the eager inner model if compilation fails."
             )
