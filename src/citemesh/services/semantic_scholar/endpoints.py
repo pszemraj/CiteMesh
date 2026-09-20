@@ -120,6 +120,27 @@ class _EndpointsMixin:
         return paper
 
     @_scoped_endpoint
+    def get_cached_papers(self, paper_ids: Sequence[str]) -> dict[str, Paper]:
+        """Load persisted paper metadata without making provider requests.
+
+        :param Sequence[str] paper_ids: Paper identifiers to resolve from cache.
+        :return dict[str, Paper]: Cached records keyed by normalized request ID.
+        """
+        normalized_ids: list[str] = []
+        for raw_id in paper_ids:
+            if not raw_id or not isinstance(raw_id, str):
+                raise ValueError(f"Invalid paper ID: {raw_id}")
+            normalized_ids.append(normalize_paper_id(raw_id))
+        if self.refresh_paper_cache:
+            return {}
+        papers = {
+            paper_id: cached
+            for paper_id in dict.fromkeys(normalized_ids)
+            if (cached := disk_cache._load_cached_paper(paper_id)) is not None
+        }
+        return papers
+
+    @_scoped_endpoint
     def get_papers(
         self, paper_ids: Sequence[str], *, raise_on_unavailable: bool = False
     ) -> dict[str, Paper]:
@@ -136,12 +157,7 @@ class _EndpointsMixin:
             normalized_ids.append(normalize_paper_id(raw_id))
         normalized_ids = list(dict.fromkeys(normalized_ids))
 
-        papers: dict[str, Paper] = {}
-        if not self.refresh_paper_cache:
-            for paper_id in normalized_ids:
-                cached = disk_cache._load_cached_paper(paper_id)
-                if cached is not None:
-                    papers[paper_id] = cached
+        papers = self.get_cached_papers(normalized_ids)
         missing = [paper_id for paper_id in normalized_ids if paper_id not in papers]
         reused_count = len(papers)
         malformed_records = 0

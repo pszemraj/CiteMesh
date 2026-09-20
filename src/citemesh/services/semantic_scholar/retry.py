@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_BACKOFF_SECONDS = 60.0
 _MAX_RETRY_AFTER_SECONDS = 300.0
+_LONG_RETRY_WARNING_SECONDS = 30.0
 
 
 def _jittered_backoff(

@@ -272,7 +272,6 @@ def fetch_seed_references(
         SemanticScholarUnavailableError,
     )
     from citemesh.services.arxiv import ArxivClient, arxiv_identifier
-    from citemesh.services.semantic_scholar.disk_cache import _load_cached_paper
 
     if limit <= 0:
         return ()
@@ -359,11 +358,9 @@ def fetch_seed_references(
             bind_entry_aliases()
             missing = [value for value in missing if value not in aliases]
         if not client.refresh_paper_cache:
-            for value in missing:
-                cached = _load_cached_paper(value)
-                if cached is not None:
-                    remember([cached])
-                    aliases[value] = cached
+            cached_records = client.get_cached_papers(missing)
+            remember(list(cached_records.values()))
+            aliases.update(cached_records)
         bind_entry_aliases()
         missing = [value for value in missing if value not in aliases]
         if missing:
@@ -499,10 +496,12 @@ def require_available_candidate_source(
     *,
     context: str,
 ) -> None:
-    """Require at least one attempted source to have completed, even if empty.
+    """Require an available candidate source, which may be evaluated-empty.
 
     Partial source outages remain usable but are surfaced once in logs. When every
-    attempted source is unavailable, callers must not publish a normal graph.
+    requested source is unavailable, callers must not publish a normal graph. An
+    empty arXiv fallback has not recovered a candidate source, so it cannot mask
+    unavailable Semantic Scholar discovery.
 
     :param Sequence[CandidateSourceResult] results: Attempted source results.
     :param str context: Human-readable acquisition context for diagnostics.
@@ -514,13 +513,18 @@ def require_available_candidate_source(
     recovered_references = any(
         result.source == "arxiv_references" and result.papers for result in results
     )
+    candidate_source_available = any(
+        result.state is not CandidateSourceState.UNAVAILABLE
+        and (result.source != "arxiv_references" or result.papers)
+        for result in results
+    )
     unavailable = [
         result
         for result in results
         if result.state is CandidateSourceState.UNAVAILABLE
         and not (recovered_references and result.source == "references")
     ]
-    if len(unavailable) == len(results):
+    if not candidate_source_available:
         sources = ", ".join(result.source for result in unavailable)
         details = "; ".join(
             f"{result.source}: {result.error or 'unavailable'}"

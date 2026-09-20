@@ -14,6 +14,7 @@ from citemesh.services import (
 )
 from citemesh.services.arxiv import ArxivClient
 from citemesh.services.semantic_scholar.disk_cache import (
+    _load_cached_paper,
     _persist_paper,
     _reference_cache_path,
 )
@@ -41,6 +42,11 @@ def providers(
     client.get_paper_citations.return_value = []
     client.get_papers.return_value = {}
     client.get_reference_ids.return_value = []
+    client.get_cached_papers.side_effect = lambda identifiers: {
+        identifier: cached
+        for identifier in identifiers
+        if (cached := _load_cached_paper(identifier)) is not None
+    }
     bibliography = MagicMock(return_value=[])
     metadata = MagicMock(return_value={})
     monkeypatch.setattr(ArxivClient, "get_bibliography", bibliography)
@@ -169,6 +175,7 @@ def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -
     client.get_papers.assert_called_once_with(
         ["arxiv:1706.03762"], raise_on_unavailable=True
     )
+    client.get_cached_papers.assert_called_once_with(["arxiv:2303.08774"])
     metadata.assert_not_called()
 
 
@@ -232,10 +239,10 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
 
 
 @pytest.mark.parametrize("html", [None, []])
-def test_html_failure_preserves_s2_failure_or_empty(
+def test_unusable_arxiv_fallback_does_not_hide_s2_outage(
     providers: tuple, html: object
 ) -> None:
-    """Unavailable and evaluated-empty HTML remain distinct outcomes.
+    """An unusable arXiv fallback cannot make an S2 outage available.
 
     :param tuple providers: Mock services.
     :param object html: Unavailable or empty parsed HTML.
@@ -246,10 +253,7 @@ def test_html_failure_preserves_s2_failure_or_empty(
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
     results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
     assert results[-1].state.value == ("unavailable" if html is None else "empty")
-    if html is None:
-        with pytest.raises(CandidateAcquisitionError):
-            require_available_candidate_source(results, context="test")
-    else:
+    with pytest.raises(CandidateAcquisitionError, match="references"):
         require_available_candidate_source(results, context="test")
 
 
@@ -318,6 +322,39 @@ def test_citation_reuses_recovery_without_persisting_partial_bibliography(
         for call in client.get_reference_ids.call_args_list
     )
     bibliography.assert_called_once()
+
+
+@pytest.mark.parametrize("html", [None, []])
+def test_citation_hydrates_seed_after_unavailable_arxiv_recovery(
+    providers: tuple, html: object
+) -> None:
+    """A failed arXiv fallback must not suppress cached seed hydration.
+
+    :param tuple providers: Mock services.
+    :param object html: Unavailable or empty parsed HTML.
+    :return None: Checks fallback failures retain seed bibliography enrichment.
+    """
+    client, bibliography, _ = providers
+    seed = paper("arxiv:2608.27147")
+    citation = paper("citation", references=["citation-reference"])
+    client.get_paper.return_value = seed
+    client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_paper_citations.return_value = [citation]
+    client.get_reference_ids.return_value = ["reference-1", "reference-2"]
+    bibliography.return_value = html
+    builder = CitationGraphBuilder(
+        max_papers=2, max_references=1, max_citations=1, client=client
+    )
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert papers[seed.paper_id].references == ["reference-1", "reference-2"]
+    client.get_reference_ids.assert_called_once_with(seed.paper_id, force_refresh=False)
+    assert builder.candidate_source_status == {
+        "references": "unavailable",
+        "arxiv_references": "unavailable" if html is None else "empty",
+        "citations": "complete",
+    }
 
 
 def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> None:

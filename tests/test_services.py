@@ -334,6 +334,22 @@ def test_get_paper_cache_not_found_refresh_and_reference_enrichment() -> None:
         assert refresh.get_paper("missing", raise_on_unavailable=True) is None
 
 
+def test_get_cached_papers_reads_only_persisted_records() -> None:
+    """Cache-only bulk lookup never performs a provider request.
+
+    :return None: Verifies normalized cache hits and refresh bypass behavior.
+    """
+    cached = Paper(paper_id="warm", title="Warm", year=2020)
+    s2.disk_cache._persist_paper(cached, "warm")
+    with SemanticScholarClient(api_key="") as client:
+        client._session.post = MagicMock()
+        assert client.get_cached_papers(["warm", "missing", "warm"]) == {"warm": cached}
+        client._session.post.assert_not_called()
+
+    with SemanticScholarClient(api_key="", refresh_paper_cache=True) as refresh:
+        assert refresh.get_cached_papers(["warm"]) == {}
+
+
 def test_get_papers_fetches_only_misses_and_preserves_request_order() -> None:
     """Bulk lookup owns cache reads and batches only missing identifiers.
 
@@ -858,6 +874,45 @@ def test_transient_transport_errors_retry(
 
         assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
         assert client._session.get.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("delay", "failed_attempts"),
+    [(30.0, 2), (15.0, 3)],
+    ids=["single-wait", "cumulative-waits"],
+)
+def test_retry_waits_warn_once_after_thirty_cumulative_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    delay: float,
+    failed_attempts: int,
+) -> None:
+    """Retry delays disclose one actionable warning after a long accumulated wait.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces retry timing and sleeping.
+    :param pytest.LogCaptureFixture caplog: Captured retry disclosure.
+    :param float delay: Fixed delay after every failed attempt.
+    :param int failed_attempts: Number of transient failures before success.
+    :return None: Verifies quiet retry logs do not hide prolonged recovery.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: delay)
+    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[_MockResponse(503)] * failed_attempts
+            + [_MockResponse(200, _paper_payload("p1"))]
+        )
+        with caplog.at_level(logging.WARNING):
+            assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert f"waiting {delay:.0f}s (30s total retry delay)" in warnings[0]
 
 
 def test_retry_after_cap_and_nonfinite_values() -> None:

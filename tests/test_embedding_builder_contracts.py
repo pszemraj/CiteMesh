@@ -743,6 +743,41 @@ def test_embedding_builder_requires_modern_torch(
         EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
 
+@pytest.mark.parametrize(
+    ("interactive", "progress_visible", "disable_calls"),
+    [(True, True, 0), (False, True, 1), (True, False, 1)],
+)
+def test_datasets_progress_policy_preserves_enabled_process_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    interactive: bool,
+    progress_visible: bool,
+    disable_calls: int,
+) -> None:
+    """Interactive CiteMesh runs must not re-enable externally disabled bars.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces optional datasets dependency.
+    :param bool interactive: Whether the output stream is interactive.
+    :param bool progress_visible: Whether CiteMesh may render progress.
+    :param int disable_calls: Expected quiet-mode datasets global toggle calls.
+    :return None: Verifies only quiet operation changes the datasets setting.
+    """
+    enable_progress_bars = MagicMock()
+    disable_progress_bars = MagicMock()
+    datasets_module = types.SimpleNamespace(
+        utils=types.SimpleNamespace(
+            enable_progress_bars=enable_progress_bars,
+            disable_progress_bars=disable_progress_bars,
+        )
+    )
+    monkeypatch.setattr(deps_module, "_import_optional", lambda *_args: datasets_module)
+    monkeypatch.setattr(deps_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(deps_module, "progress_enabled", lambda: progress_visible)
+
+    assert deps_module._import_datasets_module() is datasets_module
+    enable_progress_bars.assert_not_called()
+    assert disable_progress_bars.call_count == disable_calls
+
+
 def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

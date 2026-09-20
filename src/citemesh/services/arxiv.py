@@ -17,6 +17,7 @@ from citemesh.core.paper_ids import strip_arxiv_version
 logger = logging.getLogger(__name__)
 _ARXIV_TOKEN = r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})(?:v\d+)?"
 _ARXIV_TEXT = re.compile(r"arxiv\s*:\s*(" + _ARXIV_TOKEN + r")\b", re.I)
+_ARXIV_LEGACY_TEXT = re.compile(r"\b([a-z-]+(?:\.[a-z-]+)?/\d{7}(?:v\d+)?)\b", re.I)
 _ARXIV_URL_TEXT = re.compile(
     r"https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/[^\s<>\"]+", re.I
 )
@@ -72,6 +73,7 @@ def _identifiers(text: str, links: list[str]) -> tuple[str, ...]:
     :return tuple[str, ...]: Unique canonical aliases, arXiv before DOI.
     """
     arxiv_ids = [match[1] for match in _ARXIV_TEXT.finditer(text)]
+    arxiv_ids.extend(match[1] for match in _ARXIV_LEGACY_TEXT.finditer(text))
     for match in _ARXIV_URL_TEXT.finditer(text):
         identifier = arxiv_identifier(match[0].rstrip(".,;:)]"))
         if identifier:
@@ -104,6 +106,15 @@ class _BibliographyParser(HTMLParser):
         self.text: list[str] = []
         self.links: list[str] = []
 
+    def _finish_entry(self) -> None:
+        """Store the active bibliography entry when its boundary is reached.
+
+        :return None: Appends the active entry and clears its state.
+        """
+        if self.entry_depth is not None:
+            self.entries.append(_identifiers("".join(self.text), self.links))
+            self.entry_depth = None
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Track bibliography scope and capture entry links.
 
@@ -123,6 +134,9 @@ class _BibliographyParser(HTMLParser):
         if self.bibliography_depth is not None and (
             "ltx_bibitem" in classes or attributes.get("role") == "doc-biblioentry"
         ):
+            # LaTeXML occasionally leaves a <li> implicitly closed before the
+            # next bibliography item begins.
+            self._finish_entry()
             self.entry_depth = len(self.stack)
             self.text = []
             self.links = []
@@ -150,8 +164,7 @@ class _BibliographyParser(HTMLParser):
             return
         depth = len(self.stack) - self.stack[::-1].index(tag)
         if self.entry_depth is not None and depth <= self.entry_depth:
-            self.entries.append(_identifiers("".join(self.text), self.links))
-            self.entry_depth = None
+            self._finish_entry()
         if self.bibliography_depth is not None and depth <= self.bibliography_depth:
             self.bibliography_depth = None
         del self.stack[depth - 1 :]

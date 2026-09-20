@@ -490,15 +490,39 @@ def _log_run_summary(
     :param Path | None dashboard_package_path: Collection package path, if any.
     :return None: Emits the closing informational and debug log lines.
     """
-    primary_outputs = ", ".join(
-        f"{format_name}={path}" for format_name, path in sorted(output_paths.items())
-    )
-    logger.info(
-        "Build complete: nodes=%d, edges=%d; outputs: %s",
-        graph.number_of_nodes(),
-        graph.number_of_edges(),
-        primary_outputs,
-    )
+    if set(output_paths) == set(EXPORT_FORMATS):
+        output_directories = sorted(
+            {str(path.parent) for path in output_paths.values()}
+        )
+        if len(output_directories) == 1:
+            logger.info(
+                "Build complete: nodes=%d, edges=%d; %d artifacts saved to %s",
+                graph.number_of_nodes(),
+                graph.number_of_edges(),
+                len(output_paths),
+                output_directories[0],
+            )
+        else:
+            logger.info(
+                "Build complete: nodes=%d, edges=%d; %d artifacts saved across "
+                "%d directories: %s",
+                graph.number_of_nodes(),
+                graph.number_of_edges(),
+                len(output_paths),
+                len(output_directories),
+                ", ".join(output_directories),
+            )
+    else:
+        primary_outputs = ", ".join(
+            f"{format_name}={path}"
+            for format_name, path in sorted(output_paths.items())
+        )
+        logger.info(
+            "Build complete: nodes=%d, edges=%d; outputs: %s",
+            graph.number_of_nodes(),
+            graph.number_of_edges(),
+            primary_outputs,
+        )
 
     auxiliary_paths: dict[str, Path] = {}
     if graph_config_path is not None:

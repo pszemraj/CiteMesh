@@ -4702,8 +4702,11 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "theme": "dark",
     }
     assert any(
-        "Build complete: nodes=1, edges=0; outputs:" in message for message in logged
+        "Build complete: nodes=1, edges=0; "
+        f"{len(build_module.EXPORT_FORMATS)} artifacts saved" in message
+        for message in logged
     )
+    assert all("outputs: bibtex=" not in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)
     assert all("Creating visualization..." not in message for message in logged)

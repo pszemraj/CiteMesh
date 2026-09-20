@@ -117,15 +117,10 @@ def _import_datasets_module() -> Any:
     """
     datasets_module = _import_optional("datasets")
     progress_bars = getattr(datasets_module, "utils", None)
-    set_progress_bars = getattr(
-        progress_bars,
-        "enable_progress_bars"
-        if stderr_isatty() and progress_enabled()
-        else "disable_progress_bars",
-        None,
-    )
-    if callable(set_progress_bars):
-        set_progress_bars()
+    if not (stderr_isatty() and progress_enabled()):
+        disable_progress_bars = getattr(progress_bars, "disable_progress_bars", None)
+        if callable(disable_progress_bars):
+            disable_progress_bars()
     return datasets_module
 
 

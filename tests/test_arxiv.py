@@ -106,6 +106,25 @@ def test_extract_bibliography_recognizes_plain_arxiv_urls_and_punctuated_dois() 
     ]
 
 
+def test_extract_bibliography_recognizes_bare_legacy_ids_and_implicit_items() -> None:
+    """Bare old-style IDs survive the omitted closing tag emitted by LaTeXML.
+
+    :return None: Checks legacy text extraction and implicit list-item closure.
+    """
+    html = """
+    <section class="ltx_bibliography">
+      <ol class="ltx_biblist">
+        <li class="ltx_bibitem">hep-th/9709013, An early paper.
+        <li class="ltx_bibitem">arXiv:2608.27147v2, A later paper.</li>
+      </ol>
+    </section>
+    """
+    assert extract_reference_identifiers(html) == [
+        ("arxiv:hep-th/9709013",),
+        ("arxiv:2608.27147",),
+    ]
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

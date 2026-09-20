@@ -387,6 +387,7 @@ class SemanticScholarClient(_EndpointsMixin):
             return self._handle_unavailable(exhausted, raise_on_unavailable)
 
         last_error: Exception | None = None
+        retry_wait_seconds = 0.0
         for attempt in range(1, API_CONFIG.max_retries + 1):
             recovery_started_at = monotonic() if attempt > 1 else None
             request_started_at: float | None = None
@@ -514,15 +515,33 @@ class SemanticScholarClient(_EndpointsMixin):
                     cause=last_error,
                 )
                 return self._handle_unavailable(exhausted, raise_on_unavailable)
-            logger.debug(
-                "Semantic Scholar request failed while %s (attempt %d/%d); "
-                "retrying in %.1fs: %s",
-                context,
-                attempt,
-                API_CONFIG.max_retries,
-                delay,
-                last_error,
-            )
+            previous_retry_wait_seconds = retry_wait_seconds
+            retry_wait_seconds += delay
+            if (
+                previous_retry_wait_seconds
+                < retry._LONG_RETRY_WARNING_SECONDS
+                <= retry_wait_seconds
+            ):
+                logger.warning(
+                    "Semantic Scholar unavailable while %s (attempt %d/%d); "
+                    "waiting %.0fs (%.0fs total retry delay): %s",
+                    context,
+                    attempt,
+                    API_CONFIG.max_retries,
+                    delay,
+                    retry_wait_seconds,
+                    last_error,
+                )
+            else:
+                logger.debug(
+                    "Semantic Scholar request failed while %s (attempt %d/%d); "
+                    "retrying in %.1fs: %s",
+                    context,
+                    attempt,
+                    API_CONFIG.max_retries,
+                    delay,
+                    last_error,
+                )
             sleep_started_at = monotonic()
             try:
                 time.sleep(delay)
