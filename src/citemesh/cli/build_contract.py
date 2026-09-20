@@ -591,23 +591,6 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             args.storage_precision,
             int(args.encode_batch_size),
         )
-    if args.force_rebuild_cache:
-        overwrite_reason = _normalized_cache_reason(
-            getattr(args, "cache_overwrite_reason", None)
-        )
-        if bool(args.overwrite_cache):
-            logger.warning(
-                "--force-rebuild-cache enabled with --overwrite-cache; existing embedding namespace payload will be cleared without prompt."
-            )
-        else:
-            logger.warning(
-                "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared after confirmation."
-            )
-        if overwrite_reason:
-            logger.warning(
-                "Cache overwrite rationale: %s",
-                overwrite_reason,
-            )
 
 
 def _build_strategy_graph(

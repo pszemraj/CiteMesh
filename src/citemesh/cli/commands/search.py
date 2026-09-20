@@ -482,9 +482,8 @@ def _run_search_command(
 
     if mode == "s2":
         if origin == "config":
-            logger.info(
-                "Searching the Semantic Scholar API (defaults.search_mode = "
-                "'s2' in %s).",
+            logger.debug(
+                "Search mode resolved to Semantic Scholar from config: %s.",
                 user_config.path,
             )
         return _run_s2_search(args)
@@ -519,11 +518,15 @@ def _run_search_command(
                 f" (device={builder.device} compute_dtype={builder.compute_dtype})"
             )
         if mode == "auto":
-            logger.info(
-                "Local semantic search unavailable%s (%s); searching the "
-                "Semantic Scholar API instead.",
+            logger.warning(
+                "Local semantic search unavailable; searching the Semantic Scholar "
+                "API instead."
+            )
+            logger.debug(
+                "Local search fallback details%s: %s",
                 runtime_selectors,
                 exc,
+                exc_info=True,
             )
             return _run_s2_search(args)
         logger.error(
@@ -536,22 +539,23 @@ def _run_search_command(
 
     if mode == "auto":
         if cached_count > 0:
-            logger.info(
-                "Searching %s locally cached embeddings (model=%s). "
-                "Use --mode s2 for Semantic Scholar keyword search.",
+            logger.info("Searching locally cached embeddings...")
+            logger.debug(
+                "Local search cache: embeddings=%s, model=%s.",
                 f"{cached_count:,}",
                 defaults.model,
             )
             # Query failures stay visible once local results were selected.
             return _render_local_search(args, builder, defaults)
         logger.info(
-            "Local embedding cache is empty for model=%s semantic-source=%s "
-            "dataset-source=%s; searching the Semantic Scholar API instead. The "
-            "namespace is keyed by model, revision, profile, semantic source, "
-            "truncate dim, storage precision, int8 calibration size, and formatter "
-            "(never the device); corpus dataset source is validated against its "
-            "hydration metadata. Run `citemesh build` with this configuration to "
-            "populate it. %s",
+            "No local embeddings available; searching the Semantic Scholar API instead."
+        )
+        logger.debug(
+            "Empty local embedding namespace: model=%s, semantic_source=%s, "
+            "dataset_source=%s. Namespace keys include model, revision, profile, "
+            "semantic source, truncate dim, storage precision, int8 calibration "
+            "size, and formatter; corpus dataset source is validated against "
+            "hydration metadata. %s",
             defaults.model,
             defaults.semantic_source,
             defaults.dataset_source,

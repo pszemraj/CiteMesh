@@ -1925,17 +1925,24 @@ def test_search_auto_falls_back_on_config_contract_error(
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
     info = MagicMock()
+    warning = MagicMock()
+    debug = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info)
+    monkeypatch.setattr(cli_module.logger, "warning", warning)
+    monkeypatch.setattr(cli_module.logger, "debug", debug)
 
     result = run_cli_command(["search", "attention"])
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "Fallback Result" in result.stdout
     assert "usage: citemesh build" not in result.stderr
-    notices = str(info.call_args_list)
-    assert "defaults.device" in notices
-    assert str(config.path) in notices
-    assert "searching the Semantic Scholar API instead" in notices
+    assert any(
+        "searching the Semantic Scholar API instead" in str(call)
+        for call in warning.call_args_list
+    )
+    diagnostics = str(debug.call_args_list)
+    assert "defaults.device" in diagnostics
+    assert str(config.path) in diagnostics
 
 
 def test_search_local_reports_config_contract_error_without_build_usage(
@@ -2049,7 +2056,9 @@ def test_search_auto_uses_local_when_cache_populated(
     client_factory = MagicMock()
     monkeypatch.setattr(search_module, "get_client", client_factory)
     info_mock = MagicMock()
+    debug_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
 
     result = run_cli_command(["search", "cached topic", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
@@ -2058,7 +2067,10 @@ def test_search_auto_uses_local_when_cache_populated(
     )
     notices = str(info_mock.call_args_list)
     assert "locally cached embeddings" in notices
-    assert "--mode s2" in notices
+    diagnostics = str(debug_mock.call_args_list)
+    assert "embeddings=%s" in diagnostics
+    assert "42" in diagnostics
+    assert "model=%s" in diagnostics
     client_factory.assert_not_called()
 
 
@@ -2111,7 +2123,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         )
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
-    with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
         result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "Search results for 'attention'" in result.stdout
@@ -2120,10 +2132,12 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         "searching the Semantic Scholar API instead" in notice for notice in notices
     )
     empty_notice = next(
-        notice for notice in notices if "Local embedding cache is empty" in notice
+        notice
+        for notice in notices
+        if notice.startswith("Empty local embedding namespace:")
     )
-    assert "semantic-source=candidates" in empty_notice
-    assert f"dataset-source={DEFAULT_DATASET_SOURCE}" in empty_notice
+    assert "semantic_source=candidates" in empty_notice
+    assert f"dataset_source={DEFAULT_DATASET_SOURCE}" in empty_notice
     assert "pass --semantic-source arxiv-corpus" in empty_notice
     # The namespace has no device or compute-dtype token; guidance must not imply one.
     assert "device=" not in empty_notice
@@ -2182,7 +2196,7 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
 
     parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
-    with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
         result = search_module._run_search_command(
             args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
         )
@@ -2248,7 +2262,9 @@ def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
     s2_search = MagicMock(return_value=0)
     monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
     info_mock = MagicMock()
+    debug_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
 
     parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
@@ -2262,11 +2278,14 @@ def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
     result = search_module._run_search_command(args, build_parser, config)
 
     assert result == 0
-    assert "semantic-source=%s" in info_mock.call_args.args[0]
-    assert info_mock.call_args.args[2] == "arxiv-corpus"
-    assert info_mock.call_args.args[3] == dataset_source
-    assert "already the arXiv-corpus namespace" in info_mock.call_args.args[4]
-    assert "pass --semantic-source arxiv-corpus" not in info_mock.call_args.args[4]
+    assert info_mock.call_args.args == (
+        "No local embeddings available; searching the Semantic Scholar API instead.",
+    )
+    assert "semantic_source=%s" in debug_mock.call_args.args[0]
+    assert debug_mock.call_args.args[2] == "arxiv-corpus"
+    assert debug_mock.call_args.args[3] == dataset_source
+    assert "already the arXiv-corpus namespace" in debug_mock.call_args.args[4]
+    assert "pass --semantic-source arxiv-corpus" not in debug_mock.call_args.args[4]
     s2_search.assert_called_once_with(args)
 
 
