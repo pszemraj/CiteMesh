@@ -4,6 +4,5 @@
 
 ## Checklist
 
-- [ ] [Pre-PR checks](../CONTRIBUTING.md#before-you-open-a-pr) pass
+- [ ] `python -m pytest`, `ruff check .`, and `ruff format --check .` pass
 - [ ] Tests added/updated for changed behavior
-- [ ] Docs updated (`docs/guides/`, `docs/reference/`) if flags/defaults/layout changed

@@ -13,7 +13,7 @@ citemesh config unset defaults.semantic_source
 citemesh config path
 ```
 
-`set` rejects unknown keys and invalid values. Booleans accept `true`/`false`, `1/0`, `yes/no`, or `on/off`; `export` takes a comma-separated list such as `json,dashboard`. Other accepted values follow the [CLI flag contracts](cli.md#flag-reference).
+`set` rejects unknown keys and invalid values. Booleans accept `true`/`false`, `1/0`, `yes/no`, or `on/off`; `export` takes a comma-separated list such as `json,dashboard`. Other accepted values follow the [CLI option contracts](cli.md#option-reference).
 
 ## Precedence
 

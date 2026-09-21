@@ -10,54 +10,14 @@ Every node carries a consistent attribute payload, which keeps visualization and
 
 ## Package map
 
-### `core/` - data model and constants, no I/O
+- `core/` owns the data model, validation, shared choices, and configuration without I/O.
+- `data/` owns user configuration, cache roots, model profiles, and persistent embedding storage.
+- `services/` owns Semantic Scholar transport/cache behavior and conditional arXiv reference recovery.
+- `strategies/` owns candidate acquisition, graph construction, scoring, and embedding runtime behavior.
+- `visualization/` owns layouts, exporters, dashboard payloads, and browser assets.
+- `cli/` owns parsing, effective-option validation, command dispatch, logging, and output paths.
 
-- [choices.py](../../src/citemesh/core/choices.py) - shared CLI, config, and runtime option vocabularies
-- `config.py` - default dataclasses and their singletons (`TemporalConfig`, `EmbeddingSimilarityConfig`, `EmbeddingStorageConfig`, `HybridSimilarityConfig`, `VisualizationConfig`, `APIConfig`); embedding weight and storage settings validate on import
-- `models.py` - `Paper`, `Author`, and the overlap helpers the scorers rely on
-- `paper_fields.py` - tolerant coercion of venue, author, and category fields out of inconsistent upstream payloads
-- `paper_ids.py` - identifier normalization and alias derivation
-- `values.py`, `validation.py` - shared value coercion and input validation primitives
-- `text_batching.py` - length-bucketed encode batching and `l2_normalize_embeddings`; it sits here rather than under `strategies/embedding/` because `data/embedding_cache/` encodes through it too
-
-### `data/` - persistence
-
-- `cache.py` - cache-root resolution across platforms, atomic text/JSON writers, `atomic_output_path`, the cache-root `ReadWriteLock`
-- `user_config.py` - loads, validates, and rewrites `config.toml`, whitelisting `[defaults]` keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored so a bad config never blocks the CLI
-- `model_profiles.py` - the embedding profile registry: EmbeddingGemma, its three prompt formatters, truncate-dim policy, attention and compile eligibility, and the fallback chain
-- `embedding_cache/` - `store.py` composes `EmbeddingCache` from the `ingest`, `layout`, `recovery`, and `search` mixins over `constants`, `sql`, `models`, `quantization`; see [Embedding Cache Internals](embedding-cache.md)
-
-### `services/semantic_scholar/` - Semantic Scholar transport
-
-`errors.py` (request and availability errors) · `retry.py` (backoff and `Retry-After`) · `disk_cache.py` (canonical paper metadata, identifier lookups, and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (fresh discovery, pagination, and cache-aware metadata acquisition) · `client.py` (HTTP requests, rate limiting, shared recovery budget, `get_client`). The [API request policy](../guides/cli.md#appendix-b-troubleshooting) defines retry and recovery behavior.
-
-### `services/arxiv.py` - conditional seed-reference recovery
-
-Fetches an arXiv HTML article when Semantic Scholar returns no usable seed references, parses only its bibliography for explicit arXiv IDs and DOIs, and resolves remaining arXiv records through the batched Atom API. It uses the standard library and has no extra install dependency. The [CLI guide](../guides/cli.md#missing-semantic-scholar-references) defines its scope and limitations.
-
-### `strategies/` - candidate acquisition and scoring
-
-- `base.py` - `GraphBuilderStrategy`: the template method and its four hooks, the shared temporal/citation/bibliographic scorers, `deterministic_sort_key`, edge capping
-- `candidates.py` - pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, exact paper-ID matching, explicit corpus/S2 identifier matching, conditional arXiv seed-reference recovery, `scope_candidate_collection`
-- `similarity.py` - `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity
-- `citation.py`, `recommendation.py`, `hybrid.py` - the concrete strategies
-- `embedding/` - `deps` (lazy dependency guards) · `runtime` (device resolution, probes) · `model_runtime` (load, fallback, precision validation, TF32 and compile guards) · `precision` · `text` (`EmbeddingTask`, formatters) · `records` · `config` · `fingerprint` · `hydration` (corpus selection, calibration, resume) · `builder`
-
-### `visualization/` - layout, render, export
-
-- `render.py` - `compute_layout` and its chain (community detection, spreading, packing, orientation, normalization), `compute_node_sizes`, `visualize_graph`
-- `paths.py` - output-path and filename derivation (`generate_output_path`), free of matplotlib and numpy so the CLI resolver skips the rendering stack; `render` re-exports it.
-- `themes.py` - the immutable `light`/`dark`/`solarized` palettes and `auto` resolution
-- `node_data.py` - [Paper/scalar metadata precedence](../reference/output-artifacts.md#graph-input) shared by exporters, rendering, and filenames
-- `years.py`, `ordering.py` - year coercion and deterministic node/edge ordering
-- `export/` - `__init__` (`GraphExporter`, the `to_*` writers) · `nodes` (enrichment, seed-relevance PageRank) · `geometry` (primitives shared with the dashboard) · `plotly_figure`, `links`, `keys`, `loaders`, `bibtex`, `graphml`, `csv_`
-- `dashboard/` - `contracts.py` (`kind`/`schema_version`), `payload.py` (bundle assembly), `package.py` (locking, staging, upsert, rollback), `assets/`
-
-### `cli/` and top-level modules
-
-`__init__.py` (entry point and dispatch) · `parser.py` · `console.py` (Rich console and logging) · `build_options.py` and `build_contract.py` (strategy-scoped option validation and builder selection) · `outputs.py` · `graph_config.py` (the `*.config.json` sidecar) · `cache_ops.py` · `commands/{build,search,view,config,cache}.py`.
-
-Top-level: `__main__.py` (`python -m citemesh`), `_lazy.py` (the shared PEP 562 lazy-export plumbing every `__init__` uses), `progress.py`, `_runtime.py` (process-level runtime setup), `_version.py`.
+The [embedding-cache internals](embedding-cache.md), [arXiv recovery guide](../guides/cli.md#missing-semantic-scholar-references), and [output-artifact reference](../reference/output-artifacts.md) document the boundaries that need more detail.
 
 ## Rules
 
@@ -66,8 +26,6 @@ Top-level: `__main__.py` (`python -m citemesh`), `_lazy.py` (the shared PEP 562 
 **Optional dependencies stay lazily imported.** torch, sentence-transformers, datasets, plotly, and pyvis must never be imported at module scope on a path the base CLI reaches: a bare `pip install citemesh` has to run `citemesh build --strategy recommendation` and `citemesh --help` without them. Follow the guards in `strategies/embedding/deps.py` and `visualization/export/loaders.py`.
 
 Option vocabularies in `core/choices.py` have no runtime dependencies. The parser, persisted configuration, and relevant runtimes import them directly; changing a vocabulary does not require a second literal list or a test comparing copies.
-
-Test and code conventions are in [Contributing](../../CONTRIBUTING.md#code-conventions).
 
 ## Python ↔ JavaScript duplication
 

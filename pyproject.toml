@@ -35,7 +35,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Information Analysis",
-    "Typing :: Typed",
 ]
 
 dependencies = [
@@ -90,7 +89,7 @@ where = ["src"]
 include = ["citemesh*"]
 
 [tool.setuptools.package-data]
-citemesh = ["py.typed", "visualization/dashboard/assets/*"]
+citemesh = ["visualization/dashboard/assets/*"]
 
 [tool.setuptools_scm]
 version_file = "src/citemesh/_version.py"

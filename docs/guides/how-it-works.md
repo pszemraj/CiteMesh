@@ -1,6 +1,6 @@
 # How CiteMesh builds a graph
 
-A build resolves its seed, collects candidates, scores papers and edges, computes a layout, and exports the graph. The [strategy](strategies.md) determines candidate sources and scoring; the [CLI guide](cli.md#flag-reference) lists the controls.
+A build resolves its seed, collects candidates, scores papers and edges, computes a layout, and exports the graph. The [strategy](strategies.md) determines candidate sources and scoring; the [CLI guide](cli.md#option-reference) points to the current controls.
 
 ```text
   seed ID, or free text with --strategy embedding
