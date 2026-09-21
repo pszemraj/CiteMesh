@@ -70,6 +70,7 @@ from citemesh.strategies.candidates import (
     paper_embedding_metadata,
     provider_lookup_identifier,
     scope_candidate_collection,
+    select_recovered_references_by_score,
 )
 
 from . import deps
@@ -1264,6 +1265,47 @@ class EmbeddingGraphBuilder(
         max_citations = max(0, remaining - max_references)
         return max_references, max_citations, max_recommendations
 
+    def _select_recovered_references_by_embedding(
+        self,
+        seed: Paper,
+        recovered: Sequence[Paper],
+        limit: int,
+    ) -> list[Paper]:
+        """Select recovered references by retrieval-space cosine similarity.
+
+        The seed uses the profile's retrieval-query prompt and references use its
+        retrieval-document prompt. Citation count and bibliography position are
+        deterministic tie-breakers after semantic relevance.
+
+        :param Paper seed: Seed paper used as the retrieval query.
+        :param Sequence[Paper] recovered: Materialized bibliography records.
+        :param int limit: Maximum references to retain.
+        :return list[Paper]: Semantically ranked, capped reference records.
+        """
+        if len(recovered) <= limit:
+            return list(recovered)
+
+        seed_embedding = self.retrieval_embeddings.get(seed.paper_id)
+        if seed_embedding is None:
+            seed_embedding = self._encode_seed_embedding(seed)
+        candidates = {paper.paper_id: paper for paper in recovered}
+        embeddings = self.embed_papers(candidates)
+        query = l2_normalize_embeddings(seed_embedding)
+        return select_recovered_references_by_score(
+            recovered,
+            limit,
+            lambda paper: float(
+                np.clip(
+                    np.dot(
+                        query,
+                        l2_normalize_embeddings(embeddings[paper.paper_id]),
+                    ),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        )
+
     def _select_candidates_from_pool(
         self,
         seed_embedding: np.ndarray,
@@ -1288,6 +1330,7 @@ class EmbeddingGraphBuilder(
             max_citations=max_citations,
             max_recommendations=max_recommendations,
             seed_identifier=seed_identifier,
+            reference_selector=self._select_recovered_references_by_embedding,
         )
         self.candidate_source_status = dict(pool.source_status)
         if not pool.papers:

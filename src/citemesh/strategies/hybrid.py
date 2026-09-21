@@ -8,6 +8,7 @@ comprehensive paper discovery.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +44,7 @@ from citemesh.strategies.candidates import (
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
+    select_recovered_references_by_score,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -491,6 +493,43 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             embeddings=embeddings_map,
         )
 
+    def _select_recovered_references_by_embedding(
+        self,
+        seed: Paper,
+        recovered: Sequence[Paper],
+        limit: int,
+    ) -> list[Paper]:
+        """Select fallback references by retrieval-space cosine similarity.
+
+        :param Paper seed: Seed paper encoded in retrieval-query space.
+        :param Sequence[Paper] recovered: References encoded as retrieval documents.
+        :param int limit: Maximum references to retain.
+        :return list[Paper]: Semantically ranked, capped reference records.
+        """
+        if len(recovered) <= limit:
+            return list(recovered)
+
+        candidates = {paper.paper_id: paper for paper in recovered}
+        seed_embedding = self._ensure_candidate_embeddings(seed, candidates)
+        assert seed_embedding is not None
+        assert self.embedding_builder is not None
+        query = l2_normalize_embeddings(seed_embedding)
+        embeddings = self.embedding_builder.retrieval_embeddings
+        return select_recovered_references_by_score(
+            recovered,
+            limit,
+            lambda paper: float(
+                np.clip(
+                    np.dot(
+                        query,
+                        l2_normalize_embeddings(embeddings[paper.paper_id]),
+                    ),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        )
+
     def _seed_relevance_score(
         self,
         seed_embedding: np.ndarray | None,
@@ -655,6 +694,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     if corpus_prepared
                     else None
                 ),
+                reference_selector=self._select_recovered_references_by_embedding,
             )
         else:
             citation_papers = self.citation_builder.collect_papers(seed_id)

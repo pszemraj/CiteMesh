@@ -2254,6 +2254,91 @@ def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() 
     assert graph_score == 0.0
 
 
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+def test_embedding_strategies_rank_recovered_references_by_retrieval_cosine(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    """Embedding-enabled recovery must not fall back to lexical ranking.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces inference with fixed vectors.
+    :param str strategy: Embedding-enabled strategy under test.
+    :return None: Checks retrieval cosine wins over order and citation count.
+    """
+    seed = _seed_paper("seed")
+    early = _paper("early")
+    early.citation_count = 100
+    relevant = _paper("relevant")
+    relevant.citation_count = 0
+    query = np.asarray([1.0, 0.0], dtype=np.float32)
+    embeddings = {
+        early.paper_id: np.asarray([0.0, 1.0], dtype=np.float32),
+        relevant.paper_id: np.asarray([1.0, 0.0], dtype=np.float32),
+    }
+
+    if strategy == "embedding":
+        builder = EmbeddingGraphBuilder(
+            max_papers=2,
+            semantic_source="candidates",
+            client=MagicMock(),
+        )
+        builder.retrieval_embeddings[seed.paper_id] = query
+        monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
+        selected = builder._select_recovered_references_by_embedding(
+            seed, [early, relevant], 1
+        )
+    else:
+        builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
+        assert builder.embedding_builder is not None
+        builder.embedding_builder.retrieval_embeddings = {
+            seed.paper_id: query,
+            **embeddings,
+        }
+        monkeypatch.setattr(
+            builder,
+            "_ensure_candidate_embeddings",
+            MagicMock(return_value=query),
+        )
+        selected = builder._select_recovered_references_by_embedding(
+            seed, [early, relevant], 1
+        )
+
+    assert selected == [relevant]
+
+
+def test_embedding_candidate_pool_passes_retrieval_reference_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate acquisition must delegate fallback selection to embeddings."""
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="candidates",
+        client=MagicMock(),
+    )
+    seed = _seed_paper("seed")
+    candidate = _paper("candidate")
+    pool = CandidatePool(seed=seed)
+    pool.add(candidate, source="reference", relation="referenced_by_seed")
+    fetch = MagicMock(return_value=pool)
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding.builder.fetch_candidate_pool", fetch
+    )
+    monkeypatch.setattr(
+        builder,
+        "embed_papers",
+        MagicMock(
+            return_value={candidate.paper_id: np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
+    )
+
+    builder._select_candidates_from_pool(np.asarray([1.0, 0.0], dtype=np.float32), seed)
+
+    assert (
+        fetch.call_args.kwargs["reference_selector"]
+        == builder._select_recovered_references_by_embedding
+    )
+
+
 def test_hybrid_max_citation_count_receives_full_rerank_weight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2599,6 +2684,10 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     assert builder.paper_sources["o1"] == "both"
     assert builder.paper_sources["s1"] == "semantic"
     assert "s2" not in papers
+    assert (
+        builder.citation_builder.collect_papers.call_args.kwargs["reference_selector"]
+        == builder._select_recovered_references_by_embedding
+    )
 
 
 def test_hybrid_collection_dedupes_semantic_seed_aliases(

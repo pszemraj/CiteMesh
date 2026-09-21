@@ -41,6 +41,7 @@ DEFAULT_CANDIDATE_POOL_SIZE = 400
 QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
+ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
 
 
 class CandidateAcquisitionError(RuntimeError):
@@ -348,7 +349,30 @@ def _enrich_local_reference_records(
             merge_paper_metadata(local_paper, s2_paper)
 
 
-def _select_recovered_references(
+def select_recovered_references_by_score(
+    recovered: Sequence[Paper],
+    limit: int,
+    relevance_score: Callable[[Paper], float],
+) -> list[Paper]:
+    """Cap recovered references by relevance, impact, then source order.
+
+    :param Sequence[Paper] recovered: Materialized bibliography records.
+    :param int limit: Maximum references to retain.
+    :param Callable relevance_score: Strategy-appropriate relevance score.
+    :return list[Paper]: Ranked, capped reference records.
+    """
+    ranked = sorted(
+        enumerate(recovered),
+        key=lambda item: (
+            -relevance_score(item[1]),
+            -max(item[1].citation_count, 0),
+            item[0],
+        ),
+    )
+    return [paper for _position, paper in ranked[:limit]]
+
+
+def _select_recovered_references_by_text(
     seed: Paper,
     recovered: Sequence[Paper],
     limit: int,
@@ -369,15 +393,11 @@ def _select_recovered_references(
 
     index = AbstractSimilarityIndex()
     index.build({seed.paper_id: seed, **{paper.paper_id: paper for paper in recovered}})
-    ranked = sorted(
-        enumerate(recovered),
-        key=lambda item: (
-            -index.similarity(seed.paper_id, item[1].paper_id),
-            -max(item[1].citation_count, 0),
-            item[0],
-        ),
+    return select_recovered_references_by_score(
+        recovered,
+        limit,
+        lambda paper: index.similarity(seed.paper_id, paper.paper_id),
     )
-    return [paper for _position, paper in ranked[:limit]]
 
 
 def fetch_seed_references(
@@ -387,6 +407,7 @@ def fetch_seed_references(
     *,
     seed_identifier: str | None = None,
     local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
+    reference_selector: ReferenceSelector | None = None,
 ) -> tuple[CandidateSourceResult, ...]:
     """Recover an empty seed-reference source using its arXiv bibliography.
 
@@ -396,6 +417,8 @@ def fetch_seed_references(
     :param str | None seed_identifier: Original input, retaining arXiv version.
     :param Callable | None local_lookup: Read unambiguous requested aliases from an
         already prepared corpus, keyed by normalized request identifier.
+    :param Callable | None reference_selector: Strategy-specific selector applied
+        after the complete fallback bibliography is materialized.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
     """
     from citemesh.services import (
@@ -528,7 +551,8 @@ def fetch_seed_references(
     identifiable_entries = len({frozenset(entry) for entry in entries if entry})
     materialized_count = len(recovered)
     _enrich_local_reference_records(client, recovered)
-    recovered = _select_recovered_references(seed, recovered, limit)
+    selector = reference_selector or _select_recovered_references_by_text
+    recovered = selector(seed, recovered, limit)
     logger.debug(
         "arXiv bibliography extraction: entries=%d, identifiable=%d, "
         "materialized=%d, selected=%d, reference_limit=%d.",
@@ -795,6 +819,7 @@ def fetch_candidate_pool(
     max_citations: int = 0,
     max_recommendations: int = 0,
     seed_identifier: str | None = None,
+    reference_selector: ReferenceSelector | None = None,
 ) -> CandidatePool:
     """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
 
@@ -807,6 +832,8 @@ def fetch_candidate_pool(
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
     :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param Callable | None reference_selector: Strategy-specific recovered-reference
+        selector.
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     with client.candidate_operation_scope():
@@ -817,6 +844,7 @@ def fetch_candidate_pool(
             max_citations=max_citations,
             max_recommendations=max_recommendations,
             seed_identifier=seed_identifier,
+            reference_selector=reference_selector,
         )
 
 
@@ -828,6 +856,7 @@ def _fetch_candidate_pool(
     max_citations: int = 0,
     max_recommendations: int = 0,
     seed_identifier: str | None = None,
+    reference_selector: ReferenceSelector | None = None,
 ) -> CandidatePool:
     """Fetch candidates while an outer operation scope is active.
 
@@ -837,6 +866,8 @@ def _fetch_candidate_pool(
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
     :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param Callable | None reference_selector: Strategy-specific recovered-reference
+        selector.
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     pool = CandidatePool(seed=seed_paper)
@@ -872,7 +903,11 @@ def _fetch_candidate_pool(
         anchor_ids = [seed_id]
         if max_references > 0:
             reference_results = fetch_seed_references(
-                client, seed_paper, max_references, seed_identifier=seed_identifier
+                client,
+                seed_paper,
+                max_references,
+                seed_identifier=seed_identifier,
+                reference_selector=reference_selector,
             )
             source_results.extend(reference_results)
             for result in reference_results:

@@ -29,6 +29,7 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
     CandidateSourceState,
+    ReferenceSelector,
     candidate_records_match,
     fetch_candidate_source,
     fetch_seed_references,
@@ -303,6 +304,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         seed_paper: Paper | None = None,
         reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]]
         | None = None,
+        reference_selector: ReferenceSelector | None = None,
         **kwargs: Any,
     ) -> dict[str, Paper]:
         """
@@ -317,6 +319,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             primary identifier is local, only an external alias is sent upstream.
         :param Callable | None reference_metadata_lookup: Read metadata from an
             already prepared corpus for HTML reference recovery.
+        :param Callable | None reference_selector: Strategy-specific recovered-reference
+            selector.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -378,6 +382,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 reference_limit,
                 seed_identifier=seed_id,
                 local_lookup=reference_metadata_lookup,
+                reference_selector=reference_selector,
             )
             source_results.extend(reference_results)
             reference_ids = self._ingest_relation_batch(

@@ -495,11 +495,23 @@ def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> N
     :return None: Checks the shared pool path.
     """
     client, bibliography, metadata = providers
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [
+        ("arxiv:1706.03762",),
+        ("arxiv:2303.08774",),
+    ]
     metadata.side_effect = lambda ids: {value: paper(value) for value in ids}
-    pool = fetch_candidate_pool(client, paper("arxiv:2608.27147"), max_references=1)
-    assert pool.seed_relations == {"arxiv:1706.03762": "referenced_by_seed"}
+    selector = MagicMock(
+        side_effect=lambda _seed, recovered, limit: list(recovered)[-limit:]
+    )
+    pool = fetch_candidate_pool(
+        client,
+        paper("arxiv:2608.27147"),
+        max_references=1,
+        reference_selector=selector,
+    )
+    assert pool.seed_relations == {"arxiv:2303.08774": "referenced_by_seed"}
     assert pool.source_status == {"references": "empty", "arxiv_references": "complete"}
+    assert len(selector.call_args.args[1]) == 2
 
 
 def test_opaque_local_seed_does_not_attempt_provider_discovery(
