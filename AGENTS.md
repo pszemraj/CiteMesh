@@ -58,3 +58,11 @@ embedding model.
 ## Runtime data
 
 The cache root (`CITEMESH_CACHE_DIR`, see [Environment Variables](docs/reference/environment.md)) also holds the user config `config.toml` (`citemesh config`). Tests isolate it per test via `tests/conftest.py` and must never depend on network access.
+
+## Curated demo
+
+The checked-in Megalodon dashboard under `assets/examples/megalodon/` uses
+`arxiv:2404.08801`, matching the bare input recorded in its collection package.
+Use `arxiv:2404.08801v1` only when intentionally pinning arXiv bibliography
+recovery to version 1. The `arxiv:2608.27147` identifiers in recovery tests refer
+to Thomson and are not the demo seed.
