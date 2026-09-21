@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 import requests
@@ -118,8 +118,9 @@ def test_extract_bibliography_recognizes_bare_legacy_ids_and_implicit_items() ->
         <li class="ltx_bibitem">arXiv:2608.27147v2, A later paper.</li>
         <li class="ltx_bibitem">
           https://jstor.org/stable/2334029, example.org/pubmed/1234567,
-          and example.org/stable/2311029.
+          example.org/stable/2311029, and invalid hep-th/9713200.
         </li>
+        <li class="ltx_bibitem">math.GT/0309136 and cond-mat.str-el/0301123.</li>
       </ol>
     </section>
     """
@@ -127,7 +128,21 @@ def test_extract_bibliography_recognizes_bare_legacy_ids_and_implicit_items() ->
         ("arxiv:hep-th/9709013",),
         ("arxiv:2608.27147",),
         (),
+        ("arxiv:math/0309136", "arxiv:cond-mat/0301123"),
     ]
+
+
+def test_extract_bibliography_canonicalizes_prefixed_legacy_subject_class() -> None:
+    """An explicit legacy subject class resolves through the archive identifier.
+
+    :return None: Checks canonicalization of the historically accepted spelling.
+    """
+    html = """
+    <section class="ltx_bibliography">
+      <li class="ltx_bibitem">arXiv:math.DG/0211159</li>
+    </section>
+    """
+    assert extract_reference_identifiers(html) == [("arxiv:math/0211159",)]
 
 
 @pytest.mark.parametrize(
@@ -137,6 +152,15 @@ def test_extract_bibliography_recognizes_bare_legacy_ids_and_implicit_items() ->
         ("https://arxiv.org/html/2608.27147v3", "2608.27147v3"),
         ("https://arxiv.org/pdf/2608.27147v3.pdf?download=1", "2608.27147v3"),
         ("https://arxiv.org/abs/hep-th/9901001v2", "hep-th/9901001v2"),
+        ("hep-th/9713200", None),
+        ("arXiv:hep-th/9713200", None),
+        ("https://arxiv.org/abs/hep-th/9713200", None),
+        ("2613.00001", None),
+        ("arXiv:2613.00001", None),
+        ("https://arxiv.org/abs/2613.00001", None),
+        ("stable/2301000", None),
+        ("arXiv:stable/2301000", None),
+        ("https://arxiv.org/abs/stable/2301000", None),
         ("https://example.com/abs/2608.27147", None),
         ("arxiv:invalid", None),
     ],
@@ -169,6 +193,23 @@ def test_get_bibliography_uses_the_supplied_version_and_skips_missing_bibliograp
     assert ArxivClient().get_bibliography("2608.27147v3") == []
     assert get.call_args.args == ("https://arxiv.org/html/2608.27147v3",)
     assert get.call_args.kwargs["timeout"] == 30
+
+
+def test_get_bibliography_canonicalizes_legacy_subject_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy subject classes use the archive spelling for bibliography HTML.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture that replaces Requests.
+    :return None: Checks the seed fallback requests the resolvable legacy URL.
+    """
+    get = MagicMock(
+        return_value=_Response("<article><p>No bibliography.</p></article>")
+    )
+    monkeypatch.setattr(arxiv_module.requests, "get", get)
+
+    assert ArxivClient().get_bibliography("math.DG/0211159") == []
+    assert get.call_args.args == ("https://arxiv.org/html/math/0211159",)
 
 
 @pytest.mark.parametrize(
@@ -211,8 +252,11 @@ def test_arxiv_client_spaces_requests_by_the_documented_interval(
     )
 
     client = ArxivClient()
-    assert client._get("https://arxiv.org/html/first") == ""
-    assert client._get("https://arxiv.org/html/second") == ""
+    first = client._get("https://arxiv.org/html/first")
+    second = client._get("https://arxiv.org/html/second")
+
+    assert first is not None and first.text == ""
+    assert second is not None and second.text == ""
 
     sleep.assert_called_once_with(1.75)
 
@@ -270,15 +314,23 @@ def test_get_papers_maps_atom_metadata_and_ignores_unrequested_entries(
 def test_get_papers_retries_without_a_malformed_identifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One bad arXiv ID must not suppress valid metadata from the same batch.
+    """Bad arXiv IDs must not suppress valid metadata from the same batch.
 
-    :param pytest.MonkeyPatch monkeypatch: Replaces the paced HTTP transport.
-    :return None: Checks the malformed ID is removed from one bounded retry.
+    :param pytest.MonkeyPatch monkeypatch: Replaces the HTTP transport and delay.
+    :return None: Checks each reported malformed ID is removed before retrying.
     """
     error_atom = """
     <feed xmlns="http://www.w3.org/2005/Atom">
       <entry>
         <id>http://arxiv.org/api/errors#incorrect_id_format_for_stable/2334029</id>
+        <title>Error</title>
+      </entry>
+    </feed>
+    """
+    second_error_atom = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/api/errors#incorrect_id_format_for_document/8578572</id>
         <title>Error</title>
       </entry>
     </feed>
@@ -292,42 +344,107 @@ def test_get_papers_retries_without_a_malformed_identifier(
       </entry>
     </feed>
     """
-    client = ArxivClient()
-    get = MagicMock(side_effect=[error_atom, valid_atom])
-    monkeypatch.setattr(client, "_get", get)
+    get = MagicMock(
+        side_effect=[
+            _Response(error_atom, status_code=400),
+            _Response(second_error_atom, status_code=400),
+            _Response(valid_atom),
+        ]
+    )
+    monkeypatch.setattr(arxiv_module.requests, "get", get)
+    monkeypatch.setattr(arxiv_module.time, "sleep", MagicMock())
 
-    papers = client.get_papers(["arxiv:stable/2334029", "arxiv:1706.03762"])
+    papers = ArxivClient().get_papers(
+        [
+            "arxiv:stable/2334029",
+            "arxiv:document/8578572",
+            "arxiv:1706.03762",
+        ]
+    )
 
     assert list(papers or {}) == ["arxiv:1706.03762"]
-    assert get.call_args_list == [
-        call(
-            "https://export.arxiv.org/api/query",
-            params={
-                "id_list": "stable/2334029,1706.03762",
-                "max_results": 2,
-            },
-        ),
-        call(
-            "https://export.arxiv.org/api/query",
-            params={"id_list": "1706.03762", "max_results": 1},
-        ),
+    assert [request.kwargs["params"] for request in get.call_args_list] == [
+        {
+            "id_list": "stable/2334029,document/8578572,1706.03762",
+            "max_results": 3,
+        },
+        {"id_list": "document/8578572,1706.03762", "max_results": 2},
+        {"id_list": "1706.03762", "max_results": 1},
     ]
 
 
-@pytest.mark.parametrize(
-    "content",
-    ["not atom", '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'],
-)
-def test_get_papers_rejects_bad_atom_responses_without_requesting_again(
-    monkeypatch: pytest.MonkeyPatch, content: str
+def test_get_papers_returns_unavailable_when_error_feed_cannot_be_retried(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Malformed metadata responses preserve provider unavailability.
+    """A final Atom error must not be mistaken for complete-empty metadata.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture that replaces Requests.
-    :param str content: Malformed Atom response body.
+    :return None: Checks a sole malformed identifier preserves unavailability.
+    """
+    error_atom = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/api/errors#incorrect_id_format_for_stable/2334029</id>
+        <title>Error</title>
+      </entry>
+    </feed>
+    """
+    get = MagicMock(return_value=_Response(error_atom, status_code=400))
+    monkeypatch.setattr(arxiv_module.requests, "get", get)
+
+    assert ArxivClient().get_papers(["arxiv:stable/2334029"]) is None
+    get.assert_called_once()
+
+
+def test_get_papers_canonicalizes_legacy_subject_class_for_metadata_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy subject classes are removed before calling the current Atom API.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture that replaces Requests.
+    :return None: Checks request and response identities use the archive spelling.
+    """
+    atom = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/abs/math/0211159v1</id>
+        <title>Legacy mathematics paper</title>
+        <published>2002-11-01T00:00:00Z</published>
+      </entry>
+    </feed>
+    """
+    get = MagicMock(return_value=_Response(atom))
+    monkeypatch.setattr(arxiv_module.requests, "get", get)
+
+    papers = ArxivClient().get_papers(["arxiv:math.DG/0211159"])
+
+    assert list(papers or {}) == ["arxiv:math/0211159"]
+    assert papers["arxiv:math/0211159"].arxiv_id == "math/0211159"
+    assert get.call_args.kwargs["params"] == {
+        "id_list": "math/0211159",
+        "max_results": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("content", "status_code"),
+    [
+        ("not atom", 200),
+        ('<feed xmlns="http://www.w3.org/2005/Atom"><entry>', 200),
+        ('<feed xmlns="http://www.w3.org/2005/Atom" />', 400),
+    ],
+)
+def test_get_papers_rejects_bad_atom_responses_without_requesting_again(
+    monkeypatch: pytest.MonkeyPatch, content: str, status_code: int
+) -> None:
+    """Malformed and unrecognized error responses preserve unavailability.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture that replaces Requests.
+    :param str content: Atom response body.
+    :param int status_code: HTTP status paired with the response body.
     :return None: Checks parse failure handling.
     """
-    get = MagicMock(return_value=_Response(content))
+    get = MagicMock(return_value=_Response(content, status_code=status_code))
     monkeypatch.setattr(arxiv_module.requests, "get", get)
 
     assert ArxivClient().get_papers(["arxiv:2608.27147"]) is None

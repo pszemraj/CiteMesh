@@ -15,8 +15,6 @@ from citemesh.core import Author, Paper
 from citemesh.core.paper_ids import strip_arxiv_version
 
 logger = logging.getLogger(__name__)
-_ARXIV_TOKEN = r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})(?:v\d+)?"
-_ARXIV_TEXT = re.compile(r"arxiv\s*:\s*(" + _ARXIV_TOKEN + r")\b", re.I)
 _ARXIV_LEGACY_ARCHIVE = (
     r"(?:acc-phys|adap-org|alg-geom|ao-sci|astro-ph|atom-ph|bayes-an|"
     r"chao-dyn|chem-ph|cmp-lg|comp-gas|cond-mat|cs|dg-ga|funct-an|gr-qc|"
@@ -24,8 +22,17 @@ _ARXIV_LEGACY_ARCHIVE = (
     r"nucl-th|patt-sol|physics|plasm-ph|q-alg|q-bio|q-fin|quant-ph|"
     r"solv-int|stat|supr-con)"
 )
+_ARXIV_LEGACY_SUFFIX = (
+    rf"{_ARXIV_LEGACY_ARCHIVE}(?:\.[a-z-]+)?/"
+    rf"\d{{2}}(?:0[1-9]|1[0-2])\d{{3}}"
+)
+_ARXIV_TOKEN = (
+    rf"(?:\d{{2}}(?:0[1-9]|1[0-2])\.\d{{4,5}}|{_ARXIV_LEGACY_SUFFIX})"
+    rf"(?:v\d+)?"
+)
+_ARXIV_TEXT = re.compile(r"arxiv\s*:\s*(" + _ARXIV_TOKEN + r")\b", re.I)
 _ARXIV_LEGACY_TEXT = re.compile(
-    rf"\b({_ARXIV_LEGACY_ARCHIVE}/\d{{2}}(?:0[1-9]|1[0-2])\d{{3}}(?:v\d+)?)\b",
+    rf"\b({_ARXIV_LEGACY_SUFFIX}(?:v\d+)?)\b",
     re.I,
 )
 _ARXIV_URL_TEXT = re.compile(
@@ -50,6 +57,26 @@ _VOID_TAGS = {
 }
 _ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 _INVALID_ID_ERROR_PREFIX = "incorrect_id_format_for_"
+
+
+def _arxiv_request_suffix(value: str) -> str:
+    """Canonicalize a suffix for current arXiv APIs while retaining its version.
+
+    :param str value: Recognized arXiv identifier suffix.
+    :return str: Lowercase suffix with any legacy subject class removed.
+    """
+    return re.sub(
+        r"^([a-z-]+)\.[a-z-]+/", r"\1/", value.strip(), flags=re.IGNORECASE
+    ).lower()
+
+
+def _canonical_arxiv_suffix(value: str) -> str:
+    """Canonicalize an arXiv suffix for identity matching.
+
+    :param str value: Recognized arXiv identifier suffix.
+    :return str: Lowercase, versionless suffix accepted by current arXiv APIs.
+    """
+    return strip_arxiv_version(_arxiv_request_suffix(value))
 
 
 def arxiv_identifier(value: str) -> str | None:
@@ -93,7 +120,7 @@ def _identifiers(text: str, links: list[str]) -> tuple[str, ...]:
         identifier = arxiv_identifier(link)
         if identifier:
             arxiv_ids.append(identifier)
-    identifiers = [f"arxiv:{strip_arxiv_version(value).lower()}" for value in arxiv_ids]
+    identifiers = [f"arxiv:{_canonical_arxiv_suffix(value)}" for value in arxiv_ids]
     for source in [text, *(unquote(link) for link in links)]:
         for match in _DOI.finditer(source):
             doi = match[0].rstrip(".,;:")
@@ -210,13 +237,18 @@ class ArxivClient:
         self._last_request: float | None = None
 
     def _get(
-        self, url: str, *, params: dict[str, str | int] | None = None
-    ) -> str | None:
+        self,
+        url: str,
+        *,
+        params: dict[str, str | int] | None = None,
+        accept_statuses: frozenset[int] = frozenset(),
+    ) -> requests.Response | None:
         """Read an arXiv response with a timeout and request spacing.
 
         :param str url: arXiv endpoint.
         :param dict[str, str | int] | None params: Query parameters.
-        :return str | None: Response text, or unavailable.
+        :param frozenset[int] accept_statuses: HTTP errors whose bodies are usable.
+        :return requests.Response | None: HTTP response, or unavailable.
         """
         if self._last_request is not None:
             time.sleep(max(0.0, 3.0 - (time.monotonic() - self._last_request)))
@@ -230,11 +262,12 @@ class ArxivClient:
                     "User-Agent": "CiteMesh (https://github.com/pszemraj/CiteMesh)"
                 },
             )
-            response.raise_for_status()
+            if response.status_code not in accept_statuses:
+                response.raise_for_status()
         except requests.RequestException as exc:
             logger.debug("arXiv request unavailable for %s: %s", url, exc)
             return None
-        return response.text
+        return response
 
     def get_bibliography(self, identifier: str) -> list[tuple[str, ...]] | None:
         """Read the seed's bibliography, retaining the requested version.
@@ -242,51 +275,70 @@ class ArxivClient:
         :param str identifier: Recognized arXiv suffix.
         :return list[tuple[str, ...]] | None: Entries, or unavailable HTML.
         """
-        html = self._get(f"https://arxiv.org/html/{identifier}")
-        return extract_reference_identifiers(html) if html is not None else None
+        request_identifier = _arxiv_request_suffix(identifier)
+        response = self._get(f"https://arxiv.org/html/{request_identifier}")
+        return (
+            extract_reference_identifiers(response.text)
+            if response is not None
+            else None
+        )
 
     def get_papers(self, identifiers: list[str]) -> dict[str, Paper] | None:
-        """Fetch exact arXiv metadata, retrying one batch without malformed IDs.
+        """Fetch exact arXiv metadata, removing reported malformed IDs on retry.
 
         :param list[str] identifiers: Canonical arxiv-prefixed identifiers.
         :return dict[str, Paper] | None: Available records, or unavailable metadata.
         """
         if not identifiers:
             return {}
-        pending = list(dict.fromkeys(identifiers))
-        for attempt in range(2):
-            requested_ids = {
-                f"arxiv:{strip_arxiv_version(value.split(':', 1)[1]).lower()}"
-                for value in pending
-            }
-            content = self._get(
+        pending = list(
+            dict.fromkeys(
+                f"arxiv:{_arxiv_request_suffix(value.split(':', 1)[1])}"
+                for value in identifiers
+            )
+        )
+        requested_ids = {
+            f"arxiv:{_canonical_arxiv_suffix(value.split(':', 1)[1])}"
+            for value in pending
+        }
+        for _ in range(len(pending)):
+            response = self._get(
                 "https://export.arxiv.org/api/query",
                 params={
                     "id_list": ",".join(value.split(":", 1)[1] for value in pending),
                     "max_results": len(pending),
                 },
+                accept_statuses=frozenset({400}),
             )
-            if content is None:
+            if response is None:
                 return None
             try:
-                feed = ET.fromstring(content)
+                feed = ET.fromstring(response.text)
             except ET.ParseError:
                 logger.debug("arXiv metadata response was not valid Atom XML.")
                 return None
 
+            error_fragments = [
+                parsed.fragment
+                for entry in feed.findall("a:entry", _ATOM)
+                if (parsed := urlparse(entry.findtext("a:id", "", _ATOM))).path
+                == "/api/errors"
+            ]
             invalid_ids = {
                 unquote(fragment.removeprefix(_INVALID_ID_ERROR_PREFIX)).lower()
-                for entry in feed.findall("a:entry", _ATOM)
-                if (
-                    fragment := urlparse(entry.findtext("a:id", "", _ATOM)).fragment
-                ).startswith(_INVALID_ID_ERROR_PREFIX)
+                for fragment in error_fragments
+                if fragment.startswith(_INVALID_ID_ERROR_PREFIX)
             }
+            if response.status_code == 400 and not error_fragments:
+                return None
             remaining = [
                 value
                 for value in pending
                 if value.split(":", 1)[1].lower() not in invalid_ids
             ]
-            if attempt == 0 and invalid_ids and remaining and remaining != pending:
+            if error_fragments:
+                if not invalid_ids or not remaining or remaining == pending:
+                    return None
                 logger.debug(
                     "Retrying arXiv metadata without malformed identifier(s): %s",
                     ", ".join(sorted(invalid_ids)),
@@ -294,13 +346,16 @@ class ArxivClient:
                 pending = remaining
                 continue
             break
+        else:
+            return None
 
         papers = {}
         for entry in feed.findall("a:entry", _ATOM):
             identifier = arxiv_identifier(entry.findtext("a:id", "", _ATOM))
             if not identifier:
                 continue
-            paper_id = f"arxiv:{strip_arxiv_version(identifier).lower()}"
+            canonical_suffix = _canonical_arxiv_suffix(identifier)
+            paper_id = f"arxiv:{canonical_suffix}"
             if paper_id not in requested_ids:
                 continue
             title = " ".join(entry.findtext("a:title", "", _ATOM).split())
@@ -320,7 +375,7 @@ class ArxivClient:
                         for author in entry.findall("a:author", _ATOM)
                     ],
                     abstract=" ".join(entry.findtext("a:summary", "", _ATOM).split()),
-                    arxiv_id=strip_arxiv_version(identifier),
+                    arxiv_id=canonical_suffix,
                     doi=entry.findtext("arxiv:doi", "", _ATOM).strip(),
                     venue=entry.findtext("arxiv:journal_ref", "", _ATOM).strip(),
                     categories=[
