@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import requests
@@ -116,12 +116,17 @@ def test_extract_bibliography_recognizes_bare_legacy_ids_and_implicit_items() ->
       <ol class="ltx_biblist">
         <li class="ltx_bibitem">hep-th/9709013, An early paper.
         <li class="ltx_bibitem">arXiv:2608.27147v2, A later paper.</li>
+        <li class="ltx_bibitem">
+          https://jstor.org/stable/2334029, example.org/pubmed/1234567,
+          and example.org/stable/2311029.
+        </li>
       </ol>
     </section>
     """
     assert extract_reference_identifiers(html) == [
         ("arxiv:hep-th/9709013",),
         ("arxiv:2608.27147",),
+        (),
     ]
 
 
@@ -260,6 +265,53 @@ def test_get_papers_maps_atom_metadata_and_ignores_unrequested_entries(
         "id_list": "2608.27147v2",
         "max_results": 1,
     }
+
+
+def test_get_papers_retries_without_a_malformed_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One bad arXiv ID must not suppress valid metadata from the same batch.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the paced HTTP transport.
+    :return None: Checks the malformed ID is removed from one bounded retry.
+    """
+    error_atom = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/api/errors#incorrect_id_format_for_stable/2334029</id>
+        <title>Error</title>
+      </entry>
+    </feed>
+    """
+    valid_atom = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/abs/1706.03762v7</id>
+        <title>Attention Is All You Need</title>
+        <published>2017-06-12T00:00:00Z</published>
+      </entry>
+    </feed>
+    """
+    client = ArxivClient()
+    get = MagicMock(side_effect=[error_atom, valid_atom])
+    monkeypatch.setattr(client, "_get", get)
+
+    papers = client.get_papers(["arxiv:stable/2334029", "arxiv:1706.03762"])
+
+    assert list(papers or {}) == ["arxiv:1706.03762"]
+    assert get.call_args_list == [
+        call(
+            "https://export.arxiv.org/api/query",
+            params={
+                "id_list": "stable/2334029,1706.03762",
+                "max_results": 2,
+            },
+        ),
+        call(
+            "https://export.arxiv.org/api/query",
+            params={"id_list": "1706.03762", "max_results": 1},
+        ),
+    ]
 
 
 @pytest.mark.parametrize(

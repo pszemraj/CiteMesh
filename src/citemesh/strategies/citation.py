@@ -388,11 +388,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 and result.state is CandidateSourceState.EMPTY
                 for result in reference_results
             )
-            recovered_arxiv_references = any(
-                result.source == "arxiv_references" and result.papers
-                for result in reference_results
-            )
-            if s2_references_empty or recovered_arxiv_references:
+            if s2_references_empty:
                 # Reuse partial recovery only within this build. Never persist it
                 # as the complete S2 bibliography or repeat the empty discovery.
                 # Candidate relations remain available, but this capped subset

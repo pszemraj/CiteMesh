@@ -17,7 +17,17 @@ from citemesh.core.paper_ids import strip_arxiv_version
 logger = logging.getLogger(__name__)
 _ARXIV_TOKEN = r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})(?:v\d+)?"
 _ARXIV_TEXT = re.compile(r"arxiv\s*:\s*(" + _ARXIV_TOKEN + r")\b", re.I)
-_ARXIV_LEGACY_TEXT = re.compile(r"\b([a-z-]+(?:\.[a-z-]+)?/\d{7}(?:v\d+)?)\b", re.I)
+_ARXIV_LEGACY_ARCHIVE = (
+    r"(?:acc-phys|adap-org|alg-geom|ao-sci|astro-ph|atom-ph|bayes-an|"
+    r"chao-dyn|chem-ph|cmp-lg|comp-gas|cond-mat|cs|dg-ga|funct-an|gr-qc|"
+    r"hep-ex|hep-lat|hep-ph|hep-th|math|math-ph|mtrl-th|nlin|nucl-ex|"
+    r"nucl-th|patt-sol|physics|plasm-ph|q-alg|q-bio|q-fin|quant-ph|"
+    r"solv-int|stat|supr-con)"
+)
+_ARXIV_LEGACY_TEXT = re.compile(
+    rf"\b({_ARXIV_LEGACY_ARCHIVE}/\d{{2}}(?:0[1-9]|1[0-2])\d{{3}}(?:v\d+)?)\b",
+    re.I,
+)
 _ARXIV_URL_TEXT = re.compile(
     r"https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/[^\s<>\"]+", re.I
 )
@@ -39,6 +49,7 @@ _VOID_TAGS = {
     "wbr",
 }
 _ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+_INVALID_ID_ERROR_PREFIX = "incorrect_id_format_for_"
 
 
 def arxiv_identifier(value: str) -> str | None:
@@ -235,31 +246,55 @@ class ArxivClient:
         return extract_reference_identifiers(html) if html is not None else None
 
     def get_papers(self, identifiers: list[str]) -> dict[str, Paper] | None:
-        """Fetch exact arXiv metadata in one Atom request.
+        """Fetch exact arXiv metadata, retrying one batch without malformed IDs.
 
         :param list[str] identifiers: Canonical arxiv-prefixed identifiers.
         :return dict[str, Paper] | None: Available records, or unavailable metadata.
         """
         if not identifiers:
             return {}
-        requested_ids = {
-            f"arxiv:{strip_arxiv_version(value.split(':', 1)[1]).lower()}"
-            for value in identifiers
-        }
-        content = self._get(
-            "https://export.arxiv.org/api/query",
-            params={
-                "id_list": ",".join(value.split(":", 1)[1] for value in identifiers),
-                "max_results": len(identifiers),
-            },
-        )
-        if content is None:
-            return None
-        try:
-            feed = ET.fromstring(content)
-        except ET.ParseError:
-            logger.debug("arXiv metadata response was not valid Atom XML.")
-            return None
+        pending = list(dict.fromkeys(identifiers))
+        for attempt in range(2):
+            requested_ids = {
+                f"arxiv:{strip_arxiv_version(value.split(':', 1)[1]).lower()}"
+                for value in pending
+            }
+            content = self._get(
+                "https://export.arxiv.org/api/query",
+                params={
+                    "id_list": ",".join(value.split(":", 1)[1] for value in pending),
+                    "max_results": len(pending),
+                },
+            )
+            if content is None:
+                return None
+            try:
+                feed = ET.fromstring(content)
+            except ET.ParseError:
+                logger.debug("arXiv metadata response was not valid Atom XML.")
+                return None
+
+            invalid_ids = {
+                unquote(fragment.removeprefix(_INVALID_ID_ERROR_PREFIX)).lower()
+                for entry in feed.findall("a:entry", _ATOM)
+                if (
+                    fragment := urlparse(entry.findtext("a:id", "", _ATOM)).fragment
+                ).startswith(_INVALID_ID_ERROR_PREFIX)
+            }
+            remaining = [
+                value
+                for value in pending
+                if value.split(":", 1)[1].lower() not in invalid_ids
+            ]
+            if attempt == 0 and invalid_ids and remaining and remaining != pending:
+                logger.debug(
+                    "Retrying arXiv metadata without malformed identifier(s): %s",
+                    ", ".join(sorted(invalid_ids)),
+                )
+                pending = remaining
+                continue
+            break
+
         papers = {}
         for entry in feed.findall("a:entry", _ATOM):
             identifier = arxiv_identifier(entry.findtext("a:id", "", _ATOM))

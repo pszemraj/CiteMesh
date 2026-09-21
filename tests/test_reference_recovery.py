@@ -423,6 +423,40 @@ def test_citation_hydrates_seed_after_unavailable_arxiv_recovery(
     }
 
 
+def test_citation_hydrates_cached_seed_after_recovered_arxiv_references(
+    providers: tuple,
+) -> None:
+    """Recovered candidates must not hide the seed's cached full bibliography.
+
+    :param tuple providers: Mock services.
+    :return None: Checks S2 outage recovery retains disk-cached seed coupling.
+    """
+    client, bibliography, metadata = providers
+    seed = paper("arxiv:2608.27147")
+    client.get_paper.return_value = seed
+    client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
+        ["cached-reference"] if paper_id == seed.paper_id else []
+    )
+    bibliography.return_value = [("arxiv:1706.03762",)]
+    metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
+    builder = CitationGraphBuilder(
+        max_papers=2, max_references=1, max_citations=0, client=client
+    )
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert papers[seed.paper_id].references == ["cached-reference"]
+    assert any(
+        call.args == (seed.paper_id,) and call.kwargs == {"force_refresh": False}
+        for call in client.get_reference_ids.call_args_list
+    )
+    assert builder.candidate_source_status == {
+        "references": "unavailable",
+        "arxiv_references": "complete",
+    }
+
+
 def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> None:
     """Candidate-mode embeddings share reference recovery and seed relations.
 
