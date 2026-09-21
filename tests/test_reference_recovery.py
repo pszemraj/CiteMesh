@@ -269,11 +269,11 @@ def test_local_alias_ambiguity_does_not_cross_bibliography_entries(
 def test_unresolved_entries_do_not_exhaust_admission_limit(
     providers: tuple, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Missing DOI records are skipped and later bibliography entries are tried.
+    """Recovery ranks all resolvable entries before applying its admission limit.
 
     :param tuple providers: Mock services.
     :param pytest.LogCaptureFixture caplog: Recorded recovery summary.
-    :return None: Checks ordering, deduplication, and bounded graph admission.
+    :return None: Checks resolution, ranking, deduplication, and bounded admission.
     """
     client, bibliography, metadata = providers
     bibliography.return_value = [
@@ -283,12 +283,43 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
         ("arxiv:2303.08774",),
         ("arxiv:2401.12345",),
     ]
-    metadata.side_effect = lambda ids: {value: paper(value) for value in ids}
+    records = {
+        "arxiv:1706.03762": Paper(
+            paper_id="arxiv:1706.03762",
+            title="Unrelated optical sensor calibration",
+            year=2017,
+            abstract="Laboratory measurements of imaging hardware.",
+        ),
+        "arxiv:2303.08774": Paper(
+            paper_id="arxiv:2303.08774",
+            title="Continual learning for frontier language models",
+            year=2023,
+            abstract="Sovereign AI systems retain knowledge across updates.",
+            citation_count=1,
+        ),
+        "arxiv:2401.12345": Paper(
+            paper_id="arxiv:2401.12345",
+            title="Widely cited unrelated systems paper",
+            year=2024,
+            abstract="Distributed storage and transaction processing.",
+            citation_count=75,
+        ),
+    }
+    metadata.side_effect = lambda ids: {
+        value: records[value] for value in ids if value in records
+    }
+    seed = Paper(
+        paper_id="seed",
+        title="Thomson: Continual Learning of Frontier Models for SovereignAI",
+        year=2026,
+        abstract="Continual learning updates sovereign frontier language models.",
+        arxiv_id="2608.27147",
+    )
     with caplog.at_level(logging.INFO):
-        results = fetch_seed_references(client, paper("arxiv:2608.27147"), 2)
+        results = fetch_seed_references(client, seed, 2)
     assert [item.paper_id for item in results[-1].papers] == [
-        "arxiv:1706.03762",
         "arxiv:2303.08774",
+        "arxiv:2401.12345",
     ]
     recovery_logs = [
         record
@@ -299,7 +330,7 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
     assert recovery_logs[0].levelno == logging.INFO
     assert recovery_logs[0].getMessage() == (
         "Recovered 4 reference identifiers from the arXiv bibliography; "
-        "keeping 2 (reference limit: 2)."
+        "ranked 3 resolved references and keeping 2 (reference limit: 2)."
     )
     metadata.assert_called_once()
 

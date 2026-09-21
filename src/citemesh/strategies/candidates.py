@@ -30,6 +30,7 @@ from citemesh.core.paper_ids import (
     paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
+from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -347,6 +348,38 @@ def _enrich_local_reference_records(
             merge_paper_metadata(local_paper, s2_paper)
 
 
+def _select_recovered_references(
+    seed: Paper,
+    recovered: Sequence[Paper],
+    limit: int,
+) -> list[Paper]:
+    """Select fallback references by relevance instead of bibliography order.
+
+    Title/abstract similarity to the seed is the primary signal. Citation count
+    breaks topical ties, and original bibliography order is the stable fallback
+    when metadata cannot distinguish records.
+
+    :param Paper seed: Seed paper used as the relevance query.
+    :param Sequence[Paper] recovered: Materialized bibliography records.
+    :param int limit: Maximum references to retain.
+    :return list[Paper]: Ranked, capped reference records.
+    """
+    if len(recovered) <= limit:
+        return list(recovered)
+
+    index = AbstractSimilarityIndex()
+    index.build({seed.paper_id: seed, **{paper.paper_id: paper for paper in recovered}})
+    ranked = sorted(
+        enumerate(recovered),
+        key=lambda item: (
+            -index.similarity(seed.paper_id, item[1].paper_id),
+            -max(item[1].citation_count, 0),
+            item[0],
+        ),
+    )
+    return [paper for _position, paper in ranked[:limit]]
+
+
 def fetch_seed_references(
     client: SemanticScholarClient,
     seed: Paper,
@@ -416,8 +449,9 @@ def fetch_seed_references(
     metadata_requested = False
     metadata_completed = False
 
-    # Metadata batches are independent of the admission cap: a request for one
-    # reference must not make one paced HTTP call per unresolved bibliography row.
+    # Resolve the full bibliography in bounded batches before applying the cap.
+    # Otherwise HTML order (often alphabetical) chooses survivors before useful
+    # metadata is available for ranking.
     for offset in range(0, len(entries), 50):
         batch = entries[offset : offset + 50]
         ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
@@ -491,26 +525,27 @@ def fetch_seed_references(
                 merge_paper_metadata(existing, paper)
             else:
                 recovered.append(paper)
-            if len(recovered) >= limit:
-                break
-        if len(recovered) >= limit:
-            break
     identifiable_entries = len({frozenset(entry) for entry in entries if entry})
+    materialized_count = len(recovered)
+    _enrich_local_reference_records(client, recovered)
+    recovered = _select_recovered_references(seed, recovered, limit)
     logger.debug(
         "arXiv bibliography extraction: entries=%d, identifiable=%d, "
-        "materialized=%d, reference_limit=%d.",
+        "materialized=%d, selected=%d, reference_limit=%d.",
         len(entries),
         identifiable_entries,
+        materialized_count,
         len(recovered),
         limit,
     )
-    _enrich_local_reference_records(client, recovered)
     if recovered:
         if identifiable_entries > len(recovered) and len(recovered) >= limit:
             logger.info(
                 "Recovered %d reference identifiers from the arXiv bibliography; "
-                "keeping %d (reference limit: %d).",
+                "ranked %d resolved references and keeping %d "
+                "(reference limit: %d).",
                 identifiable_entries,
+                materialized_count,
                 len(recovered),
                 limit,
             )
