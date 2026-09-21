@@ -25,7 +25,13 @@ import networkx as nx
 import numpy as np
 
 from citemesh._runtime import stderr_isatty
-from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
+from citemesh.core import (
+    DEFAULT_MAX_PAPERS,
+    EMBEDDING_CONFIG,
+    EMBEDDING_STORAGE_CONFIG,
+    Author,
+    Paper,
+)
 from citemesh.core.paper_ids import (
     is_local_corpus_paper_id as _is_local_corpus_paper_id,
 )
@@ -129,7 +135,7 @@ class EmbeddingGraphBuilder(
 
     def __init__(
         self,
-        max_papers: int = 40,
+        max_papers: int = DEFAULT_MAX_PAPERS,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_profile: str = "auto",
         model_revision: str | None = None,

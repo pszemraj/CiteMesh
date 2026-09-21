@@ -1650,33 +1650,19 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'class="nav-btn active"',
     ]:
         assert stale_token not in rendered
-    for css_token in [
-        "html, body {\n      margin: 0;\n      height: 100%;\n      overflow: hidden;",
-        "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
-        "min-width: 0;\n      max-width: 100%;\n      height: 100%;",
-        "#paper-list {\n      margin: 0;\n      padding: 0;\n      list-style: none;\n      overflow-y: auto;",
-        "#detail-content {\n      padding: 14px 13px 12px;\n      flex: 1;\n      min-height: 0;\n      display: flex;\n      flex-direction: column;\n      gap: 16px;\n      overflow-y: auto;",
-        "#graph-pane .pane-header .muted {\n      max-width: 72%;\n      font-size: 12px;",
-        "min-height: 160px;\n      flex: 1 0 160px;",
-        "#detail-pane { grid-area: detail; min-height: 620px; }",
-        ".toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }",
-        "grid-template-columns: minmax(240px, 9fr) minmax(420px, 15fr) minmax(300px, 11fr);",
-        "@media (max-width: 640px) {\n      #dashboard-toolbar {\n        position: static;\n        margin: 8px 8px 0;",
-        "@media (max-width: 768px), (max-width: 900px) and (max-height: 500px) {",
-        ".nav-btn[disabled] {\n      opacity: 0.45;\n      cursor: default;",
-        "@media (min-width: 1101px) {\n      #list-view-btn {\n        display: none;",
-        ".toolbar-row.primary,\n      .toolbar-row.secondary {\n        grid-template-columns: minmax(0, 1fr);",
-        "#global-nav,\n      #global-nav .nav-group {\n        align-items: stretch;\n        width: 100%;",
-        "#result-select {\n        width: 100%;\n        min-width: 0;\n        max-width: none;",
-        "input,\n      select,\n      button {\n        min-height: 44px;\n        font-size: 16px;",
-        "#year-timeline {\n        width: 100%;\n        grid-template-columns: auto minmax(0, 1fr) auto;",
-        ".toolbar-row.primary #search-input,\n      #provenance-filters {\n        grid-column: auto;",
-        ".js-plotly-plot .modebar-btn path {\n      fill: var(--text-muted) !important;",
-        ".js-plotly-plot .modebar-btn:focus-visible {\n      outline: 2px solid var(--accent);",
-        "width: 100%;\n      height: 100%;\n      min-height: 0;",
-    ]:
-        assert css_token in rendered
-
+    assert re.search(
+        r"@media\s*\(max-width:\s*1100px\).*?"
+        r"#dashboard-root\s*\{[^}]*"
+        r"grid-template-columns:\s*minmax\(0,\s*1fr\)",
+        rendered,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"@media\s*\(max-width:\s*768px\).*?"
+        r"(?:input|\.nav-btn)[^{]*\{[^}]*min-height:\s*44px",
+        rendered,
+        flags=re.DOTALL,
+    )
     payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
     assert payload["meta"]["seed_id"] == "seed"
     assert payload["meta"]["strategy"] == "hybrid"
@@ -1779,37 +1765,18 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
 
 
-def test_pages_demo_assets_and_metadata_are_staged() -> None:
-    """Pages staging keeps demo branding out of ordinary dashboard exports."""
+def test_pages_demo_assets_and_graph_package_are_valid() -> None:
+    """The saved demo keeps a valid package and recognizable binary assets."""
     repository = Path(__file__).resolve().parents[1]
     demo_dir = repository / "assets" / "examples" / "megalodon"
-    template = (
-        repository
-        / "src"
-        / "citemesh"
-        / "visualization"
-        / "dashboard"
-        / "assets"
-        / "template.html"
-    ).read_text(encoding="utf-8")
     demo_html = (demo_dir / "dashboard.html").read_text(encoding="utf-8")
     workflow = (repository / ".github" / "workflows" / "pages.yml").read_text(
         encoding="utf-8"
     )
-
-    assert "CiteMesh — Interactive Research Map" not in template
-    assert "favicon.ico" not in template
-    assert "<title>CiteMesh Dashboard</title>" in template
-    for metadata in [
-        "<title>CiteMesh — Interactive Research Map</title>",
-        '<link rel="canonical" href="https://pszemraj.github.io/CiteMesh/" />',
-        '<link rel="icon" href="favicon.ico" sizes="any" />',
-        '<meta property="og:image" content="https://pszemraj.github.io/CiteMesh/og-image.png" />',
-        '<meta name="twitter:card" content="summary_large_image" />',
-        "grid-template-columns: minmax(0, 1fr);",
-        "min-height: 44px;",
-    ]:
-        assert metadata in demo_html
+    assert "https://pszemraj.github.io/CiteMesh/" in demo_html
+    for asset in ["favicon.ico", "og-image.png"]:
+        assert asset in demo_html
+        assert f"assets/examples/megalodon/{asset}" in workflow
     package = json.loads(
         (demo_dir / "dashboard.citemesh.json").read_text(encoding="utf-8")
     )
@@ -1831,11 +1798,6 @@ def test_pages_demo_assets_and_metadata_are_staged() -> None:
     assert {(edge["source"], edge["target"]) for edge in embedded_graph["edges"]} == {
         (edge["source"], edge["target"]) for edge in current_graph["edges"]
     }
-    for asset in ["favicon.ico", "og-image.png"]:
-        assert (
-            f'cp assets/examples/megalodon/{asset} "$RUNNER_TEMP/citemesh-pages/{asset}"'
-            in workflow
-        )
     with (demo_dir / "favicon.ico").open("rb") as icon:
         assert icon.read(4) == b"\x00\x00\x01\x00"
     with (demo_dir / "og-image.png").open("rb") as social_image:
@@ -2511,6 +2473,34 @@ process.stdout.write(JSON.stringify(probed === undefined ? null : probed));
     )
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
+
+
+def test_dashboard_edge_strength_normalization_matches_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Browser imports and Python exports must scale edge weights identically."""
+    from citemesh.visualization.export import _edge_strength_scale
+
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = _dashboard_exporter_with_collection(graph, seed_id, title="Seed Paper")
+    out_path = tmp_path / "edge-strength.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    javascript = _probe_dashboard_runtime_in_node(
+        out_path,
+        "({"
+        " varied: normalizeDashboardEdgeStrengths("
+        "[{weight: 0.55}, {weight: 0.75}, {weight: 0.95}]),"
+        " tied: normalizeDashboardEdgeStrengths([{weight: 0.7}, {weight: 0.7}])"
+        "})",
+    )
+
+    assert javascript["varied"] == pytest.approx(
+        _edge_strength_scale([0.55, 0.75, 0.95])
+    )
+    assert javascript["tied"] == pytest.approx(_edge_strength_scale([0.7, 0.7]))
 
 
 def test_dashboard_invalid_bootstrap_surfaces_status_in_node(

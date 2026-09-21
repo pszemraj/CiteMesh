@@ -33,6 +33,21 @@ SEARCH_MAX_RESULTS = 1000
 SEARCH_PAGE_SIZE = 100
 
 
+def _warn_skipped_recommendations(paper_id: str, skipped_records: int) -> None:
+    """Report malformed or unresolved recommendation rows once.
+
+    :param str paper_id: Normalized seed identifier.
+    :param int skipped_records: Number of unusable response rows.
+    :return None: Emits a warning only when rows were skipped.
+    """
+    if skipped_records:
+        logger.warning(
+            "Recommendations for %s skipped %d malformed or unresolved records.",
+            paper_id,
+            skipped_records,
+        )
+
+
 def _scoped_endpoint(method: Callable[..., Any]) -> Callable[..., Any]:
     """Run an endpoint inside the outer candidate collection scope.
 
@@ -566,13 +581,7 @@ class _EndpointsMixin:
                 )
                 skipped_records += malformed_records
                 if papers:
-                    if skipped_records:
-                        logger.warning(
-                            "Recommendations for %s skipped %d malformed or "
-                            "unresolved records.",
-                            normalized_id,
-                            skipped_records,
-                        )
+                    _warn_skipped_recommendations(normalized_id, skipped_records)
                     return papers[:parsed_limit]
                 continue
 
@@ -600,20 +609,9 @@ class _EndpointsMixin:
             ]
             skipped_records += len(paper_ids) - len(papers)
             if papers:
-                if skipped_records:
-                    logger.warning(
-                        "Recommendations for %s skipped %d malformed or "
-                        "unresolved records.",
-                        normalized_id,
-                        skipped_records,
-                    )
+                _warn_skipped_recommendations(normalized_id, skipped_records)
                 return papers[:parsed_limit]
-        if skipped_records:
-            logger.warning(
-                "Recommendations for %s skipped %d malformed or unresolved records.",
-                normalized_id,
-                skipped_records,
-            )
+        _warn_skipped_recommendations(normalized_id, skipped_records)
         return []
 
     @_scoped_endpoint

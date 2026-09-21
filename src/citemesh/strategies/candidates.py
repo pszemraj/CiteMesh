@@ -250,6 +250,103 @@ def fetch_candidate_source(
     )
 
 
+@dataclass
+class _ReferenceAliasResolver:
+    """Request-local bibliography aliases and cross-identifier bindings."""
+
+    aliases: dict[str, Paper] = field(default_factory=dict)
+
+    def remember(self, records: Sequence[Paper]) -> None:
+        """Index resolved records by every explicit identifier alias.
+
+        :param Sequence[Paper] records: Resolved metadata.
+        :return None: Updates the request-local alias map.
+        """
+        for paper in records:
+            for alias in paper_identifier_aliases(
+                paper_id=paper.paper_id, arxiv_id=paper.arxiv_id, doi=paper.doi
+            ):
+                self.aliases[normalize_paper_id(alias).lower()] = paper
+
+    def resolve(self, entry: Sequence[str]) -> Paper | None:
+        """Return the first paper bound to an entry's explicit identifiers.
+
+        :param Sequence[str] entry: Identifier spellings from one bibliography row.
+        :return Paper | None: Resolved record, when any spelling is known.
+        """
+        return next(
+            (self.aliases[value] for value in entry if value in self.aliases), None
+        )
+
+    def bind_entries(self, entries: Sequence[Sequence[str]]) -> None:
+        """Bind every spelling in a resolved bibliography entry to one record.
+
+        :param Sequence[Sequence[str]] entries: Bibliography identifier groups.
+        :return None: Adds aliases without replacing earlier evidence.
+        """
+        for entry in entries:
+            paper = self.resolve(entry)
+            if paper is not None:
+                for value in entry:
+                    self.aliases.setdefault(value, paper)
+
+
+def _enrich_local_reference_records(
+    client: SemanticScholarClient,
+    recovered: Sequence[Paper],
+) -> None:
+    """Merge available Semantic Scholar metadata onto local-corpus references.
+
+    :param SemanticScholarClient client: Existing metadata client.
+    :param Sequence[Paper] recovered: Materialized bibliography records.
+    :return None: Enriches local records in place when matching metadata exists.
+    """
+    from citemesh.services import (
+        SemanticScholarRequestError,
+        SemanticScholarUnavailableError,
+    )
+
+    local_targets = [
+        (paper, lookup_id)
+        for paper in recovered
+        if paper.is_local_corpus
+        and (lookup_id := provider_lookup_identifier(paper.paper_id, paper)) is not None
+    ]
+    if not local_targets:
+        return
+
+    lookup_ids = [lookup_id for _paper, lookup_id in local_targets]
+    if client.refresh_paper_cache:
+        try:
+            s2_records = client.get_papers(lookup_ids, raise_on_unavailable=True)
+        except (
+            SemanticScholarRequestError,
+            SemanticScholarUnavailableError,
+        ) as exc:
+            logger.debug(
+                "S2 metadata enrichment unavailable during arXiv recovery: %s",
+                exc,
+            )
+            s2_records = {}
+    else:
+        # A local record is already sufficient recovery. Avoid spending the shared
+        # retry budget unless the caller explicitly requested refresh.
+        s2_records = client.get_cached_papers(lookup_ids)
+    for local_paper, lookup_id in local_targets:
+        s2_paper = s2_records.get(normalize_paper_id(lookup_id))
+        if s2_paper is None:
+            s2_paper = next(
+                (
+                    candidate
+                    for candidate in s2_records.values()
+                    if candidate_records_match(local_paper, candidate)
+                ),
+                None,
+            )
+        if s2_paper is not None:
+            merge_paper_metadata(local_paper, s2_paper)
+
+
 def fetch_seed_references(
     client: SemanticScholarClient,
     seed: Paper,
@@ -313,23 +410,11 @@ def fetch_seed_references(
 
     # Alias maps are request-local. Partial bibliography evidence is never saved
     # in Semantic Scholar's complete-reference cache.
-    aliases: dict[str, Paper] = {}
+    resolver = _ReferenceAliasResolver()
     recovered: list[Paper] = []
     attempted: set[str] = set()
     metadata_requested = False
     metadata_completed = False
-
-    def remember(records: Sequence[Paper]) -> None:
-        """Index available records by explicit aliases.
-
-        :param Sequence[Paper] records: Resolved metadata.
-        :return None: Updates the request-local alias map.
-        """
-        for paper in records:
-            for alias in paper_identifier_aliases(
-                paper_id=paper.paper_id, arxiv_id=paper.arxiv_id, doi=paper.doi
-            ):
-                aliases[normalize_paper_id(alias).lower()] = paper
 
     # Metadata batches are independent of the admission cap: a request for one
     # reference must not make one paced HTTP call per unresolved bibliography row.
@@ -337,37 +422,26 @@ def fetch_seed_references(
         batch = entries[offset : offset + 50]
         ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
 
-        def bind_entry_aliases() -> None:
-            """Reuse a resolved entry across its explicit identifier spellings.
-
-            :return None: Updates aliases for entries in the current batch.
-            """
-            for entry in batch:
-                paper = next(
-                    (aliases[value] for value in entry if value in aliases), None
-                )
-                if paper is not None:
-                    for value in entry:
-                        aliases.setdefault(value, paper)
-
-        bind_entry_aliases()
+        resolver.bind_entries(batch)
         missing = [
-            value for value in ids if value not in aliases and value not in attempted
+            value
+            for value in ids
+            if value not in resolver.aliases and value not in attempted
         ]
         if local_lookup is not None:
             local_records = local_lookup(missing)
             for requested_id, paper in local_records.items():
                 normalized_id = normalize_paper_id(requested_id).lower()
                 if normalized_id in missing:
-                    aliases[normalized_id] = paper
-            bind_entry_aliases()
-            missing = [value for value in missing if value not in aliases]
+                    resolver.aliases[normalized_id] = paper
+            resolver.bind_entries(batch)
+            missing = [value for value in missing if value not in resolver.aliases]
         if missing and not client.refresh_paper_cache:
             cached_records = client.get_cached_papers(missing)
-            remember(list(cached_records.values()))
-            aliases.update(cached_records)
-        bind_entry_aliases()
-        missing = [value for value in missing if value not in aliases]
+            resolver.remember(list(cached_records.values()))
+            resolver.aliases.update(cached_records)
+        resolver.bind_entries(batch)
+        missing = [value for value in missing if value not in resolver.aliases]
         if missing:
             metadata_requested = True
             try:
@@ -380,24 +454,24 @@ def fetch_seed_references(
                 records = {}
             else:
                 metadata_completed = True
-            remember(list(records.values()))
+            resolver.remember(list(records.values()))
             for requested_id, paper in records.items():
-                aliases[normalize_paper_id(requested_id).lower()] = paper
-            bind_entry_aliases()
+                resolver.aliases[normalize_paper_id(requested_id).lower()] = paper
+            resolver.bind_entries(batch)
             missing_arxiv = [
                 value
                 for value in missing
-                if value.startswith("arxiv:") and value not in aliases
+                if value.startswith("arxiv:") and value not in resolver.aliases
             ]
             if missing_arxiv:
                 arxiv_records = arxiv.get_papers(missing_arxiv)
                 if arxiv_records is not None:
                     metadata_completed = True
-                    remember(list(arxiv_records.values()))
-            bind_entry_aliases()
+                    resolver.remember(list(arxiv_records.values()))
+            resolver.bind_entries(batch)
         attempted.update(ids)
         for entry in batch:
-            paper = next((aliases[value] for value in entry if value in aliases), None)
+            paper = resolver.resolve(entry)
             if (
                 paper is None
                 or paper.paper_id == seed.paper_id
@@ -430,43 +504,7 @@ def fetch_seed_references(
         len(recovered),
         limit,
     )
-    local_targets = [
-        (paper, lookup_id)
-        for paper in recovered
-        if paper.is_local_corpus
-        and (lookup_id := provider_lookup_identifier(paper.paper_id, paper)) is not None
-    ]
-    if local_targets:
-        lookup_ids = [lookup_id for _paper, lookup_id in local_targets]
-        if client.refresh_paper_cache:
-            try:
-                s2_records = client.get_papers(lookup_ids, raise_on_unavailable=True)
-            except (
-                SemanticScholarRequestError,
-                SemanticScholarUnavailableError,
-            ) as exc:
-                logger.debug(
-                    "S2 metadata enrichment unavailable during arXiv recovery: %s",
-                    exc,
-                )
-                s2_records = {}
-        else:
-            # A local record is already sufficient recovery. Avoid spending the
-            # shared retry budget unless the caller explicitly requested refresh.
-            s2_records = client.get_cached_papers(lookup_ids)
-        for local_paper, lookup_id in local_targets:
-            s2_paper = s2_records.get(normalize_paper_id(lookup_id))
-            if s2_paper is None:
-                s2_paper = next(
-                    (
-                        candidate
-                        for candidate in s2_records.values()
-                        if candidate_records_match(local_paper, candidate)
-                    ),
-                    None,
-                )
-            if s2_paper is not None:
-                merge_paper_metadata(local_paper, s2_paper)
+    _enrich_local_reference_records(client, recovered)
     if recovered:
         if identifiable_entries > len(recovered) and len(recovered) >= limit:
             logger.info(

@@ -8,10 +8,15 @@ from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
-from citemesh.core import Paper
+from citemesh.core import (
+    DEFAULT_MAX_PAPERS,
+    DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
+    Paper,
+)
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
 from citemesh.strategies.base import (
+    RELATIONSHIP_DEGREE_CAP,
     GraphBuilderStrategy,
     build_capped_undirected_graph,
 )
@@ -39,10 +44,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
     def __init__(
         self,
-        max_papers: int = 40,
+        max_papers: int = DEFAULT_MAX_PAPERS,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        similarity_threshold: float = 0.2,
+        similarity_threshold: float = DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
         client: SemanticScholarClient | None = None,
     ):
         """Initialize recommendation graph builder.
@@ -200,7 +205,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        filtered_graph = build_capped_undirected_graph(graph, 3, seed_id=actual_seed_id)
+        filtered_graph = build_capped_undirected_graph(
+            graph, RELATIONSHIP_DEGREE_CAP, seed_id=actual_seed_id
+        )
         logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),

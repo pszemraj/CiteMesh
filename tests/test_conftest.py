@@ -6,7 +6,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
+import requests
 
 
 @pytest.mark.parametrize("preimport_transformers", [False, True])
@@ -65,3 +67,13 @@ def test_arxiv_request_guard_blocks_non_slow_tests() -> None:
 
     with pytest.raises(AssertionError, match="attempted an arXiv request"):
         arxiv_module.requests.get("https://arxiv.org/html/2608.27147")
+
+
+def test_external_http_guard_blocks_unpatched_sessions() -> None:
+    """The shared test guard rejects provider calls below patched SDK helpers."""
+    with pytest.raises(AssertionError, match="attempted an external HTTP request"):
+        requests.Session().send(
+            requests.Request("GET", "https://huggingface.co").prepare()
+        )
+    with pytest.raises(AssertionError, match="attempted an external HTTP request"):
+        httpx.Client().send(httpx.Request("GET", "https://huggingface.co"))

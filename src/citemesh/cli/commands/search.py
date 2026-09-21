@@ -490,9 +490,19 @@ def _run_search_command(
 
     builder: EmbeddingGraphBuilder | None = None
     try:
-        builder, defaults = _prepare_local_search_builder(
-            args, build_parser, user_config
-        )
+        try:
+            builder, defaults = _prepare_local_search_builder(
+                args, build_parser, user_config
+            )
+        except ImportError as exc:
+            if mode == "auto":
+                logger.info(
+                    "Local semantic search dependencies are unavailable; "
+                    "searching the Semantic Scholar API instead."
+                )
+                logger.debug("Local search dependency details: %s", exc, exc_info=True)
+                return _run_s2_search(args)
+            raise
         # Resolve the artifact before opening a namespace: opening the provisional
         # cache just to count rows leaves unused metadata and lock files behind.
         if builder.has_persistent_embedding_artifacts():

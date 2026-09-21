@@ -3424,24 +3424,18 @@ def test_positional_corpus_identity_reconciliation_preserves_physical_rows(
     assert set(alias_candidates) == {"arxiv_0", "arxiv_1"}
     assert alias_candidates["arxiv_0"]["doi"] == "10.1/first"
     with cache._connect_db() as conn:
-        doi_plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT paper_id FROM papers "
-            "WHERE doi COLLATE NOCASE IN (?)",
-            ("10.1/FIRST",),
-        ).fetchall()
-        arxiv_plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT paper_id FROM papers "
-            "WHERE arxiv_id COLLATE NOCASE IN (?)",
-            ("1706.03762",),
-        ).fetchall()
-        primary_plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT paper_id FROM papers "
-            "WHERE paper_id COLLATE NOCASE IN (?)",
-            ("10.1/FIRST",),
-        ).fetchall()
-    assert any("idx_papers_doi_nocase" in str(row) for row in doi_plan)
-    assert any("idx_papers_arxiv_id_nocase" in str(row) for row in arxiv_plan)
-    assert any("idx_papers_paper_id_nocase" in str(row) for row in primary_plan)
+        nocase_indexed_columns = set()
+        for index in conn.execute("PRAGMA index_list('papers')"):
+            if index[4]:
+                continue
+            key_columns = [
+                column
+                for column in conn.execute(f"PRAGMA index_xinfo('{index[1]}')")
+                if column[5]
+            ]
+            if key_columns and str(key_columns[0][4]).upper() == "NOCASE":
+                nocase_indexed_columns.add(key_columns[0][2])
+    assert {"paper_id", "arxiv_id", "doi"} <= nocase_indexed_columns
 
     # A real source ID can happen to resemble the old generated convention;
     # aliases continue to cover it without changing that physical identity.

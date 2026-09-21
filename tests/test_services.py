@@ -368,12 +368,17 @@ def test_get_papers_fetches_only_misses_and_preserves_request_order() -> None:
     assert client._session.post.call_args.kwargs["json"] == {"ids": ["cold"]}
 
 
-def test_get_papers_splits_arbitrary_missing_count_at_500() -> None:
+def test_get_papers_splits_arbitrary_missing_count_at_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A public bulk call splits missing IDs into valid provider batches.
 
+    :param pytest.MonkeyPatch monkeypatch: Skips unrelated disk persistence.
     :return None: Verifies 500-record chunking.
     """
     ids = [f"p{i}" for i in range(1001)]
+    persist_paper = MagicMock()
+    monkeypatch.setattr(s2.disk_cache, "_persist_paper", persist_paper)
 
     def respond(_url: str, **kwargs: Any) -> _MockResponse:
         """Return positional rows for the submitted batch.
@@ -394,9 +399,10 @@ def test_get_papers_splits_arbitrary_missing_count_at_500() -> None:
     assert [
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500, 1]
+    assert [call.args[1] for call in persist_paper.call_args_list] == ids
 
 
-def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
+def test_tolerant_get_papers_warns_after_unavailable_batch(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A failed metadata batch emits one actionable availability warning.
@@ -406,6 +412,8 @@ def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
     :return None: Verifies partial metadata results remain attributable to an outage.
     """
     ids = [f"p{index}" for index in range(1001)]
+    persist_paper = MagicMock()
+    monkeypatch.setattr(s2.disk_cache, "_persist_paper", persist_paper)
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
     with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
         _disable_pacing(client)
@@ -424,6 +432,7 @@ def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
     assert [
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500]
+    assert [call.args[1] for call in persist_paper.call_args_list] == ids[:500]
     warnings = [
         record.getMessage()
         for record in caplog.records
