@@ -16,41 +16,35 @@ __author__ = "CiteMesh Contributors"
 from .core import Author, Paper
 
 if TYPE_CHECKING:
-    from .strategies.base import GraphBuilderStrategy
-    from .strategies.citation import CitationGraphBuilder
-    from .strategies.embedding import EmbeddingGraphBuilder
-    from .strategies.hybrid import HybridGraphBuilder
-    from .strategies.recommendation import RecommendationGraphBuilder
+    from .strategies.base import GraphBuilderStrategy as GraphBuilderStrategy
+    from .strategies.citation import CitationGraphBuilder as CitationGraphBuilder
+    from .strategies.embedding import EmbeddingGraphBuilder as EmbeddingGraphBuilder
+    from .strategies.hybrid import HybridGraphBuilder as HybridGraphBuilder
+    from .strategies.recommendation import (
+        RecommendationGraphBuilder as RecommendationGraphBuilder,
+    )
 
-__all__ = [
-    "__version__",
-    "Paper",
-    "Author",
-    "GraphBuilderStrategy",
-    "CitationGraphBuilder",
-    "RecommendationGraphBuilder",
-    "EmbeddingGraphBuilder",
-    "HybridGraphBuilder",
-]
+_LAZY_EXPORTS = {
+    "GraphBuilderStrategy": ("citemesh.strategies.base", "GraphBuilderStrategy"),
+    "CitationGraphBuilder": (
+        "citemesh.strategies.citation",
+        "CitationGraphBuilder",
+    ),
+    "RecommendationGraphBuilder": (
+        "citemesh.strategies.recommendation",
+        "RecommendationGraphBuilder",
+    ),
+    "EmbeddingGraphBuilder": (
+        "citemesh.strategies.embedding",
+        "EmbeddingGraphBuilder",
+    ),
+    "HybridGraphBuilder": ("citemesh.strategies.hybrid", "HybridGraphBuilder"),
+}
+__all__ = ["__version__", "Paper", "Author", *_LAZY_EXPORTS]
 
 # Strategy exports stay lazy so ``import citemesh`` never pulls the embedding or
 # visualization stacks.
 __getattr__, __dir__ = install_lazy_exports(
     globals(),
-    {
-        "GraphBuilderStrategy": ("citemesh.strategies.base", "GraphBuilderStrategy"),
-        "CitationGraphBuilder": (
-            "citemesh.strategies.citation",
-            "CitationGraphBuilder",
-        ),
-        "RecommendationGraphBuilder": (
-            "citemesh.strategies.recommendation",
-            "RecommendationGraphBuilder",
-        ),
-        "EmbeddingGraphBuilder": (
-            "citemesh.strategies.embedding",
-            "EmbeddingGraphBuilder",
-        ),
-        "HybridGraphBuilder": ("citemesh.strategies.hybrid", "HybridGraphBuilder"),
-    },
+    _LAZY_EXPORTS,
 )

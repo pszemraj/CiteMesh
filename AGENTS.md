@@ -32,8 +32,8 @@ Install the project for development with `pip install -e ".[all]"`. Versions com
 from Git tags via setuptools-scm, so fetch tags when a checkout reports an
 unexpected development version.
 
-Run every project command through the maintainer's `inf` conda environment
-(Python 3.12, torch 2.13+). Before committing, run:
+Run every project command in the configured development environment. Before
+committing, run:
 
 ```bash
 python -m pytest

@@ -1769,10 +1769,22 @@ def test_pages_demo_assets_and_graph_package_are_valid() -> None:
     """The saved demo keeps a valid package and recognizable binary assets."""
     repository = Path(__file__).resolve().parents[1]
     demo_dir = repository / "assets" / "examples" / "megalodon"
+    template = (
+        repository
+        / "src"
+        / "citemesh"
+        / "visualization"
+        / "dashboard"
+        / "assets"
+        / "template.html"
+    ).read_text(encoding="utf-8")
     demo_html = (demo_dir / "dashboard.html").read_text(encoding="utf-8")
     workflow = (repository / ".github" / "workflows" / "pages.yml").read_text(
         encoding="utf-8"
     )
+    assert "CiteMesh — Interactive Research Map" not in template
+    assert "favicon.ico" not in template
+    assert "<title>CiteMesh Dashboard</title>" in template
     assert "https://pszemraj.github.io/CiteMesh/" in demo_html
     for asset in ["favicon.ico", "og-image.png"]:
         assert asset in demo_html
