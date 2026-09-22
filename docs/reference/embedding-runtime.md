@@ -64,7 +64,7 @@ EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support i
 
 The [`embeddings` extra](../../pyproject.toml) declares the dependency floor. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
 
-The default suite covers prompt routing, cache separation, and complete vector sets. Run real-model checks as described in [Contributing](../../CONTRIBUTING.md#before-you-open-a-pr).
+The default suite covers prompt routing, cache separation, and complete vector sets. Real-model checks are opt-in with `python -m pytest -m "slow and cuda"`.
 
 ## Implementation references
 

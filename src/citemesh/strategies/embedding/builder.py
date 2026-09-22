@@ -25,11 +25,17 @@ import networkx as nx
 import numpy as np
 
 from citemesh._runtime import stderr_isatty
-from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
+from citemesh.core import (
+    DEFAULT_MAX_PAPERS,
+    EMBEDDING_CONFIG,
+    EMBEDDING_STORAGE_CONFIG,
+    Author,
+    Paper,
+)
 from citemesh.core.paper_ids import (
     is_local_corpus_paper_id as _is_local_corpus_paper_id,
 )
-from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -64,6 +70,7 @@ from citemesh.strategies.candidates import (
     paper_embedding_metadata,
     provider_lookup_identifier,
     scope_candidate_collection,
+    select_recovered_references_by_score,
 )
 
 from . import deps
@@ -129,7 +136,7 @@ class EmbeddingGraphBuilder(
 
     def __init__(
         self,
-        max_papers: int = 40,
+        max_papers: int = DEFAULT_MAX_PAPERS,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_profile: str = "auto",
         model_revision: str | None = None,
@@ -465,7 +472,7 @@ class EmbeddingGraphBuilder(
         """
         if not force_rebuild_cache:
             return None
-        logger.info(
+        logger.debug(
             "Embedding cache rebuild requested; deferring clear until the "
             "runtime-active model namespace is resolved."
         )
@@ -905,7 +912,7 @@ class EmbeddingGraphBuilder(
 
         if self.semantic_source != "arxiv-corpus":
             self._collect_candidate_pool_papers(
-                papers, seed_embedding, resolved_seed_paper
+                papers, seed_embedding, resolved_seed_paper, seed_identifier=seed_id
             )
             return papers
 
@@ -1068,7 +1075,8 @@ class EmbeddingGraphBuilder(
             return replace(resolved_seed_paper, is_seed=True)
 
         # Treat as text query
-        logger.info(f"Using '{seed_id}' as text query")
+        logger.info("Using text query as seed.")
+        logger.debug("Text-query seed: %s", seed_id)
         # Create dummy seed paper
         return Paper(
             paper_id=_query_seed_id(seed_id),
@@ -1116,16 +1124,21 @@ class EmbeddingGraphBuilder(
         papers: dict[str, Paper],
         seed_embedding: np.ndarray,
         seed_paper: Paper,
+        *,
+        seed_identifier: str | None = None,
     ) -> None:
         """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
         :param np.ndarray seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Resolved seed paper used to fetch the pool.
+        :param str | None seed_identifier: Original arXiv input including version.
         :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
         """
         logger.debug("Using candidate-pool semantic search...")
-        pool_candidates = self._select_candidates_from_pool(seed_embedding, seed_paper)
+        pool_candidates = self._select_candidates_from_pool(
+            seed_embedding, seed_paper, seed_identifier=seed_identifier
+        )
         for paper_id, paper, embedding in pool_candidates:
             if len(papers) >= self.max_papers:
                 break
@@ -1204,6 +1217,41 @@ class EmbeddingGraphBuilder(
             is_local_corpus=True,
         )
 
+    def cached_reference_metadata(self, identifiers: list[str]) -> dict[str, Paper]:
+        """Resolve exact references from the corpus already prepared by hybrid.
+
+        :param list[str] identifiers: Canonical bibliography identifiers.
+        :return dict[str, Paper]: Unambiguous local papers keyed by requested alias.
+        """
+        candidates = {
+            paper_id: self._paper_from_cached_metadata(paper_id, metadata)
+            for paper_id, metadata in self.embedding_cache.get_paper_metadata_alias_candidates(
+                identifiers
+            ).items()
+        }
+        requested_aliases = {
+            normalize_paper_id(identifier).lower() for identifier in identifiers
+        }
+        matches_by_alias: dict[str, set[str]] = {
+            alias: set() for alias in requested_aliases
+        }
+        for paper_id, paper in candidates.items():
+            aliases = {
+                normalize_paper_id(alias).lower()
+                for alias in paper_identifier_aliases(
+                    paper_id=paper.paper_id,
+                    arxiv_id=paper.arxiv_id,
+                    doi=paper.doi,
+                )
+            }
+            for alias in requested_aliases & aliases:
+                matches_by_alias[alias].add(paper_id)
+        return {
+            alias: candidates[next(iter(matches))]
+            for alias, matches in matches_by_alias.items()
+            if len(matches) == 1
+        }
+
     def _candidate_pool_budgets(self) -> tuple[int, int, int]:
         """Split the candidate pool size into per-source fetch budgets.
 
@@ -1217,13 +1265,59 @@ class EmbeddingGraphBuilder(
         max_citations = max(0, remaining - max_references)
         return max_references, max_citations, max_recommendations
 
+    def _select_recovered_references_by_embedding(
+        self,
+        seed: Paper,
+        recovered: Sequence[Paper],
+        limit: int,
+    ) -> list[Paper]:
+        """Select recovered references by retrieval-space cosine similarity.
+
+        The seed uses the profile's retrieval-query prompt and references use its
+        retrieval-document prompt. Citation count and bibliography position are
+        deterministic tie-breakers after semantic relevance.
+
+        :param Paper seed: Seed paper used as the retrieval query.
+        :param Sequence[Paper] recovered: Materialized bibliography records.
+        :param int limit: Maximum references to retain.
+        :return list[Paper]: Semantically ranked, capped reference records.
+        """
+        if len(recovered) <= limit:
+            return list(recovered)
+
+        seed_embedding = self.retrieval_embeddings.get(seed.paper_id)
+        if seed_embedding is None:
+            seed_embedding = self._encode_seed_embedding(seed)
+        candidates = {paper.paper_id: paper for paper in recovered}
+        embeddings = self.embed_papers(candidates)
+        query = l2_normalize_embeddings(seed_embedding)
+        return select_recovered_references_by_score(
+            recovered,
+            limit,
+            lambda paper: float(
+                np.clip(
+                    np.dot(
+                        query,
+                        l2_normalize_embeddings(embeddings[paper.paper_id]),
+                    ),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        )
+
     def _select_candidates_from_pool(
-        self, seed_embedding: np.ndarray, seed_paper: Paper
+        self,
+        seed_embedding: np.ndarray,
+        seed_paper: Paper,
+        *,
+        seed_identifier: str | None = None,
     ) -> list[tuple[str, Paper, np.ndarray]]:
         """Rank S2 candidate-pool papers by cosine similarity to the seed.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
         :param Paper seed_paper: Resolved seed paper (S2-backed or query seed).
+        :param str | None seed_identifier: Original arXiv input including version.
         :return List[Tuple[str, Paper, np.ndarray]]: Ranked candidate tuples.
         """
         max_references, max_citations, max_recommendations = (
@@ -1235,6 +1329,8 @@ class EmbeddingGraphBuilder(
             max_references=max_references,
             max_citations=max_citations,
             max_recommendations=max_recommendations,
+            seed_identifier=seed_identifier,
+            reference_selector=self._select_recovered_references_by_embedding,
         )
         self.candidate_source_status = dict(pool.source_status)
         if not pool.papers:
@@ -1259,7 +1355,7 @@ class EmbeddingGraphBuilder(
                 item[0], item[1], stable_index=item[4]
             )
         )
-        logger.info(
+        logger.debug(
             "Candidate semantic search ranked %d of %d pooled papers.",
             len(scored),
             len(pool.papers),
@@ -1485,7 +1581,7 @@ class EmbeddingGraphBuilder(
         if not targets:
             return
 
-        logger.info(
+        logger.debug(
             "Fetching citation counts from Semantic Scholar for up to %d papers...",
             len(targets),
         )
@@ -1584,7 +1680,7 @@ class EmbeddingGraphBuilder(
             graph, self.top_k, seed_id=actual_seed_id
         )
 
-        logger.info(
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),

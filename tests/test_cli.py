@@ -79,6 +79,8 @@ from tests._helpers import (
     run_captured_cli,
 )
 
+pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
 
 def run_cli_command(args: list[str]) -> SimpleNamespace:
     """Run CLI in-process and capture stdout/stderr.
@@ -892,6 +894,48 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected_level"),
+    [
+        (["--verbose", "build", "arxiv:1706.03762"], "debug"),
+        (["-v", "build", "arxiv:1706.03762"], "debug"),
+        (["build", "arxiv:1706.03762", "-v"], "debug"),
+        (
+            [
+                "--log-level",
+                "warning",
+                "build",
+                "arxiv:1706.03762",
+                "--verbose",
+            ],
+            "debug",
+        ),
+        (
+            [
+                "--verbose",
+                "build",
+                "arxiv:1706.03762",
+                "--log-level",
+                "error",
+            ],
+            "error",
+        ),
+        (["cache", "scan", "--verbose"], "debug"),
+        (["cache", "scan", "-v"], "debug"),
+    ],
+)
+def test_cli_verbose_alias_is_position_agnostic_and_last_option_wins(
+    argv: list[str], expected_level: str
+) -> None:
+    """`--verbose` should share `--log-level` precedence across command nesting."""
+    parser, _, _, _ = parser_module._create_parser()
+
+    parsed = parser.parse_args(argv)
+
+    assert parsed.log_level == expected_level
+    assert parser_module._pop_tracked_option_dests(parsed) == {"log_level"}
+
+
 def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
     """TTY streams should default Rich consoles to auto width."""
     assert console_module._resolve_console_width(0, interactive=True) is None
@@ -904,6 +948,32 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
         == cli_module.REDIRECTED_LOG_WIDTH
     )
     assert console_module._resolve_console_width(96, interactive=True) == 96
+
+
+@pytest.mark.parametrize(
+    ("log_level", "expected_progress"),
+    [("debug", True), ("info", True), ("warning", False), ("error", False)],
+)
+def test_configure_logging_sets_progress_policy_from_severity(
+    monkeypatch: pytest.MonkeyPatch,
+    log_level: str,
+    expected_progress: bool,
+) -> None:
+    """Progress bars should appear only for normal and verbose CLI output."""
+    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
+    progress_policy: list[bool] = []
+    monkeypatch.setattr(
+        console_module,
+        "set_progress_enabled",
+        lambda enabled: progress_policy.append(enabled),
+    )
+
+    try:
+        console_module._configure_logging(log_level=log_level)
+    finally:
+        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+
+    assert progress_policy == [expected_progress]
 
 
 @pytest.mark.parametrize("preconfigured", [False, True])
@@ -1858,17 +1928,24 @@ def test_search_auto_falls_back_on_config_contract_error(
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
     info = MagicMock()
+    warning = MagicMock()
+    debug = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info)
+    monkeypatch.setattr(cli_module.logger, "warning", warning)
+    monkeypatch.setattr(cli_module.logger, "debug", debug)
 
     result = run_cli_command(["search", "attention"])
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "Fallback Result" in result.stdout
     assert "usage: citemesh build" not in result.stderr
-    notices = str(info.call_args_list)
-    assert "defaults.device" in notices
-    assert str(config.path) in notices
-    assert "searching the Semantic Scholar API instead" in notices
+    assert any(
+        "searching the Semantic Scholar API instead" in str(call)
+        for call in warning.call_args_list
+    )
+    diagnostics = str(debug.call_args_list)
+    assert "defaults.device" in diagnostics
+    assert str(config.path) in diagnostics
 
 
 def test_search_local_reports_config_contract_error_without_build_usage(
@@ -1982,7 +2059,9 @@ def test_search_auto_uses_local_when_cache_populated(
     client_factory = MagicMock()
     monkeypatch.setattr(search_module, "get_client", client_factory)
     info_mock = MagicMock()
+    debug_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
 
     result = run_cli_command(["search", "cached topic", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
@@ -1991,7 +2070,10 @@ def test_search_auto_uses_local_when_cache_populated(
     )
     notices = str(info_mock.call_args_list)
     assert "locally cached embeddings" in notices
-    assert "--mode s2" in notices
+    diagnostics = str(debug_mock.call_args_list)
+    assert "embeddings=%s" in diagnostics
+    assert "42" in diagnostics
+    assert "model=%s" in diagnostics
     client_factory.assert_not_called()
 
 
@@ -2044,7 +2126,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         )
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
-    with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
         result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "Search results for 'attention'" in result.stdout
@@ -2053,10 +2135,12 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         "searching the Semantic Scholar API instead" in notice for notice in notices
     )
     empty_notice = next(
-        notice for notice in notices if "Local embedding cache is empty" in notice
+        notice
+        for notice in notices
+        if notice.startswith("Empty local embedding namespace:")
     )
-    assert "semantic-source=candidates" in empty_notice
-    assert f"dataset-source={DEFAULT_DATASET_SOURCE}" in empty_notice
+    assert "semantic_source=candidates" in empty_notice
+    assert f"dataset_source={DEFAULT_DATASET_SOURCE}" in empty_notice
     assert "pass --semantic-source arxiv-corpus" in empty_notice
     # The namespace has no device or compute-dtype token; guidance must not imply one.
     assert "device=" not in empty_notice
@@ -2069,8 +2153,6 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Explicit local mode treats an empty cache as an error with guidance."""
-    error_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "error", error_mock)
     fake_builder = _fake_local_search_builder(cached_count=0)
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
@@ -2078,7 +2160,7 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
 
     result = run_cli_command(["search", "anything", "--mode", "local"])
     assert result.returncode == 1
-    message = str(error_mock.call_args)
+    message = flatten_console_text(result.stderr)
     assert "Local search was requested via" in message
     assert "--mode local" in message
     assert "has no vectors" in message
@@ -2086,9 +2168,8 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     # Device and compute dtype are absent from the namespace contract.
     assert "device=" not in message
     assert "compute_dtype" not in message
-    assert "semantic-source=%s" in error_mock.call_args.args[0]
-    assert error_mock.call_args.args[3] == "candidates"
-    assert error_mock.call_args.args[4] == DEFAULT_DATASET_SOURCE
+    assert "semantic-source=candidates" in message
+    assert f"dataset-source={DEFAULT_DATASET_SOURCE}" in message
     fake_builder.prepare_embedding_cache.assert_not_called()
     fake_builder.search_local.assert_not_called()
 
@@ -2115,7 +2196,7 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
 
     parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
-    with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
         result = search_module._run_search_command(
             args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
         )
@@ -2123,6 +2204,50 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
     assert result == 0
     assert any(
         "device=cuda compute_dtype=bfloat16" in record.getMessage()
+        for record in caplog.records
+    )
+    assert any(
+        record.levelno == logging.WARNING
+        and "Local semantic search unavailable" in record.getMessage()
+        for record in caplog.records
+    )
+    s2_search.assert_called_once_with(args)
+
+
+def test_search_auto_treats_missing_embedding_dependencies_as_expected(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A base install falls back to S2 without a degraded-result warning.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces local and S2 search dependencies.
+    :param pytest.LogCaptureFixture caplog: Captures fallback diagnostics.
+    :return None: Verifies an expected optional dependency gap remains informational.
+    """
+    monkeypatch.setattr(
+        search_module,
+        "EmbeddingGraphBuilder",
+        MagicMock(side_effect=ImportError("sentence-transformers is not installed")),
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
+    args = parser.parse_args(["search", "attention"])
+
+    with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
+        result = search_module._run_search_command(
+            args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
+        )
+
+    assert result == 0
+    assert any(
+        record.levelno == logging.INFO
+        and "dependencies are unavailable" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno == logging.WARNING
+        and "Local semantic search unavailable" in record.getMessage()
         for record in caplog.records
     )
     s2_search.assert_called_once_with(args)
@@ -2167,6 +2292,7 @@ def test_search_auto_refuses_corpus_fingerprint_mismatch(
 
 def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Auto fallback must name a corpus selector without recommending it again.
 
@@ -2180,9 +2306,6 @@ def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
     )
     s2_search = MagicMock(return_value=0)
     monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
-    info_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info_mock)
-
     parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
     config = UserConfig(
@@ -2192,14 +2315,24 @@ def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
             "dataset_source": dataset_source,
         },
     )
-    result = search_module._run_search_command(args, build_parser, config)
+    with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
+        result = search_module._run_search_command(args, build_parser, config)
 
     assert result == 0
-    assert "semantic-source=%s" in info_mock.call_args.args[0]
-    assert info_mock.call_args.args[2] == "arxiv-corpus"
-    assert info_mock.call_args.args[3] == dataset_source
-    assert "already the arXiv-corpus namespace" in info_mock.call_args.args[4]
-    assert "pass --semantic-source arxiv-corpus" not in info_mock.call_args.args[4]
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "No local embeddings available; searching the Semantic Scholar API instead."
+        in messages
+    )
+    debug_message = next(
+        message
+        for message in messages
+        if message.startswith("Empty local embedding namespace:")
+    )
+    assert "semantic_source=arxiv-corpus" in debug_message
+    assert f"dataset_source={dataset_source}" in debug_message
+    assert "already the arXiv-corpus namespace" in debug_message
+    assert "pass --semantic-source arxiv-corpus" not in debug_message
     s2_search.assert_called_once_with(args)
 
 
@@ -2216,9 +2349,6 @@ def test_search_local_empty_corpus_cache_names_the_selected_dataset(
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
-    error_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "error", error_mock)
-
     result = run_cli_command(
         [
             "search",
@@ -2233,11 +2363,11 @@ def test_search_local_empty_corpus_cache_names_the_selected_dataset(
     )
 
     assert result.returncode == 1
-    assert "semantic-source=%s" in error_mock.call_args.args[0]
-    assert error_mock.call_args.args[3] == "arxiv-corpus"
-    assert error_mock.call_args.args[4] == dataset_source
-    assert "already the arXiv-corpus namespace" in error_mock.call_args.args[5]
-    assert "pass --semantic-source arxiv-corpus" not in error_mock.call_args.args[5]
+    message = flatten_console_text(result.stderr)
+    assert "semantic-source=arxiv-corpus" in message
+    assert f"dataset-source={dataset_source}" in message
+    assert "already the arXiv-corpus namespace" in message
+    assert "pass --semantic-source arxiv-corpus" not in message
 
 
 def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
@@ -2262,14 +2392,13 @@ def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
         )
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
-    info_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info_mock)
-
     result = run_cli_command(
         ["search", "anything", "--mode", "auto", "--model", "custom/model"]
     )
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert "searching the Semantic Scholar API instead" in str(info_mock.call_args_list)
+    assert "searching the Semantic Scholar API instead" in flatten_console_text(
+        result.stderr
+    )
     mock_client.search_papers.assert_called_once()
     fake_builder.search_local.assert_not_called()
 
@@ -4470,10 +4599,10 @@ def test_dashboard_package_migrates_safe_legacy_results_non_destructively(
 def test_dashboard_collection_mode_logs_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Collection-mode dashboard exports should log their extra saved-artifact flow."""
+    """Collection-mode dashboard exports should debug-log planning details."""
     graph = build_seed_graph("seed")
-    info_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    debug_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
@@ -4504,10 +4633,46 @@ def test_dashboard_collection_mode_logs_side_effects(
         )
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    info_messages = [
-        str(call.args[0]) for call in info_mock.call_args_list if call.args
+    debug_messages = [
+        str(call.args[0]) for call in debug_mock.call_args_list if call.args
     ]
-    assert any("Dashboard collection mode:" in msg for msg in info_messages)
+    assert any("Dashboard collection mode:" in msg for msg in debug_messages)
+
+
+def test_build_run_summary_reports_requested_outputs_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The closing INFO record should contain graph counts and requested paths."""
+    info_mock = MagicMock()
+    debug_mock = MagicMock()
+    monkeypatch.setattr(build_module.logger, "info", info_mock)
+    monkeypatch.setattr(build_module.logger, "debug", debug_mock)
+    graph = build_seed_graph("seed")
+    output_paths = {
+        "dashboard": tmp_path / "dashboard.html",
+        "json": tmp_path / "graph.json",
+    }
+
+    build_module._log_run_summary(
+        graph,
+        output_paths=output_paths,
+        graph_config_path=tmp_path / "graph.config.json",
+        dashboard_package_path=tmp_path / "dashboard.citemesh.json",
+    )
+
+    info_mock.assert_called_once_with(
+        "Build complete: nodes=%d, edges=%d; outputs: %s",
+        1,
+        0,
+        f"dashboard={output_paths['dashboard']}, json={output_paths['json']}",
+    )
+    debug_mock.assert_called_once_with(
+        "Build auxiliary artifacts: %s",
+        "config="
+        f"{tmp_path / 'graph.config.json'}, dashboard_package="
+        f"{tmp_path / 'dashboard.citemesh.json'}",
+    )
 
 
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
@@ -4579,7 +4744,12 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "edges": 0,
         "theme": "dark",
     }
-    assert any("export artifacts saved" in message for message in logged)
+    assert any(
+        "Build complete: nodes=1, edges=0; "
+        f"{len(build_module.EXPORT_FORMATS)} artifacts saved" in message
+        for message in logged
+    )
+    assert all("outputs: bibtex=" not in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)
     assert all("Creating visualization..." not in message for message in logged)

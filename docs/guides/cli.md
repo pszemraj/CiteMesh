@@ -19,7 +19,7 @@ citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -o out/report.dashboard
 
 # Embedding graph over a corpus slice, with a debug trace
 citemesh build "arxiv:1810.04805" -s embedding --dataset-split "train[:2%]" \
-  -e plotly --log-level debug --log-file out/run.log
+  -e plotly --verbose --log-file out/run.log
 ```
 
 Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
@@ -70,86 +70,32 @@ citemesh cache scan
 
 See [User Configuration](configuration.md) for saved defaults and [cache maintenance](caching.md#inspecting-and-clearing) for scan and reset behavior.
 
+### Missing Semantic Scholar references
+
+If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection; corpus-only embedding search does not fetch HTML. Nonempty S2 reference results are unchanged.
+
+Recovery uses explicit arXiv IDs and DOIs in bibliography entries, resolves available local metadata before S2, and uses arXiv's metadata API for remaining arXiv IDs. It respects reference and total-paper limits. A supplied arXiv version selects that HTML version, while graph identities remain version-independent. Missing HTML and unresolved references leave other available sources usable. Recovery finds outgoing references, not incoming citations, and does not imply complete bibliography coverage. Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists. No PDF/LaTeX extraction or extra dependency is required.
+
 ### Help and console output
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
 
-`--log-level debug --log-file out/run.log` adds option routing, effective embedding configuration, retry attempts, model provenance, and namespace decisions. `info` keeps phase progress and one-time runtime summaries; warnings mark degraded operations, recovery, and material cache clears.
+`-v`/`--verbose` is shorthand for `--log-level debug`; it works before or after a subcommand. When several verbosity options are present, the last one wins. `--log-level debug --log-file out/run.log` adds option routing, cache and provider details, runtime configuration, retry attempts, and namespace decisions.
 
-## Flag reference
+| Level | Output |
+| --- | --- |
+| `error` | The requested operation failed. |
+| `warning` | A result was materially degraded or an explicitly requested runtime feature could not be used. |
+| `info` | Brief build phases, useful outcomes, and saved output locations. |
+| `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
-Build options are strategy-scoped: an explicit flag unsupported by the selected strategy is a CLI error. [Configured defaults](configuration.md#precedence) follow different applicability rules.
+Progress bars appear only on an interactive terminal at `info` or `debug`.
 
-### Core options
+## Option reference
 
-| Flag | Description | Default |
-| --- | --- | --- |
-| `--strategy`, `-s` | `recommendation`, `citation`, `embedding`, or `hybrid` | `recommendation` |
-| `--max-papers`, `-p` | Maximum nodes in the final graph, seed included | `40` (`hybrid`: implicit `45`) |
-| `--refresh-paper-cache` | Bypass [persisted paper metadata](caching.md#paper-metadata-and-reference-ids) for this run | disabled |
-| `--s2-retry-budget SECONDS` | Override the [Semantic Scholar recovery budget](#appendix-b-troubleshooting) | `90` seconds anonymously; no elapsed cap with an API key |
-| `--spring-iterations`, `-i` | Iterations for the spring-layout fallback only | `100` |
-| `--dpi`, `-d` | PNG output resolution | `150` |
-| `--seed` | Seed for the layout shared by `png`, `plotly`, `dashboard`, `json` | deterministic built-in seed |
-| `--include-timestamp` | Include generation time in output metadata | disabled |
-| `--export`, `-e` | Select an [export format](../reference/output-artifacts.md); repeat for multiple, or use `all` | `png` |
-| `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` checks environment hints before macOS appearance | `dark` |
-| `--output`, `-o` | File or directory, following the [output-location rules](../reference/output-artifacts.md#output-location) | automatic |
-| `--log-level` | `debug`, `info`, `warning`, `error` | `info` |
-| `--log-width` | Console wrap width in columns; `0` means terminal width on a TTY, a stable fallback when redirected | `0` |
-| `--log-file` | Plain-text log file path, overwriting an existing file | disabled |
+Use `citemesh COMMAND --help` for the current flags, defaults, accepted values, and command examples. Build options are strategy-scoped: an explicit flag unsupported by the selected strategy is a CLI error, while [configured defaults](configuration.md#precedence) follow their documented applicability rules.
 
-The logging flags work on every command, including nested `cache` and `config` subcommands.
-
-### Cross-strategy behavior
-
-- `--similarity-threshold`, `-t` sets minimum edge similarity for `recommendation` and `citation` (default `0.2`).
-- `--no-references` and `--refresh-reference-cache` apply to `recommendation`, `citation`, and hybrid's citation branch.
-
-### Citation strategy
-
-- `--max-citations`, `-c`: citing papers to fetch (default `25`; hybrid implicit default `45`)
-- `--max-references`, `-r`: referenced papers to fetch (default `25`; hybrid implicit default `12`)
-
-### Embedding strategy
-
-#### Model and device
-
-- `--model`, `-m`: checkpoint or local path; see [model selection and fallback](../reference/embedding-runtime.md#model-selection-and-fallback) for the default.
-- `--model-profile {auto,default,embeddinggemma}`: task and runtime contract. `auto` recognizes known Hub aliases and compatible local metadata; name one explicitly for stripped local fine-tune exports.
-- `--model-revision`: branch, tag, or commit for hub models
-- `--truncate-dim`: output dimensions, overriding the [model profile](../reference/embedding-runtime.md#embeddinggemma-profile).
-- `--batch-size`, `-bs`: encode batch size for hydration and search (default `32`)
-- `--device {auto,cuda,mps,cpu}`: compute device; see [device selection](../reference/embedding-runtime.md#device-selection).
-- `--torch-compile` / `--no-torch-compile`: enable or disable the [compile policy](../reference/embedding-runtime.md#compile-policy).
-
-#### Candidate sourcing
-
-- `--semantic-source {candidates,arxiv-corpus}`: default `candidates`, an S2-derived pool with no corpus download. With the source omitted, the corpus-only flags below imply `arxiv-corpus` and `--candidate-pool-size` implies `candidates`; mixing the two families, or naming a source that conflicts with a mode-only flag, is rejected.
-- `--candidate-pool-size`: S2 fetch budget in candidates mode (default `400`); allocation is described under [candidate acquisition](how-it-works.md#2-candidate-acquisition).
-- `--dataset-source`: Hugging Face metadata repository (default `librarian-bots/arxiv-metadata-snapshot`), using the [supported corpus fields](caching.md#corpus-records).
-- `--dataset-split`: split within that source (default `train`). Non-streaming slices such as `train[:5%]` bound the rows exposed to CiteMesh after dataset preparation.
-- `--corpus-size`: cap the selected corpus at N papers; omitted means the full split. [Hydration and resume](caching.md#corpus-hydration-and-resume) explain selection order, scanning, and later growth.
-- `--all-corpus`: use the full selected split, overriding a configured cap; rejects an explicit `--corpus-size`.
-- `--streaming` / `--no-streaming`: stream the dataset or load cached shards. Streaming requires a non-sliced split; the negative form overrides `defaults.streaming` for one run.
-
-#### Graph edges and cache storage
-
-- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
-- `--min-semantic-similarity`: cosine required for embedding/hybrid graph edges (default `0.74`, calibrated for EmbeddingGemma at 512 dimensions); hybrid can also admit pairs with shared references. It does not re-encode anything.
-- `--storage-precision {int8,float32}`: persistent cache precision, `int8` in corpus mode and `float32` in candidates mode, which has no calibration data - so explicit `int8` requires `arxiv-corpus`.
-- `--binary-prefilter` / `--no-binary-prefilter`: binary Hamming prefilter, on for int8 corpus mode and normalized off in candidates mode
-- `--binary-rescore-multiplier`: oversampling factor for prefilter rescoring (int8 default `8`; elsewhere normalized to an unused `1`)
-- `--calibration-sample-size`: sample size for int8 quantization ranges (default `2000`)
-- `--cache-compression` / `--cache-compression-level`: HDF5 filter for cache datasets (`gzip` or `lzf`, default `gzip` at level `1`). `lzf` normalizes the level to `0` and rejects an explicit one.
-- `--force-rebuild-cache`, `--overwrite-cache`, `--cache-overwrite-reason`: request, approve, and annotate a [forced rebuild](caching.md#inspecting-and-clearing). The latter two require `--force-rebuild-cache`.
-
-The prefilter, rescore-multiplier, and calibration flags are int8-only: passing any explicitly requires `--storage-precision int8`. The sweeps behind these numbers are in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
-
-### Hybrid strategy
-
-- Inherits the citation collection flags and every embedding control except `--top-k`.
-- `--max-semantic`: semantic-only non-seed additions after reranking, from `0` through `max-papers - 1`, defaulting to `min(20, max-papers - 1)`. At an effective `0` - explicit, or implied by `--max-papers 1` - semantic enrichment is off and embedding-only flags are rejected.
+Behavior that needs more context than command help lives in [Strategies](strategies.md), [Caching and Data](caching.md), [Embedding Runtime](../reference/embedding-runtime.md), and [Output Artifacts](../reference/output-artifacts.md). The sweeps behind tuned embedding defaults live in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 
 ### Export formats
 
@@ -158,14 +104,6 @@ Formats, dashboard collection and standalone behavior, package schemas, sidecars
 ![CiteMesh dashboard built with --theme light, with a paper selected](../../assets/ui-dashboard-light-theme.png)
 
 _`--theme light` with a paper selected._
-
-## Appendix A: Validation rules
-
-- `build <paper-id>` and `search <query>` require non-empty strings.
-- At least `1`: `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, `--batch-size` / `-bs`, `--candidate-pool-size`, `search --limit`.
-- At least `0`: `--max-citations`, `--max-references`, `--cache-compression-level` (valid only with `--cache-compression gzip`).
-- `--s2-retry-budget` must be a finite float at least `0`.
-- `--similarity-threshold` and `--min-semantic-similarity` must be finite floats in `[0.0, 1.0]`.
 
 ## Appendix B: Troubleshooting
 

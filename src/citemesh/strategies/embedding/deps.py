@@ -12,6 +12,9 @@ import importlib
 import importlib.util
 from typing import Any
 
+from citemesh._runtime import stderr_isatty
+from citemesh.progress import progress_enabled
+
 from . import runtime
 
 
@@ -108,11 +111,17 @@ def _import_sentence_transformer_class() -> Any:
 
 
 def _import_datasets_module() -> Any:
-    """Import and return the ``datasets`` module.
+    """Import ``datasets`` and apply CiteMesh's progress-display policy.
 
     :return Any: Imported ``datasets`` module object.
     """
-    return _import_optional("datasets")
+    datasets_module = _import_optional("datasets")
+    progress_bars = getattr(datasets_module, "utils", None)
+    if not (stderr_isatty() and progress_enabled()):
+        disable_progress_bars = getattr(progress_bars, "disable_progress_bars", None)
+        if callable(disable_progress_bars):
+            disable_progress_bars()
+    return datasets_module
 
 
 def _import_huggingface_hub_module() -> Any:

@@ -23,6 +23,7 @@ from typing import (
 from citemesh._runtime import stderr_isatty
 from citemesh.core.choices import DEVICE_CHOICES as EMBEDDING_DEVICE_CHOICES
 from citemesh.data.model_profiles import EmbeddingModelProfile
+from citemesh.progress import progress_enabled
 
 from . import deps
 
@@ -127,12 +128,12 @@ def _suppress_expected_fa2_load_dtype_warning(*, enabled: bool) -> Iterator[None
 
 
 @contextmanager
-def _suppress_transformers_progress_for_non_tty() -> Iterator[None]:
-    """Temporarily hide Transformers progress bars when stderr is redirected.
+def _suppress_transformers_progress_when_hidden() -> Iterator[None]:
+    """Temporarily hide Transformers progress bars outside normal CLI output.
 
     :return Iterator[None]: Scoped model-loading output configuration.
     """
-    if stderr_isatty():
+    if stderr_isatty() and progress_enabled():
         yield
         return
 

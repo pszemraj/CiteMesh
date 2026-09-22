@@ -69,6 +69,9 @@ _REAL_DEP_CHECK_TESTS = {
 }
 
 
+pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
+
 @pytest.fixture(autouse=True)
 def _disable_embedding_optional_deps(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
@@ -740,6 +743,41 @@ def test_embedding_builder_requires_modern_torch(
         EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
 
+@pytest.mark.parametrize(
+    ("interactive", "progress_visible", "disable_calls"),
+    [(True, True, 0), (False, True, 1), (True, False, 1)],
+)
+def test_datasets_progress_policy_preserves_enabled_process_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    interactive: bool,
+    progress_visible: bool,
+    disable_calls: int,
+) -> None:
+    """Interactive CiteMesh runs must not re-enable externally disabled bars.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces optional datasets dependency.
+    :param bool interactive: Whether the output stream is interactive.
+    :param bool progress_visible: Whether CiteMesh may render progress.
+    :param int disable_calls: Expected quiet-mode datasets global toggle calls.
+    :return None: Verifies only quiet operation changes the datasets setting.
+    """
+    enable_progress_bars = MagicMock()
+    disable_progress_bars = MagicMock()
+    datasets_module = types.SimpleNamespace(
+        utils=types.SimpleNamespace(
+            enable_progress_bars=enable_progress_bars,
+            disable_progress_bars=disable_progress_bars,
+        )
+    )
+    monkeypatch.setattr(deps_module, "_import_optional", lambda *_args: datasets_module)
+    monkeypatch.setattr(deps_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(deps_module, "progress_enabled", lambda: progress_visible)
+
+    assert deps_module._import_datasets_module() is datasets_module
+    enable_progress_bars.assert_not_called()
+    assert disable_progress_bars.call_count == disable_calls
+
+
 def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -963,7 +1001,8 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         if record.levelno == logging.DEBUG
     ]
 
-    assert any("runtime: device=" in message for message in info_messages)
+    assert not any("runtime: device=" in message for message in info_messages)
+    assert any("runtime: device=" in message for message in debug_messages)
     assert not any(
         "Adds recommended retrieval-query, retrieval-document, and symmetric" in message
         for message in info_messages
@@ -1961,15 +2000,28 @@ def test_embedding_default_model_loads_with_fallback_chain(
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         builder._load_model()
 
     assert init_log["attempts"] == [DEFAULT_EMBEDDING_MODEL_NAME, fallback_model]
     assert init_log["model_name"] == fallback_model
-    log_messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "Using fallback embedding checkpoint:" in message for message in log_messages
-    )
+    fallback_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Requested embedding checkpoint")
+    ]
+    assert len(fallback_logs) == 1
+    assert fallback_logs[0].levelno == logging.WARNING
+    assert fallback_model in fallback_logs[0].getMessage()
+    failure_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith(
+            "Embedding checkpoint failures before fallback:"
+        )
+    ]
+    assert len(failure_logs) == 1
+    assert failure_logs[0].levelno == logging.DEBUG
 
 
 @pytest.mark.parametrize(
@@ -3774,6 +3826,38 @@ def test_corpus_metadata_keeps_first_source_doi(source_doi: str, expected: str) 
         {"id": "1706.03762", "doi": source_doi}, 0
     )
     assert metadata["doi"] == expected
+
+
+def test_cached_reference_metadata_resolves_only_unambiguous_aliases() -> None:
+    """DOI lookup should reuse one local row without guessing among duplicates.
+
+    :return None: Checks secondary-key lookup and ambiguity handling.
+    """
+    builder = object.__new__(EmbeddingGraphBuilder)
+    builder.embedding_cache = MagicMock()
+    builder.embedding_cache.get_paper_metadata_alias_candidates.return_value = {
+        "local-unique": {
+            "title": "Unique",
+            "arxiv_id": "1706.03762",
+            "doi": "10.1000/unique",
+        },
+        "local-ambiguous-a": {
+            "title": "Ambiguous A",
+            "doi": "10.1000/ambiguous",
+        },
+        "local-ambiguous-b": {
+            "title": "Ambiguous B",
+            "doi": "10.1000/ambiguous",
+        },
+    }
+
+    resolved = builder.cached_reference_metadata(
+        ["10.1000/UNIQUE", "10.1000/ambiguous"]
+    )
+
+    assert set(resolved) == {"10.1000/unique"}
+    assert resolved["10.1000/unique"].paper_id == "local-unique"
+    assert resolved["10.1000/unique"].is_local_corpus
 
 
 def test_fresh_hydration_resume_skips_metadata_backfill(
@@ -7993,7 +8077,7 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
 def test_embedding_candidate_search_logs_comparison_counts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Candidate search should log compared/rescored embedding counts."""
+    """Candidate search should debug-log compared/rescored embedding counts."""
 
     builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
     _pin_model_fingerprint(monkeypatch, builder)
@@ -8013,7 +8097,7 @@ def test_embedding_candidate_search_logs_comparison_counts(
     )
 
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         candidates = builder._select_candidates(
             np.asarray([1.0, 0.0], dtype=np.float32),
             use_streaming=False,
@@ -8064,18 +8148,20 @@ def test_embedding_citation_enrichment_logs_target_count(
     }
 
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         builder._update_citation_counts(papers)
 
     assert papers["paper-1"].citation_count == 77
     client.get_papers.assert_called_once_with(["paper-1"])
     client.get_paper.assert_not_called()
-    log_messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "Fetching citation counts from Semantic Scholar for up to 1 papers..."
-        in message
-        for message in log_messages
-    )
+    target_logs = [
+        record
+        for record in caplog.records
+        if "Fetching citation counts from Semantic Scholar for up to 1 papers..."
+        in record.getMessage()
+    ]
+    assert len(target_logs) == 1
+    assert target_logs[0].levelno == logging.DEBUG
 
 
 def test_embedding_citation_enrichment_skips_invalid_batch_rows(
@@ -8125,7 +8211,12 @@ def test_embedding_citation_enrichment_skips_invalid_batch_rows(
 
     assert papers["valid"].citation_count == 77
     assert papers["invalid"].citation_count == 2
-    assert "Skipping malformed batch paper for invalid." in caplog.text
+    assert "Paper metadata skipped 1 malformed records." in caplog.text
+    assert "Skipping malformed batch paper for invalid." not in caplog.text
+    assert (
+        len([record for record in caplog.records if record.levelno >= logging.WARNING])
+        == 1
+    )
 
 
 @pytest.mark.parametrize("seed_id", ["content:abc123", "arxiv_7", "local-source-42"])

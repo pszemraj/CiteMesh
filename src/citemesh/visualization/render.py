@@ -658,7 +658,7 @@ def compute_node_colors(
 
 def compute_layout(
     graph: nx.Graph,
-    iterations: int = 100,
+    iterations: int = VIZ_CONFIG.spring_iterations,
     layout_seed: int | None = None,
 ) -> dict[Hashable, np.ndarray]:
     """
@@ -931,7 +931,7 @@ def visualize_graph(
     graph: nx.Graph,
     seed_id: str,
     output_path: Path,
-    iterations: int = 100,
+    iterations: int = VIZ_CONFIG.spring_iterations,
     dpi: int = None,
     metadata: dict[str, Any] | None = None,
     theme_name: str = "dark",

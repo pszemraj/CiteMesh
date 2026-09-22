@@ -478,6 +478,97 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                 output[paper_id] = decoded
         return output
 
+    def get_paper_metadata_alias_candidates(
+        self, identifiers: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return cached rows matching a primary, arXiv, or DOI identifier.
+
+        Exact primary IDs win. For identifiers without a primary match, this
+        deliberately returns every secondary-key row; the strategy layer owns
+        ambiguity handling because one DOI can occur on multiple local records.
+
+        :param Sequence[str] identifiers: Canonical bibliography identifiers.
+        :return Dict[str, Dict[str, Any]]: Candidate metadata keyed by primary ID.
+        """
+        normalized = {
+            str(identifier).strip().lower()
+            for identifier in identifiers
+            if str(identifier).strip()
+        }
+        if not normalized or not path_exists(self.db_path):
+            return {}
+
+        arxiv_suffixes = {
+            identifier.split(":", 1)[1]
+            for identifier in normalized
+            if identifier.startswith("arxiv:")
+        }
+        lookup_values = sorted(normalized | arxiv_suffixes)
+        output: dict[str, dict[str, Any]] = {}
+        with self._locked_connection() as conn:
+            self._recover_pending_replacements_with_connection_locked(conn)
+            for row in self._query_paper_rows(
+                conn,
+                lookup_values,
+                lookup_column="paper_id",
+            ):
+                decoded = _decode_paper_row(row, parse_json_lists=True)
+                paper_id = str(decoded.pop("paper_id"))
+                decoded.pop("text_hash")
+                decoded.pop("row_idx")
+                output[paper_id] = decoded
+
+            def direct_output_aliases() -> set[str]:
+                """Return normalized primary aliases already resolved exactly."""
+                aliases = {paper_id.lower() for paper_id in output}
+                arxiv_aliases = {
+                    paper_id.split(":", 1)[1]
+                    for paper_id in aliases
+                    if paper_id.startswith("arxiv:")
+                }
+                return aliases | arxiv_aliases
+
+            direct_aliases = direct_output_aliases()
+            casefold_primary_values = [
+                value
+                for value in lookup_values
+                if value not in direct_aliases
+                and (
+                    value.startswith("arxiv:")
+                    or value in arxiv_suffixes
+                    or re.match(r"^10\.\d{4,9}/\S+$", value)
+                )
+            ]
+            for row in self._query_paper_rows(
+                conn,
+                casefold_primary_values,
+                lookup_column="paper_id",
+                case_insensitive=True,
+            ):
+                decoded = _decode_paper_row(row, parse_json_lists=True)
+                paper_id = str(decoded.pop("paper_id"))
+                decoded.pop("text_hash")
+                decoded.pop("row_idx")
+                output[paper_id] = decoded
+
+            direct_aliases = direct_output_aliases()
+            secondary_values = [
+                value for value in lookup_values if value not in direct_aliases
+            ]
+            for lookup_column in ("arxiv_id", "doi"):
+                for row in self._query_paper_rows(
+                    conn,
+                    secondary_values,
+                    lookup_column=lookup_column,
+                    case_insensitive=True,
+                ):
+                    decoded = _decode_paper_row(row, parse_json_lists=True)
+                    paper_id = str(decoded.pop("paper_id"))
+                    decoded.pop("text_hash")
+                    decoded.pop("row_idx")
+                    output[paper_id] = decoded
+        return output
+
     def prepare_corpus_identity_reconciliation(self) -> bool:
         """Prepare one source reconciliation for caches with positional-looking IDs.
 

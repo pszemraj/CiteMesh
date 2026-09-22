@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 
 from .choices import STORAGE_PRECISION_CHOICES
 
+DEFAULT_MAX_PAPERS = 40
+DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD = 0.2
+
 
 @dataclass
 class TemporalConfig:
@@ -122,6 +125,7 @@ class VisualizationConfig:
     edge_width_max: float = 1.5
 
     # Layout parameters
+    spring_iterations: int = 100
     layout_scale: float = 0.9
     layout_center: tuple[float, float] = (0.5, 0.5)
     perturbation_std: float = 0.02  # Random perturbation for organic look

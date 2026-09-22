@@ -23,11 +23,11 @@ pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.gi
 citemesh --help
 ```
 
-Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly exports), `recommended` (both), `all` (adds dev tooling). Omit the extra for the citation/recommendation-only CLI. Editable installs: [Contributing](CONTRIBUTING.md).
+Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly exports), `recommended` (both), `all` (adds dev tooling). Omit the extra for the citation/recommendation-only CLI. For an editable development checkout, run `pip install -e ".[all]"`.
 
 Python >= 3.10. For embedding dependencies and device requirements, see [Embedding Runtime](docs/reference/embedding-runtime.md#dependency-floor).
 
-For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#appendix-b-troubleshooting).
+For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#appendix-b-troubleshooting). When Semantic Scholar omits a seed's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
 
 ### Run one graph
 
@@ -54,7 +54,7 @@ Follow the pipeline in [How CiteMesh builds a graph](docs/guides/how-it-works.md
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues).
+Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues).
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/CiteMesh)
 

@@ -35,7 +35,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Information Analysis",
-    "Typing :: Typed",
 ]
 
 dependencies = [
@@ -65,6 +64,7 @@ embeddings = [
 recommended = ["citemesh[embeddings,viz]"]
 dev = [
     "citemesh[embeddings]",
+    "httpx>=0.27.0",
     "pytest>=8.0.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.9.0",
@@ -90,7 +90,7 @@ where = ["src"]
 include = ["citemesh*"]
 
 [tool.setuptools.package-data]
-citemesh = ["py.typed", "visualization/dashboard/assets/*"]
+citemesh = ["visualization/dashboard/assets/*"]
 
 [tool.setuptools_scm]
 version_file = "src/citemesh/_version.py"

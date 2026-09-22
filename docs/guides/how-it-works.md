@@ -1,6 +1,6 @@
 # How CiteMesh builds a graph
 
-A build resolves its seed, collects candidates, scores papers and edges, computes a layout, and exports the graph. The [strategy](strategies.md) determines candidate sources and scoring; the [CLI guide](cli.md#flag-reference) lists the controls.
+A build resolves its seed, collects candidates, scores papers and edges, computes a layout, and exports the graph. The [strategy](strategies.md) determines candidate sources and scoring; the [CLI guide](cli.md#option-reference) points to the current controls.
 
 ```text
   seed ID, or free text with --strategy embedding
@@ -24,6 +24,8 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 ## 2. Candidate acquisition
 
 S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. An embedding candidate pool allocates roughly a quarter to recommendations and a quarter to references, each capped at 100; citations receive the remainder. Hybrid's citation branch uses its own fetch budgets, while its semantic branch adds recommendations up to the smallest of 100, `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, and `--candidate-pool-size`.
+
+When S2 returns no usable seed references and the seed has an arXiv ID, the shared acquisition path can recover explicit arXiv IDs and DOIs from an available arXiv HTML bibliography. [CLI Usage](cli.md#missing-semantic-scholar-references) defines the fallback's resolution order and limits.
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 

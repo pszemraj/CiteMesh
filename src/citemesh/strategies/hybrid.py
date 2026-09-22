@@ -8,6 +8,7 @@ comprehensive paper discovery.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,7 @@ from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
     CandidateAcquisitionError,
+    CandidateSourceResult,
     CandidateSourceState,
     candidate_records_match,
     fetch_candidate_source,
@@ -42,6 +44,7 @@ from citemesh.strategies.candidates import (
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
+    select_recovered_references_by_score,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -490,6 +493,43 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             embeddings=embeddings_map,
         )
 
+    def _select_recovered_references_by_embedding(
+        self,
+        seed: Paper,
+        recovered: Sequence[Paper],
+        limit: int,
+    ) -> list[Paper]:
+        """Select fallback references by retrieval-space cosine similarity.
+
+        :param Paper seed: Seed paper encoded in retrieval-query space.
+        :param Sequence[Paper] recovered: References encoded as retrieval documents.
+        :param int limit: Maximum references to retain.
+        :return list[Paper]: Semantically ranked, capped reference records.
+        """
+        if len(recovered) <= limit:
+            return list(recovered)
+
+        candidates = {paper.paper_id: paper for paper in recovered}
+        seed_embedding = self._ensure_candidate_embeddings(seed, candidates)
+        assert seed_embedding is not None
+        assert self.embedding_builder is not None
+        query = l2_normalize_embeddings(seed_embedding)
+        embeddings = self.embedding_builder.retrieval_embeddings
+        return select_recovered_references_by_score(
+            recovered,
+            limit,
+            lambda paper: float(
+                np.clip(
+                    np.dot(
+                        query,
+                        l2_normalize_embeddings(embeddings[paper.paper_id]),
+                    ),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        )
+
     def _seed_relevance_score(
         self,
         seed_embedding: np.ndarray | None,
@@ -649,6 +689,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 validate_source_availability=False,
                 hydrate_references=False,
                 seed_paper=cached_corpus_seed,
+                reference_metadata_lookup=(
+                    (lambda ids: self.embedding_builder.cached_reference_metadata(ids))
+                    if corpus_prepared
+                    else None
+                ),
+                reference_selector=self._select_recovered_references_by_embedding,
             )
         else:
             citation_papers = self.citation_builder.collect_papers(seed_id)
@@ -723,25 +769,19 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         try:
             if self.semantic_source == "arxiv-corpus":
-                citation_source_results = self.citation_builder.candidate_source_results
-                if citation_source_results and all(
-                    result.state is CandidateSourceState.UNAVAILABLE
-                    for result in citation_source_results
-                ):
-                    details = "; ".join(
-                        f"{result.source}: {result.error or 'unavailable'}"
-                        for result in citation_source_results
-                    )
-                    logger.warning(
-                        "Continuing hybrid corpus acquisition for %s with partial "
-                        "Semantic Scholar evidence (%s).",
-                        seed_paper.paper_id,
-                        details,
-                    )
                 semantic_papers = self.embedding_builder.collect_papers(
                     seed_id,
                     seed_paper=seed_paper,
                     _corpus_prepared=corpus_prepared,
+                )
+                require_available_candidate_source(
+                    [
+                        *self.citation_builder.candidate_source_results,
+                        CandidateSourceResult(
+                            "arxiv_corpus", CandidateSourceState.COMPLETE
+                        ),
+                    ],
+                    context=f"hybrid corpus acquisition for {seed_paper.paper_id}",
                 )
             else:
                 # Candidate mode: the citation branch already covers references
@@ -822,7 +862,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if "citation" in tags:
                 self.seed_relations.setdefault(paper_id, "citation")
 
-        logger.info("Added %s semantic papers", added_semantic)
+        logger.debug("Added %s semantic papers", added_semantic)
 
         return papers
 
@@ -948,7 +988,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:
-            logger.info(
+            logger.debug(
                 "Graph complete: %s nodes, %s edges",
                 graph.number_of_nodes(),
                 graph.number_of_edges(),
@@ -959,12 +999,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             graph, max_edges, seed_id=actual_seed_id
         )
 
-        logger.info(
+        logger.debug(
             "Hybrid edge cap applied: %s -> %s edges",
             graph.number_of_edges(),
             filtered_graph.number_of_edges(),
         )
-        logger.info(
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),

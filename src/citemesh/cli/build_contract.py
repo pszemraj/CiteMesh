@@ -280,7 +280,7 @@ def _drop_ignored_corpus_config_defaults(context: _BuildContractContext) -> None
     source = (
         str(context.config_path) if context.config_path is not None else "config.toml"
     )
-    logger.info(
+    logger.debug(
         "Ignoring corpus-only config default(s) %s from %s because "
         "the effective semantic source is candidates; set "
         "defaults.semantic_source='arxiv-corpus' to apply them.",
@@ -591,23 +591,6 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             args.storage_precision,
             int(args.encode_batch_size),
         )
-    if args.force_rebuild_cache:
-        overwrite_reason = _normalized_cache_reason(
-            getattr(args, "cache_overwrite_reason", None)
-        )
-        if bool(args.overwrite_cache):
-            logger.warning(
-                "--force-rebuild-cache enabled with --overwrite-cache; existing embedding namespace payload will be cleared without prompt."
-            )
-        else:
-            logger.warning(
-                "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared after confirmation."
-            )
-        if overwrite_reason:
-            logger.warning(
-                "Cache overwrite rationale: %s",
-                overwrite_reason,
-            )
 
 
 def _build_strategy_graph(

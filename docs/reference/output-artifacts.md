@@ -90,6 +90,8 @@ A reduced node schema: `provenance`, `provenance_base`, `seed_relation`, `seed_r
 
 `dashboard.html` in collection mode, `<name>.dashboard.html` standalone: a tri-pane interface with an embedded Plotly graph, paper list, and detail panel. Collection-mode HTML embeds a package snapshot because browsers do not reliably let a `file://` page fetch adjacent local files; the package itself stays authoritative.
 
+At 1100px and below, the panes stack as graph, details, then paper list, and **List view** jumps directly to the list. Navigation, filters, legends, and long paper metadata reflow on narrow screens without expanding the document beyond the viewport.
+
 ![CiteMesh dashboard with Prior works active and a paper selected](../../assets/ui-prior-works.png)
 
 _**Prior works** active with a paper selected: the graph and paper list narrow to papers the seed references, plus undirected ones published no later than the seed, and the detail pane explains that paper's path to the seed._

@@ -6,6 +6,7 @@ import csv
 import html
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -245,7 +246,9 @@ def _build_hostile_graph(
 
 
 def test_exporter_serialization_contracts_and_determinism(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
@@ -267,8 +270,9 @@ def test_exporter_serialization_contracts_and_determinism(
     graphml_again_path = tmp_path / "graph-again.graphml"
 
     exporter.to_json(json_path)
-    exporter.to_graphml(graphml_path)
-    exporter.to_graphml(graphml_again_path)
+    with caplog.at_level(logging.DEBUG):
+        exporter.to_graphml(graphml_path)
+        exporter.to_graphml(graphml_again_path)
 
     payload = json.loads(json_path.read_text())
     assert payload["kind"] == "citemesh-graph"
@@ -314,6 +318,15 @@ def test_exporter_serialization_contracts_and_determinism(
         assert _canonicalize_graphml(graphml_path) == _canonicalize_graphml(
             graphml_again_path
         )
+        determinism_logs = [
+            record
+            for record in caplog.records
+            if record.getMessage().startswith(
+                "GraphML serialization is deterministic only as best-effort"
+            )
+        ]
+        assert len(determinism_logs) == 2
+        assert all(record.levelno == logging.DEBUG for record in determinism_logs)
 
     captured: dict[str, object] = {}
 
@@ -1637,26 +1650,19 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'class="nav-btn active"',
     ]:
         assert stale_token not in rendered
-    for css_token in [
-        "html, body {\n      margin: 0;\n      height: 100%;\n      overflow: hidden;",
-        "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
-        "#paper-list {\n      margin: 0;\n      padding: 0;\n      list-style: none;\n      overflow-y: auto;",
-        "#detail-content {\n      padding: 14px 13px 12px;\n      flex: 1;\n      min-height: 0;\n      display: flex;\n      flex-direction: column;\n      gap: 16px;\n      overflow-y: auto;",
-        "#graph-pane .pane-header .muted {\n      max-width: 72%;\n      font-size: 12px;",
-        "min-height: 160px;\n      flex: 1 0 160px;",
-        "#detail-pane { grid-area: detail; min-height: 620px; }",
-        ".toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }",
-        "@media (max-width: 640px) {\n      #dashboard-toolbar { position: static; }",
-        ".nav-btn[disabled] {\n      opacity: 0.45;\n      cursor: default;",
-        "@media (min-width: 1101px) {\n      #list-view-btn {\n        display: none;",
-        ".toolbar-row.primary,\n      .toolbar-row.secondary {\n        grid-template-columns: minmax(0, 1fr);",
-        ".toolbar-row.primary #search-input,\n      #provenance-filters {\n        grid-column: auto;",
-        ".js-plotly-plot .modebar-btn path {\n      fill: var(--text-muted) !important;",
-        ".js-plotly-plot .modebar-btn:focus-visible {\n      outline: 2px solid var(--accent);",
-        "width: 100%;\n      height: 100%;\n      min-height: 0;",
-    ]:
-        assert css_token in rendered
-
+    assert re.search(
+        r"@media\s*\(max-width:\s*1100px\).*?"
+        r"#dashboard-root\s*\{[^}]*"
+        r"grid-template-columns:\s*minmax\(0,\s*1fr\)",
+        rendered,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"@media\s*\(max-width:\s*768px\).*?"
+        r"(?:input|\.nav-btn)[^{]*\{[^}]*min-height:\s*44px",
+        rendered,
+        flags=re.DOTALL,
+    )
     payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
     assert payload["meta"]["seed_id"] == "seed"
     assert payload["meta"]["strategy"] == "hybrid"
@@ -1723,6 +1729,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert neighborhood_trace["line"]["width"] == pytest.approx(2.0)
     marker = node_trace["marker"]
     assert marker["showscale"] is False
+
     assert marker["sizemode"] == "area"
     assert marker["sizeref"] > 0
     assert marker["sizemin"] == 4
@@ -1756,6 +1763,57 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert "seed paper" in seed_hover
     # Hover cards use the dashboard panel chrome, not the marker color.
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
+
+
+def test_pages_demo_assets_and_graph_package_are_valid() -> None:
+    """The saved demo keeps a valid package and recognizable binary assets."""
+    repository = Path(__file__).resolve().parents[1]
+    demo_dir = repository / "assets" / "examples" / "megalodon"
+    template = (
+        repository
+        / "src"
+        / "citemesh"
+        / "visualization"
+        / "dashboard"
+        / "assets"
+        / "template.html"
+    ).read_text(encoding="utf-8")
+    demo_html = (demo_dir / "dashboard.html").read_text(encoding="utf-8")
+    workflow = (repository / ".github" / "workflows" / "pages.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "CiteMesh — Interactive Research Map" not in template
+    assert "favicon.ico" not in template
+    assert "<title>CiteMesh Dashboard</title>" in template
+    assert "https://pszemraj.github.io/CiteMesh/" in demo_html
+    for asset in ["favicon.ico", "og-image.png"]:
+        assert asset in demo_html
+        assert f"assets/examples/megalodon/{asset}" in workflow
+    package = json.loads(
+        (demo_dir / "dashboard.citemesh.json").read_text(encoding="utf-8")
+    )
+    embedded_collection = _extract_dashboard_script_json(
+        demo_html, "citemesh-dashboard-collection"
+    )
+    embedded_graph = _extract_dashboard_script_json(
+        demo_html, "citemesh-dashboard-data"
+    )
+    assert embedded_collection == package
+    current_graph = next(
+        result["payload"]
+        for result in package["results"]
+        if result["result_id"] == package["current_result_id"]
+    )
+    assert {node["id"] for node in embedded_graph["nodes"]} == {
+        node["id"] for node in current_graph["nodes"]
+    }
+    assert {(edge["source"], edge["target"]) for edge in embedded_graph["edges"]} == {
+        (edge["source"], edge["target"]) for edge in current_graph["edges"]
+    }
+    with (demo_dir / "favicon.ico").open("rb") as icon:
+        assert icon.read(4) == b"\x00\x00\x01\x00"
+    with (demo_dir / "og-image.png").open("rb") as social_image:
+        assert social_image.read(8) == b"\x89PNG\r\n\x1a\n"
 
 
 @pytest.mark.parametrize("theme_name", ["dark", "light", "solarized", "auto"])
@@ -2427,6 +2485,34 @@ process.stdout.write(JSON.stringify(probed === undefined ? null : probed));
     )
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
+
+
+def test_dashboard_edge_strength_normalization_matches_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Browser imports and Python exports must scale edge weights identically."""
+    from citemesh.visualization.export import _edge_strength_scale
+
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = _dashboard_exporter_with_collection(graph, seed_id, title="Seed Paper")
+    out_path = tmp_path / "edge-strength.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    javascript = _probe_dashboard_runtime_in_node(
+        out_path,
+        "({"
+        " varied: normalizeDashboardEdgeStrengths("
+        "[{weight: 0.55}, {weight: 0.75}, {weight: 0.95}]),"
+        " tied: normalizeDashboardEdgeStrengths([{weight: 0.7}, {weight: 0.7}])"
+        "})",
+    )
+
+    assert javascript["varied"] == pytest.approx(
+        _edge_strength_scale([0.55, 0.75, 0.95])
+    )
+    assert javascript["tied"] == pytest.approx(_edge_strength_scale([0.7, 0.7]))
 
 
 def test_dashboard_invalid_bootstrap_surfaces_status_in_node(

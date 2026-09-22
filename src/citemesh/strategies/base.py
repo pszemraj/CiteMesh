@@ -18,10 +18,11 @@ from typing import (
 import networkx as nx
 import numpy as np
 
-from citemesh.core import TEMPORAL_CONFIG, Paper
+from citemesh.core import DEFAULT_MAX_PAPERS, TEMPORAL_CONFIG, Paper
 from citemesh.core.values import coerce_float
 
 logger = logging.getLogger(__name__)
+RELATIONSHIP_DEGREE_CAP = 3
 
 
 def validate_embedding_vectors(
@@ -188,7 +189,7 @@ class GraphBuilderStrategy(ABC):
     strategy_name: ClassVar[str] = ""
     """Canonical strategy token persisted into graph-level metadata."""
 
-    def __init__(self, max_papers: int = 40):
+    def __init__(self, max_papers: int = DEFAULT_MAX_PAPERS):
         """
         Initialize the graph builder.
 
@@ -297,7 +298,7 @@ class GraphBuilderStrategy(ABC):
             logger.info(summary)
         else:
             logger.info("Collected %s papers", len(self.papers))
-        logger.info("Seed paper: %s", seed_paper.title)
+        logger.debug("Seed paper: %s", seed_paper.title)
         self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes
@@ -338,7 +339,7 @@ class GraphBuilderStrategy(ABC):
                     graph.add_edge(p1.paper_id, p2.paper_id, weight=similarity)
                     edges_created += 1
 
-        logger.info(
+        logger.debug(
             "Graph constructed: %s nodes, %s edges",
             graph.number_of_nodes(),
             edges_created,

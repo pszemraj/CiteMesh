@@ -319,7 +319,7 @@ def _convert_api_paper(api_paper: Any) -> Paper | None:
             category_keys=("fields", "fieldsOfStudy"),
         )
     except Exception as exc:
-        logger.warning("Failed to convert API paper: %s", exc)
+        logger.debug("Failed to convert API paper: %s", exc)
         return None
 
 

@@ -21,4 +21,4 @@
 - [Architecture](internals/architecture.md)
 - [Embedding cache](internals/embedding-cache.md)
 
-[Installation](../README.md#quick-start), [contributing](../CONTRIBUTING.md), and [release notes](https://github.com/pszemraj/CiteMesh/releases).
+[Installation](../README.md#quick-start) and [release notes](https://github.com/pszemraj/CiteMesh/releases).

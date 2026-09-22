@@ -3420,6 +3420,22 @@ def test_positional_corpus_identity_reconciliation_preserves_physical_rows(
     selected = cache.get_paper_metadata_batch(["arxiv_0", "missing"])
     assert set(selected) == {"arxiv_0"}
     assert selected["arxiv_0"]["authors"] == ["Alice"]
+    alias_candidates = cache.get_paper_metadata_alias_candidates(["10.1/FIRST"])
+    assert set(alias_candidates) == {"arxiv_0", "arxiv_1"}
+    assert alias_candidates["arxiv_0"]["doi"] == "10.1/first"
+    with cache._connect_db() as conn:
+        nocase_indexed_columns = set()
+        for index in conn.execute("PRAGMA index_list('papers')"):
+            if index[4]:
+                continue
+            key_columns = [
+                column
+                for column in conn.execute(f"PRAGMA index_xinfo('{index[1]}')")
+                if column[5]
+            ]
+            if key_columns and str(key_columns[0][4]).upper() == "NOCASE":
+                nocase_indexed_columns.add(key_columns[0][2])
+    assert {"paper_id", "arxiv_id", "doi"} <= nocase_indexed_columns
 
     # A real source ID can happen to resemble the old generated convention;
     # aliases continue to cover it without changing that physical identity.
@@ -3429,6 +3445,52 @@ def test_positional_corpus_identity_reconciliation_preserves_physical_rows(
         "arxiv_2",
         "arxiv_99",
     }
+
+
+def test_alias_candidate_lookup_preserves_external_primary_ids(tmp_path: Path) -> None:
+    """Exact external primary IDs win without corrupting alias expansion.
+
+    :param Path tmp_path: Isolated cache namespace.
+    :return None: Checks arXiv expansion and case-insensitive DOI precedence.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="exact-arxiv-primary",
+        storage_precision="float32",
+    )
+    cache.get_embeddings(
+        {
+            "arxiv:1706.03762": {
+                "title": "Attention",
+                "abstract": "Abstract",
+                "arxiv_id": "1706.03762",
+            },
+            "10.1000/UPPER": {
+                "title": "Primary DOI",
+                "abstract": "Abstract",
+                "doi": "10.1000/UPPER",
+            },
+            "duplicate": {
+                "title": "Duplicate DOI",
+                "abstract": "Abstract",
+                "doi": "10.1000/upper",
+            },
+        },
+        LookupEncodeModel(
+            {
+                "Attention. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+                "Primary DOI. Abstract": np.asarray([0.0, 1.0], dtype=np.float32),
+                "Duplicate DOI. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+            }
+        ),
+        show_progress=False,
+    )
+
+    arxiv_matches = cache.get_paper_metadata_alias_candidates(["arxiv:1706.03762"])
+    doi_matches = cache.get_paper_metadata_alias_candidates(["10.1000/upper"])
+
+    assert set(arxiv_matches) == {"arxiv:1706.03762"}
+    assert set(doi_matches) == {"10.1000/UPPER"}
 
 
 def test_identity_preparation_ignores_nonpositional_corpus_ids(tmp_path: Path) -> None:

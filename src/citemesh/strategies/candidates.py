@@ -27,8 +27,10 @@ from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     is_local_corpus_paper_id,
     normalize_paper_id,
+    paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
+from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -39,6 +41,7 @@ DEFAULT_CANDIDATE_POOL_SIZE = 400
 QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
+ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
 
 
 class CandidateAcquisitionError(RuntimeError):
@@ -249,15 +252,365 @@ def fetch_candidate_source(
     )
 
 
+@dataclass
+class _ReferenceAliasResolver:
+    """Request-local bibliography aliases and cross-identifier bindings."""
+
+    aliases: dict[str, Paper] = field(default_factory=dict)
+
+    def remember(self, records: Sequence[Paper]) -> None:
+        """Index resolved records by every explicit identifier alias.
+
+        :param Sequence[Paper] records: Resolved metadata.
+        :return None: Updates the request-local alias map.
+        """
+        for paper in records:
+            for alias in paper_identifier_aliases(
+                paper_id=paper.paper_id, arxiv_id=paper.arxiv_id, doi=paper.doi
+            ):
+                self.aliases[normalize_paper_id(alias).lower()] = paper
+
+    def resolve(self, entry: Sequence[str]) -> Paper | None:
+        """Return the first paper bound to an entry's explicit identifiers.
+
+        :param Sequence[str] entry: Identifier spellings from one bibliography row.
+        :return Paper | None: Resolved record, when any spelling is known.
+        """
+        return next(
+            (self.aliases[value] for value in entry if value in self.aliases), None
+        )
+
+    def bind_entries(self, entries: Sequence[Sequence[str]]) -> None:
+        """Bind every spelling in a resolved bibliography entry to one record.
+
+        :param Sequence[Sequence[str]] entries: Bibliography identifier groups.
+        :return None: Adds aliases without replacing earlier evidence.
+        """
+        for entry in entries:
+            paper = self.resolve(entry)
+            if paper is not None:
+                for value in entry:
+                    self.aliases.setdefault(value, paper)
+
+
+def _enrich_local_reference_records(
+    client: SemanticScholarClient,
+    recovered: Sequence[Paper],
+) -> None:
+    """Merge available Semantic Scholar metadata onto local-corpus references.
+
+    :param SemanticScholarClient client: Existing metadata client.
+    :param Sequence[Paper] recovered: Materialized bibliography records.
+    :return None: Enriches local records in place when matching metadata exists.
+    """
+    from citemesh.services import (
+        SemanticScholarRequestError,
+        SemanticScholarUnavailableError,
+    )
+
+    local_targets = [
+        (paper, lookup_id)
+        for paper in recovered
+        if paper.is_local_corpus
+        and (lookup_id := provider_lookup_identifier(paper.paper_id, paper)) is not None
+    ]
+    if not local_targets:
+        return
+
+    lookup_ids = [lookup_id for _paper, lookup_id in local_targets]
+    if client.refresh_paper_cache:
+        try:
+            s2_records = client.get_papers(lookup_ids, raise_on_unavailable=True)
+        except (
+            SemanticScholarRequestError,
+            SemanticScholarUnavailableError,
+        ) as exc:
+            logger.debug(
+                "S2 metadata enrichment unavailable during arXiv recovery: %s",
+                exc,
+            )
+            s2_records = {}
+    else:
+        # A local record is already sufficient recovery. Avoid spending the shared
+        # retry budget unless the caller explicitly requested refresh.
+        s2_records = client.get_cached_papers(lookup_ids)
+    for local_paper, lookup_id in local_targets:
+        s2_paper = s2_records.get(normalize_paper_id(lookup_id))
+        if s2_paper is None:
+            s2_paper = next(
+                (
+                    candidate
+                    for candidate in s2_records.values()
+                    if candidate_records_match(local_paper, candidate)
+                ),
+                None,
+            )
+        if s2_paper is not None:
+            merge_paper_metadata(local_paper, s2_paper)
+
+
+def select_recovered_references_by_score(
+    recovered: Sequence[Paper],
+    limit: int,
+    relevance_score: Callable[[Paper], float],
+) -> list[Paper]:
+    """Cap recovered references by relevance, impact, then source order.
+
+    :param Sequence[Paper] recovered: Materialized bibliography records.
+    :param int limit: Maximum references to retain.
+    :param Callable relevance_score: Strategy-appropriate relevance score.
+    :return list[Paper]: Ranked, capped reference records.
+    """
+    ranked = sorted(
+        enumerate(recovered),
+        key=lambda item: (
+            -relevance_score(item[1]),
+            -max(item[1].citation_count, 0),
+            item[0],
+        ),
+    )
+    return [paper for _position, paper in ranked[:limit]]
+
+
+def _select_recovered_references_by_text(
+    seed: Paper,
+    recovered: Sequence[Paper],
+    limit: int,
+) -> list[Paper]:
+    """Select fallback references by relevance instead of bibliography order.
+
+    Title/abstract similarity to the seed is the primary signal. Citation count
+    breaks topical ties, and original bibliography order is the stable fallback
+    when metadata cannot distinguish records.
+
+    :param Paper seed: Seed paper used as the relevance query.
+    :param Sequence[Paper] recovered: Materialized bibliography records.
+    :param int limit: Maximum references to retain.
+    :return list[Paper]: Ranked, capped reference records.
+    """
+    if len(recovered) <= limit:
+        return list(recovered)
+
+    index = AbstractSimilarityIndex()
+    index.build({seed.paper_id: seed, **{paper.paper_id: paper for paper in recovered}})
+    return select_recovered_references_by_score(
+        recovered,
+        limit,
+        lambda paper: index.similarity(seed.paper_id, paper.paper_id),
+    )
+
+
+def fetch_seed_references(
+    client: SemanticScholarClient,
+    seed: Paper,
+    limit: int,
+    *,
+    seed_identifier: str | None = None,
+    local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
+    reference_selector: ReferenceSelector | None = None,
+) -> tuple[CandidateSourceResult, ...]:
+    """Recover an empty seed-reference source using its arXiv bibliography.
+
+    :param SemanticScholarClient client: Existing metadata and discovery client.
+    :param Paper seed: Resolved seed, supplying external identifiers.
+    :param int limit: Maximum usable references; zero disables discovery.
+    :param str | None seed_identifier: Original input, retaining arXiv version.
+    :param Callable | None local_lookup: Read unambiguous requested aliases from an
+        already prepared corpus, keyed by normalized request identifier.
+    :param Callable | None reference_selector: Strategy-specific selector applied
+        after the complete fallback bibliography is materialized.
+    :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
+    """
+    from citemesh.services import (
+        SemanticScholarRequestError,
+        SemanticScholarUnavailableError,
+    )
+    from citemesh.services.arxiv import ArxivClient, arxiv_identifier
+
+    if limit <= 0:
+        return ()
+    provider_id = provider_lookup_identifier(seed.paper_id, seed)
+    original = (
+        fetch_candidate_source(
+            "references",
+            lambda: client.get_paper_references(
+                provider_id, limit=limit, raise_on_unavailable=True
+            ),
+        )
+        if provider_id is not None
+        else CandidateSourceResult("references", CandidateSourceState.UNAVAILABLE)
+    )
+    if original.papers:
+        return (original,)
+    identifier = next(
+        (
+            value
+            for raw in (seed_identifier or "", seed.arxiv_id, seed.paper_id)
+            if (value := arxiv_identifier(raw))
+        ),
+        None,
+    )
+    if identifier is None:
+        return (original,) if provider_id is not None else ()
+    arxiv = ArxivClient()
+    entries = arxiv.get_bibliography(identifier)
+    if entries is None:
+        return (
+            original,
+            CandidateSourceResult(
+                "arxiv_references",
+                CandidateSourceState.UNAVAILABLE,
+                error="No usable arXiv HTML",
+            ),
+        )
+
+    # Alias maps are request-local. Partial bibliography evidence is never saved
+    # in Semantic Scholar's complete-reference cache.
+    resolver = _ReferenceAliasResolver()
+    recovered: list[Paper] = []
+    attempted: set[str] = set()
+    metadata_requested = False
+    metadata_completed = False
+
+    # Resolve the full bibliography in bounded batches before applying the cap.
+    # Otherwise HTML order (often alphabetical) chooses survivors before useful
+    # metadata is available for ranking.
+    for offset in range(0, len(entries), 50):
+        batch = entries[offset : offset + 50]
+        ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
+
+        resolver.bind_entries(batch)
+        missing = [
+            value
+            for value in ids
+            if value not in resolver.aliases and value not in attempted
+        ]
+        if local_lookup is not None:
+            local_records = local_lookup(missing)
+            for requested_id, paper in local_records.items():
+                normalized_id = normalize_paper_id(requested_id).lower()
+                if normalized_id in missing:
+                    resolver.aliases[normalized_id] = paper
+            resolver.bind_entries(batch)
+            missing = [value for value in missing if value not in resolver.aliases]
+        if missing and not client.refresh_paper_cache:
+            cached_records = client.get_cached_papers(missing)
+            resolver.remember(list(cached_records.values()))
+            resolver.aliases.update(cached_records)
+        resolver.bind_entries(batch)
+        missing = [value for value in missing if value not in resolver.aliases]
+        if missing:
+            metadata_requested = True
+            try:
+                records = client.get_papers(missing, raise_on_unavailable=True)
+            except (
+                SemanticScholarRequestError,
+                SemanticScholarUnavailableError,
+            ) as exc:
+                logger.debug("S2 metadata unavailable during arXiv recovery: %s", exc)
+                records = {}
+            else:
+                metadata_completed = True
+            resolver.remember(list(records.values()))
+            for requested_id, paper in records.items():
+                resolver.aliases[normalize_paper_id(requested_id).lower()] = paper
+            resolver.bind_entries(batch)
+            missing_arxiv = [
+                value
+                for value in missing
+                if value.startswith("arxiv:") and value not in resolver.aliases
+            ]
+            if missing_arxiv:
+                arxiv_records = arxiv.get_papers(missing_arxiv)
+                if arxiv_records is not None:
+                    metadata_completed = True
+                    resolver.remember(list(arxiv_records.values()))
+            resolver.bind_entries(batch)
+        attempted.update(ids)
+        for entry in batch:
+            paper = resolver.resolve(entry)
+            if (
+                paper is None
+                or paper.paper_id == seed.paper_id
+                or candidate_records_match(seed, paper)
+            ):
+                continue
+            existing = next(
+                (
+                    item
+                    for item in recovered
+                    if item.paper_id == paper.paper_id
+                    or candidate_records_match(item, paper)
+                ),
+                None,
+            )
+            if existing is not None:
+                merge_paper_metadata(existing, paper)
+            else:
+                recovered.append(paper)
+    identifiable_entries = len({frozenset(entry) for entry in entries if entry})
+    materialized_count = len(recovered)
+    _enrich_local_reference_records(client, recovered)
+    selector = reference_selector or _select_recovered_references_by_text
+    recovered = selector(seed, recovered, limit)
+    logger.debug(
+        "arXiv bibliography extraction: entries=%d, identifiable=%d, "
+        "materialized=%d, selected=%d, reference_limit=%d.",
+        len(entries),
+        identifiable_entries,
+        materialized_count,
+        len(recovered),
+        limit,
+    )
+    if recovered:
+        if identifiable_entries > len(recovered) and len(recovered) >= limit:
+            logger.info(
+                "Recovered %d reference identifiers from the arXiv bibliography; "
+                "ranked %d resolved references and keeping %d "
+                "(reference limit: %d).",
+                identifiable_entries,
+                materialized_count,
+                len(recovered),
+                limit,
+            )
+        else:
+            logger.info(
+                "Recovered %d reference%s from the arXiv bibliography.",
+                len(recovered),
+                "" if len(recovered) == 1 else "s",
+            )
+    # COMPLETE describes an evaluated source, not exhaustive bibliography coverage.
+    if recovered:
+        state = CandidateSourceState.COMPLETE
+        error = None
+    elif metadata_requested and not metadata_completed:
+        state = CandidateSourceState.UNAVAILABLE
+        error = "Reference metadata unavailable during arXiv recovery"
+    else:
+        state = CandidateSourceState.EMPTY
+        error = None
+    return (
+        original,
+        CandidateSourceResult(
+            "arxiv_references",
+            state,
+            papers=tuple(recovered),
+            error=error,
+        ),
+    )
+
+
 def require_available_candidate_source(
     results: Sequence[CandidateSourceResult],
     *,
     context: str,
 ) -> None:
-    """Require at least one attempted source to have completed, even if empty.
+    """Require an available candidate source, which may be evaluated-empty.
 
     Partial source outages remain usable but are surfaced once in logs. When every
-    attempted source is unavailable, callers must not publish a normal graph.
+    requested source is unavailable, callers must not publish a normal graph. An
+    empty arXiv fallback has not recovered a candidate source, so it cannot mask
+    unavailable Semantic Scholar discovery.
 
     :param Sequence[CandidateSourceResult] results: Attempted source results.
     :param str context: Human-readable acquisition context for diagnostics.
@@ -266,10 +619,21 @@ def require_available_candidate_source(
     """
     if not results:
         return
+    recovered_references = any(
+        result.source == "arxiv_references" and result.papers for result in results
+    )
+    candidate_source_available = any(
+        result.state is not CandidateSourceState.UNAVAILABLE
+        and (result.source != "arxiv_references" or result.papers)
+        for result in results
+    )
     unavailable = [
-        result for result in results if result.state is CandidateSourceState.UNAVAILABLE
+        result
+        for result in results
+        if result.state is CandidateSourceState.UNAVAILABLE
+        and not (recovered_references and result.source == "references")
     ]
-    if len(unavailable) == len(results):
+    if not candidate_source_available:
         sources = ", ".join(result.source for result in unavailable)
         details = "; ".join(
             f"{result.source}: {result.error or 'unavailable'}"
@@ -284,10 +648,10 @@ def require_available_candidate_source(
             f"{result.source}: {result.error or 'unavailable'}"
             for result in unavailable
         )
+        logger.debug("Unavailable candidate-source details: %s", details)
         logger.warning(
-            "Continuing %s with partial Semantic Scholar evidence (%s).",
-            context,
-            details,
+            "Continuing with unavailable candidate sources: %s.",
+            ", ".join(result.source for result in unavailable),
         )
 
 
@@ -454,6 +818,8 @@ def fetch_candidate_pool(
     max_references: int = 0,
     max_citations: int = 0,
     max_recommendations: int = 0,
+    seed_identifier: str | None = None,
+    reference_selector: ReferenceSelector | None = None,
 ) -> CandidatePool:
     """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
 
@@ -465,6 +831,9 @@ def fetch_candidate_pool(
     :param int max_references: Maximum seed references to fetch (0 disables).
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param Callable | None reference_selector: Strategy-specific recovered-reference
+        selector.
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     with client.candidate_operation_scope():
@@ -474,6 +843,8 @@ def fetch_candidate_pool(
             max_references=max_references,
             max_citations=max_citations,
             max_recommendations=max_recommendations,
+            seed_identifier=seed_identifier,
+            reference_selector=reference_selector,
         )
 
 
@@ -484,6 +855,8 @@ def _fetch_candidate_pool(
     max_references: int = 0,
     max_citations: int = 0,
     max_recommendations: int = 0,
+    seed_identifier: str | None = None,
+    reference_selector: ReferenceSelector | None = None,
 ) -> CandidatePool:
     """Fetch candidates while an outer operation scope is active.
 
@@ -492,6 +865,9 @@ def _fetch_candidate_pool(
     :param int max_references: Maximum seed references to fetch (0 disables).
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param Callable | None reference_selector: Strategy-specific recovered-reference
+        selector.
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     pool = CandidatePool(seed=seed_paper)
@@ -526,17 +902,17 @@ def _fetch_candidate_pool(
     else:
         anchor_ids = [seed_id]
         if max_references > 0:
-            reference_result = fetch_candidate_source(
-                "references",
-                lambda: client.get_paper_references(
-                    seed_id,
-                    limit=max_references,
-                    raise_on_unavailable=True,
-                ),
+            reference_results = fetch_seed_references(
+                client,
+                seed_paper,
+                max_references,
+                seed_identifier=seed_identifier,
+                reference_selector=reference_selector,
             )
-            source_results.append(reference_result)
-            for paper in reference_result.papers:
-                pool.add(paper, source="reference", relation="referenced_by_seed")
+            source_results.extend(reference_results)
+            for result in reference_results:
+                for paper in result.papers:
+                    pool.add(paper, source="reference", relation="referenced_by_seed")
         if max_citations > 0:
             citation_result = fetch_candidate_source(
                 "citations",

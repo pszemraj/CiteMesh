@@ -36,6 +36,8 @@ from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 from tests._helpers import disable_embedding_dep_checks
 
+pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
 
 @pytest.fixture(autouse=True)
 def _disable_embedding_optional_deps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,7 +396,10 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     assert set(papers) == {"seed", "first", "second"}
     client.get_reference_ids.assert_called_once_with("first", force_refresh=False)
     assert len(caplog.records) == 1
-    assert "without further reference hydration" in caplog.text
+    assert (
+        "Reference hydration unavailable; continuing with available reference data."
+        in caplog.text
+    )
     client.get_reference_ids.reset_mock(side_effect=True)
     client.get_reference_ids.return_value = ["restored"]
 
@@ -1053,15 +1058,13 @@ def test_citation_collect_populates_reference_cache_and_summary(
     assert set(papers) == {"seed", "ref1", "cit1"}
     assert papers["ref1"].references == ["ref1-ref"]
     assert papers["cit1"].references == ["cit1-ref"]
-    assert (
-        builder.get_collection_summary()
-        == "Collected 3 papers (3 with reference lists)"
-    )
+    assert builder.get_collection_summary() == "Collected 3 papers"
     assert client.get_reference_ids.call_args_list == [
         call("ref1", force_refresh=False),
         call("cit1", force_refresh=False),
     ]
-    assert "Hydrating reference lists for 3 papers..." in caplog.text
+    assert "Hydrating reference lists" not in caplog.text
+    assert "Collecting related papers" in caplog.text
 
 
 def test_citation_reference_hydration_reports_interactive_progress() -> None:
@@ -1080,7 +1083,7 @@ def test_citation_reference_hydration_reports_interactive_progress() -> None:
     builder = CitationGraphBuilder(fetch_references=True, client=client)
 
     with (
-        patch("citemesh.strategies.citation.stderr_isatty", return_value=True),
+        patch("citemesh.strategies.citation.progress_enabled", return_value=True),
         patch("citemesh.strategies.citation.progress_iterator", progress),
     ):
         builder.hydrate_collected_references(papers, seed)
@@ -1783,7 +1786,10 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
         semantic_candidate.paper_id,
     }
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
-    assert "Reference IDs unavailable for related paper seed" in caplog.text
+    assert (
+        "Reference hydration unavailable; continuing with available reference data."
+        in caplog.text
+    )
 
 
 def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
@@ -1964,8 +1970,8 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
     client.get_recommended_papers.assert_not_called()
     assert (
-        "Continuing hybrid corpus acquisition for seed with partial Semantic Scholar "
-        "evidence (references: offline; citations: offline)." in caplog.text
+        "Continuing with unavailable candidate sources: references, citations."
+        in caplog.text
     )
 
 
@@ -2246,6 +2252,91 @@ def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() 
 
     graph_score = builder.compute_similarity(seed, candidate)
     assert graph_score == 0.0
+
+
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+def test_embedding_strategies_rank_recovered_references_by_retrieval_cosine(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    """Embedding-enabled recovery must not fall back to lexical ranking.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces inference with fixed vectors.
+    :param str strategy: Embedding-enabled strategy under test.
+    :return None: Checks retrieval cosine wins over order and citation count.
+    """
+    seed = _seed_paper("seed")
+    early = _paper("early")
+    early.citation_count = 100
+    relevant = _paper("relevant")
+    relevant.citation_count = 0
+    query = np.asarray([1.0, 0.0], dtype=np.float32)
+    embeddings = {
+        early.paper_id: np.asarray([0.0, 1.0], dtype=np.float32),
+        relevant.paper_id: np.asarray([1.0, 0.0], dtype=np.float32),
+    }
+
+    if strategy == "embedding":
+        builder = EmbeddingGraphBuilder(
+            max_papers=2,
+            semantic_source="candidates",
+            client=MagicMock(),
+        )
+        builder.retrieval_embeddings[seed.paper_id] = query
+        monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
+        selected = builder._select_recovered_references_by_embedding(
+            seed, [early, relevant], 1
+        )
+    else:
+        builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
+        assert builder.embedding_builder is not None
+        builder.embedding_builder.retrieval_embeddings = {
+            seed.paper_id: query,
+            **embeddings,
+        }
+        monkeypatch.setattr(
+            builder,
+            "_ensure_candidate_embeddings",
+            MagicMock(return_value=query),
+        )
+        selected = builder._select_recovered_references_by_embedding(
+            seed, [early, relevant], 1
+        )
+
+    assert selected == [relevant]
+
+
+def test_embedding_candidate_pool_passes_retrieval_reference_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate acquisition must delegate fallback selection to embeddings."""
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="candidates",
+        client=MagicMock(),
+    )
+    seed = _seed_paper("seed")
+    candidate = _paper("candidate")
+    pool = CandidatePool(seed=seed)
+    pool.add(candidate, source="reference", relation="referenced_by_seed")
+    fetch = MagicMock(return_value=pool)
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding.builder.fetch_candidate_pool", fetch
+    )
+    monkeypatch.setattr(
+        builder,
+        "embed_papers",
+        MagicMock(
+            return_value={candidate.paper_id: np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
+    )
+
+    builder._select_candidates_from_pool(np.asarray([1.0, 0.0], dtype=np.float32), seed)
+
+    assert (
+        fetch.call_args.kwargs["reference_selector"]
+        == builder._select_recovered_references_by_embedding
+    )
 
 
 def test_hybrid_max_citation_count_receives_full_rerank_weight(
@@ -2593,6 +2684,10 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     assert builder.paper_sources["o1"] == "both"
     assert builder.paper_sources["s1"] == "semantic"
     assert "s2" not in papers
+    assert (
+        builder.citation_builder.collect_papers.call_args.kwargs["reference_selector"]
+        == builder._select_recovered_references_by_embedding
+    )
 
 
 def test_hybrid_collection_dedupes_semantic_seed_aliases(
@@ -2717,7 +2812,7 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
         lambda self, seed_id, **kwargs: (graph, "seed"),
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         out_graph, out_seed = builder.build_graph("seed")
 
     assert out_seed == "seed"
@@ -3078,6 +3173,7 @@ def test_degree_capping_preserves_per_node_limit(
     [
         lambda: CitationGraphBuilder(max_papers=5, client=MagicMock()),
         lambda: RecommendationGraphBuilder(max_papers=5, client=MagicMock()),
+        lambda: EmbeddingGraphBuilder(max_papers=5, top_k=1, client=MagicMock()),
     ],
 )
 def test_capped_strategies_log_final_edge_count(
@@ -3094,12 +3190,18 @@ def test_capped_strategies_log_final_edge_count(
     """
     builder, _ = _make_constant_similarity_builder(builder_factory, monkeypatch)
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         graph, _ = builder.build_graph("seed")
 
     assert "Graph constructed: 5 nodes, 10 edges" in caplog.text
     assert f"Graph complete: 5 nodes, {graph.number_of_edges()} edges" in caplog.text
     assert "Graph complete: 5 nodes, 10 edges" not in caplog.text
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.INFO
+        and record.message.startswith("Graph complete:")
+    ]
 
 
 @pytest.mark.parametrize(

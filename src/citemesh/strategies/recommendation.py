@@ -8,10 +8,15 @@ from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
-from citemesh.core import Paper
+from citemesh.core import (
+    DEFAULT_MAX_PAPERS,
+    DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
+    Paper,
+)
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
 from citemesh.strategies.base import (
+    RELATIONSHIP_DEGREE_CAP,
     GraphBuilderStrategy,
     build_capped_undirected_graph,
 )
@@ -39,10 +44,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
     def __init__(
         self,
-        max_papers: int = 40,
+        max_papers: int = DEFAULT_MAX_PAPERS,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        similarity_threshold: float = 0.2,
+        similarity_threshold: float = DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
         client: SemanticScholarClient | None = None,
     ):
         """Initialize recommendation graph builder.
@@ -88,8 +93,11 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         except SemanticScholarUnavailableError as exc:
             self._reference_source_unavailable = True
             logger.warning(
-                "Reference IDs unavailable for recommendation %s; continuing "
-                "without further reference hydration for this collection: %s",
+                "Reference hydration unavailable; continuing with available "
+                "reference data."
+            )
+            logger.debug(
+                "Reference hydration failed for recommendation %s: %s",
                 paper.paper_id,
                 exc,
             )
@@ -106,7 +114,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {}
         self._reference_source_unavailable = False
 
-        logger.info("Fetching seed paper: %s", seed_id)
+        logger.debug("Fetching seed paper: %s", seed_id)
         seed = self.client.get_paper(
             seed_id,
             raise_on_unavailable=True,
@@ -121,7 +129,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         seed = replace(seed, is_seed=True)
         papers[seed.paper_id] = seed
 
-        logger.info("Fetching recommendations for %s", seed.paper_id)
+        logger.info("Collecting recommendations...")
+        logger.debug("Recommendation seed: %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(
@@ -196,8 +205,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        filtered_graph = build_capped_undirected_graph(graph, 3, seed_id=actual_seed_id)
-        logger.info(
+        filtered_graph = build_capped_undirected_graph(
+            graph, RELATIONSHIP_DEGREE_CAP, seed_id=actual_seed_id
+        )
+        logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),

@@ -334,6 +334,22 @@ def test_get_paper_cache_not_found_refresh_and_reference_enrichment() -> None:
         assert refresh.get_paper("missing", raise_on_unavailable=True) is None
 
 
+def test_get_cached_papers_reads_only_persisted_records() -> None:
+    """Cache-only bulk lookup never performs a provider request.
+
+    :return None: Verifies normalized cache hits and refresh bypass behavior.
+    """
+    cached = Paper(paper_id="warm", title="Warm", year=2020)
+    s2.disk_cache._persist_paper(cached, "warm")
+    with SemanticScholarClient(api_key="") as client:
+        client._session.post = MagicMock()
+        assert client.get_cached_papers(["warm", "missing", "warm"]) == {"warm": cached}
+        client._session.post.assert_not_called()
+
+    with SemanticScholarClient(api_key="", refresh_paper_cache=True) as refresh:
+        assert refresh.get_cached_papers(["warm"]) == {}
+
+
 def test_get_papers_fetches_only_misses_and_preserves_request_order() -> None:
     """Bulk lookup owns cache reads and batches only missing identifiers.
 
@@ -352,12 +368,17 @@ def test_get_papers_fetches_only_misses_and_preserves_request_order() -> None:
     assert client._session.post.call_args.kwargs["json"] == {"ids": ["cold"]}
 
 
-def test_get_papers_splits_arbitrary_missing_count_at_500() -> None:
+def test_get_papers_splits_arbitrary_missing_count_at_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A public bulk call splits missing IDs into valid provider batches.
 
+    :param pytest.MonkeyPatch monkeypatch: Skips unrelated disk persistence.
     :return None: Verifies 500-record chunking.
     """
     ids = [f"p{i}" for i in range(1001)]
+    persist_paper = MagicMock()
+    monkeypatch.setattr(s2.disk_cache, "_persist_paper", persist_paper)
 
     def respond(_url: str, **kwargs: Any) -> _MockResponse:
         """Return positional rows for the submitted batch.
@@ -378,18 +399,21 @@ def test_get_papers_splits_arbitrary_missing_count_at_500() -> None:
     assert [
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500, 1]
+    assert [call.args[1] for call in persist_paper.call_args_list] == ids
 
 
-def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
+def test_tolerant_get_papers_warns_after_unavailable_batch(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A failed metadata batch reports the current and remaining skipped records.
+    """A failed metadata batch emits one actionable availability warning.
 
     :param pytest.MonkeyPatch monkeypatch: Makes retry waits unaffordable.
     :param pytest.LogCaptureFixture caplog: Captured warning log.
     :return None: Verifies partial metadata results remain attributable to an outage.
     """
     ids = [f"p{index}" for index in range(1001)]
+    persist_paper = MagicMock()
+    monkeypatch.setattr(s2.disk_cache, "_persist_paper", persist_paper)
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
     with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
         _disable_pacing(client)
@@ -408,10 +432,14 @@ def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
     assert [
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500]
-    assert (
-        "Paper metadata: stopped after an unavailable batch; 501 missing records "
-        "were not fetched." in caplog.text
-    )
+    assert [call.args[1] for call in persist_paper.call_args_list] == ids[:500]
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "batch fetching 500 papers" in warnings[0]
 
 
 def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
@@ -431,12 +459,46 @@ def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
                 _MockResponse(400, {"error": "Bad fields"}),
             ]
         )
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             assert list(client.get_papers(["ok", "missing", "bad"])) == ["ok"]
         assert client.get_papers(["unknown"]) == {}
         with pytest.raises(SemanticScholarRequestError, match="HTTP 400"):
             client.get_papers(["rejected"])
     assert "Skipping malformed batch paper" in caplog.text
+    assert "Paper metadata skipped 1 malformed records." in caplog.text
+
+
+def test_get_papers_aggregates_malformed_rows_into_one_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Metadata batches summarize malformed rows while preserving debug details.
+
+    :param pytest.LogCaptureFixture caplog: Captured provider logs.
+    :return None: Verifies one user-facing warning represents the degraded batch.
+    """
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            return_value=_MockResponse(
+                200, [{"title": "bad one"}, {"title": "bad two"}]
+            )
+        )
+        with caplog.at_level(logging.DEBUG):
+            assert client.get_papers(["one", "two"]) == {}
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    debug_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+    ]
+    assert warnings == ["Paper metadata skipped 2 malformed records."]
+    assert debug_messages.count("Skipping malformed batch paper for one.") == 1
+    assert debug_messages.count("Skipping malformed batch paper for two.") == 1
 
 
 @pytest.mark.parametrize(
@@ -821,6 +883,45 @@ def test_transient_transport_errors_retry(
 
         assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
         assert client._session.get.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("delay", "failed_attempts"),
+    [(30.0, 2), (15.0, 3)],
+    ids=["single-wait", "cumulative-waits"],
+)
+def test_retry_waits_warn_once_after_thirty_cumulative_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    delay: float,
+    failed_attempts: int,
+) -> None:
+    """Retry delays disclose one actionable warning after a long accumulated wait.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces retry timing and sleeping.
+    :param pytest.LogCaptureFixture caplog: Captured retry disclosure.
+    :param float delay: Fixed delay after every failed attempt.
+    :param int failed_attempts: Number of transient failures before success.
+    :return None: Verifies quiet retry logs do not hide prolonged recovery.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: delay)
+    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[_MockResponse(503)] * failed_attempts
+            + [_MockResponse(200, _paper_payload("p1"))]
+        )
+        with caplog.at_level(logging.WARNING):
+            assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert f"waiting {delay:.0f}s (30s total retry delay)" in warnings[0]
 
 
 def test_retry_after_cap_and_nonfinite_values() -> None:

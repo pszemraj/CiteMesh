@@ -21,7 +21,13 @@ from rich.text import Text
 from rich_argparse import RichHelpFormatter
 
 from citemesh import __version__
-from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
+from citemesh.core import (
+    DEFAULT_MAX_PAPERS,
+    DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
+    EMBEDDING_CONFIG,
+    EMBEDDING_STORAGE_CONFIG,
+    VIZ_CONFIG,
+)
 from citemesh.core.choices import (
     DEVICE_CHOICES,
     EXPORT_CHOICES,
@@ -351,6 +357,15 @@ def _add_logging_arguments(
         help="Console verbosity: debug, info, warning, error (default: info)",
     )
     group.add_argument(
+        "-v",
+        "--verbose",
+        dest="log_level",
+        action="store_const",
+        const="debug",
+        default=argparse.SUPPRESS,
+        help="Enable debug logging (same as --log-level debug)",
+    )
+    group.add_argument(
         "--log-width",
         metavar="COLS",
         type=_non_negative_int,
@@ -470,9 +485,9 @@ def _add_build_graph_arguments(
         "-p",
         type=_positive_int,
         metavar="N",
-        default=40,
+        default=DEFAULT_MAX_PAPERS,
         help=(
-            "Maximum papers including the seed (default: 40; "
+            f"Maximum papers including the seed (default: {DEFAULT_MAX_PAPERS}; "
             f"hybrid: {HYBRID_DEFAULT_MAX_PAPERS})"
         ),
     )
@@ -482,8 +497,8 @@ def _add_build_graph_arguments(
         "-i",
         type=_positive_int,
         metavar="N",
-        default=100,
-        help="Spring fallback layout iterations (default: 100)",
+        default=VIZ_CONFIG.spring_iterations,
+        help=f"Spring fallback layout iterations (default: {VIZ_CONFIG.spring_iterations})",
     )
 
     export_group.add_argument(
@@ -491,8 +506,8 @@ def _add_build_graph_arguments(
         "-d",
         type=_positive_int,
         metavar="N",
-        default=150,
-        help="Output image resolution (default: 150)",
+        default=VIZ_CONFIG.dpi,
+        help=f"Output image resolution (default: {VIZ_CONFIG.dpi})",
     )
 
     export_group.add_argument(
@@ -550,8 +565,11 @@ def _add_build_citation_arguments(
         "-t",
         type=_threshold_float,
         metavar="SCORE",
-        default=0.2,
-        help="Minimum edge similarity for citation/recommendation strategies (default: 0.2)",
+        default=DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
+        help=(
+            "Minimum edge similarity for citation/recommendation strategies "
+            f"(default: {DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD})"
+        ),
     )
 
     citation_group.add_argument(

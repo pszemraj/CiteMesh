@@ -1,6 +1,6 @@
 # Agent / Contributor Notes
 
-Rules for working on CiteMesh, for humans and coding agents. Setup, the pre-PR checks, and CI live in [CONTRIBUTING.md](CONTRIBUTING.md).
+Rules for working on CiteMesh, for humans and coding agents.
 
 ## Scope
 
@@ -18,7 +18,7 @@ Rules for working on CiteMesh, for humans and coding agents. Setup, the pre-PR c
 
 ## Model and dtype policy (non-negotiable)
 
-Apply the [model-loading and precision rules](docs/reference/embedding-runtime.md) to implementation, tests, calibration, validation, benchmarks, and fallbacks. Persistent embeddings follow the [storage contract](docs/guides/cli.md#graph-edges-and-cache-storage).
+Apply the [model-loading and precision rules](docs/reference/embedding-runtime.md) to implementation, tests, calibration, validation, benchmarks, and fallbacks. Persistent embeddings follow the [storage contract](docs/guides/caching.md#embedding-namespaces).
 
 For real inference, use the [designated model](docs/reference/embedding-runtime.md#model-selection-and-fallback) or a newer suitable one. Never substitute an older or smaller model without user approval; MiniLM is explicitly disallowed.
 
@@ -28,12 +28,41 @@ Inside sandboxed agent shells Metal is not visible: `torch.backends.mps.is_avail
 
 ## Environment and commands
 
-Run every project command through the maintainer's `inf` conda environment (Python 3.12, torch 2.13+). Follow the [setup steps](CONTRIBUTING.md#getting-set-up) and [pre-PR checks](CONTRIBUTING.md#before-you-open-a-pr). Keep the suite green and lint-clean before committing.
+Install the project for development with `pip install -e ".[all]"`. Versions come
+from Git tags via setuptools-scm, so fetch tags when a checkout reports an
+unexpected development version.
+
+Run every project command in the configured development environment. Before
+committing, run:
+
+```bash
+python -m pytest
+ruff check .
+ruff format --check .
+```
+
+The default suite is network-free and excludes slow tests. Real CUDA checks are
+opt-in with `python -m pytest -m "slow and cuda"` and may download the designated
+embedding model.
 
 ## Code conventions
 
-Follow the [contributor conventions](CONTRIBUTING.md#code-conventions).
+- Prefer explicit code and focused changes. Add or update tests for changed behavior.
+- Patch names where they are used, not where they were originally defined.
+- Keep optional dependencies lazily imported and preserve the dependency direction
+  in [Architecture](docs/internals/architecture.md#rules).
+- Use INFO for brief phases and outcomes. Use WARNING only when results are
+  materially degraded or an explicitly requested capability is unavailable. Put
+  cache, provider, runtime, and scoring details at DEBUG.
 
 ## Runtime data
 
 The cache root (`CITEMESH_CACHE_DIR`, see [Environment Variables](docs/reference/environment.md)) also holds the user config `config.toml` (`citemesh config`). Tests isolate it per test via `tests/conftest.py` and must never depend on network access.
+
+## Curated demo
+
+The checked-in Megalodon dashboard under `assets/examples/megalodon/` uses
+`arxiv:2404.08801`, matching the bare input recorded in its collection package.
+Use `arxiv:2404.08801v1` only when intentionally pinning arXiv bibliography
+recovery to version 1. The `arxiv:2608.27147` identifiers in recovery tests refer
+to Thomson and are not the demo seed.

@@ -144,16 +144,18 @@ def _confirm_destructive_cache_action(
         logger.error(non_interactive_error)
         return False
     else:
-        logger.warning("%s requires explicit confirmation.", operation_label)
         logger.warning(
-            "Cache snapshot: root=%s files=%d size=%s.",
+            "%s requires confirmation: root=%s, files=%d, size=%s. "
+            "Use %s to bypass the prompt.",
+            operation_label,
             root,
             total_files,
             total_size_label,
+            confirmation_flag,
         )
 
     if scope_note:
-        logger.warning("%s", scope_note)
+        logger.debug("%s", scope_note)
     if large_cache:
         logger.warning(
             "Large cache warning: %s >= %s. %s",
@@ -162,13 +164,9 @@ def _confirm_destructive_cache_action(
             large_cache_detail,
         )
     if normalized_reason:
-        logger.warning("%s rationale: %s", reason_label, normalized_reason)
+        logger.debug("%s rationale: %s", reason_label, normalized_reason)
     if confirmed:
         return True
-    logger.warning(
-        "Use %s to bypass this prompt in scripted/non-interactive workflows.",
-        confirmation_flag,
-    )
     # Text, not markup: the clear prompt interpolates a path that could
     # otherwise be parsed as console tags.
     styled_prompt = Text.assemble((prompt, "bold"), (" [y/N]: ", "dim"))
