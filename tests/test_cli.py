@@ -22,7 +22,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import networkx as nx
-import numpy as np
 import pytest
 
 from citemesh import cli as cli_module
@@ -73,6 +72,7 @@ from citemesh.visualization import GraphExporter as ProductionGraphExporter
 from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
+    BlockingEncodeModel,
     PausedFirstWrite,
     build_seed_graph,
     get_paper_id_normalization_cases,
@@ -519,23 +519,8 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
     encode_started = threading.Event()
     release_encode = threading.Event()
 
-    class _BlockingEncodeModel:
-        """Hold an embedding operation between its cache lookup and commit."""
-
-        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
-            """Wait until the test permits the cache commit.
-
-            :param list[str] texts: Text payload to embed.
-            :param object kwargs: Unused encoder keyword arguments.
-            :return np.ndarray: One deterministic FP32 vector per requested text.
-            """
-            del kwargs
-            encode_started.set()
-            assert release_encode.wait(timeout=5), "encode was never released"
-            return np.ones((len(texts), 2), dtype=np.float32)
-
     cache = EmbeddingCache(model_name="clear-race", storage_precision="float32")
-    model = _BlockingEncodeModel()
+    model = BlockingEncodeModel(encode_started, release_encode, 2)
     with ThreadPoolExecutor(max_workers=1) as executor:
         write = executor.submit(
             cache.get_embeddings,

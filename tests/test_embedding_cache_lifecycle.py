@@ -23,6 +23,7 @@ from citemesh.data.embedding_contract import (
     EmbeddingContract,
     serialize_embedding_namespace,
 )
+from tests._helpers import BlockingEncodeModel
 
 
 def _settings(tmp_path, dtype="float32", dimension=4):
@@ -454,15 +455,11 @@ def test_writer_started_before_adoption_cannot_commit_after_certification(tmp_pa
     cache.upsert_embeddings({"paper-0": _records()[0]}, ImmediateModel())
     entered, release = threading.Event(), threading.Event()
 
-    class PausedModel:
-        def encode(self, texts, **kwargs):
-            entered.set()
-            assert release.wait(5)
-            return np.ones((len(texts), 4), dtype=np.float32)
-
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
-            cache.upsert_embeddings, {"new-paper": {"title": "New"}}, PausedModel()
+            cache.upsert_embeddings,
+            {"new-paper": {"title": "New"}},
+            BlockingEncodeModel(entered, release, 4),
         )
         assert entered.wait(5)
         try:

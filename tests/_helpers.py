@@ -55,6 +55,38 @@ class ConstantEncodeModel:
         return np.repeat(self.vector[np.newaxis, :], len(texts), axis=0)
 
 
+class BlockingEncodeModel:
+    """Pause an encode call before returning fixed-width FP32 vectors."""
+
+    def __init__(
+        self,
+        entered: threading.Event,
+        release: threading.Event,
+        dimension: int,
+    ) -> None:
+        """Store the synchronization events and output dimension.
+
+        :param threading.Event entered: Event set when encoding begins.
+        :param threading.Event release: Event that releases the paused encode.
+        :param int dimension: Width of each returned embedding vector.
+        """
+        self.entered = entered
+        self.release = release
+        self.dimension = dimension
+
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        """Signal entry, wait for release, and return deterministic vectors.
+
+        :param list[str] texts: Input texts.
+        :param Any kwargs: Ignored encoder keyword arguments.
+        :return np.ndarray: One all-ones FP32 vector per text.
+        """
+        del kwargs
+        self.entered.set()
+        assert self.release.wait(timeout=5), "encode was never released"
+        return np.ones((len(texts), self.dimension), dtype=np.float32)
+
+
 class SeededRandomEncodeModel:
     """Deterministic pseudo-random encode model keyed by batch size."""
 

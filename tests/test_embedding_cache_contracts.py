@@ -53,7 +53,11 @@ from citemesh.data.embedding_cache import (
     _resolve_cache_lock_timeout_seconds,
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
-from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
+from tests._helpers import (
+    BlockingEncodeModel,
+    LookupEncodeModel,
+    SeededRandomEncodeModel,
+)
 
 
 def _fail_second_connection_commit(
@@ -3871,28 +3875,6 @@ def test_embedding_cache_root_read_locks_allow_separate_namespaces() -> None:
     second_started = threading.Event()
     release_encode = threading.Event()
 
-    class _BlockingEncodeModel:
-        """Block an encode after its root read lock is acquired."""
-
-        def __init__(self, started: threading.Event) -> None:
-            """Store the event that signals entry to encode.
-
-            :param threading.Event started: Event set when encode begins.
-            """
-            self.started = started
-
-        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
-            """Block each encode until both namespaces are active.
-
-            :param list[str] texts: Text payload to embed.
-            :param object kwargs: Unused encoder keyword arguments.
-            :return np.ndarray: One deterministic FP32 vector per requested text.
-            """
-            del kwargs
-            self.started.set()
-            assert release_encode.wait(timeout=5), "encode was never released"
-            return np.ones((len(texts), 2), dtype=np.float32)
-
     first_cache = EmbeddingCache(
         model_name="parallel-root-read-one", storage_precision="float32"
     )
@@ -3904,13 +3886,13 @@ def test_embedding_cache_root_read_locks_allow_separate_namespaces() -> None:
         first = executor.submit(
             first_cache.get_embeddings,
             papers,
-            _BlockingEncodeModel(first_started),
+            BlockingEncodeModel(first_started, release_encode, 2),
             show_progress=False,
         )
         second = executor.submit(
             second_cache.get_embeddings,
             papers,
-            _BlockingEncodeModel(second_started),
+            BlockingEncodeModel(second_started, release_encode, 2),
             show_progress=False,
         )
         try:
