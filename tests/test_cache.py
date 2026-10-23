@@ -432,3 +432,27 @@ def test_embedding_namespace_scan_groups_artifacts_and_flags_dtype_upgrade_cache
         "Orphaned artifact (metadata database missing)"
     )
     assert cleaned_namespace not in rows
+
+
+@pytest.mark.parametrize(
+    "state",
+    [[], {"source": [1]}, {"source": {"selection": 1, "limit": 5}}],
+)
+def test_embedding_namespace_scan_tolerates_malformed_corpus_state(
+    tmp_path: Path, state: object
+) -> None:
+    """Unreadable corpus state must not prevent inspecting other cache files."""
+    db_path = tmp_path / "metadata_0123456789ab.db"
+    _write_embedding_namespace_schema(db_path, EMBEDDING_CACHE_SCHEMA_VERSION)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE papers (paper_id TEXT)")
+        connection.execute("CREATE TABLE corpus_membership (paper_id TEXT)")
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("corpus_state", json.dumps(state)),
+        )
+
+    rows = cache_ops_module._scan_embedding_namespaces(tmp_path)
+
+    assert len(rows) == 1
+    assert rows[0].status == "Corpus metadata unavailable (inspect before removing)"

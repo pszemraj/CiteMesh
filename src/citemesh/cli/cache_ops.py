@@ -365,33 +365,33 @@ def _installed_corpus_status(db_path: Path) -> str | None:
             active = connection.execute(
                 "SELECT COUNT(*) FROM corpus_membership"
             ).fetchone()[0]
-    except (sqlite3.Error, ValueError, TypeError):
+        contract = state.get("contract") or {}
+        source = state.get("source") or {}
+        origin = state.get("origin") or {}
+        pending = state.get("pending")
+        coverage = source.get("selection", "unknown")
+        if source.get("limit") is not None:
+            coverage += f" {source['limit']}"
+        labels = [
+            f"{contract.get('dimension', '?')}d {contract.get('stored_dtype', '?')}",
+            f"active {active:,} / physical {physical:,}",
+            f"source {source.get('revision', 'unknown')}",
+            f"coverage {coverage}",
+        ]
+        if origin:
+            labels.append(
+                f"origin {origin.get('bucket_id', origin.get('repo_id', 'local'))} / "
+                f"{origin.get('config_name', '?')}"
+            )
+        if pending:
+            labels.append(f"pending {pending.get('kind', 'operation')}")
+        elif state.get("membership_complete"):
+            labels.append("ready")
+        else:
+            labels.append("membership uncertified")
+        return "; ".join(labels)
+    except (sqlite3.Error, ValueError, TypeError, AttributeError):
         return "Corpus metadata unavailable (inspect before removing)"
-    contract = state.get("contract") or {}
-    source = state.get("source") or {}
-    origin = state.get("origin") or {}
-    pending = state.get("pending")
-    coverage = source.get("selection", "unknown")
-    if source.get("limit") is not None:
-        coverage += f" {source['limit']}"
-    labels = [
-        f"{contract.get('dimension', '?')}d {contract.get('stored_dtype', '?')}",
-        f"active {active:,} / physical {physical:,}",
-        f"source {source.get('revision', 'unknown')}",
-        f"coverage {coverage}",
-    ]
-    if origin:
-        labels.append(
-            f"origin {origin.get('bucket_id', origin.get('repo_id', 'local'))} / "
-            f"{origin.get('config_name', '?')}"
-        )
-    if pending:
-        labels.append(f"pending {pending.get('kind', 'operation')}")
-    elif state.get("membership_complete"):
-        labels.append("ready")
-    else:
-        labels.append("membership uncertified")
-    return "; ".join(labels)
 
 
 def _scan_embedding_namespaces(
