@@ -46,7 +46,19 @@ from .runtime import (
 )
 
 if TYPE_CHECKING:
+    import torch
     from sentence_transformers import SentenceTransformer
+
+    from citemesh.core.text_batching import _TextEncoder
+    from citemesh.data.embedding_cache import EmbeddingCache
+    from citemesh.data.model_profiles import EmbeddingModelProfile
+
+    from ._host import _EmbeddingBuilderHost
+    from .precision import _PrecisionEncodeProxy
+
+    _EmbeddingBuilderHostBase = _EmbeddingBuilderHost
+else:
+    _EmbeddingBuilderHostBase = object
 
 logger = logging.getLogger(__name__)
 
@@ -91,21 +103,22 @@ def _is_tf32_precision_backend(
     return value is not None and hasattr(value, "fp32_precision")
 
 
-class _ModelRuntimeMixin:
-    """Model loading, precision contexts and compile handling.
+class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
+    """Load embedding models and configure precision and compile contexts."""
 
-    Mixed into :class:`~citemesh.strategies.embedding.builder.EmbeddingGraphBuilder`.
-
-    Requires the host to provide: ``model``, ``model_name``, ``model_profile``,
-    ``device``, ``compute_dtype``, ``truncate_dim``, ``embedding_dim``,
-    ``encode_batch_size``, ``prefetch_batches``, ``storage_precision``,
-    ``_model_revision``, ``_active_model_name``, ``_source_dtype_hint``,
-    ``_attention_implementation_hint``, ``_autocast_enabled``,
-    ``_autocast_device_type``, ``_tf32_enabled``, ``_inner_model_compiled``,
-    ``_compile_status_reason``, ``_bind_model_contract``,
-    ``_resolve_truncate_dim``, ``_ensure_cache_model_fingerprint``,
-    ``_bind_embedding_cache_to_active_model`` and ``_cached_payload_row_count``.
-    """
+    model: SentenceTransformer | None
+    model_profile: EmbeddingModelProfile
+    truncate_dim: int | None
+    _active_model_name: str | None
+    _autocast_dtype: torch.dtype | None
+    _autocast_device_type: str | None
+    _encode_model: _TextEncoder | None
+    _embedding_cache: EmbeddingCache | None
+    _graph_embedding_cache: EmbeddingCache | None
+    _eager_inner_transformer: torch.nn.Module | None
+    _compile_status_reason: str | None
+    _resolved_model_fingerprint: str | None
+    _tf32_runtime_configured: bool
 
     def _bind_model_contract(self, model_name_or_path: str) -> None:
         """Bind profile-derived formatting and runtime policy to one load candidate.
@@ -246,7 +259,7 @@ class _ModelRuntimeMixin:
         """
         torch_version = _parse_major_minor(
             getattr(torch, "__version__", ""), default=(0, 0)
-        )
+        ) or (0, 0)
         if torch_version >= _MPS_MIN_TORCH_VERSION:
             return True
         logger.warning(
@@ -417,8 +430,10 @@ class _ModelRuntimeMixin:
             return
 
         try:
-            active_config = model[0].auto_model.config
-            bidirectional_attention = active_config.use_bidirectional_attention
+            active_config: object = getattr(getattr(model[0], "auto_model"), "config")
+            bidirectional_attention: object = getattr(
+                active_config, "use_bidirectional_attention"
+            )
         except Exception as exc:
             raise EmbeddingBackendCompatibilityError(
                 f"Embedding checkpoint {model_name_or_path!r} requires bidirectional "
@@ -564,11 +579,11 @@ class _ModelRuntimeMixin:
                     """
                     return record.getMessage() != _FA2_FORWARD_DTYPE_WARNING
 
-                flash_logger = logging.getLogger(
+                attention_logger = logging.getLogger(
                     "transformers.modeling_flash_attention_utils"
                 )
-                flash_logger.addFilter(keep_relevant_warning)
-                stack.callback(flash_logger.removeFilter, keep_relevant_warning)
+                attention_logger.addFilter(keep_relevant_warning)
+                stack.callback(attention_logger.removeFilter, keep_relevant_warning)
             if self.device == "cpu" and self._inner_model_compiled:
                 # Dynamo must see freezing while capturing weights; backend-only
                 # compile options arrive too late. Keep eager fallback weights.
@@ -583,7 +598,7 @@ class _ModelRuntimeMixin:
             ):
                 from torch._dynamo import config as dynamo_config
                 from transformers.modeling_flash_attention_utils import (
-                    logger as flash_logger,
+                    logger as transformers_logger,
                 )
 
                 # Transformers logs an autocast conversion inside attention.
@@ -597,16 +612,16 @@ class _ModelRuntimeMixin:
                     dynamo_config.patch(
                         **{
                             logging_option: getattr(dynamo_config, logging_option)
-                            | {flash_logger.warning_once}
+                            | {transformers_logger.warning_once}
                         }
                     )
                 )
             yield
 
-    def _get_model_for_encoding(self) -> SentenceTransformer | _PrecisionEncodeProxy:
+    def _get_model_for_encoding(self) -> _TextEncoder:
         """Return model object used for embedding encode calls.
 
-        :return SentenceTransformer | _PrecisionEncodeProxy: Encoder or precision proxy.
+        :return _TextEncoder: Loaded encoder or precision proxy.
         """
         if self.model is None:
             raise RuntimeError("Embedding model is not loaded.")

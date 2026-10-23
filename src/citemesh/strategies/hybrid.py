@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
-import networkx as nx
+    from citemesh.core.models import PaperGraph
 import numpy as np
 from numpy.typing import NDArray
 
@@ -32,7 +32,7 @@ from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
-    NoStrategyOptions,
+    GraphCollectionOptions,
     build_capped_undirected_graph,
     deterministic_sort_key,
     validate_embedding_vectors,
@@ -235,34 +235,36 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     self.max_semantic * HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER,
                 ),
             )
-            self.embedding_builder = EmbeddingGraphBuilder(
-                # Embedding strategy budgets include the seed node; hybrid's
-                # max_semantic contract counts only added non-seed neighbors.
-                max_papers=self._semantic_candidate_cap + 1,
-                model_name=model_name,
-                model_profile=model_profile,
-                model_revision=model_revision,
-                dataset_source=dataset_source,
-                dataset_split=dataset_split,
-                corpus_size=corpus_size,
-                truncate_dim=truncate_dim,
-                min_semantic_similarity=min_semantic_similarity,
-                use_streaming=use_streaming,
-                force_rebuild_cache=force_rebuild_cache,
-                force_rebuild_reason=force_rebuild_reason,
-                storage_precision=storage_precision,
-                binary_prefilter=binary_prefilter,
-                binary_rescore_multiplier=binary_rescore_multiplier,
-                calibration_sample_size=calibration_sample_size,
-                cache_compression=cache_compression,
-                cache_compression_level=cache_compression_level,
-                encode_batch_size=encode_batch_size,
-                enable_torch_compile=enable_torch_compile,
-                device=device,
-                semantic_source=normalized_semantic_source,
-                candidate_pool_size=candidate_pool_size,
-                client=self.client,
-                cache_selection=cache_selection,
+            self.embedding_builder: EmbeddingGraphBuilder | None = (
+                EmbeddingGraphBuilder(
+                    # Embedding strategy budgets include the seed node; hybrid's
+                    # max_semantic contract counts only added non-seed neighbors.
+                    max_papers=self._semantic_candidate_cap + 1,
+                    model_name=model_name,
+                    model_profile=model_profile,
+                    model_revision=model_revision,
+                    dataset_source=dataset_source,
+                    dataset_split=dataset_split,
+                    corpus_size=corpus_size,
+                    truncate_dim=truncate_dim,
+                    min_semantic_similarity=min_semantic_similarity,
+                    use_streaming=use_streaming,
+                    force_rebuild_cache=force_rebuild_cache,
+                    force_rebuild_reason=force_rebuild_reason,
+                    storage_precision=storage_precision,
+                    binary_prefilter=binary_prefilter,
+                    binary_rescore_multiplier=binary_rescore_multiplier,
+                    calibration_sample_size=calibration_sample_size,
+                    cache_compression=cache_compression,
+                    cache_compression_level=cache_compression_level,
+                    encode_batch_size=encode_batch_size,
+                    enable_torch_compile=enable_torch_compile,
+                    device=device,
+                    semantic_source=normalized_semantic_source,
+                    candidate_pool_size=candidate_pool_size,
+                    client=self.client,
+                    cache_selection=cache_selection,
+                )
             )
         else:
             self.embedding_builder = None
@@ -628,7 +630,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     @scope_candidate_collection
     def collect_papers(
-        self, seed_id: str, **kwargs: Unpack[NoStrategyOptions]
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> dict[str, Paper]:
         """Collect papers while retaining any corpus lifecycle operation lock.
 
@@ -646,7 +648,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             return self._collect_papers_under_operation_lock(seed_id, **kwargs)
 
     def _collect_papers_under_operation_lock(
-        self, seed_id: str, **kwargs: Unpack[NoStrategyOptions]
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> dict[str, Paper]:
         """
         Collect papers from both citation and semantic sources.
@@ -689,14 +691,19 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
-        if self.embedding_builder is not None:
+        reference_embedding_builder = self.embedding_builder
+        if reference_embedding_builder is not None:
             citation_papers = self.citation_builder.collect_papers(
                 seed_id,
                 validate_source_availability=False,
                 hydrate_references=False,
                 seed_paper=cached_corpus_seed,
                 reference_metadata_lookup=(
-                    (lambda ids: self.embedding_builder.cached_reference_metadata(ids))
+                    (
+                        lambda ids: (
+                            reference_embedding_builder.cached_reference_metadata(ids)
+                        )
+                    )
                     if corpus_prepared
                     else None
                 ),
@@ -746,7 +753,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 relation=str(citation_seed_relations.get(paper.paper_id, "citation")),
             )
 
-        if self.embedding_builder is None:
+        embedding_builder = self.embedding_builder
+        if embedding_builder is None:
             for paper_id, paper in candidate_pool.items():
                 if len(papers) >= self.max_papers:
                     break
@@ -775,7 +783,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         try:
             if self.semantic_source == "arxiv-corpus":
-                semantic_papers = self.embedding_builder.collect_papers(
+                semantic_papers = embedding_builder.collect_papers(
                     seed_id,
                     seed_paper=seed_paper,
                     _corpus_prepared=corpus_prepared,
@@ -801,7 +809,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                         limit=min(
                             100,
                             self._semantic_candidate_cap,
-                            self.embedding_builder.candidate_pool_size,
+                            embedding_builder.candidate_pool_size,
                         ),
                         raise_on_unavailable=True,
                     ),
@@ -816,7 +824,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     ],
                     context=f"hybrid candidate acquisition for {seed_paper.paper_id}",
                 )
-                self.embedding_builder._load_model()
+                embedding_builder._load_model()
                 semantic_papers = {
                     paper.paper_id: paper for paper in recommendation_result.papers
                 }
@@ -831,7 +839,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         # reference hydration can use the remaining shared recovery budget
         # without suppressing recommendation discovery.
         if cached_corpus_seed is not None:
-            self.embedding_builder.enrich_cached_corpus_seed(seed_paper)
+            embedding_builder.enrich_cached_corpus_seed(seed_paper)
         self.citation_builder.hydrate_collected_references(citation_papers, seed_paper)
 
         for paper in semantic_papers.values():
@@ -962,14 +970,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return min(similarity, 1.0)  # Cap at 1.0
 
     def build_graph(
-        self, seed_id: str, **kwargs: Unpack[NoStrategyOptions]
-    ) -> tuple[nx.Graph, str]:
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> tuple[PaperGraph, str]:
         """
         Build graph and enforce per-node edge limits for readability.
 
         :param str seed_id: Seed paper identifier
         :param kwargs: Extra options are ignored by collection.
-        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
+        :return tuple[PaperGraph, str]: Built graph and canonical seed ID.
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
         graph.graph["strategy"] = self._resolved_strategy_name()

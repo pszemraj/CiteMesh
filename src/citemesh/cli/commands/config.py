@@ -75,8 +75,8 @@ def _run_config_command(
         table.add_column("Key", style="cyan")
         table.add_column("Value")
         if rows:
-            for key, value in rows:
-                table.add_row(Text(key), Text(value))
+            for key, display_value in rows:
+                table.add_row(Text(key), Text(display_value))
         else:
             table.add_row("(no values set)", "")
         console.output_console.print(table)
@@ -107,12 +107,14 @@ def _run_config_command(
         except ConfigFileError as exc:
             logger.error("%s", exc)
             return 1
-        display_value = (
+        updated_display_value = (
             _masked_secret(str(value))
             if str(args.key).strip() == "api.s2_api_key"
             else format_config_value(value)
         )
-        logger.info("✓ Set %s = %s in %s", args.key, display_value, user_config_path())
+        logger.info(
+            "✓ Set %s = %s in %s", args.key, updated_display_value, user_config_path()
+        )
         return 0
 
     if command == "unset":

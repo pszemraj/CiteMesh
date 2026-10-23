@@ -15,9 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-import networkx as nx
+from typing import TYPE_CHECKING, cast
 
 from citemesh.data.cache import atomic_write_json, path_exists
 from citemesh.data.user_config import UserConfig
@@ -41,6 +39,7 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
+    from citemesh.core.models import PaperGraph
     from citemesh.strategies.embedding.builder import EmbeddingRuntimeMetadata
     from citemesh.visualization.dashboard.contracts import GraphConfigData
     from citemesh.visualization.export import ExportMetadata, PlotOverlayMetadata
@@ -146,14 +145,14 @@ def _resolve_build_plan(args: argparse.Namespace) -> _BuildPlan:
 def _resolve_run_output_paths(
     args: argparse.Namespace,
     plan: _BuildPlan,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
 ) -> tuple[dict[str, Path], Path | None]:
     """Resolve every artifact path for this run and create their directories.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param _BuildPlan plan: Export selection resolved before the graph was built.
-    :param nx.Graph graph: Constructed graph, used to derive a default path.
+    :param PaperGraph graph: Constructed graph, used to derive a default path.
     :param str seed_id: Canonical seed identifier for the run.
     :return tuple[dict[str, Path], Path | None]: Format-keyed output paths and
         the collection package path, or ``None`` outside collection mode.
@@ -205,12 +204,12 @@ def _resolve_run_output_paths(
 
 
 def _build_export_metadata(
-    args: argparse.Namespace, graph: nx.Graph, seed_id: str
+    args: argparse.Namespace, graph: PaperGraph, seed_id: str
 ) -> ExportMetadata:
     """Assemble the run metadata embedded in every export artifact.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
-    :param nx.Graph graph: Constructed graph carrying runtime annotations.
+    :param PaperGraph graph: Constructed graph carrying runtime annotations.
     :param str seed_id: Canonical seed identifier for the run.
     :return ExportMetadata: Metadata passed to the exporter and sidecar payload.
     """
@@ -236,7 +235,9 @@ def _build_export_metadata(
         runtime_embedding_metadata: EmbeddingRuntimeMetadata | None = None
         raw_runtime_metadata = graph.graph.get("embedding_runtime")
         if isinstance(raw_runtime_metadata, dict):
-            runtime_embedding_metadata = raw_runtime_metadata
+            runtime_embedding_metadata = cast(
+                "EmbeddingRuntimeMetadata", raw_runtime_metadata
+            )
         metadata["embedding"] = _embedding_export_metadata(
             args, runtime_embedding_metadata
         )
@@ -247,7 +248,7 @@ def _build_export_metadata(
 
 def _create_graph_exporter(
     args: argparse.Namespace,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
     metadata: ExportMetadata,
     output_paths: dict[str, Path],
@@ -258,7 +259,7 @@ def _create_graph_exporter(
     ``--spring-iterations``/``--seed``) instead of a default one.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
-    :param nx.Graph graph: Constructed graph to export.
+    :param PaperGraph graph: Constructed graph to export.
     :param str seed_id: Canonical seed identifier for the run.
     :param ExportMetadata metadata: Run metadata embedded in exports.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
@@ -290,7 +291,7 @@ def _write_export_artifacts(
     export_paths: dict[str, Path],
     *,
     args: argparse.Namespace,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
     exporter: GraphExporter,
     plot_metadata: PlotOverlayMetadata,
@@ -301,7 +302,7 @@ def _write_export_artifacts(
 
     :param dict[str, Path] export_paths: Destination paths for this write.
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
-    :param nx.Graph graph: Constructed graph to render.
+    :param PaperGraph graph: Constructed graph to render.
     :param str seed_id: Canonical seed identifier for the run.
     :param GraphExporter exporter: Exporter bound to the run's graph and layout.
     :param PlotOverlayMetadata plot_metadata: Compact metadata overlaid on the plot.
@@ -374,7 +375,7 @@ def _stage_dashboard_result(
     *,
     dashboard_package_path: Path,
     output_paths: dict[str, Path],
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
     exporter: GraphExporter,
     graph_config_payload: GraphConfigData,
@@ -389,7 +390,7 @@ def _stage_dashboard_result(
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param Path dashboard_package_path: Collection package to update.
     :param dict[str, Path] output_paths: Final artifact paths for the run.
-    :param nx.Graph graph: Constructed graph being recorded.
+    :param PaperGraph graph: Constructed graph being recorded.
     :param str seed_id: Canonical seed identifier for the run.
     :param GraphExporter exporter: Exporter bound to the run's graph and layout.
     :param GraphConfigData graph_config_payload: Reproducible build payload.
@@ -429,7 +430,7 @@ def _stage_dashboard_result(
             seed_id=seed_id,
             strategy=args.strategy,
             payload=graph_payload,
-            build=dict(graph_config_payload.get("build", {})),
+            build=graph_config_payload["build"].copy(),
             staged_result_files=staged_result_files,
             obsolete_result_paths=(
                 _dashboard_optional_result_paths(output_paths)
@@ -482,7 +483,7 @@ def _render_dashboard_viewer(
 
 
 def _log_run_summary(
-    graph: nx.Graph,
+    graph: PaperGraph,
     *,
     output_paths: dict[str, Path],
     graph_config_path: Path | None,
@@ -490,7 +491,7 @@ def _log_run_summary(
 ) -> None:
     """Log one user-facing completion result and auxiliary paths for debugging.
 
-    :param nx.Graph graph: Constructed graph being summarized.
+    :param PaperGraph graph: Constructed graph being summarized.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
     :param Path | None graph_config_path: Sidecar path, if one was written.
     :param Path | None dashboard_package_path: Collection package path, if any.

@@ -7,7 +7,7 @@ import logging
 import shlex
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from rich.text import Text
 
@@ -85,11 +85,14 @@ def _namespace_overrides(args: argparse.Namespace) -> _NamespaceOverrides:
     :param argparse.Namespace args: Parsed search command arguments.
     :return _NamespaceOverrides: Supplied selector destinations and their values.
     """
-    return {
-        dest: value
-        for dest in _NAMESPACE_OVERRIDE_DESTS
-        if (value := getattr(args, dest, None)) is not None
-    }
+    return cast(
+        _NamespaceOverrides,
+        {
+            dest: value
+            for dest in _NAMESPACE_OVERRIDE_DESTS
+            if (value := getattr(args, dest, None)) is not None
+        },
+    )
 
 
 def _namespace_override_labels(overrides: _NamespaceOverrides) -> list[str]:

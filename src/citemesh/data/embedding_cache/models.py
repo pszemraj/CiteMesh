@@ -10,7 +10,7 @@ incompatible and the namespace must be rebuilt.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import TypeAlias, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
@@ -48,9 +48,6 @@ class EmbeddingInputMetadata(PaperMetadata, total=False):
     chronology_key: int | None
 
 
-PaperRequest = tuple[str, EmbeddingInputMetadata]
-
-
 class CachedPaperMetadata(TypedDict):
     """Normalized metadata returned from a persisted paper row."""
 
@@ -84,6 +81,9 @@ class CorpusMetadataUpdate(PaperMetadata):
     paper_id: str
 
 
+CorpusMetadataUpdateValues: TypeAlias = CorpusMetadataUpdate | CachedPaperRecord
+
+
 class CorpusRecord(TypedDict):
     """Persisted corpus row carried by a portable snapshot."""
 
@@ -99,6 +99,13 @@ class CorpusRecord(TypedDict):
     text_hash: str
     chronology_key: int | None
     source_ordinal: int
+
+
+CacheInputMetadata: TypeAlias = (
+    EmbeddingInputMetadata | CorpusSourceRecord | CachedPaperRecord
+)
+CacheMetadataValues: TypeAlias = CacheInputMetadata | CorpusRecord
+PaperRequest = tuple[str, CacheInputMetadata]
 
 
 class ActiveCorpusRecord(CorpusRecord):
@@ -189,6 +196,8 @@ PaperRowValues = tuple[
     int | None,
 ]
 
+NormalizedMetadataFields = tuple[str, str, int | None, str, str, str, str, str]
+
 
 class _EmbeddingCacheLayoutError(ValueError):
     """A proven persisted layout mismatch that requires a namespace rebuild."""
@@ -223,7 +232,7 @@ class PendingEmbeddingRecord:
     """Cache-miss record staged across lookup/encode/commit phases."""
 
     paper_id: str
-    metadata: EmbeddingInputMetadata
+    metadata: CacheInputMetadata
     text_hash: str
     text: str
     row_idx: int | None
@@ -254,5 +263,5 @@ class _VectorWritePlan:
     rows_to_upsert: list[PaperRowValues]
     append_embeddings: list[StoredEmbedding]
     append_binary_embeddings: list[NDArray[np.uint8]]
-    append_records: list[tuple[str, EmbeddingInputMetadata, str]]
+    append_records: list[tuple[str, CacheInputMetadata, str]]
     replacement_rows: list[VectorReplacement]

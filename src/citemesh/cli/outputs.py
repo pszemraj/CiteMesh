@@ -8,8 +8,7 @@ artifact paths for single runs and dashboard collections.
 from __future__ import annotations
 
 from pathlib import Path
-
-import networkx as nx
+from typing import TYPE_CHECKING
 
 from citemesh.core.choices import EXPORT_FORMATS as EXPORT_FORMATS
 from citemesh.visualization.dashboard.package import (
@@ -18,6 +17,9 @@ from citemesh.visualization.dashboard.package import (
     LEGACY_DASHBOARD_MANIFEST_FILENAME,
 )
 from citemesh.visualization.paths import generate_output_path
+
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
 
 __all__ = [
     "DASHBOARD_COLLECTION_FILENAME",
@@ -180,7 +182,7 @@ def resolve_dashboard_collection_outputs(
     selected_formats: list[str],
     explicit_output: bool,
     strategy: str,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
 ) -> tuple[dict[str, Path], Path]:
     """Resolve shared dashboard files and per-seed result artifacts.
@@ -193,7 +195,7 @@ def resolve_dashboard_collection_outputs(
     :param List[str] selected_formats: Requested export formats.
     :param bool explicit_output: Whether ``--output`` was provided.
     :param str strategy: Active strategy name.
-    :param nx.Graph graph: Built graph used for run-specific output naming.
+    :param PaperGraph graph: Built graph used for run-specific output naming.
     :param str seed_id: Seed node identifier.
     :return tuple[Dict[str, Path], Path]: Resolved output paths and package path.
     """

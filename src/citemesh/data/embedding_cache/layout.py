@@ -13,7 +13,7 @@ import logging
 import sqlite3
 import stat
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import h5py
 import numpy as np
@@ -54,8 +54,9 @@ from .constants import (
     TEXT_FORMATTER_FINGERPRINT_KEY,
 )
 from .models import (
+    CacheMetadataValues,
     CacheNamespacePayloadStats,
-    EmbeddingInputMetadata,
+    NormalizedMetadataFields,
     PaperRowValues,
     _EmbeddingCacheLayoutError,
 )
@@ -81,6 +82,11 @@ from .sql import (
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
+
 
 class DatasetCompressionKwargs(TypedDict, total=False):
     """Supported keyword arguments for creating compressed HDF5 datasets."""
@@ -89,10 +95,7 @@ class DatasetCompressionKwargs(TypedDict, total=False):
     compression_opts: int
 
 
-NormalizedMetadataFields = tuple[str, str, int | None, str, str, str, str, str]
-
-
-class _H5LayoutMixin:
+class _H5LayoutMixin(_EmbeddingCacheHost):
     """SQLite schema and HDF5 layout management for :class:`EmbeddingCache`."""
 
     def _init_db(self) -> None:
@@ -752,7 +755,7 @@ class _H5LayoutMixin:
     @staticmethod
     def _metadata_tuple(
         paper_id: str,
-        metadata: EmbeddingInputMetadata,
+        metadata: CacheMetadataValues,
         text_hash: str,
         embedding_dim: int,
         row_idx: int,
@@ -760,15 +763,22 @@ class _H5LayoutMixin:
         """Build metadata row tuple for SQLite upsert.
 
         :param str paper_id: Paper identifier.
-        :param EmbeddingInputMetadata metadata: Paper metadata payload.
+        :param CacheMetadataValues metadata: Paper metadata payload.
         :param str text_hash: Deterministic hash for encoded text.
         :param int embedding_dim: Embedding vector width.
         :param int row_idx: Row index inside matrix dataset.
         :return PaperRowValues: SQLite upsert values in ``papers`` column order.
         """
-        title, abstract, year, *remaining = _H5LayoutMixin._normalized_metadata_fields(
-            metadata
-        )
+        (
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+        ) = _H5LayoutMixin._normalized_metadata_fields(metadata)
         return (
             paper_id,
             title,
@@ -777,7 +787,11 @@ class _H5LayoutMixin:
             text_hash,
             embedding_dim,
             row_idx,
-            *remaining,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
             # Derived from the primary key rather than the arxiv_id column, which
             # is empty for rows whose paper_id is still a parseable arXiv ID.
             encode_arxiv_id_chronology_key(paper_id),
@@ -785,11 +799,11 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _normalized_metadata_fields(
-        metadata: EmbeddingInputMetadata,
+        metadata: CacheMetadataValues,
     ) -> NormalizedMetadataFields:
         """Normalize metadata fields to stable cache representations.
 
-        :param EmbeddingInputMetadata metadata: Paper metadata payload.
+        :param CacheMetadataValues metadata: Paper metadata payload.
         :return NormalizedMetadataFields:
             Normalized title/abstract/year/authors/categories and venue/arXiv/DOI fields.
         """
@@ -821,22 +835,19 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _metadata_fields_changed(
-        existing_row: SerializedPaperMetadata, metadata: EmbeddingInputMetadata
+        existing_row: SerializedPaperMetadata, metadata: CacheMetadataValues
     ) -> bool:
         """Return whether cached non-vector metadata differs from incoming payload.
 
         :param SerializedPaperMetadata existing_row: Existing cached metadata row.
-        :param EmbeddingInputMetadata metadata: Incoming metadata payload.
+        :param CacheMetadataValues metadata: Incoming metadata payload.
         :return bool: ``True`` when a metadata-only refresh is required.
         """
+        existing_year = existing_row.get("year")
         current = (
             str(existing_row.get("title", "") or ""),
             str(existing_row.get("abstract", "") or ""),
-            (
-                int(existing_row["year"])
-                if existing_row.get("year") is not None
-                else None
-            ),
+            (int(existing_year) if existing_year is not None else None),
             _safe_json_list(_parse_json_list(existing_row.get("authors_json"))),
             _safe_json_list(_parse_json_list(existing_row.get("categories_json"))),
             str(existing_row.get("venue", "") or "").strip(),
@@ -848,12 +859,12 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _metadata_refresh_tuple(
-        paper_id: str, metadata: EmbeddingInputMetadata
+        paper_id: str, metadata: CacheMetadataValues
     ) -> PaperMetadataRefreshValues:
         """Build SQL update tuple for metadata-only refresh paths.
 
         :param str paper_id: Paper identifier.
-        :param EmbeddingInputMetadata metadata: Incoming metadata payload.
+        :param CacheMetadataValues metadata: Incoming metadata payload.
         :return PaperMetadataRefreshValues: Values for the metadata UPDATE query.
         """
         # The chronology key rides along so both write paths agree on it; it is
@@ -1071,7 +1082,7 @@ class _H5LayoutMixin:
         *,
         name: str,
         width: int,
-        dtype: np.dtype[np.generic],
+        dtype: np.dtype[np.float32] | np.dtype[np.int8] | type[np.uint8],
         enabled: bool = True,
     ) -> h5py.Dataset | None:
         """Create or validate an enabled resizable two-dimensional HDF5 matrix.
@@ -1079,7 +1090,7 @@ class _H5LayoutMixin:
         :param h5py.File h5_file: Open HDF5 file handle.
         :param str name: Dataset name.
         :param int width: Required number of matrix columns.
-        :param np.dtype[np.generic] dtype: Required matrix dtype.
+        :param np.dtype[np.float32] | np.dtype[np.int8] | type[np.uint8] dtype: Required matrix dtype.
         :param bool enabled: Whether the optional matrix is enabled.
         :return Optional[h5py.Dataset]: Valid matrix dataset, or ``None`` when disabled.
         """

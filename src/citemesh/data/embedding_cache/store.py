@@ -64,10 +64,10 @@ from .layout import _H5LayoutMixin
 from .lifecycle import _LifecycleMixin
 from .models import (
     CachedPaperMetadata,
+    CacheInputMetadata,
     CacheNamespacePayloadStats,
     CacheSearchResult,
-    CorpusMetadataUpdate,
-    EmbeddingInputMetadata,
+    CorpusMetadataUpdateValues,
     PaperRequest,
 )
 from .quantization import (
@@ -174,7 +174,7 @@ class EmbeddingCache(
         self._int8_saturation_warning_emitted = False
         self._progress = progress
         self._strict_existing = bool(strict)
-        self._operation_owner = None
+        self._operation_owner: tuple[int, str] | None = None
 
         if _initialize:
             with self.namespace_lock_only():
@@ -191,19 +191,19 @@ class EmbeddingCache(
 
     def get_embeddings(
         self,
-        papers: Mapping[str, EmbeddingInputMetadata],
+        papers: Mapping[str, CacheInputMetadata],
         model: _TextEncoder,
         batch_size: int = 32,
         show_progress: bool = True,
-        text_builder: Callable[[EmbeddingInputMetadata], str] | None = None,
+        text_builder: Callable[[CacheInputMetadata], str] | None = None,
     ) -> dict[str, NDArray[np.float32]]:
         """Return embeddings for provided papers, computing only missing ones.
 
-        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param Mapping[str, CacheInputMetadata] papers: Papers keyed by ID with cache metadata.
         :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
+        :param Optional[Callable[[CacheInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         :return dict[str, NDArray[np.float32]]: Mapping of paper IDs to float32 embeddings.
         """
         result = self._process_embeddings(
@@ -219,19 +219,19 @@ class EmbeddingCache(
 
     def upsert_embeddings(
         self,
-        papers: Mapping[str, EmbeddingInputMetadata],
+        papers: Mapping[str, CacheInputMetadata],
         model: _TextEncoder,
         batch_size: int = 32,
         show_progress: bool = False,
-        text_builder: Callable[[EmbeddingInputMetadata], str] | None = None,
+        text_builder: Callable[[CacheInputMetadata], str] | None = None,
     ) -> None:
         """Persist embeddings for papers without materializing float32 return payloads.
 
-        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param Mapping[str, CacheInputMetadata] papers: Papers keyed by ID with cache metadata.
         :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
+        :param Optional[Callable[[CacheInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         """
         self._process_embeddings(
             papers,
@@ -411,7 +411,7 @@ class EmbeddingCache(
                 results: list[CacheSearchResult] = []
                 for idx, row_idx in enumerate(row_values):
                     payload = metadata_by_row[row_idx]
-                    result_metadata = {
+                    result_metadata: CachedPaperMetadata = {
                         "title": payload.get("title", "Unknown"),
                         "abstract": payload.get("abstract", ""),
                         "year": payload.get("year"),
@@ -908,10 +908,12 @@ class EmbeddingCache(
             }
         )
 
-    def update_corpus_metadata(self, papers: Sequence[CorpusMetadataUpdate]) -> None:
+    def update_corpus_metadata(
+        self, papers: Sequence[CorpusMetadataUpdateValues]
+    ) -> None:
         """Correct years, DOIs and venues without touching cached vectors.
 
-        :param Sequence[CorpusMetadataUpdate] papers: Source metadata with IDs, years, DOIs and venues.
+        :param Sequence[CorpusMetadataUpdateValues] papers: Source metadata with IDs, years, DOIs and venues.
         """
         with self._locked_connection() as conn:
             self._require_write_owned_locked(conn)

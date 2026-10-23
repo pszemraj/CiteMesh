@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable
-from typing import TYPE_CHECKING, Literal, TypedDict
+from collections.abc import Hashable, Mapping
+from typing import TYPE_CHECKING, Final, Literal, TypedDict
 
 if TYPE_CHECKING:
     from citemesh.data.embedding_cache.models import CorpusOrigin
@@ -34,7 +34,7 @@ class _DashboardCollectionResultRequired(TypedDict):
     """Identity and graph data required in a dashboard collection result."""
 
     result_id: str
-    payload: dict[str, object]
+    payload: Mapping[str, object]
 
 
 class DashboardCollectionResult(_DashboardCollectionResultRequired, total=False):
@@ -45,7 +45,7 @@ class DashboardCollectionResult(_DashboardCollectionResultRequired, total=False)
     strategy: object
     summary: object
     updated_at: object
-    build: dict[str, object]
+    build: dict[object, object]
 
 
 class _DashboardCollectionBundleRequired(TypedDict):
@@ -317,7 +317,7 @@ class DashboardResultEntry(TypedDict):
     summary: GraphSummary
     updated_at: str
     payload: ValidatedGraphPayload
-    build: dict[str, object]
+    build: dict[object, object]
 
 
 class DashboardCollectionPackage(TypedDict):
@@ -424,10 +424,12 @@ class GraphConfigData(TypedDict):
     metadata: ExportMetadata
 
 
-GRAPH_PAYLOAD_KIND = "citemesh-graph"
-GRAPH_PAYLOAD_SCHEMA_VERSION = 1
-DASHBOARD_COLLECTION_KIND = "citemesh-dashboard-collection"
-DASHBOARD_COLLECTION_SCHEMA_VERSION = 1
+GRAPH_PAYLOAD_KIND: Final[Literal["citemesh-graph"]] = "citemesh-graph"
+GRAPH_PAYLOAD_SCHEMA_VERSION: Final[Literal[1]] = 1
+DASHBOARD_COLLECTION_KIND: Final[Literal["citemesh-dashboard-collection"]] = (
+    "citemesh-dashboard-collection"
+)
+DASHBOARD_COLLECTION_SCHEMA_VERSION: Final[Literal[1]] = 1
 
 __all__ = [
     "ScoreContract",

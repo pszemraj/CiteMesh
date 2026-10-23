@@ -21,11 +21,12 @@ class _TextEncoder(Protocol):
 
     def encode(
         self,
-        sentences: list[str],
+        inputs: list[str],
+        /,
         *,
         batch_size: int,
-        convert_to_tensor: bool,
-        normalize_embeddings: bool,
+        convert_to_tensor: Literal[False],
+        normalize_embeddings: Literal[True],
         show_progress_bar: bool,
     ) -> ArrayLike: ...
 

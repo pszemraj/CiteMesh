@@ -10,12 +10,14 @@ import textwrap
 from collections.abc import Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict
 
-import networkx as nx
 import numpy as np
 from numpy.typing import NDArray
 
+from citemesh.core.values import parse_float
+
 from ..themes import Theme
 from ..years import coerce_publication_year, publication_year_scale
+from ._host import _ExporterHost
 from .geometry import (
     _HOVER_RELATION_LABELS,
     DASHBOARD_AXIS_MIN_PADDING,
@@ -45,6 +47,8 @@ from .nodes import (
 
 if TYPE_CHECKING:
     from plotly.graph_objects import Figure, Scatter
+
+    from citemesh.core.models import PaperGraph
 
 
 class _TextFont(TypedDict):
@@ -122,31 +126,35 @@ class _PlotlyLayoutKwargs(TypedDict, total=False):
 
     showlegend: bool
     hovermode: Literal["closest"]
-    margin: dict[Literal["b", "l", "r", "t"], int]
+    margin: dict[str, int]
     xaxis: _AxisOptions
     yaxis: _AxisOptions
     plot_bgcolor: str
     paper_bgcolor: str
     font: _PlotlyFont
     hoverlabel: PlotlyHoverLabel
-    annotations: list[_PlotlyAnnotation]
+    annotations: list[dict[str, object]]
     uirevision: str
     shapes: list[_PathShape]
     title: str
 
 
-def _plotly_title_text(graph: nx.Graph, seed_id: str) -> str:
+def _plotly_title_text(graph: PaperGraph, seed_id: str) -> str:
     """Build wrapped seed title text used by Plotly figure titles.
 
-    :param nx.Graph graph: Graph containing the seed node.
+    :param PaperGraph graph: Graph containing the seed node.
     :param str seed_id: Seed paper identifier.
     :return str: Wrapped title string.
     """
     seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-    serialized = _serialize_node(seed_id, seed_attrs) if seed_attrs else {}
+    title = (
+        _serialize_node(seed_id, seed_attrs).get("title", "CiteMesh")
+        if seed_attrs
+        else "CiteMesh"
+    )
     # Plotly renders titles as pseudo-HTML, so upstream markup must be escaped
     # before wrapping; only the "<br>" joins below stay live markup.
-    raw_title = html.escape(" ".join(str(serialized.get("title", "CiteMesh")).split()))
+    raw_title = html.escape(" ".join(str(title).split()))
     title_text = "<br>".join(textwrap.wrap(raw_title, width=72, break_long_words=False))
     if not title_text:
         return "CiteMesh"
@@ -170,7 +178,7 @@ def _build_edge_layer(
     *,
     go: PlotlyGraphObjects,
     theme_obj: Theme,
-    graph: nx.Graph,
+    graph: PaperGraph,
     pos: Mapping[Hashable, NDArray[np.float64]],
     for_dashboard: bool,
 ) -> tuple[list[_PathShape], Scatter | None]:
@@ -178,7 +186,7 @@ def _build_edge_layer(
 
     :param PlotlyGraphObjects go: Lazily loaded Plotly graph_objects module.
     :param Theme theme_obj: Active visualization theme.
-    :param nx.Graph graph: Graph supplying deterministically ordered edges.
+    :param PaperGraph graph: Graph supplying deterministically ordered edges.
     :param Mapping[Hashable, NDArray[np.float64]] pos: Normalized node positions.
     :param bool for_dashboard: Whether to emit curved dashboard shapes.
     :return tuple[list[_PathShape], Scatter | None]: Layout shapes and the
@@ -191,7 +199,10 @@ def _build_edge_layer(
         curvature = 0.15
         edge_records = list(_sorted_edges(graph))
         edge_strengths = _edge_strength_scale(
-            [max(float(attrs.get("weight", 0.0)), 0.0) for _, _, attrs in edge_records]
+            [
+                max(parse_float(attrs.get("weight", 0.0)), 0.0)
+                for _, _, attrs in edge_records
+            ]
         )
         for (u, v, attrs), strength in zip(edge_records, edge_strengths):
             x0f = float(pos[u][0])
@@ -242,7 +253,7 @@ def _build_edge_layer(
 
 def _build_node_style(
     *,
-    graph: nx.Graph,
+    graph: PaperGraph,
     node_ids: list[Hashable],
     pos: Mapping[Hashable, NDArray[np.float64]],
     base_labels: list[object],
@@ -251,7 +262,7 @@ def _build_node_style(
 ) -> _NodeStyle:
     """Resolve node label text and marker styling for the active render mode.
 
-    :param nx.Graph graph: Graph supplying seed and ranking attributes.
+    :param PaperGraph graph: Graph supplying seed and ranking attributes.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :param Mapping[Hashable, NDArray[np.float64]] pos: Normalized node positions.
     :param list[object] base_labels: Raw per-node label candidates.
@@ -259,6 +270,12 @@ def _build_node_style(
     :param bool for_dashboard: Whether to apply dashboard label thinning.
     :return _NodeStyle: Escaped labels plus marker and text styling.
     """
+    text_font: _TextFont
+    color_scale: str | list[list[float | str]]
+    marker_line_width: int | list[float]
+    marker_line_color: str | list[str]
+    marker_colorbar: _MarkerColorbar | None
+
     if for_dashboard:
         label_nodes = _select_dashboard_label_nodes(graph, node_ids, pos)
         node_labels = [
@@ -268,13 +285,13 @@ def _build_node_style(
         text_position = "top center"
         # Keep one marker trace so point indices stay stable for hover/click sync;
         # use a muted shared text alpha instead of per-point text styling.
-        text_font = dict(
+        text_font = _TextFont(
             size=10,
             color=_rgb_tuple_to_rgba(
                 theme_obj.text_color, theme_label_text_alpha(theme_obj)
             ),
         )
-        color_scale: object = [
+        color_scale = [
             [0.0, _rgb_tuple_to_hex(theme_obj.node_color_old)],
             [1.0, _rgb_tuple_to_hex(theme_obj.node_color_new)],
         ]
@@ -288,19 +305,19 @@ def _build_node_style(
             for node in node_ids
         ]
         marker_showscale = False
-        marker_colorbar: _MarkerColorbar | None = None
+        marker_colorbar = None
     else:
         node_labels = [str(label) for label in base_labels]
         text_position = "bottom center"
-        text_font = dict(size=8, color=theme_obj.text_color)
+        text_font = _TextFont(size=8, color=theme_obj.text_color)
         color_scale = "Plasma" if theme_obj.name == "dark" else "Viridis"
         marker_line_width = 2
         marker_line_color = theme_obj.text_color
         marker_showscale = True
-        marker_colorbar = dict(
+        marker_colorbar = _MarkerColorbar(
             thickness=15,
             xanchor="left",
-            title=dict(text="Year", side="right"),
+            title=_ColorbarTitle(text="Year", side="right"),
         )
     node_labels = [html.escape(label) for label in node_labels]
 
@@ -316,10 +333,10 @@ def _build_node_style(
     )
 
 
-def _build_hover_texts(*, graph: nx.Graph, node_ids: list[Hashable]) -> list[str]:
+def _build_hover_texts(*, graph: PaperGraph, node_ids: list[Hashable]) -> list[str]:
     """Build per-node hover tooltips answering "why is this paper here".
 
-    :param nx.Graph graph: Graph supplying node attributes and relation maps.
+    :param PaperGraph graph: Graph supplying node attributes and relation maps.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :return list[str]: Pseudo-HTML tooltip bodies, one per node.
     """
@@ -348,9 +365,11 @@ def _build_hover_texts(*, graph: nx.Graph, node_ids: list[Hashable]) -> list[str
                 authors += f" +{len(serialized_authors) - 3}"
             lines.append(html.escape(authors))
             paper_year = coerce_publication_year(serialized.get("year"))
+            # Preserve ``int``'s native failure behavior for raw citation values.
+            citation_count = int(serialized.get("citation_count", 0))  # type: ignore[call-overload]
             fact_bits = [
                 str(paper_year) if paper_year > 0 else "n.d.",
-                f"{int(serialized.get('citation_count', 0)):,} citations",
+                f"{citation_count:,} citations",
             ]
             venue = " ".join(str(serialized.get("venue") or "").split())
             if venue:
@@ -375,7 +394,7 @@ def _build_hover_texts(*, graph: nx.Graph, node_ids: list[Hashable]) -> list[str
 def _build_dashboard_overlay_traces(
     *,
     go: PlotlyGraphObjects,
-    graph: nx.Graph,
+    graph: PaperGraph,
     node_ids: list[Hashable],
     node_x: list[float],
     node_y: list[float],
@@ -386,7 +405,7 @@ def _build_dashboard_overlay_traces(
     """Build the seed selection halo and neighborhood-edge overlay traces.
 
     :param PlotlyGraphObjects go: Lazily loaded Plotly graph_objects module.
-    :param nx.Graph graph: Graph supplying the seed flag.
+    :param PaperGraph graph: Graph supplying the seed flag.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :param list[float] node_x: Node x coordinates.
     :param list[float] node_y: Node y coordinates.
@@ -453,7 +472,7 @@ def _build_label_annotations(
     node_labels: list[str],
     node_sizes: list[float],
     marker_sizeref: float,
-    marker_line_width: list[float],
+    marker_line_width: int | list[float],
     text_font: _TextFont,
 ) -> list[_PlotlyAnnotation]:
     """Build dashboard label annotations shifted clear of every selection halo.
@@ -463,7 +482,7 @@ def _build_label_annotations(
     :param list[str] node_labels: Escaped labels; empty entries are skipped.
     :param list[float] node_sizes: Node marker areas.
     :param float marker_sizeref: Plotly area-mode marker size reference.
-    :param list[float] marker_line_width: Marker outline widths.
+    :param int | list[float] marker_line_width: Marker outline widths.
     :param _TextFont text_font: Shared annotation font spec.
     :return list[_PlotlyAnnotation]: Plotly annotation dictionaries.
     """
@@ -487,7 +506,12 @@ def _build_label_annotations(
                     / (2.0 * marker_sizeref)
                 ),
                 max(4.0, math.sqrt(node_sizes[idx] / (2.0 * marker_sizeref)))
-                + marker_line_width[idx] / 2.0,
+                + (
+                    marker_line_width[idx]
+                    if isinstance(marker_line_width, list)
+                    else marker_line_width
+                )
+                / 2.0,
             )
             + 3.0,
         )
@@ -528,7 +552,7 @@ class PlotlyFigureMixin:
     """Exporter-state Plotly figure construction and deterministic div IDs."""
 
     def _build_plotly_figure(
-        self,
+        self: _ExporterHost,
         *,
         go: PlotlyGraphObjects,
         theme_obj: Theme,
@@ -657,15 +681,18 @@ class PlotlyFigureMixin:
         }
         if for_dashboard:
             # Pixel shifts clear the largest selection halo at every zoom level.
-            layout_kwargs["annotations"] = _build_label_annotations(
-                node_x=node_x,
-                node_y=node_y,
-                node_labels=node_labels,
-                node_sizes=node_sizes,
-                marker_sizeref=marker_sizeref,
-                marker_line_width=marker_line_width,
-                text_font=text_font,
-            )
+            layout_kwargs["annotations"] = [
+                dict(annotation)
+                for annotation in _build_label_annotations(
+                    node_x=node_x,
+                    node_y=node_y,
+                    node_labels=node_labels,
+                    node_sizes=node_sizes,
+                    marker_sizeref=marker_sizeref,
+                    marker_line_width=marker_line_width,
+                    text_font=text_font,
+                )
+            ]
         if for_dashboard and node_x and node_y:
             _apply_axis_ranges(layout_kwargs, node_x, node_y)
             # Preserve view state within one result without carrying its viewport
@@ -688,11 +715,11 @@ class PlotlyFigureMixin:
                 traces.append(neighborhood_trace)
             traces.append(node_trace)
         else:
-            traces = [edge_trace, node_trace]
+            traces = [trace for trace in (edge_trace, node_trace) if trace is not None]
         fig = go.Figure(data=traces, layout=go.Layout(**layout_kwargs))
         return fig, node_ids
 
-    def _plotly_div_id(self, prefix: str = "citemesh-plotly") -> str:
+    def _plotly_div_id(self: _ExporterHost, prefix: str = "citemesh-plotly") -> str:
         """Build a deterministic Plotly HTML container id.
 
         :param str prefix: Prefix for resulting ``div_id``.
@@ -703,7 +730,7 @@ class PlotlyFigureMixin:
             (
                 str(left),
                 str(right),
-                round(float(attrs.get("weight", 0.0)), 8),
+                round(parse_float(attrs.get("weight", 0.0)), 8),
             )
             for left, right, attrs in _sorted_edges(self.graph)
         ]
@@ -716,7 +743,7 @@ class PlotlyFigureMixin:
         return f"{prefix}-{digest}"
 
     def _plotly_year_scale(
-        self, node_ids: list[Hashable]
+        self: _ExporterHost, node_ids: list[Hashable]
     ) -> tuple[list[float], float, float]:
         """Build deterministic Plotly marker years and explicit scale bounds.
 

@@ -85,13 +85,13 @@ _CHRONOLOGY_YEAR_SCALE = 10_000_000
 _CHRONOLOGY_MONTH_SCALE = 100_000
 
 
-def arxiv_id_chronology_key(raw_id: str | None) -> tuple[int, int, int] | None:
+def arxiv_id_chronology_key(raw_id: object) -> tuple[int, int, int] | None:
     """Return a sortable submission-chronology key for an arXiv identifier.
 
     New-style ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN`` identifiers both
     encode the submission year and month.
 
-    :param str | None raw_id: Raw identifier value from a dataset record.
+    :param object raw_id: Raw identifier value from a dataset record.
     :return Optional[Tuple[int, int, int]]: ``(year, month, sequence)`` or
         ``None`` when the identifier is not a parseable arXiv ID.
     """
@@ -110,14 +110,14 @@ def arxiv_id_chronology_key(raw_id: str | None) -> tuple[int, int, int] | None:
     return (year, month, sequence)
 
 
-def encode_arxiv_id_chronology_key(raw_id: str | None) -> int | None:
+def encode_arxiv_id_chronology_key(raw_id: object) -> int | None:
     """Return the chronology key of an arXiv identifier as one sortable integer.
 
     The packed form is order-isomorphic to :func:`arxiv_id_chronology_key`, so a
     stored column of these values can be compared and aggregated in SQL. Values
     exceed 2e10 and therefore require 64-bit integer storage.
 
-    :param str | None raw_id: Identifier, with or without an ``arxiv:`` prefix.
+    :param object raw_id: Identifier, with or without an ``arxiv:`` prefix.
     :return Optional[int]: Packed ``(year, month, sequence)`` key, or ``None``
         when the identifier is not a parseable arXiv ID.
     """

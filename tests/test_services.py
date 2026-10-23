@@ -15,6 +15,7 @@ import pytest
 import requests
 
 from citemesh.core import API_CONFIG, Author, Paper
+from citemesh.data.cache import JSONValue
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
@@ -260,6 +261,54 @@ def test_alias_reads_follow_canonical_refresh_and_return_fresh_instances() -> No
     assert left is not None and right is not None
     assert left.title == right.title == "New"
     assert left is not right
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"year": "2024"},
+        {"citation_count": None},
+        {"abstract": []},
+        {"categories": [1]},
+        {"references": "other"},
+        {"authors": [{"name": 1}]},
+    ],
+)
+def test_paper_cache_misses_on_invalid_typed_fields(
+    invalid_fields: dict[str, JSONValue],
+) -> None:
+    """Reject cached fields that cannot form typed paper metadata.
+
+    :param dict[str, JSONValue] invalid_fields: Malformed cached paper fields.
+    :return None: Checks that invalid metadata produces a cache miss.
+    """
+    paper: dict[str, JSONValue] = {
+        "paper_id": "canonical",
+        "title": "Cached",
+        "year": 2024,
+        **invalid_fields,
+    }
+    s2.disk_cache._paper_cache_path("canonical").write_text(
+        json.dumps({"version": 2, "paper": paper}), encoding="utf-8"
+    )
+    assert s2.disk_cache._load_cached_paper("canonical") is None
+
+
+def test_paper_cache_accepts_omitted_optional_fields() -> None:
+    """Load minimal cached paper data with the dataclass defaults."""
+    s2.disk_cache._paper_cache_path("canonical").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "paper": {"paper_id": "canonical", "title": "Cached", "year": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cached = s2.disk_cache._load_cached_paper("canonical")
+    assert cached is not None
+    assert cached.title == "Cached" and cached.year is None
+    assert cached.authors == [] and cached.citation_count == 0
 
 
 def test_legacy_full_alias_uses_canonical_and_misses_without_it() -> None:

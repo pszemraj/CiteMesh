@@ -15,6 +15,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
@@ -36,8 +37,13 @@ from .models import StoredEmbedding, _EmbeddingCacheLayoutError
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
 
-class _RecoveryMixin:
+
+class _RecoveryMixin(_EmbeddingCacheHost):
     """Locking, connection, and crash-recovery behaviour for the cache."""
 
     @contextmanager

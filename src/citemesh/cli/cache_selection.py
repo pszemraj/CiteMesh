@@ -57,8 +57,8 @@ def _apply_cache_selection(
         error_sink.error("--force-rebuild-cache cannot be used with --cache-namespace.")
     cache = open_existing_cache(selection)
     with cache.hydration_operation_lock():
-        source = cache.corpus_state().get("source") or {}
-    limit = source.get("limit")
+        source = cache.corpus_state().get("source")
+    limit = source.get("limit") if source is not None else None
     if limit is not None and not {"all_corpus", "corpus_size"}.intersection(provided):
         args.all_corpus = False
         args.corpus_size = min(args.corpus_size, limit) if args.corpus_size else limit

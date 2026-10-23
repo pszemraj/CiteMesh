@@ -48,7 +48,9 @@ def _check_embedding_deps(require_corpus: bool = True) -> None:
         )
 
     raw_torch_version = str(getattr(torch_module, "__version__", "")).strip()
-    torch_version = runtime._parse_major_minor(raw_torch_version, default=(0, 0))
+    torch_version = runtime._parse_major_minor(raw_torch_version)
+    if torch_version is None:
+        torch_version = (0, 0)
     if torch_version < runtime._EMBEDDING_MIN_TORCH_VERSION:
         raise ImportError(
             "Embedding strategy requires torch>=2.9.0 (runtime precision policy). "

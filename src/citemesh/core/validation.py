@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import math
 
+from citemesh.core.values import parse_float
+
 __all__ = [
     "ValueValidationError",
     "parse_bounded_int",
@@ -69,16 +71,17 @@ def parse_bounded_int(value: object, *, minimum: int) -> int:
 def parse_unit_interval_float(value: object) -> float:
     """Parse a finite float constrained to the inclusive range ``[0.0, 1.0]``.
 
-    :param object value: Raw string, number, or unsupported value.
+    :param object value: Raw value accepted by Python's ``float`` conversion.
     :return float: Parsed float between zero and one, inclusive.
     :raises ValueValidationError: With reason ``not_number`` if the value is not
         numeric, ``not_finite`` for NaN/infinity, or ``out_of_range`` if the
         value falls outside ``[0.0, 1.0]``.
+    :raises OverflowError: If numeric conversion exceeds the float range.
     """
     if isinstance(value, bool):
         raise ValueValidationError("not_number", "expected a float, got a boolean")
     try:
-        parsed = float(value)
+        parsed = parse_float(value)
     except (TypeError, ValueError) as exc:
         raise ValueValidationError("not_number", "expected a float") from exc
     if not math.isfinite(parsed):

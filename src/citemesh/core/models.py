@@ -7,8 +7,15 @@ providing type safety, validation, and encapsulation of paper-related logic.
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING, TypeAlias
+
+if TYPE_CHECKING:
+    import networkx as nx
+
+    PaperGraph: TypeAlias = nx.Graph[Hashable, dict[str, object], dict[str, object]]
 
 
 @dataclass

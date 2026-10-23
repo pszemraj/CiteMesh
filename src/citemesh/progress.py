@@ -8,7 +8,7 @@ console, which keeps a single owner for stream, width, and TTY policy.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TypeVar
 
@@ -193,7 +193,7 @@ def progress_iterator(
     unit: str = "items",
     total: int | None = None,
     enabled: bool | None = None,
-) -> Iterator[T]:
+) -> Generator[T, None, None]:
     """Yield items from an iterable while rendering a progress bar.
 
     Closing the returned generator early tears down the display, so callers may
@@ -206,7 +206,7 @@ def progress_iterator(
         when it reports a length.
     :param Optional[bool] enabled: Force display on or off; ``None`` shows the
         bar only when stderr is interactive.
-    :return Iterator[T]: Items from ``iterable``, unchanged.
+    :return Generator[T, None, None]: Items from ``iterable``, unchanged.
     """
     resolved_total = total
     if resolved_total is None:

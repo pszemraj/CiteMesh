@@ -12,10 +12,10 @@ from contextlib import closing
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
-from citemesh.data.embedding_cache.models import CorpusSourceRecord
+from citemesh.data.embedding_cache.models import CorpusSourceRecord, PaperMetadata
 from citemesh.data.embedding_contract import CorpusSource
 
 from . import deps
@@ -34,6 +34,13 @@ class SourceScanStats(TypedDict):
     source_records_examined: int
 
 
+class _SourceRecordPayload(PaperMetadata):
+    """Source fields stored in SQLite before restoring the selected ordinal."""
+
+    paper_id: str
+    chronology_key: int | None
+
+
 def _source_timestamp(value: object) -> str:
     """Normalize a source timestamp to a UTC ISO value.
 
@@ -43,11 +50,12 @@ def _source_timestamp(value: object) -> str:
     if isinstance(value, date) and not isinstance(value, datetime):
         value = value.isoformat()
     if isinstance(value, str):
+        raw_timestamp = value
         try:
-            value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            value = datetime.fromisoformat(raw_timestamp.strip().replace("Z", "+00:00"))
         except ValueError:
             try:
-                value = parsedate_to_datetime(value)
+                value = parsedate_to_datetime(raw_timestamp)
             except (ValueError, TypeError, IndexError):
                 return ""
     if not isinstance(value, datetime):
@@ -206,10 +214,8 @@ def iter_source_records(
                 ambiguous,
             )
         if source.selection == "all":
-            query, parameters = (
-                "SELECT ordinal,payload FROM records ORDER BY ordinal",
-                (),
-            )
+            query = "SELECT ordinal,payload FROM records ORDER BY ordinal"
+            parameters: tuple[int | None, ...] = ()
         else:
             query = (
                 "SELECT ordinal,payload FROM records ORDER BY chronology IS NULL, "
@@ -218,7 +224,10 @@ def iter_source_records(
             )
             parameters = (source.limit,)
         for ordinal, payload in connection.execute(query, parameters):
-            yield {**json.loads(payload), "source_ordinal": ordinal}
+            # The JSON row is serialized from the typed source record above,
+            # with only source_ordinal removed before writing to SQLite.
+            source_payload = cast(_SourceRecordPayload, json.loads(payload))
+            yield {**source_payload, "source_ordinal": ordinal}
 
 
 def iter_source_batches(

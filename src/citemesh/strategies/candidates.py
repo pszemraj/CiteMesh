@@ -72,12 +72,12 @@ class CandidateSourceState(str, Enum):
 
 @dataclass(frozen=True)
 class CandidateSourceResult:
-    """Papers and availability state returned by one candidate source."""
+    """Papers, availability state, and optional failure detail for a source."""
 
     source: str
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
-    error: str = ""
+    error: str | None = ""
 
 
 def scope_candidate_collection(
@@ -542,26 +542,26 @@ def fetch_seed_references(
             resolver.bind_entries(batch)
         attempted.update(ids)
         for entry in batch:
-            paper = resolver.resolve(entry)
+            resolved_paper = resolver.resolve(entry)
             if (
-                paper is None
-                or paper.paper_id == seed.paper_id
-                or candidate_records_match(seed, paper)
+                resolved_paper is None
+                or resolved_paper.paper_id == seed.paper_id
+                or candidate_records_match(seed, resolved_paper)
             ):
                 continue
             existing = next(
                 (
                     item
                     for item in recovered
-                    if item.paper_id == paper.paper_id
-                    or candidate_records_match(item, paper)
+                    if item.paper_id == resolved_paper.paper_id
+                    or candidate_records_match(item, resolved_paper)
                 ),
                 None,
             )
             if existing is not None:
-                merge_paper_metadata(existing, paper)
+                merge_paper_metadata(existing, resolved_paper)
             else:
-                recovered.append(paper)
+                recovered.append(resolved_paper)
     identifiable_entries = len({frozenset(entry) for entry in entries if entry})
     materialized_count = len(recovered)
     _enrich_local_reference_records(client, recovered)

@@ -28,6 +28,7 @@ from .endpoints import PAPER_BASE_URL, _EndpointsMixin
 from .errors import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
+    _CandidateOperationLocal,
     _CandidateOperationState,
     _RetryableRequestError,
     _RetryDiagnostics,
@@ -85,7 +86,7 @@ class SemanticScholarClient(_EndpointsMixin):
         )
         self._next_request_time = 0.0
         self._rate_limit_lock = threading.Lock()
-        self._candidate_operation = threading.local()
+        self._candidate_operation = _CandidateOperationLocal()
         self._session = requests.Session()
         self._closed = False
 
@@ -109,7 +110,9 @@ class SemanticScholarClient(_EndpointsMixin):
 
         Yields: ``None`` for the scope duration.
         """
-        state = getattr(self._candidate_operation, "state", None)
+        state: _CandidateOperationState | None = getattr(
+            self._candidate_operation, "state", None
+        )
         owns_state = state is None
         operation_lock = (
             cache_operation_lock(get_cache_dir())
@@ -120,6 +123,8 @@ class SemanticScholarClient(_EndpointsMixin):
             if owns_state:
                 state = _CandidateOperationState(self.retry_budget_seconds)
                 self._candidate_operation.state = state
+            else:
+                state = self._candidate_operation.state
             state.depth += 1
             try:
                 yield
@@ -300,11 +305,12 @@ class SemanticScholarClient(_EndpointsMixin):
         :param PaperBatchRequest | None payload: Optional batch POST body.
         :return JSONValue: Decoded JSON value, or ``None`` for HTTP 404.
         """
-        kwargs = {"params": params, "timeout": timeout}
         response = (
-            self._session.get(url, **kwargs)
+            self._session.get(url, params=params, timeout=timeout)
             if payload is None
-            else self._session.post(url, json=payload, **kwargs)
+            else self._session.post(
+                url, json={"ids": payload["ids"]}, params=params, timeout=timeout
+            )
         )
         if response.status_code == 404:
             return None
@@ -378,7 +384,8 @@ class SemanticScholarClient(_EndpointsMixin):
                 attempts=0,
                 reason="shared recovery budget exhausted",
             )
-            return self._handle_unavailable(exhausted, raise_on_unavailable)
+            self._handle_unavailable(exhausted, raise_on_unavailable)
+            return None
 
         last_error: Exception | None = None
         retry_wait_seconds = 0.0
@@ -419,16 +426,17 @@ class SemanticScholarClient(_EndpointsMixin):
                     raise _RetryableRequestError(
                         f"HTTP 404 from {url}", status_code=404
                     )
-            except _RetryExhaustedError as exhausted:
+            except _RetryExhaustedError as caught_exhaustion:
                 if recovery_started_at is not None:
                     self._charge_recovery(state, recovery_started_at)
-                    exhausted = self._retry_exhausted(
+                    caught_exhaustion = self._retry_exhausted(
                         state,
                         operation=context,
                         attempts=attempt - 1,
-                        reason=exhausted.retry_diagnostics.stop_reason,
+                        reason=caught_exhaustion.retry_diagnostics.stop_reason,
                     )
-                return self._handle_unavailable(exhausted, raise_on_unavailable)
+                self._handle_unavailable(caught_exhaustion, raise_on_unavailable)
+                return None
             except (
                 requests.Timeout,
                 requests.ConnectionError,
@@ -472,7 +480,8 @@ class SemanticScholarClient(_EndpointsMixin):
                     reason="maximum transient not-found attempts reached",
                     cause=last_error,
                 )
-                return self._handle_unavailable(exhausted, raise_on_unavailable)
+                self._handle_unavailable(exhausted, raise_on_unavailable)
+                return None
 
             if attempt == API_CONFIG.max_retries:
                 exhausted = self._retry_exhausted(
@@ -482,7 +491,8 @@ class SemanticScholarClient(_EndpointsMixin):
                     reason="maximum retry attempts reached",
                     cause=last_error,
                 )
-                return self._handle_unavailable(exhausted, raise_on_unavailable)
+                self._handle_unavailable(exhausted, raise_on_unavailable)
+                return None
 
             remaining = self._remaining_recovery_budget(state)
             if remaining is not None and remaining <= 0:
@@ -493,7 +503,8 @@ class SemanticScholarClient(_EndpointsMixin):
                     reason="shared recovery budget exhausted",
                     cause=last_error,
                 )
-                return self._handle_unavailable(exhausted, raise_on_unavailable)
+                self._handle_unavailable(exhausted, raise_on_unavailable)
+                return None
             delay = retry._jittered_backoff(
                 attempt,
                 retry_after=getattr(last_error, "retry_after", None),
@@ -508,7 +519,8 @@ class SemanticScholarClient(_EndpointsMixin):
                     reason="next wait exceeds remaining recovery budget",
                     cause=last_error,
                 )
-                return self._handle_unavailable(exhausted, raise_on_unavailable)
+                self._handle_unavailable(exhausted, raise_on_unavailable)
+                return None
             previous_retry_wait_seconds = retry_wait_seconds
             retry_wait_seconds += delay
             if (

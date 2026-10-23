@@ -103,26 +103,24 @@ def publish_arxiv_index(
     from citemesh.services.embedding_indexes import publish_snapshot
     from citemesh.strategies.embedding import EmbeddingGraphBuilder
 
-    options = {"semantic_source": "arxiv-corpus", "device": device}
     if namespace is not None:
         from citemesh.data.embedding_cache.lifecycle import (
             open_existing_cache,
             select_existing_cache,
         )
 
-        options["cache_selection"] = select_existing_cache(
-            namespace, require_ready=False
+        selection = select_existing_cache(namespace, require_ready=False)
+        builder = EmbeddingGraphBuilder(
+            semantic_source="arxiv-corpus", device=device, cache_selection=selection
         )
+        builder.embedding_cache = open_existing_cache(selection, require_ready=False)
     else:
-        options.update(
+        builder = EmbeddingGraphBuilder(
+            semantic_source="arxiv-corpus",
+            device=device,
             model_revision=model_revision,
             truncate_dim=dimension,
             storage_precision=storage_precision,
-        )
-    builder = EmbeddingGraphBuilder(**options)
-    if namespace is not None:
-        builder.embedding_cache = open_existing_cache(
-            options["cache_selection"], require_ready=False
         )
     if adopt_namespace is not None:
         from citemesh.strategies.embedding.refresh import adopt_legacy_cache

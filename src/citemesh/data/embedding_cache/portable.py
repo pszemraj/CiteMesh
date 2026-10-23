@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 from uuid import uuid4
 
 import numpy as np
@@ -20,11 +20,12 @@ from numpy.typing import NDArray
 
 from citemesh.data.embedding_cache.models import (
     ActiveCorpusRecord,
+    CorpusOrigin,
     CorpusRecord,
     PortableImportIdentity,
-    PortableProducerProvenance,
     PortableShardData,
     PublicationOrigin,
+    RuntimeVersions,
     StoredEmbedding,
 )
 from citemesh.data.embedding_contract import (
@@ -59,9 +60,34 @@ class PortableManifestData(TypedDict):
     source_records_examined: int
     shards: list[PortableShardData]
     calibration_ranges: str | None
-    producer_provenance: PortableProducerProvenance
+    producer_provenance: Mapping[str, object]
     format_version: int
     row_order: Literal["native-relative"]
+
+
+class _PortableManifestRequiredFields(TypedDict):
+    """Required fields passed to the portable manifest dataclass."""
+
+    config_name: str
+    snapshot_id: str
+    created_at: str
+    producer_version: str
+    contract: EmbeddingContract
+    namespace_serialization: str
+    namespace_selectors: NamespaceSelectors
+    source: CorpusSource
+    row_count: int
+    source_records_examined: int
+    shards: tuple[PortableShard, ...]
+    format_version: int
+    row_order: Literal["native-relative"]
+
+
+class _PortableManifestConstructor(_PortableManifestRequiredFields, total=False):
+    """Typed constructor input for an already-decoded manifest mapping."""
+
+    calibration_ranges: str | None
+    producer_provenance: Mapping[str, object]
 
 
 def _relative_path(value: str) -> str:
@@ -108,7 +134,7 @@ class PortableManifest:
     source_records_examined: int
     shards: tuple[PortableShard, ...]
     calibration_ranges: str | None = None
-    producer_provenance: PortableProducerProvenance = field(default_factory=dict)
+    producer_provenance: Mapping[str, object] = field(default_factory=dict)
     format_version: int = FORMAT_VERSION
     row_order: Literal["native-relative"] = "native-relative"
 
@@ -166,22 +192,24 @@ class PortableManifest:
                 or not isinstance(shard_data, Iterable)
             ):
                 raise TypeError("Portable manifest fields have invalid mapping shapes")
-            contract_values: Mapping[str, object] = contract_data
-            source_values: Mapping[str, object] = source_data
+            # Type the decoded wire mappings for the existing model constructors;
+            # their current construction and validation path remains unchanged.
+            contract_values = cast(EmbeddingContractData, contract_data)
+            source_values = cast(CorpusSourceData, source_data)
             shard_values: Iterable[object] = shard_data
-            shards = []
+            shards: list[PortableShard] = []
             for item in shard_values:
                 if not isinstance(item, Mapping):
                     raise TypeError("Portable shard fields must be mappings")
-                shards.append(PortableShard(**item))
-            manifest = cls(
-                **{
-                    **value,
-                    "contract": EmbeddingContract(**contract_values),
-                    "source": CorpusSource(**source_values),
-                    "shards": tuple(shards),
-                }
-            )
+                shards.append(PortableShard(**cast(PortableShardData, item)))
+            manifest_data: dict[str, object] = {
+                **value,
+                "contract": EmbeddingContract(**contract_values),
+                "source": CorpusSource(**source_values),
+                "shards": tuple(shards),
+            }
+            # Construction and the checks below validate this decoded mapping.
+            manifest = cls(**cast(_PortableManifestConstructor, manifest_data))
         except (KeyError, TypeError) as exc:
             raise ValueError(f"Invalid portable manifest: {exc}") from exc
         if manifest.format_version != FORMAT_VERSION:
@@ -338,26 +366,23 @@ def portable_schema(contract: EmbeddingContract) -> pa.Schema:
 
     _validate_contract(contract)
     value_type = pa.int8() if contract.stored_dtype == "int8" else pa.float32()
-    return pa.schema(
-        [
-            pa.field("row_number", pa.int64(), nullable=False),
-            pa.field("paper_id", pa.string(), nullable=False),
-            pa.field("arxiv_id", pa.string()),
-            pa.field("doi", pa.string()),
-            pa.field("title", pa.string()),
-            pa.field("abstract", pa.string()),
-            pa.field("year", pa.int32()),
-            pa.field("authors", pa.list_(pa.string())),
-            pa.field("categories", pa.list_(pa.string())),
-            pa.field("venue", pa.string()),
-            pa.field("text_hash", pa.string(), nullable=False),
-            pa.field("chronology_key", pa.int64()),
-            pa.field("source_ordinal", pa.int64(), nullable=False),
-            pa.field(
-                "embedding", pa.list_(value_type, contract.dimension), nullable=False
-            ),
-        ]
-    )
+    fields: list[pa.Field[pa.DataType]] = [
+        pa.field("row_number", pa.int64(), nullable=False),
+        pa.field("paper_id", pa.string(), nullable=False),
+        pa.field("arxiv_id", pa.string()),
+        pa.field("doi", pa.string()),
+        pa.field("title", pa.string()),
+        pa.field("abstract", pa.string()),
+        pa.field("year", pa.int32()),
+        pa.field("authors", pa.list_(pa.string())),
+        pa.field("categories", pa.list_(pa.string())),
+        pa.field("venue", pa.string()),
+        pa.field("text_hash", pa.string(), nullable=False),
+        pa.field("chronology_key", pa.int64()),
+        pa.field("source_ordinal", pa.int64(), nullable=False),
+        pa.field("embedding", pa.list_(value_type, contract.dimension), nullable=False),
+    ]
+    return pa.schema(fields)
 
 
 def _validate_vectors(
@@ -414,8 +439,9 @@ def _record_batch(
 
     _validate_vectors(vectors, contract, len(records))
     schema = portable_schema(contract)
-    columns = []
+    columns: list[pa.Array[pa.Scalar[pa.DataType]]] = []
     for column in schema:
+        array: pa.Array[pa.Scalar[pa.DataType]]
         if column.name == "embedding":
             values = pa.array(vectors.reshape(-1), type=column.type.value_type)
             array = pa.FixedSizeListArray.from_arrays(values, contract.dimension)
@@ -458,7 +484,7 @@ def export_snapshot(
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / "data").mkdir()
     writer = None
-    shards = []
+    shards: list[PortableShard] = []
     next_row = 0
     shard_count = 0
     shard_start = 0
@@ -477,7 +503,8 @@ def export_snapshot(
                             output_dir / shard_path,
                             portable_schema(view.contract),
                             compression="zstd",
-                            use_dictionary=["venue", "year"],
+                            # PyArrow accepts a column-name list; its stub types this as bool.
+                            use_dictionary=["venue", "year"],  # type: ignore[arg-type]
                         )
                     count = min(len(records) - offset, shard_rows - shard_count)
                     batch = _record_batch(
@@ -502,7 +529,8 @@ def export_snapshot(
                 shards.append(PortableShard(shard_path, shard_start, shard_count))
             ranges_path = None
             if view.contract.stored_dtype == "int8":
-                ranges = view.calibration_ranges
+                # The int8 view carries calibration ranges by construction.
+                ranges = cast(NDArray[np.float32], view.calibration_ranges)
                 _validate_ranges(ranges, view.contract)
                 ranges_path = "calibration_ranges.npy"
                 np.save(output_dir / ranges_path, ranges, allow_pickle=False)
@@ -519,13 +547,12 @@ def export_snapshot(
                 source_records_examined=view.source_records_examined,
                 producer_provenance={
                     **view.producer_provenance,
-                    "export_runtime_versions": {
-                        "python": platform.python_version(),
-                        **{
-                            package: version(package)
-                            for package in ("numpy", "h5py", "pyarrow")
-                        },
-                    },
+                    "export_runtime_versions": RuntimeVersions(
+                        python=platform.python_version(),
+                        numpy=version("numpy"),
+                        h5py=version("h5py"),
+                        pyarrow=version("pyarrow"),
+                    ),
                 },
                 shards=tuple(shards),
                 calibration_ranges=ranges_path,
@@ -597,7 +624,11 @@ def _iter_snapshot_batches(
                     row_numbers, np.arange(next_row, next_row + len(batch))
                 ):
                     raise ValueError("Portable row numbers are not contiguous")
-                embedding = batch.column(schema.get_field_index("embedding"))
+                # The parquet schema was checked against this contract above.
+                embedding = cast(
+                    "pa.FixedSizeListArray[pa.DataType, int]",
+                    batch.column(schema.get_field_index("embedding")),
+                )
                 values = embedding.values.slice(
                     embedding.offset * manifest.contract.dimension,
                     len(batch) * manifest.contract.dimension,
@@ -608,9 +639,11 @@ def _iter_snapshot_batches(
                     len(batch), manifest.contract.dimension
                 )
                 _validate_vectors(vectors, manifest.contract, len(batch))
-                records: list[CorpusRecord] = batch.select(
-                    schema.names[1:-1]
-                ).to_pylist()
+                # The selected columns use the validated portable row schema.
+                records = cast(
+                    list[CorpusRecord],
+                    batch.select(schema.names[1:-1]).to_pylist(),
+                )
                 if any(record["source_ordinal"] < 0 for record in records):
                     raise ValueError("Portable source ordinals must be nonnegative")
                 if any(
@@ -678,7 +711,10 @@ def import_snapshot(
         ranges = np.load(snapshot_dir / manifest.calibration_ranges, allow_pickle=False)
         _validate_ranges(ranges, manifest.contract)
     identity = manifest_import_identity(manifest)
-    origin = {"snapshot_id": manifest.snapshot_id, **(publication or {})}
+    if publication is None:
+        origin: CorpusOrigin = {"snapshot_id": manifest.snapshot_id}
+    else:
+        origin = publication.copy()
     with import_destination_session(
         cache_dir=destination,
         namespace_serialization=manifest.namespace_serialization,

@@ -24,6 +24,11 @@ from .payloads import RecommendationResponse, RelationPage, SearchResponse
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .errors import _CandidateOperationLocal
+
 RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
@@ -117,10 +122,27 @@ class _EndpointsMixin:
     """Public Semantic Scholar endpoint surface."""
 
     if TYPE_CHECKING:
+        _candidate_operation: _CandidateOperationLocal
+        refresh_paper_cache: bool
 
         def candidate_operation_scope(self) -> AbstractContextManager[None]:
             """Scope supplied by the client that hosts this mixin."""
             ...
+
+        def _request_json(
+            self,
+            url: str,
+            params: dict[str, str | int],
+            *,
+            context: str,
+            payload: payloads.PaperBatchRequest | None = None,
+            raise_on_unavailable: bool = False,
+            retry_not_found: bool = False,
+        ) -> JSONValue: ...
+
+        def _persist_reference_cache_entry(
+            self, cache_path: Path, paper_id: str, reference_ids: list[str]
+        ) -> None: ...
 
     @_scoped_endpoint
     def get_paper(

@@ -11,10 +11,18 @@ from __future__ import annotations
 import logging
 import os
 import random
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
-from typing import Final, Literal
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    Protocol,
+    TypedDict,
+    TypeGuard,
+    overload,
+)
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,7 +35,10 @@ from citemesh.data.embedding_cache import (
     _corpus_size_from_token,
     _corpus_size_token,
 )
-from citemesh.data.embedding_cache.models import EmbeddingInputMetadata, PaperMetadata
+from citemesh.data.embedding_cache.models import (
+    CachedPaperMetadata,
+    CacheInputMetadata,
+)
 from citemesh.progress import progress_task
 from citemesh.strategies.base import deterministic_sort_key
 
@@ -50,6 +61,13 @@ from .records import (
     _newest_records_by_arxiv_id,
 )
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingBuilderHost
+
+    _EmbeddingBuilderHostBase = _EmbeddingBuilderHost
+else:
+    _EmbeddingBuilderHostBase = object
+
 logger = logging.getLogger(__name__)
 
 HYDRATION_FLUSH_SIZE = EMBEDDING_DATASET_CHUNK_ROWS
@@ -65,9 +83,105 @@ _REQUESTED_CORPUS_SIZE: Final = "requested"
 _CorpusSizeArg = int | None | Literal["requested"]
 
 
-def _indexable_dataset_identifier_records(
+class _ColumnarDataset(Iterable[DatasetRecord], Protocol):
+    """Dataset view with the columns used to identify corpus rows."""
+
+    column_names: Sequence[str]
+
+    @overload
+    def __getitem__(self, key: str, /) -> Sequence[object]: ...
+
+    @overload
+    def __getitem__(self, key: int, /) -> DatasetRecord: ...
+
+
+class _SelectableDataset(Iterable[DatasetRecord], Protocol):
+    """Non-streaming dataset that can select rows by source index."""
+
+    column_names: Sequence[str]
+
+    def select(self, indices: Sequence[int], /) -> Iterable[DatasetRecord]: ...
+
+
+class _SizedDataset(Iterable[DatasetRecord], Protocol):
+    """Re-iterable dataset with a known row count."""
+
+    def __len__(self) -> int: ...
+
+
+class _IdentifierFields(TypedDict, total=False):
+    """Optional source ID fields used to rank dataset rows."""
+
+    id: object
+    paper_id: object
+    paperId: object
+
+
+class _SourceIndexedIdentifierRecord(_IdentifierFields):
+    """Identifier fields paired with their source row index."""
+
+    source_index: int
+
+
+def _is_columnar_dataset(
     dataset: Iterable[DatasetRecord],
-) -> Iterable[DatasetRecord] | None:
+) -> TypeGuard[_ColumnarDataset]:
+    """Check whether named columns and integer row indexing are available.
+
+    :param Iterable[DatasetRecord] dataset: Loaded source rows.
+    :return bool: Whether the dataset exposes both operations.
+    """
+    return getattr(dataset, "column_names", None) is not None and hasattr(
+        dataset, "__getitem__"
+    )
+
+
+def _is_selectable_dataset(
+    dataset: Iterable[DatasetRecord],
+) -> TypeGuard[_SelectableDataset]:
+    """Check whether a dataset exposes named columns and row selection.
+
+    :param Iterable[DatasetRecord] dataset: Loaded source rows.
+    :return bool: Whether the dataset supports index-based selection.
+    """
+    return getattr(dataset, "column_names", None) is not None and hasattr(
+        dataset, "select"
+    )
+
+
+def _is_sized_dataset(
+    dataset: Iterable[DatasetRecord],
+) -> TypeGuard[_SizedDataset]:
+    """Check whether a dataset exposes a length method.
+
+    :param Iterable[DatasetRecord] dataset: Loaded source rows.
+    :return bool: Whether the dataset has ``__len__``.
+    """
+    return hasattr(dataset, "__len__")
+
+
+def _index_identifier_record(
+    record: DatasetRecord, source_index: int
+) -> _SourceIndexedIdentifierRecord:
+    """Pair a source row's available identifier fields with its row index.
+
+    :param record: Row containing any supported source identifier fields.
+    :param source_index: Position of the row in the loaded dataset.
+    :return: Identifier fields and their source position.
+    """
+    indexed_record = _SourceIndexedIdentifierRecord(source_index=source_index)
+    if "id" in record:
+        indexed_record["id"] = record["id"]
+    if "paper_id" in record:
+        indexed_record["paper_id"] = record["paper_id"]
+    if "paperId" in record:
+        indexed_record["paperId"] = record["paperId"]
+    return indexed_record
+
+
+def _indexable_dataset_identifier_records(
+    dataset: _ColumnarDataset,
+) -> Iterator[DatasetRecord] | None:
     """Return lightweight identifier records for an indexable dataset.
 
     Every available identifier column is retained so per-row fallback follows
@@ -77,11 +191,8 @@ def _indexable_dataset_identifier_records(
     :return Optional[Iterable[DatasetRecord]]: Lightweight records, or ``None``
         when column-only traversal is unavailable.
     """
-    column_names = getattr(dataset, "column_names", None)
-    if column_names is None or not hasattr(dataset, "__getitem__"):
-        return None
     identifier_columns = tuple(
-        field for field in _DATASET_PAPER_ID_FIELDS if field in column_names
+        field for field in _DATASET_PAPER_ID_FIELDS if field in dataset.column_names
     )
     if not identifier_columns:
         return None
@@ -91,7 +202,7 @@ def _indexable_dataset_identifier_records(
     return (dict(zip(identifier_columns, values)) for values in zip(*identifier_values))
 
 
-class _CorpusHydrationMixin:
+class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
     """Dataset hydration, calibration and cache-native candidate search.
 
     Mixed into :class:`~citemesh.strategies.embedding.builder.EmbeddingGraphBuilder`.
@@ -108,11 +219,11 @@ class _CorpusHydrationMixin:
 
     def _search_cache_candidates(
         self, seed_embedding: NDArray[np.float32]
-    ) -> list[tuple[str, PaperMetadata, NDArray[np.float32]]]:
+    ) -> list[tuple[str, CachedPaperMetadata, NDArray[np.float32]]]:
         """Run cache-native retrieval and map results to candidate tuples.
 
         :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
-        :return List[Tuple[str, PaperMetadata, NDArray[np.float32]]]: Candidates by score.
+        :return List[Tuple[str, CachedPaperMetadata, NDArray[np.float32]]]: Candidates by score.
         """
         top_k = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         search_results = self.embedding_cache.search(
@@ -120,10 +231,10 @@ class _CorpusHydrationMixin:
             top_k=top_k,
             binary_prefilter=self.binary_prefilter,
             binary_rescore_multiplier=self.binary_rescore_multiplier,
-            **(
-                {"corpus_size": self.corpus_size}
+            corpus_size=(
+                self.corpus_size
                 if getattr(self, "_cache_selection", None) is not None
-                else {}
+                else None
             ),
         )
         self._last_search_used_binary_prefilter = (
@@ -375,7 +486,7 @@ class _CorpusHydrationMixin:
 
     def _resolve_hydration_dataset(
         self, cached_dataset_source: str | None, use_streaming: bool
-    ) -> tuple[str | None, Iterable[DatasetRecord]]:
+    ) -> tuple[str, Iterable[DatasetRecord]]:
         """Resolve the dataset to hydrate from, warning first about a rebuild.
 
         A source that cannot be resolved is fatal rather than a fall back to the
@@ -384,8 +495,7 @@ class _CorpusHydrationMixin:
 
         :param Optional[str] cached_dataset_source: Source recorded on the cache.
         :param bool use_streaming: Whether hydration mode is streaming.
-        :return Tuple[Optional[str], Iterable[DatasetRecord]]: Resolved source
-            token and the selected dataset rows.
+        :return tuple[str, Iterable[DatasetRecord]]: Resolved source and rows.
         :raises RuntimeError: If the configured dataset source cannot be resolved.
         """
         if cached_dataset_source or self.embedding_cache.has_cached_payload():
@@ -408,7 +518,7 @@ class _CorpusHydrationMixin:
     def _prepare_clean_hydration_namespace(
         self,
         *,
-        dataset_source: str | None,
+        dataset_source: str,
         cached_dataset_source: str | None,
         use_streaming: bool,
     ) -> None:
@@ -417,7 +527,7 @@ class _CorpusHydrationMixin:
         The model fingerprint is carried across the clear so the rebuilt
         namespace stays bound to the checkpoint that is already loaded.
 
-        :param Optional[str] dataset_source: Resolved dataset source token.
+        :param str dataset_source: Resolved dataset source token.
         :param Optional[str] cached_dataset_source: Source recorded on the cache.
         :param bool use_streaming: Whether hydration mode is streaming.
         :return None: Leaves an empty namespace marked incomplete.
@@ -470,13 +580,13 @@ class _CorpusHydrationMixin:
         self,
         *,
         dataset: Iterable[DatasetRecord],
-        dataset_source: str | None,
+        dataset_source: str,
         use_streaming: bool,
     ) -> _HydrationSourceSliceResult:
         """Encode a clean namespace while counting the source rows actually read.
 
         :param Iterable[DatasetRecord] dataset: Selected dataset rows.
-        :param Optional[str] dataset_source: Resolved dataset source token.
+        :param str dataset_source: Resolved dataset source token.
         :param bool use_streaming: Whether hydration mode is streaming.
         :return _HydrationSourceSliceResult: Cache writes and observed source progress.
         """
@@ -484,12 +594,15 @@ class _CorpusHydrationMixin:
             dataset,
             use_streaming=use_streaming,
         )
+        selected_dataset: _SizedDataset | None = None
+        if not use_streaming and _is_sized_dataset(dataset):
+            selected_dataset = dataset
+        elif isinstance(dataset, list):
+            selected_dataset = dataset
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=dataset_source,
-            selected_dataset=(
-                dataset if not use_streaming or isinstance(dataset, list) else None
-            ),
+            selected_dataset=selected_dataset,
         )
         return self._hydrate_exact_hydration_source_slice(
             dataset=dataset,
@@ -502,7 +615,7 @@ class _CorpusHydrationMixin:
 
     def _mark_hydration_complete(
         self,
-        dataset_source: str | None,
+        dataset_source: str,
         *,
         source_rows: int,
         capped_upstream_rows: int | None = None,
@@ -514,7 +627,7 @@ class _CorpusHydrationMixin:
         not evidence that those newly published papers were included. Duplicate
         IDs can still leave fewer vectors than observed source rows.
 
-        :param Optional[str] dataset_source: Resolved dataset source token.
+        :param str dataset_source: Resolved dataset source token.
         :param int source_rows: Rows consumed from the loaded source snapshot.
         :param Optional[int] capped_upstream_rows: Upstream row count observed
             before a capped selection began.
@@ -1253,6 +1366,9 @@ class _CorpusHydrationMixin:
         :param Set[str] existing_paper_ids: IDs already persisted or queued by hydration.
         :return Iterable[DatasetRecord]: Full missing rows and lightweight cached IDs.
         """
+        if not _is_columnar_dataset(dataset):
+            yield from dataset
+            return
         identifier_records = _indexable_dataset_identifier_records(dataset)
         if identifier_records is None:
             yield from dataset
@@ -1322,7 +1438,7 @@ class _CorpusHydrationMixin:
         :return Optional[int]: Progress-bar total when it can be inferred.
         """
         progress_total = self._effective_corpus_size(corpus_size)
-        if not use_streaming and progress_total is None:
+        if not use_streaming and progress_total is None and _is_sized_dataset(dataset):
             try:
                 progress_total = len(dataset)
             except TypeError:  # pragma: no cover - defensive for dataset APIs
@@ -1390,7 +1506,7 @@ class _CorpusHydrationMixin:
         *,
         use_streaming: bool,
         dataset_source: str,
-        selected_dataset: Sequence[DatasetRecord] | None = None,
+        selected_dataset: _SizedDataset | None = None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> None:
         """Initialize representative int8 calibration ranges before hydration writes.
@@ -1579,9 +1695,19 @@ class _CorpusHydrationMixin:
             iterable when no arXiv IDs are parseable).
         """
         limit = int(corpus_size)
-        column_names = getattr(dataset, "column_names", None)
-        select_by_index = column_names is not None and hasattr(dataset, "select")
-        if select_by_index:
+        selectable_dataset: _SelectableDataset | None = None
+        selected_indices: list[int] = []
+        selected: Sequence[DatasetRecord]
+        if _is_selectable_dataset(dataset):
+            selectable_dataset = dataset
+            if not _is_columnar_dataset(dataset):
+                logger.warning(
+                    "Dataset %s has no supported paper identifier column; capped "
+                    "hydration takes the first %d rows instead of the newest.",
+                    dataset_source,
+                    limit,
+                )
+                return dataset
             identifier_records = _indexable_dataset_identifier_records(dataset)
             if identifier_records is None:
                 logger.warning(
@@ -1591,13 +1717,18 @@ class _CorpusHydrationMixin:
                     limit,
                 )
                 return dataset
-            selected = _newest_records_by_arxiv_id(
-                (
-                    {**record, "source_index": idx}
-                    for idx, record in enumerate(identifier_records)
-                ),
+            indexed_records = (
+                _index_identifier_record(record, index)
+                for index, record in enumerate(identifier_records)
+            )
+            selected_indexed_records = _newest_records_by_arxiv_id(
+                indexed_records,
                 limit,
             )
+            selected_indices = sorted(
+                record["source_index"] for record in selected_indexed_records
+            )
+            selected = selected_indexed_records
         else:
             logger.warning(
                 "Newest-first selection must scan the entire %s stream to rank "
@@ -1620,7 +1751,7 @@ class _CorpusHydrationMixin:
                 dataset_source,
                 limit,
             )
-            return dataset if select_by_index else selected
+            return selectable_dataset if selectable_dataset is not None else selected
         else:
             if len(chronology_keys) < len(selected):
                 logger.warning(
@@ -1640,10 +1771,8 @@ class _CorpusHydrationMixin:
                 chronology_keys[-1][0],
                 chronology_keys[-1][1],
             )
-        if select_by_index:
-            return dataset.select(
-                sorted(int(record["source_index"]) for record in selected)
-            )
+        if selectable_dataset is not None:
+            return selectable_dataset.select(selected_indices)
         return selected
 
     def _resolve_dataset_split_row_count(self, dataset_source: str) -> int | None:
@@ -1881,7 +2010,10 @@ class _CorpusHydrationMixin:
             operation="Capped corpus recency check",
             corpus_size=corpus_size,
         )
-        identifier_records = _indexable_dataset_identifier_records(dataset)
+        if _is_columnar_dataset(dataset):
+            identifier_records = _indexable_dataset_identifier_records(dataset)
+        else:
+            identifier_records = None
         if identifier_records is not None:
             raw_ids: Iterable[object | None] = (
                 _dataset_record_raw_paper_id(record) for record in identifier_records
@@ -1896,7 +2028,7 @@ class _CorpusHydrationMixin:
                 newest_key = key
         # Reading the keys drained a bare iterator, but not a materialized
         # newest-N list or an indexable dataset view; sizedness tells them apart.
-        selection = dataset if hasattr(dataset, "__len__") else None
+        selection = dataset if _is_sized_dataset(dataset) else None
         return _CappedCorpusRecencyProbe(newest_key=newest_key, selection=selection)
 
     def _capped_corpus_selection_is_cached(
@@ -2112,19 +2244,19 @@ class _CorpusHydrationMixin:
                 else str(parsed_row_offset + parsed_row_limit)
             )
             split_for_load = f"{split_for_load}[{start_idx}:{stop_idx}]"
-        dataset = load_dataset(
+        dataset: Iterable[DatasetRecord] = load_dataset(
             self.dataset_source,
             split=split_for_load,
             streaming=use_streaming,
             num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
         )
         if use_streaming and (parsed_row_limit is not None or parsed_row_offset > 0):
-            stop_idx = (
+            stream_stop_idx = (
                 None
                 if parsed_row_limit is None
                 else parsed_row_offset + parsed_row_limit
             )
-            dataset = islice(dataset, parsed_row_offset, stop_idx)
+            dataset = islice(dataset, parsed_row_offset, stream_stop_idx)
         elif (
             selection_corpus_size is not None
             and parsed_row_limit is None
@@ -2184,7 +2316,7 @@ class _CorpusHydrationMixin:
         if not batch:
             return 0
 
-        metadata_map: dict[str, EmbeddingInputMetadata] = {}
+        metadata_map: dict[str, CacheInputMetadata] = {}
         for metadata in batch:
             paper_id = metadata["paper_id"].strip()
             if not paper_id:

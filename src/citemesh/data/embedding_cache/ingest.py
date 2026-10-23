@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, cast
 
 import h5py
 import numpy as np
@@ -39,7 +40,7 @@ from citemesh.core.text_batching import (
 
 from ..model_profiles import compose_title_abstract_text
 from .models import (
-    EmbeddingInputMetadata,
+    CacheInputMetadata,
     PaperRequest,
     PaperRowValues,
     PendingEmbeddingRecord,
@@ -61,6 +62,11 @@ from .sql import (
     PaperMetadataRefreshValues,
 )
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
+
 
 def _close_progress(iterator: Iterable[PaperRequest]) -> None:
     """Tear down a progress reporter that was consumed to completion.
@@ -75,26 +81,26 @@ def _close_progress(iterator: Iterable[PaperRequest]) -> None:
         close()
 
 
-class _IngestMixin:
+class _IngestMixin(_EmbeddingCacheHost):
     """Cache-miss lookup, encoding, and durable commit for :class:`EmbeddingCache`."""
 
     def _process_embeddings(
         self,
-        papers: Mapping[str, EmbeddingInputMetadata],
+        papers: Mapping[str, CacheInputMetadata],
         model: _TextEncoder,
         *,
         batch_size: int,
         show_progress: bool,
-        text_builder: Callable[[EmbeddingInputMetadata], str] | None,
+        text_builder: Callable[[CacheInputMetadata], str] | None,
         return_embeddings: bool,
     ) -> dict[str, NDArray[np.float32]] | None:
         """Coordinate one complete embedding cache operation with root clearing.
 
-        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param Mapping[str, CacheInputMetadata] papers: Papers keyed by ID with cache metadata.
         :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
+        :param Optional[Callable[[CacheInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         :param bool return_embeddings: Whether to return float32 embedding payloads.
         :return Optional[dict[str, NDArray[np.float32]]]: Embedding map when requested, else ``None``.
         """
@@ -110,12 +116,12 @@ class _IngestMixin:
 
     def _process_embeddings_locked(
         self,
-        papers: Mapping[str, EmbeddingInputMetadata],
+        papers: Mapping[str, CacheInputMetadata],
         model: _TextEncoder,
         *,
         batch_size: int,
         show_progress: bool,
-        text_builder: Callable[[EmbeddingInputMetadata], str] | None,
+        text_builder: Callable[[CacheInputMetadata], str] | None,
         return_embeddings: bool,
     ) -> dict[str, NDArray[np.float32]] | None:
         """Hydrate cache entries while the root operation lock is held.
@@ -126,11 +132,11 @@ class _IngestMixin:
         HDF5 handle are opened here and handed to each step, so no step widens
         or shortens the window a caller sees.
 
-        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param Mapping[str, CacheInputMetadata] papers: Papers keyed by ID with cache metadata.
         :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
+        :param Optional[Callable[[CacheInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         :param bool return_embeddings: Whether to return float32 embedding payloads.
         :return Optional[dict[str, NDArray[np.float32]]]: Embedding map when requested, else ``None``.
         """
@@ -206,7 +212,7 @@ class _IngestMixin:
         conn: sqlite3.Connection,
         h5_file: h5py.File,
         items: Sequence[PaperRequest],
-        builder: Callable[[EmbeddingInputMetadata], str],
+        builder: Callable[[CacheInputMetadata], str],
         return_embeddings: bool,
         show_progress: bool,
     ) -> _CacheLookupPlan:
@@ -221,7 +227,7 @@ class _IngestMixin:
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
         :param Sequence[PaperRequest] items: Requested ``(paper_id, metadata)`` pairs.
-        :param Callable[[EmbeddingInputMetadata], str] builder: Metadata-to-text formatter.
+        :param Callable[[CacheInputMetadata], str] builder: Metadata-to-text formatter.
         :param bool return_embeddings: Whether cached vectors must be materialized.
         :param bool show_progress: Whether the scan may report progress.
         :return _CacheLookupPlan: Cached vectors plus the records still to encode.
@@ -273,7 +279,7 @@ class _IngestMixin:
                 papers_to_embed.append(
                     PendingEmbeddingRecord(
                         paper_id=paper_id,
-                        metadata=dict(metadata),
+                        metadata=metadata.copy(),
                         text_hash=text_hash,
                         text=text,
                         row_idx=row_idx,
@@ -534,7 +540,7 @@ class _IngestMixin:
             prefilter is enabled, and the float32 vectors to return.
         """
         dequantized_embeddings = (
-            self._dequantize_int8(h5_file, storage_embeddings)
+            self._dequantize_int8(h5_file, cast(NDArray[np.int8], storage_embeddings))
             if self.storage_precision == "int8"
             and (self.binary_prefilter or return_embeddings)
             else None

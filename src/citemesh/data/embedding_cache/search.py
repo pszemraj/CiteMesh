@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
@@ -28,8 +29,13 @@ from .quantization import (
 )
 from .sql import _cached_paper_record, _decode_paper_row
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
 
-class _SearchMixin:
+
+class _SearchMixin(_EmbeddingCacheHost):
     """Query-time scoring and metadata resolution for :class:`EmbeddingCache`."""
 
     def _require_calibration_ranges(

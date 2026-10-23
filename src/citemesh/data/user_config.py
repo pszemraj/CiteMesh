@@ -13,6 +13,7 @@ configuration never imports strategy or visualization modules.
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -20,10 +21,10 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
-    import tomli as tomllib  # type: ignore[no-redef]
+else:  # pragma: no cover - Python < 3.11 fallback
+    import tomli as tomllib
 
 import tomli_w
 from filelock import FileLock, Timeout
@@ -49,15 +50,7 @@ logger = logging.getLogger(__name__)
 
 ConfigValue: TypeAlias = str | int | float | bool | list[str]
 TOMLValue: TypeAlias = (
-    str
-    | int
-    | float
-    | bool
-    | date
-    | datetime
-    | time
-    | list["TOMLValue"]
-    | dict[str, "TOMLValue"]
+    ConfigValue | date | datetime | time | list["TOMLValue"] | dict[str, "TOMLValue"]
 )
 _ConfigValueT = TypeVar("_ConfigValueT", bound=ConfigValue)
 
@@ -234,7 +227,7 @@ CONFIG_API_KEY_SPECS: dict[str, Callable[[object], str]] = {
     "s2_api_key": _cast_str,
 }
 
-_TABLE_SPECS: dict[str, dict[str, ConfigCaster]] = {
+_TABLE_SPECS: dict[str, Mapping[str, ConfigCaster]] = {
     DEFAULTS_TABLE: CONFIG_DEFAULT_KEY_SPECS,
     API_TABLE: CONFIG_API_KEY_SPECS,
 }

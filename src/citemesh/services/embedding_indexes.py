@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 if TYPE_CHECKING:
-    from huggingface_hub import HfApi
+    from huggingface_hub import BucketFile, HfApi
 
+    from citemesh.data.embedding_cache.models import PublicationOrigin
     from citemesh.data.embedding_cache.portable import PortableManifest
 
 
@@ -120,7 +121,7 @@ class ResolvedPublication:
     cache_dir: Path | None = None
 
     @property
-    def origin(self) -> dict[str, str]:
+    def origin(self) -> PublicationOrigin:
         """Return the publication identity recorded by native import."""
         return {
             "bucket_id": self.bucket_id,
@@ -169,11 +170,11 @@ def _cache_root(bucket_id: str, cache_dir: Path | None) -> Path:
     return Path(cache_dir) / "citemesh-indexes" / bucket_id
 
 
-def _download_files(bucket_id: str, files: list[tuple[str, Path]]) -> None:
+def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
     """Download bucket files through temporary paths before replacing targets.
 
     :param str bucket_id: Hugging Face bucket identifier.
-    :param list[tuple[str, Path]] files: Remote paths and their local targets.
+    :param Sequence[tuple[str, Path]] files: Remote paths and their local targets.
     """
     from huggingface_hub import HfApi
 
@@ -184,8 +185,11 @@ def _download_files(bucket_id: str, files: list[tuple[str, Path]]) -> None:
     ]
     for _, path in partials:
         path.parent.mkdir(parents=True, exist_ok=True)
+    api_files: list[tuple[str | BucketFile, str | Path]] = [
+        (remote, partial) for remote, partial in partials
+    ]
     HfApi().download_bucket_files(
-        bucket_id, files=partials, raise_on_missing_files=True
+        bucket_id, files=api_files, raise_on_missing_files=True
     )
     for (_, partial), (_, target) in zip(partials, files):
         partial.replace(target)
@@ -421,6 +425,7 @@ def publish_snapshot(
             if old.calibration_ranges is not None:
                 import numpy as np
 
+                assert manifest.calibration_ranges is not None
                 old_ranges = local.parent / old.calibration_ranges
                 if not old_ranges.is_file():
                     _download_files(
@@ -454,7 +459,7 @@ def publish_snapshot(
     catalog = IndexCatalog(configs, previous.default_config or manifest.config_name)
     manifests[manifest.config_name] = manifest
     directory = PurePosixPath(selected_path).parent
-    payloads = [
+    payloads: list[tuple[str | Path | bytes, str]] = [
         (snapshot_dir / name, str(directory / name)) for name in manifest.artifact_paths
     ]
     if selected_path not in bucket_paths:

@@ -19,12 +19,15 @@ from typing import (
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
+    from citemesh.core.models import PaperGraph
+    from citemesh.strategies.similarity import AbstractSimilarityIndex
+
 import networkx as nx
 import numpy as np
 from numpy.typing import NDArray
 
 from citemesh.core import DEFAULT_MAX_PAPERS, TEMPORAL_CONFIG, Paper
-from citemesh.core.values import coerce_float
+from citemesh.core.values import coerce_float, parse_float
 
 logger = logging.getLogger(__name__)
 RELATIONSHIP_DEGREE_CAP = 3
@@ -36,8 +39,8 @@ class _SeedPaperOption(TypedDict, total=False):
     seed_paper: Paper | None
 
 
-class CitationCollectionOptions(_SeedPaperOption, total=False):
-    """Options accepted by citation collection."""
+class _CitationSpecificOptions(TypedDict, total=False):
+    """Options used only while collecting citation candidates."""
 
     validate_source_availability: bool
     hydrate_references: bool
@@ -45,18 +48,22 @@ class CitationCollectionOptions(_SeedPaperOption, total=False):
     reference_selector: Callable[[Paper, Sequence[Paper], int], list[Paper]] | None
 
 
-class EmbeddingCollectionOptions(_SeedPaperOption, total=False):
-    """Options accepted by embedding graph collection."""
+class _CorpusPreparedOption(TypedDict, total=False):
+    """Flag indicating that a parent already prepared the corpus."""
 
     _corpus_prepared: bool
 
 
+class CitationCollectionOptions(_SeedPaperOption, _CitationSpecificOptions):
+    """Options accepted by citation collection."""
+
+
+class EmbeddingCollectionOptions(_SeedPaperOption, _CorpusPreparedOption):
+    """Options accepted by embedding graph collection."""
+
+
 class GraphCollectionOptions(CitationCollectionOptions, EmbeddingCollectionOptions):
     """Combined keyword options exposed by the abstract graph builder."""
-
-
-class NoStrategyOptions(TypedDict):
-    """Empty keyword contract for strategies with no collection options."""
 
 
 def validate_embedding_vectors(
@@ -131,14 +138,14 @@ def deterministic_sort_key(
 
 
 def select_capped_undirected_edges(
-    edges: Iterable[tuple[Hashable, Hashable, Mapping[str, float]]],
+    edges: Iterable[tuple[Hashable, Hashable, Mapping[str, object]]],
     max_edges_per_node: int,
     *,
     seed_id: Hashable | None = None,
 ) -> list[tuple[Hashable, Hashable, float]]:
     """Select edges for an undirected graph while capping per-node degree.
 
-    :param Iterable[Tuple[Hashable, Hashable, Mapping[str, float]]] edges: Edge tuples with optional
+    :param Iterable[tuple[Hashable, Hashable, Mapping[str, object]]] edges: Edge tuples with optional
         ``weight`` metadata.
     :param int max_edges_per_node: Maximum degree per node.
     :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
@@ -153,7 +160,7 @@ def select_capped_undirected_edges(
         left, right = (u, v) if str(u) <= str(v) else (v, u)
         key = (str(left), str(right))
 
-        weight = float(data.get("weight", 0.0))
+        weight = parse_float(data.get("weight", 0.0))
         best = canonical_edges.get(key)
         if best is None or weight > best[2]:
             canonical_edges[key] = (left, right, weight)
@@ -190,16 +197,16 @@ def select_capped_undirected_edges(
 
 
 def build_capped_undirected_graph(
-    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Hashable | None = None
-) -> nx.Graph:
+    graph: PaperGraph, max_edges_per_node: int, *, seed_id: Hashable | None = None
+) -> PaperGraph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
-    :param nx.Graph graph: Source graph whose nodes and metadata should be preserved.
+    :param PaperGraph graph: Source graph whose nodes and metadata should be preserved.
     :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
     :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
-    :return nx.Graph: Rebuilt graph with selected weighted edges.
+    :return PaperGraph: Rebuilt graph with selected weighted edges.
     """
-    filtered_graph = nx.Graph()
+    filtered_graph: PaperGraph = nx.Graph()
     filtered_graph.graph.update(graph.graph)
     filtered_graph.add_nodes_from(graph.nodes(data=True))
 
@@ -220,6 +227,7 @@ class GraphBuilderStrategy(ABC):
     computing similarity, while the base class handles common graph construction logic.
     """
 
+    max_papers: int
     strategy_name: ClassVar[str] = ""
     """Canonical strategy token persisted into graph-level metadata."""
 
@@ -309,13 +317,13 @@ class GraphBuilderStrategy(ABC):
 
     def build_graph(
         self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
-    ) -> tuple[nx.Graph, str]:
+    ) -> tuple[PaperGraph, str]:
         """
         Build the complete similarity graph.
 
         :param str seed_id: The seed paper identifier
         :param kwargs: Strategy-specific parameters passed to collect_papers.
-        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
+        :return tuple[PaperGraph, str]: Built graph and canonical seed paper ID.
         """
         # Step 1: Collect papers
         logger.debug("Collecting papers using %s...", self.__class__.__name__)
@@ -340,7 +348,7 @@ class GraphBuilderStrategy(ABC):
         self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes
-        graph = nx.Graph()
+        graph: PaperGraph = nx.Graph()
         for paper in self.papers.values():
             graph.add_node(
                 paper.paper_id,
@@ -403,6 +411,7 @@ class GraphBuilderStrategy(ABC):
         paper1: Paper,
         paper2: Paper,
         *,
+        abstract_index: AbstractSimilarityIndex,
         with_references_weights: tuple[float, float, float, float],
         without_references_weights: tuple[float, float, float, float],
         cap_at_one: bool = False,
@@ -411,6 +420,7 @@ class GraphBuilderStrategy(ABC):
 
         :param Paper paper1: First paper to compare.
         :param Paper paper2: Second paper to compare.
+        :param AbstractSimilarityIndex abstract_index: Index of paper-text vectors.
         :param tuple[float, float, float, float] with_references_weights: Component
             weights used when reference data is available.
         :param tuple[float, float, float, float] without_references_weights: Component
@@ -418,7 +428,7 @@ class GraphBuilderStrategy(ABC):
         :param bool cap_at_one: Whether to clamp the combined similarity score to ``1.0``.
         :return float: Composite indexed similarity score.
         """
-        abstract_similarity = self._abstract_index.similarity(
+        abstract_similarity = abstract_index.similarity(
             paper1.paper_id, paper2.paper_id
         )
         temporal_similarity = self.temporal_similarity(paper1, paper2)

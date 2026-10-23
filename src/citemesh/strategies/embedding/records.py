@@ -15,6 +15,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha1, sha256
+from typing import TypeVar
 
 from citemesh.core.paper_fields import coerce_authors, coerce_categories, coerce_venue
 from citemesh.core.paper_ids import (
@@ -25,16 +26,17 @@ from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
 )
-from citemesh.data.embedding_cache.models import PaperMetadata
+from citemesh.data.embedding_cache.models import CachedPaperMetadata
 
 from .text import _embedding_text_metadata
 
 _DATASET_PAPER_ID_FIELDS = ("id", "paper_id", "paperId")
 
 DatasetRecord = Mapping[str, object]
+_RecordT = TypeVar("_RecordT", bound=Mapping[str, object])
 
 
-class ExtractedPaperMetadata(PaperMetadata):
+class ExtractedPaperMetadata(CachedPaperMetadata):
     """Normalized source metadata keyed by its resolved paper identity."""
 
     paper_id: str
@@ -114,13 +116,14 @@ def _parse_year(paper: DatasetRecord) -> int | None:
         except (TypeError, ValueError):
             pass
 
-    chronology = _arxiv_id_chronology_key(_dataset_record_raw_paper_id(paper))
+    raw_id = _dataset_record_raw_paper_id(paper)
+    chronology = _arxiv_id_chronology_key(raw_id)
     return chronology[0] if chronology is not None else None
 
 
 def _newest_records_by_arxiv_id(
-    records: Iterable[DatasetRecord], limit: int
-) -> list[DatasetRecord]:
+    records: Iterable[_RecordT], limit: int
+) -> list[_RecordT]:
     """Select the ``limit`` most recently submitted records in one bounded pass.
 
     Prefer records with parseable arXiv IDs, filling any shortfall from the
@@ -130,10 +133,11 @@ def _newest_records_by_arxiv_id(
     :param int limit: Number of newest records to keep.
     :return List[DatasetRecord]: Selected records in chronological order.
     """
-    heap: list[tuple[tuple[int, int, int], int, DatasetRecord]] = []
-    head_fallback: list[DatasetRecord] = []
+    heap: list[tuple[tuple[int, int, int], int, _RecordT]] = []
+    head_fallback: list[_RecordT] = []
     for order, record in enumerate(records):
-        key = _arxiv_id_chronology_key(_dataset_record_raw_paper_id(record or {}))
+        raw_id = _dataset_record_raw_paper_id(record or {})
+        key = _arxiv_id_chronology_key(raw_id)
         if key is None:
             if len(head_fallback) < limit:
                 head_fallback.append(record)

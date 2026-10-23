@@ -8,6 +8,7 @@ from collections.abc import Hashable
 from functools import lru_cache
 from importlib import resources
 
+from citemesh.core.values import parse_float
 from citemesh.visualization.export.geometry import (
     _UI_PALETTES,
     DASHBOARD_AXIS_MIN_PADDING,
@@ -23,6 +24,7 @@ from citemesh.visualization.export.geometry import (
 )
 from citemesh.visualization.export.nodes import _sorted_edges, _strategy
 
+from ..export._host import _ExporterHost
 from ..themes import Theme
 from ..years import optional_publication_year_bounds
 from .contracts import (
@@ -35,6 +37,7 @@ from .contracts import (
     DashboardMetadata,
     DashboardPayload,
     EnrichedNodePayload,
+    YearRange,
 )
 
 _DASHBOARD_ASSET_PACKAGE = "citemesh.visualization.dashboard"
@@ -143,7 +146,7 @@ class DashboardPayloadMixin:
     """Exporter-state dashboard metadata, payload, and collection assembly."""
 
     def _dashboard_meta(
-        self,
+        self: _ExporterHost,
         *,
         theme_obj: Theme,
         node_ids: list[Hashable],
@@ -170,7 +173,9 @@ class DashboardPayloadMixin:
         bounds = optional_publication_year_bounds(
             node.get("year") for node in node_payloads
         )
-        year_range = {"min": bounds[0], "max": bounds[1]} if bounds else None
+        year_range: YearRange | None = (
+            {"min": bounds[0], "max": bounds[1]} if bounds else None
+        )
 
         meta: DashboardMetadata = {
             "seed_id": str(self.seed_id),
@@ -203,7 +208,7 @@ class DashboardPayloadMixin:
         return meta
 
     def _dashboard_payload(
-        self, *, theme_obj: Theme, node_ids: list[Hashable]
+        self: _ExporterHost, *, theme_obj: Theme, node_ids: list[Hashable]
     ) -> DashboardPayload:
         """Build deterministic dashboard payload from graph metadata.
 
@@ -226,14 +231,16 @@ class DashboardPayloadMixin:
                 {
                     "source": str(left),
                     "target": str(right),
-                    "weight": float(data.get("weight", 0.0)),
+                    "weight": parse_float(data.get("weight", 0.0)),
                 }
                 for left, right, data in sorted_edges
             ],
         }
         return payload
 
-    def _dashboard_collection_bundle(self) -> DashboardCollectionBundle:
+    def _dashboard_collection_bundle(
+        self: _ExporterHost,
+    ) -> DashboardCollectionBundle:
         """Normalize optional collection metadata for shared dashboard shells.
 
         :return DashboardCollectionBundle: Collection result descriptors and payloads.
@@ -264,19 +271,18 @@ class DashboardPayloadMixin:
                 if not result_id or not isinstance(payload, dict):
                     continue
                 entry: DashboardCollectionResult = {
-                    key: raw_entry[key]
-                    for key in (
-                        "result_id",
-                        "seed_id",
-                        "title",
-                        "strategy",
-                        "summary",
-                        "updated_at",
-                    )
-                    if key in raw_entry
+                    "result_id": result_id,
+                    "payload": payload,
                 }
-                entry["result_id"] = result_id
-                entry["payload"] = payload
+                for key in (
+                    "seed_id",
+                    "title",
+                    "strategy",
+                    "summary",
+                    "updated_at",
+                ):
+                    if key in raw_entry:
+                        entry[key] = raw_entry[key]
                 build = raw_entry.get("build")
                 if isinstance(build, dict):
                     entry["build"] = build

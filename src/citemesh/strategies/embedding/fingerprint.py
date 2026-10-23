@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from citemesh.data import format_bytes
-from citemesh.data.model_profiles import DocumentFormatter, SimilarityFormatter
 
 from . import deps
 from .runtime import (
@@ -34,6 +33,14 @@ from .text import (
 
 if TYPE_CHECKING:
     from citemesh.data import EmbeddingCache
+    from citemesh.data.embedding_cache.models import EmbeddingInputMetadata
+    from citemesh.data.model_profiles import DocumentFormatter, SimilarityFormatter
+
+    from ._host import _EmbeddingBuilderHost
+
+    _EmbeddingBuilderHostBase = _EmbeddingBuilderHost
+else:
+    _EmbeddingBuilderHostBase = object
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +49,7 @@ class EmbeddingCacheFingerprintMismatchError(RuntimeError):
     """Raised when a hydrated corpus cache belongs to a different model."""
 
 
-class _FingerprintMixin:
+class _FingerprintMixin(_EmbeddingBuilderHostBase):
     """Model- and formatter-identity fingerprints for embedding cache validity.
 
     Mixed into :class:`~citemesh.strategies.embedding.builder.EmbeddingGraphBuilder`.
@@ -54,20 +61,23 @@ class _FingerprintMixin:
     ``storage_precision``, ``embedding_cache`` and ``_clear_embedding_cache``.
     """
 
+    _resolved_model_fingerprint: str | None
+
     def _resolve_formatter_fingerprint(
         self,
         *,
         formatter: DocumentFormatter | SimilarityFormatter,
-        probe_renderer: Callable[[dict[str, str]], str],
+        probe_renderer: Callable[[EmbeddingInputMetadata], str],
     ) -> str:
         """Resolve a deterministic cache fingerprint for one formatter role.
 
         :param DocumentFormatter | SimilarityFormatter formatter: Profile formatter identity.
-        :param Callable[[Dict[str, str]], str] probe_renderer: Probe rendering callback.
+        :param Callable[[EmbeddingInputMetadata], str] probe_renderer: Probe rendering callback.
         :return str: SHA-256 digest of profile formatter probes.
         """
         outputs = [
-            probe_renderer(dict(metadata)) for metadata in _FORMATTER_FINGERPRINT_PROBES
+            probe_renderer(metadata.copy())
+            for metadata in _FORMATTER_FINGERPRINT_PROBES
         ]
         payload = "||".join(
             (

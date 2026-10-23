@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from itertools import chain
-from typing import TYPE_CHECKING, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, overload
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -25,6 +25,7 @@ from . import deps
 if TYPE_CHECKING:
     import torch
     from sentence_transformers import SentenceTransformer
+    from sentence_transformers.base.modality_types import PairInput, SingleInput
     from typing_extensions import Unpack
 
 logger = logging.getLogger(__name__)
@@ -125,14 +126,35 @@ class _PrecisionEncodeProxy:
             except Exception as eager_error:
                 raise eager_error from compiled_failure
 
+    @overload
     def encode(
         self,
-        *sentences: list[str],
+        sentences: list[str],
+        /,
+        *,
+        batch_size: int,
+        convert_to_tensor: Literal[False],
+        normalize_embeddings: Literal[True],
+        show_progress_bar: bool,
+    ) -> NDArray[np.float32]: ...
+
+    @overload
+    def encode(
+        self,
+        sentences: list[str],
+        /,
+        **kwargs: Unpack[_EncodeOptions],
+    ) -> ArrayLike | torch.Tensor: ...
+
+    def encode(
+        self,
+        sentences: list[str],
+        /,
         **kwargs: Unpack[_EncodeOptions],
     ) -> ArrayLike | torch.Tensor:
         """Run ``encode`` within the configured context manager.
 
-        :param sentences: Positional inputs passed to the wrapped encoder.
+        :param list[str] sentences: Text inputs passed to the wrapped encoder.
         :param kwargs: Encoder options used by CiteMesh text batching.
         :return ArrayLike | torch.Tensor: Encoded vectors from the wrapped model.
         """
@@ -140,7 +162,7 @@ class _PrecisionEncodeProxy:
         if normalize_output:
             kwargs["normalize_embeddings"] = False
         embeddings = self._call_with_precision(
-            lambda: self._model.encode(*sentences, **kwargs)
+            lambda: self._model.encode(sentences, **kwargs)
         )
         # Normalize once in FP32; CPU autocast would round ST's division to BF16.
         if normalize_output:
@@ -158,7 +180,11 @@ class _PrecisionEncodeProxy:
         :param Optional[str] prompt: Model-resolved prompt prepended by preprocessing.
         :return Tuple[Dict[str, torch.Tensor], int]: Prepared CPU features and truncation count.
         """
-        features: dict[str, torch.Tensor] = self._model.preprocess(texts, prompt=prompt)
+        inputs: list[SingleInput | PairInput] = []
+        inputs.extend(texts)
+        features: dict[str, torch.Tensor] = self._model.preprocess(
+            inputs, prompt=prompt
+        )
         max_length = getattr(self._model, "max_seq_length", None)
         if max_length is None:
             return features, 0
@@ -258,10 +284,9 @@ class _PrecisionEncodeProxy:
                         ordered_embeddings[original_idx] = batch_embeddings[position]
 
         self._call_with_precision(run_batches)
-        if truncated_count:
-            warn_on_truncated_count(
-                logger, truncated_count, len(texts), model.max_seq_length
-            )
+        max_length = model.max_seq_length
+        if truncated_count and max_length is not None:
+            warn_on_truncated_count(logger, truncated_count, len(texts), max_length)
 
         embeddings = np.asarray(
             [ordered_embeddings[idx] for idx in range(len(texts))],

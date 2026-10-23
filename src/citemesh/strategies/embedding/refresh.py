@@ -8,8 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike
 
 from citemesh.data.embedding_contract import (
     INT8_QUANTIZATION,
@@ -65,12 +64,13 @@ class _LazyEncoder:
     def encode(
         self,
         sentences: list[str],
+        /,
         *,
         batch_size: int,
         convert_to_tensor: Literal[False],
         normalize_embeddings: Literal[True],
         show_progress_bar: bool,
-    ) -> NDArray[np.float32]:
+    ) -> ArrayLike:
         """Encode one cache-miss batch with the builder's active model.
 
         :param sentences: Retrieval texts to encode.
@@ -78,7 +78,7 @@ class _LazyEncoder:
         :param convert_to_tensor: Whether the encoder should return a tensor.
         :param normalize_embeddings: Whether the encoder should normalize vectors.
         :param show_progress_bar: Whether the encoder may show a progress bar.
-        :return: Normalized float32 vectors for the supplied texts.
+        :return: Encoded vectors for the supplied texts.
         """
         self.builder._load_model()
         self.builder._ensure_cache_model_fingerprint()
@@ -308,7 +308,10 @@ def refresh_cache_selection(
 
     cache = open_existing_cache(selection, require_ready=False)
     state = cache.corpus_state()
-    source = state.get("source") or (state.get("pending") or {}).get("target_source")
+    pending = state.get("pending")
+    source = state.get("source") or (
+        pending["target_source"] if pending is not None else None
+    )
     corpus_size = source.get("limit") if source else None
     builder = EmbeddingGraphBuilder(
         cache_selection=selection, corpus_size=corpus_size, **runtime_options

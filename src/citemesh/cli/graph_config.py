@@ -20,7 +20,6 @@ from citemesh.visualization.dashboard.contracts import (
 from citemesh.visualization.export import ExportMetadata
 
 from .build_options import (
-    _CORPUS_ONLY_OPTION_DESTS,
     _embedding_branch_enabled,
     _normalized_cache_reason,
     _resolved_hybrid_max_semantic,
@@ -146,17 +145,17 @@ def _build_graph_config_payload(
         if strategy == "embedding":
             embedding_config["top_k"] = int(cli_args.top_k)
         if cli_args.semantic_source != "arxiv-corpus":
-            for dest in _CORPUS_ONLY_OPTION_DESTS:
-                embedding_config.pop(dest, None)
+            embedding_config.pop("dataset_source", None)
+            embedding_config.pop("dataset_split", None)
+            embedding_config.pop("corpus_size", None)
+            embedding_config.pop("all_corpus", None)
+            embedding_config.pop("streaming", None)
         else:
             embedding_config.pop("candidate_pool_size")
         if cli_args.storage_precision != "int8":
-            for dest in (
-                "binary_prefilter",
-                "binary_rescore_multiplier",
-                "calibration_sample_size",
-            ):
-                embedding_config.pop(dest)
+            embedding_config.pop("binary_prefilter")
+            embedding_config.pop("binary_rescore_multiplier")
+            embedding_config.pop("calibration_sample_size")
 
     payload = {
         "schema_version": 1,

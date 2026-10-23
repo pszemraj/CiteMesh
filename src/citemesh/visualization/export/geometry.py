@@ -7,14 +7,15 @@ import math
 import re
 from collections.abc import Hashable, Iterable, Mapping
 from pathlib import Path
-from typing import Literal, TypedDict
-
-import networkx as nx
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from citemesh.core.values import coerce_citation_count
 
 from ..themes import Theme
 from ..years import coerce_publication_year
+
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
 
 DASHBOARD_AXIS_MIN_PADDING = 0.14
 DASHBOARD_AXIS_X_PADDING = 0.18
@@ -185,13 +186,13 @@ def _stable_curve_direction(left_id: object, right_id: object) -> float:
 
 
 def _select_dashboard_label_nodes(
-    graph: nx.Graph,
+    graph: PaperGraph,
     node_ids: list[Hashable],
     pos: Mapping[Hashable, Iterable[float]],
 ) -> set[Hashable]:
     """Select prominent dashboard labels without crowding one graph region.
 
-    :param nx.Graph graph: Graph containing node ranking attributes.
+    :param PaperGraph graph: Graph containing node ranking attributes.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :param Mapping[Hashable, Iterable[float]] pos: Normalized node positions.
     :return set[Hashable]: Node identifiers whose labels should remain visible.

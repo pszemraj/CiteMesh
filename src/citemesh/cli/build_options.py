@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import argparse
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Protocol, TypedDict
-
-import networkx as nx
 
 from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.data.user_config import UserConfig, format_config_value
 from citemesh.services import SemanticScholarClient
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, EmbeddingGraphBuilder
-from citemesh.strategies.embedding.builder import EmbeddingBuilderRuntimeOptions
+from citemesh.strategies.embedding.builder import EmbeddingRuntimeOptions
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -30,6 +28,7 @@ from citemesh.strategies.hybrid import (
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
 if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
     from citemesh.strategies.embedding.builder import EmbeddingRuntimeMetadata
     from citemesh.visualization.export import (
         EmbeddingExportMetadata,
@@ -44,11 +43,11 @@ from .console import logger
 class _StrategyBuilderProtocol(Protocol):
     """Protocol describing strategy builder objects used by CLI dispatch."""
 
-    def build_graph(self, paper_id: str) -> tuple[nx.Graph, str]:
+    def build_graph(self, paper_id: str) -> tuple[PaperGraph, str]:
         """Build a graph for a paper identifier.
 
         :param str paper_id: Raw or normalized seed paper identifier.
-        :return tuple[nx.Graph, str]: Built graph and normalized seed paper ID.
+        :return tuple[PaperGraph, str]: Built graph and normalized seed paper ID.
         """
         ...
 
@@ -67,21 +66,11 @@ class _ConfiguredClientKwargs(TypedDict, total=False):
     client: SemanticScholarClient
 
 
-class _SharedEmbeddingBuilderKwargs(EmbeddingBuilderRuntimeOptions, total=False):
+class _SharedEmbeddingBuilderKwargs(EmbeddingRuntimeOptions, total=False):
     """Embedding builder options shared by CLI strategy factories."""
 
     corpus_size: int | None
     cache_selection: ExistingCacheSelection
-
-
-class _CorpusOptionDefaults(TypedDict):
-    """Built-in values restored when corpus options do not apply."""
-
-    dataset_source: str
-    dataset_split: str
-    corpus_size: None
-    all_corpus: bool
-    streaming: bool
 
 
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
@@ -132,7 +121,7 @@ _CORPUS_ONLY_OPTION_DESTS: set[str] = {
 }
 # Built-in parser defaults restored when corpus-only config values are ignored
 # in candidates mode; kept in sync with the build parser by a contract test.
-_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: _CorpusOptionDefaults = {
+_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: Mapping[str, str | bool | None] = {
     "dataset_source": DEFAULT_DATASET_SOURCE,
     "dataset_split": "train",
     "corpus_size": None,
@@ -329,12 +318,20 @@ def _plot_overlay_metadata(export_metadata: ExportMetadata) -> PlotOverlayMetada
     :param ExportMetadata export_metadata: Full export metadata payload.
     :return PlotOverlayMetadata: Reduced metadata subset for on-plot annotation.
     """
-    overlay_keys = ("paper_id", "strategy", "nodes", "edges", "theme", "timestamp")
-    return {
-        key: export_metadata[key]
-        for key in overlay_keys
-        if key in export_metadata and export_metadata[key] is not None
-    }
+    overlay: PlotOverlayMetadata = {}
+    if "paper_id" in export_metadata and export_metadata["paper_id"] is not None:
+        overlay["paper_id"] = export_metadata["paper_id"]
+    if "strategy" in export_metadata and export_metadata["strategy"] is not None:
+        overlay["strategy"] = export_metadata["strategy"]
+    if "nodes" in export_metadata and export_metadata["nodes"] is not None:
+        overlay["nodes"] = export_metadata["nodes"]
+    if "edges" in export_metadata and export_metadata["edges"] is not None:
+        overlay["edges"] = export_metadata["edges"]
+    if "theme" in export_metadata and export_metadata["theme"] is not None:
+        overlay["theme"] = export_metadata["theme"]
+    if "timestamp" in export_metadata and export_metadata["timestamp"] is not None:
+        overlay["timestamp"] = export_metadata["timestamp"]
+    return overlay
 
 
 def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
@@ -462,40 +459,26 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
     :param str strategy: Active build strategy.
     :return ScoreContract: Score semantics metadata.
     """
-    base_contract = {
+    contract: ScoreContract = {
         "strategy": strategy,
         "comparable_across_strategies": False,
         "range_hint": "[0,1] strategy-specific composite score",
-    }
-    if strategy == "citation":
-        return {
-            **base_contract,
-            "score_type": "citation_similarity_composite",
-        }
-    if strategy == "recommendation":
-        return {
-            **base_contract,
-            "score_type": "recommendation_similarity_composite",
-        }
-    if strategy == "embedding":
-        return {
-            **base_contract,
-            "score_type": "embedding_similarity_composite",
-        }
-    if strategy == "hybrid":
-        return {
-            **base_contract,
-            "score_type": "hybrid_similarity_composite",
-            "adjudication_policy": (
-                "seed-relevance-ranked union across citation+semantic candidates "
-                "with overlap priority; purely semantic additions are capped by "
-                "max_semantic."
-            ),
-        }
-    return {
-        **base_contract,
         "score_type": "unknown",
     }
+    if strategy == "citation":
+        contract["score_type"] = "citation_similarity_composite"
+    elif strategy == "recommendation":
+        contract["score_type"] = "recommendation_similarity_composite"
+    elif strategy == "embedding":
+        contract["score_type"] = "embedding_similarity_composite"
+    elif strategy == "hybrid":
+        contract["score_type"] = "hybrid_similarity_composite"
+        contract["adjudication_policy"] = (
+            "seed-relevance-ranked union across citation+semantic candidates "
+            "with overlap priority; purely semantic additions are capped by "
+            "max_semantic."
+        )
+    return contract
 
 
 _STRATEGY_DISPATCH: dict[str, StrategyFactory] = {
