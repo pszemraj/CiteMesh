@@ -31,6 +31,7 @@ from ..build_options import (
     _resolve_user_config_api_key,
     _shared_embedding_builder_kwargs,
 )
+from ..cache_selection import _apply_cache_selection
 from ..console import logger
 from ..parser import _output_table, _pop_tracked_option_dests
 
@@ -48,6 +49,10 @@ _NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
         "truncate_dim",
         "storage_precision",
         "calibration_sample_size",
+        "cache_namespace",
+        "dataset_split",
+        "corpus_size",
+        "all_corpus",
     }
 )
 
@@ -176,6 +181,10 @@ def _prepare_local_search_builder(
     # the dataset the user named.
     provided_dests = set(overrides)
     try:
+        stored_dests = _apply_cache_selection(
+            defaults, provided_dests, _ValueErrorParserErrorSink()
+        )
+        config_default_dests.difference_update(stored_dests)
         _validate_build_cli_contract(
             defaults,
             _ValueErrorParserErrorSink(),
@@ -184,7 +193,9 @@ def _prepare_local_search_builder(
             config_path=user_config.path,
         )
     except _BuildContractValueError as exc:
-        if not provided_dests.intersection(exc.related_dests):
+        if not getattr(
+            args, "cache_namespace", None
+        ) and not provided_dests.intersection(exc.related_dests):
             # This command line did not produce the failing value, so it stays
             # what it has always been: a config-sourced reason local search is
             # unavailable, which auto mode may answer from Semantic Scholar.
@@ -241,6 +252,21 @@ def _local_result_build_command(
         "--storage-precision",
         str(defaults.storage_precision),
     ]
+    if getattr(defaults, "cache_namespace", None):
+        command = [
+            "citemesh",
+            "build",
+            "<ID>",
+            "--strategy",
+            "embedding",
+            "--cache-namespace",
+            defaults.cache_namespace,
+        ]
+        if defaults.all_corpus or defaults.corpus_size is None:
+            command.append("--all-corpus")
+        else:
+            command.extend(["--corpus-size", str(defaults.corpus_size)])
+        return shlex.join(command)
     if defaults.model_revision is not None:
         command.extend(["--model-revision", str(defaults.model_revision)])
     if defaults.truncate_dim is not None:
@@ -252,7 +278,9 @@ def _local_result_build_command(
             return None
         command.extend(["--dataset-source", str(defaults.dataset_source)])
         command.extend(["--dataset-split", stats.hydration_split])
-        recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
+        recorded_corpus_size = None if defaults.all_corpus else defaults.corpus_size
+        if recorded_corpus_size is None and not defaults.all_corpus:
+            recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
         if recorded_corpus_size is None:
             command.append("--all-corpus")
         else:
@@ -456,6 +484,7 @@ def _run_search_command(
     :return int: Process-style exit code.
     """
     mode, origin = _resolve_search_mode(args, user_config)
+    selected_namespace = bool(getattr(args, "cache_namespace", None))
     overrides = _namespace_overrides(args)
     override_labels = _namespace_override_labels(overrides)
     if overrides:
@@ -466,6 +495,8 @@ def _run_search_command(
                 ", ".join(override_labels),
             )
             return 2
+        if selected_namespace:
+            mode, origin = "local", "namespace-flag"
         # An already-local default retains its mode provenance; selectors still
         # choose which namespace that local search reads.
         if origin != "flag" and mode != "local":

@@ -61,6 +61,105 @@ The migration that removed compute dtype from namespace names deliberately leave
 
 Crash safety, the replacement journal, flush ordering, and locking are in [Embedding Cache Internals](../internals/embedding-cache.md).
 
+## Portable corpus indexes
+
+A portable index installs precomputed retrieval-document embeddings into the
+native cache. Install the `embeddings` extra first. Import and export copy the
+stored int8 or float32 values without loading an encoder; query encoding and
+the selected graph papers' symmetric embeddings still use the recorded model.
+
+```bash
+# Import a local export, or one configuration from a dataset repository.
+citemesh cache import --path ./arxiv-index
+citemesh cache import --repo OWNER/INDEX --config embeddinggemma-512-int8 \
+  --revision PUBLICATION_COMMIT
+citemesh cache scan
+
+# Use the namespace printed by import or scan.
+citemesh search "long-context language models" --mode local \
+  --cache-namespace NAMESPACE --corpus-size 50000
+citemesh build arxiv:2404.08801 --strategy embedding \
+  --cache-namespace NAMESPACE --all-corpus
+
+# Export a completed corpus into a new directory.
+citemesh cache export --namespace NAMESPACE --output ./arxiv-index
+```
+
+`--path` and `--repo` are alternatives. Repository imports use the selected
+configuration, or the catalog's default, and resolve the publication revision
+once before downloading its declared files. The publication commit identifies
+the exported files; the manifest separately records the upstream dataset
+revision represented by those files. Each configuration can have different
+coverage and freshness.
+
+Explicit `--cache-namespace` selects existing files and pins model, profile,
+document formatter, dimension, storage precision, dataset, and split from their
+stored contract. Conflicting explicit flags fail. Device, batch size, scoring,
+and result limits remain configurable. Search failures stay errors even in
+`--mode auto`. Import does not change saved defaults.
+
+Installed indexes are manually refreshed. Build and search use their completed
+source revision without checking or scanning the upstream dataset:
+
+```bash
+citemesh cache refresh --namespace NAMESPACE
+citemesh cache refresh --namespace NAMESPACE --dataset-revision SOURCE_COMMIT
+```
+
+A new refresh resolves its source revision once, compares full normalized
+records, and encodes only new or changed document text. Metadata-only changes
+retain their vectors and need no encoder. Existing int8 calibration ranges stay
+fixed. Removed source papers keep their physical vectors but leave active
+membership, retrieval, and export. Refresh scans source metadata; it does not
+promise a delta download.
+
+For a full index, `--corpus-size N` ranks only the newest N active members at
+the completed revision; `--all-corpus` uses every active member. Chronology ties
+prefer later source rows; undated papers fill remaining places in source
+order. A smaller view changes neither stored coverage nor membership. A capped
+index cannot supply a larger view or claim full coverage. Seed lookup is
+independent of neighbor eligibility, so an older seed can search newer papers.
+
+An interrupted import or refresh remains unavailable to consumers. Resume an
+import with the same local snapshot or the exact publication command printed
+when import starts. Resume refresh against its recorded source target; a
+moving upstream branch cannot change that pending target. The cache recovers
+committed vector writes and reuses them on retry.
+
+Import accepts a fresh destination, the same incomplete import, or an identical
+completed import. An occupied incompatible destination is preserved and
+refused, including a bootstrap snapshot whose local copy has since been
+refreshed. Use another cache root for a different source or calibration lineage
+that would otherwise share a native address. Existing legacy caches need an
+explicit reconciliation before they can be exported with certified coverage:
+
+```bash
+# Supply the original model/storage/source settings when they differ from defaults.
+citemesh cache refresh --namespace NAMESPACE --adopt \
+  --model-revision main --dataset-revision SOURCE_COMMIT
+```
+
+Adoption checks the supplied historical selectors and stored model fingerprint;
+it never labels old vectors with the current moving model revision. A namespace
+whose original settings cannot be established is preserved and refused.
+
+The manual publisher uses these same refresh and export operations. Create a
+private dataset repository with an initial README first, then run from a source
+checkout:
+
+```bash
+python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
+  --adopt-namespace NAMESPACE --device cuda
+```
+
+Use `--namespace` for an already certified corpus, or omit both namespace flags
+to create a new configuration. The output directory must be new. The script
+resolves and pins the source, refreshes, exports, and publishes one complete
+configuration in a parent-constrained commit. It preserves other configurations
+and refuses public repositories. Int8 ranges are established once for a new
+configuration and reused on refresh; a different calibration lineage needs a
+different configuration and native destination.
+
 ## Corpus records
 
 The dataset adapter accepts `id`, `paper_id`, or `paperId`, taking the first non-empty identifier. Stable source IDs preserve cache identity across updates. Without an ID, usable title or abstract text produces a content-derived ID; a row with neither fails and reports its source-row index.
@@ -68,6 +167,10 @@ The dataset adapter accepts `id`, `paper_id`, or `paperId`, taking the first non
 `title` supplies the paper name. `abstract` supplies the text, with `summary` used when the abstract is empty or unusable. Optional fields include `authors`, `authors_parsed`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal`. Structured `authors_parsed` entries take precedence over free-text authors. Missing titles become `Unknown`; years fall back to the arXiv submission year when available. Arbitrary column mappings are unsupported.
 
 ## Corpus hydration and resume
+
+The automatic hydration rules below apply to ordinary legacy corpus caches.
+Certified portable indexes follow the explicit refresh and membership rules
+above.
 
 arXiv-corpus mode hydrates the full selected `--dataset-split` by default - "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; on a cold build the cap bounds what gets embedded, not how many rows are scanned to establish that order. Streaming ranking drains the source before encoding begins. An indexable non-streaming dataset instead scans its identifier columns. A slice such as `train[:2%]` limits the population ranked. Rows without parseable arXiv IDs fill any shortfall in source order, with a warning; when none can be parsed, the cap selects the first N rows.
 

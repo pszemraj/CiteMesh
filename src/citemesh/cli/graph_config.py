@@ -91,6 +91,7 @@ def _build_graph_config_payload(
     embedding_config: dict[str, Any] | None = None
     if semantic_enabled:
         embedding_config = {
+            "cache_namespace": getattr(cli_args, "cache_namespace", None),
             "model": cli_args.model,
             "model_profile": cli_args.model_profile,
             "model_revision": cli_args.model_revision,
@@ -124,6 +125,9 @@ def _build_graph_config_payload(
         }
         runtime_embedding = metadata.get("embedding")
         if isinstance(runtime_embedding, dict):
+            for key in ("dataset_revision", "cache_namespace", "index_origin"):
+                if key in runtime_embedding:
+                    embedding_config[key] = runtime_embedding[key]
             effective_model = runtime_embedding.get("effective_model")
             if isinstance(effective_model, str) and effective_model:
                 embedding_config["model"] = effective_model

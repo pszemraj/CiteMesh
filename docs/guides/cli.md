@@ -46,6 +46,14 @@ Search modes:
 - `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
 - `auto` tries local search first and falls back to S2 when the cache is empty or unavailable, logging the reason.
 
+Select an installed portable index directly with `--cache-namespace NAMESPACE`.
+Its fixed model and source settings override unrelated saved defaults; explicit
+conflicts are usage errors. This selection never falls back to S2, including
+under `--mode auto`. `--dataset-split`, `--corpus-size N`, and `--all-corpus`
+also apply to local search. For installed indexes a smaller cap is an exact
+view over completed active membership and performs no source refresh. Copyable
+build commands retain that view.
+
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
 Match the [namespace used by the build](caching.md#embedding-namespaces). `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; the command is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
@@ -69,6 +77,29 @@ citemesh cache scan
 ```
 
 See [User Configuration](configuration.md) for saved defaults and [cache maintenance](caching.md#inspecting-and-clearing) for scan and reset behavior.
+
+### Install, export, and refresh a corpus index
+
+```bash
+citemesh cache import --path ./arxiv-index
+citemesh cache import --repo OWNER/INDEX --config embeddinggemma-512-int8 \
+  --revision PUBLICATION_COMMIT
+citemesh cache export --namespace NAMESPACE --output ./arxiv-index
+citemesh cache refresh --namespace NAMESPACE --dataset-revision SOURCE_COMMIT
+```
+
+`cache import` requires exactly one of `--path` and `--repo`. A repository's
+catalog supplies its default configuration when `--config` is omitted.
+`--revision` selects the publication; `cache refresh --dataset-revision`
+selects the upstream source. Omitting the latter resolves latest once for a new
+refresh and resumes the recorded target for an interrupted one.
+
+Import prints the installed namespace and a search command. `cache scan`
+reports contract, origin, source revision, active and physical counts, coverage,
+and pending operations without loading a model. Incomplete operations block
+search, builds, and export until resumed; occupied incompatible import targets
+are preserved. See [portable indexes](caching.md#portable-corpus-indexes) for
+selection, recovery, and calibration semantics.
 
 ### Missing Semantic Scholar references
 

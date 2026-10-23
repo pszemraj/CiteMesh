@@ -53,6 +53,7 @@ from ..build_options import (
     _strategy_score_contract,
 )
 from ..cache_ops import _confirm_force_rebuild_cache
+from ..cache_selection import _apply_cache_selection
 from ..console import logger
 from ..graph_config import (
     _build_graph_config_payload,
@@ -557,6 +558,14 @@ def run_build_command(
     config_default_dests = _apply_user_config_defaults(
         args, provided_build_options, user_config
     )
+    try:
+        stored_dests = _apply_cache_selection(
+            args, provided_build_options, build_parser
+        )
+    except (ValueError, OSError, ImportError) as exc:
+        logger.error("Cannot use selected corpus: %s", exc)
+        return 1
+    config_default_dests.difference_update(stored_dests)
     _validate_build_cli_contract(
         args,
         build_parser,

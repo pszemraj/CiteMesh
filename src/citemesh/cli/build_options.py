@@ -52,6 +52,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: dict[str, set[str]] = {
     "no_references": {"citation", "recommendation", "hybrid"},
     "refresh_reference_cache": {"citation", "recommendation", "hybrid"},
     "model": {"embedding", "hybrid"},
+    "cache_namespace": {"embedding", "hybrid"},
     "model_profile": {"embedding", "hybrid"},
     "model_revision": {"embedding", "hybrid"},
     "dataset_source": {"embedding", "hybrid"},
@@ -142,6 +143,11 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> dict[str, 
     """
     return {
         **_configured_client_kwargs(cli_args),
+        **(
+            {"cache_selection": cli_args._cache_selection}
+            if getattr(cli_args, "_cache_selection", None) is not None
+            else {}
+        ),
         "model_name": cli_args.model,
         "model_profile": cli_args.model_profile,
         "model_revision": cli_args.model_revision,
@@ -267,6 +273,9 @@ def _embedding_export_metadata(
         # Corpus builds never consult the candidate pool; recording its default
         # here contradicted the config sidecar, which omits it.
         payload.pop("candidate_pool_size")
+        for key in ("dataset_revision", "cache_namespace", "index_origin"):
+            if isinstance(runtime_metadata, dict) and key in runtime_metadata:
+                payload[key] = runtime_metadata[key]
     return payload
 
 

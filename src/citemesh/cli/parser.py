@@ -604,6 +604,12 @@ def _add_build_corpus_arguments(
     """
     # Embedding strategy arguments
     embedding_group.add_argument(
+        "--cache-namespace",
+        type=_non_empty_str,
+        default=None,
+        help="Use an installed corpus namespace reported by cache scan",
+    )
+    embedding_group.add_argument(
         "--model",
         "-m",
         type=_non_empty_str,
@@ -1111,6 +1117,32 @@ def _add_search_arguments(
         ),
     )
     search_parser.add_argument(
+        "--cache-namespace",
+        type=_non_empty_str,
+        default=None,
+        help="Search an installed corpus namespace (never falls back to S2)",
+    )
+    search_parser.add_argument(
+        "--dataset-split",
+        type=_non_empty_str,
+        default=None,
+        help="Dataset split used by the corpus cache",
+    )
+    corpus_view = search_parser.add_mutually_exclusive_group()
+    corpus_view.add_argument(
+        "--corpus-size",
+        type=_positive_int,
+        metavar="N",
+        default=None,
+        help="Search only the N newest members of the installed corpus",
+    )
+    corpus_view.add_argument(
+        "--all-corpus",
+        action="store_true",
+        default=None,
+        help="Search the full certified corpus, overriding a configured cap",
+    )
+    search_parser.add_argument(
         "--model-profile",
         metavar="PROFILE",
         choices=list(MODEL_PROFILE_CHOICES),
@@ -1233,10 +1265,78 @@ def _add_cache_arguments(
         description="Show the cache root, usage by section, and total disk space.",
     )
 
+    export_parser = cache_subparsers.add_parser(
+        "export", help="Export a certified corpus without loading its model"
+    )
+    export_parser.add_argument(
+        "--namespace",
+        type=_non_empty_str,
+        required=True,
+        help="Certified native namespace reported by cache scan",
+    )
+    export_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="New directory for the portable manifest and Parquet shards",
+    )
+    import_parser = cache_subparsers.add_parser(
+        "import", help="Install a portable corpus from local files or Hugging Face"
+    )
+    source = import_parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--path", type=Path, help="Local portable snapshot directory")
+    source.add_argument(
+        "--repo", type=_non_empty_str, help="Hugging Face dataset repository"
+    )
+    import_parser.add_argument(
+        "--config",
+        type=_non_empty_str,
+        help="Published index variant (default: catalog's declared default)",
+    )
+    import_parser.add_argument(
+        "--revision",
+        type=_non_empty_str,
+        help="Publication branch, tag, or commit (default: main; resolved once)",
+    )
+    refresh_parser = cache_subparsers.add_parser(
+        "refresh", help="Reconcile an installed corpus with a pinned source revision"
+    )
+    refresh_parser.add_argument(
+        "--namespace",
+        type=_non_empty_str,
+        required=True,
+        help="Installed native namespace reported by cache scan",
+    )
+    refresh_parser.add_argument(
+        "--dataset-revision",
+        type=_non_empty_str,
+        help="Upstream source revision (default: latest; interrupted work resumes its pin)",
+    )
+    refresh_parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help="Explicitly certify a legacy corpus after proving its model and namespace",
+    )
+    adoption = refresh_parser.add_argument_group("Legacy adoption selectors (--adopt)")
+    for option in ("model", "model-revision", "dataset-source", "dataset-split"):
+        adoption.add_argument(f"--{option}", type=_non_empty_str, default=None)
+    adoption.add_argument(
+        "--model-profile", choices=list(MODEL_PROFILE_CHOICES), default=None
+    )
+    adoption.add_argument(
+        "--storage-precision", choices=list(STORAGE_PRECISION_CHOICES), default=None
+    )
+    for option in ("truncate-dim", "calibration-sample-size", "corpus-size"):
+        adoption.add_argument(f"--{option}", type=_positive_int, default=None)
+    adoption.add_argument("--all-corpus", action="store_true", default=None)
+
     return cache_parser, [
         (cache_parser, "COMMAND [options]"),
         (cache_clear_parser, "[options]"),
         (cache_scan_parser, "[options]"),
+        (export_parser, "[options]"),
+        (import_parser, "[options]"),
+        (refresh_parser, "[options]"),
     ]
 
 
@@ -1354,6 +1454,12 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
                 "model_revision": "REV",
                 "dataset_source": "DATASET",
                 "dataset_split": "SPLIT",
+                "namespace": "NAMESPACE",
+                "cache_namespace": "NAMESPACE",
+                "dataset_revision": "REV",
+                "revision": "REV",
+                "repo": "REPO",
+                "config": "NAME",
                 "browser": "NAME",
             }.get(action.dest, "TEXT")
 

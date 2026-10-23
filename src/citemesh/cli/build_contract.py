@@ -510,6 +510,8 @@ def _validate_build_cli_contract(
     """
     _apply_hybrid_default_overrides(args, provided | set(config_defaults))
     contract_provided = set(provided)
+    if getattr(args, "_cache_selection", None) is not None:
+        contract_provided.add("semantic_source")
     context = _BuildContractContext(
         args=args,
         error_sink=build_parser,

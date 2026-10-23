@@ -8,8 +8,10 @@ embedding artifacts while preserving the user config.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -338,12 +340,57 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
 
     current_schema = str(EMBEDDING_CACHE_SCHEMA_VERSION)
     if schema_version == current_schema:
+        corpus_status = _installed_corpus_status(db_path)
+        if corpus_status is not None:
+            return corpus_status
         # This table reports schema reachability, not vector health or readiness;
         # full cache opening owns HDF5 and row-mapping integrity checks.
         return "Current schema"
     if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
         return "Legacy dtype-keyed namespace (reclaim after replacement is ready)"
     return f"Legacy schema v{schema_version} (rebuilt on next access)"
+
+
+def _installed_corpus_status(db_path: Path) -> str | None:
+    """Read certified corpus state without opening vectors or importing models."""
+    try:
+        with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
+            row = connection.execute(
+                "SELECT value FROM cache_metadata WHERE key = 'corpus_state'"
+            ).fetchone()
+            if row is None:
+                return None
+            state = json.loads(row[0])
+            physical = connection.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+            active = connection.execute(
+                "SELECT COUNT(*) FROM corpus_membership"
+            ).fetchone()[0]
+    except (sqlite3.Error, ValueError, TypeError):
+        return "Corpus metadata unavailable (inspect before removing)"
+    contract = state.get("contract") or {}
+    source = state.get("source") or {}
+    origin = state.get("origin") or {}
+    pending = state.get("pending")
+    coverage = source.get("selection", "unknown")
+    if source.get("limit") is not None:
+        coverage += f" {source['limit']}"
+    labels = [
+        f"{contract.get('dimension', '?')}d {contract.get('stored_dtype', '?')}",
+        f"active {active:,} / physical {physical:,}",
+        f"source {source.get('revision', 'unknown')}",
+        f"coverage {coverage}",
+    ]
+    if origin:
+        labels.append(
+            f"origin {origin.get('repo_id', 'local')} / {origin.get('config_name', '?')}"
+        )
+    if pending:
+        labels.append(f"pending {pending.get('kind', 'operation')}")
+    elif state.get("membership_complete"):
+        labels.append("ready")
+    else:
+        labels.append("membership uncertified")
+    return "; ".join(labels)
 
 
 def _scan_embedding_namespaces(
