@@ -17,6 +17,8 @@ from citemesh.core.choices import (
     MODEL_PROFILE_CHOICES as EMBEDDING_MODEL_PROFILE_CHOICES,
 )
 
+from .cache import read_json_object
+
 QueryFormatter = Callable[[str, dict[str, str] | None], str]
 DocumentFormatter = Callable[[dict[str, str]], str]
 SimilarityFormatter = Callable[[str, dict[str, str] | None], str]
@@ -212,21 +214,6 @@ def embedding_model_profile_key(profile: EmbeddingModelProfile) -> str:
     raise ValueError(f"No explicit selector is registered for profile {profile.name!r}")
 
 
-def _read_json_object(path: Path) -> dict[str, object]:
-    """Read a JSON object, returning an empty mapping for absent/invalid files.
-
-    :param Path path: JSON file to inspect.
-    :return Dict[str, object]: Parsed object or an empty mapping.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def _local_transformer_configs(root: Path) -> tuple[dict[str, object], ...]:
     """Read transformer configs from root and SentenceTransformers modules.
 
@@ -249,7 +236,9 @@ def _local_transformer_configs(root: Path) -> tuple[dict[str, object], ...]:
             continue
         config_paths.append(root / module_path / "config.json")
 
-    configs = tuple(_read_json_object(path) for path in dict.fromkeys(config_paths))
+    configs = tuple(
+        read_json_object(path) or {} for path in dict.fromkeys(config_paths)
+    )
     return tuple(config for config in configs if config)
 
 
@@ -276,8 +265,8 @@ def _local_embeddinggemma_evidence(root: Path) -> tuple[bool, bool, bool]:
                 transformer_config.get("use_bidirectional_attention") is True
             )
 
-    sentence_transformer_config = _read_json_object(
-        root / "config_sentence_transformers.json"
+    sentence_transformer_config = (
+        read_json_object(root / "config_sentence_transformers.json") or {}
     )
     raw_prompts = sentence_transformer_config.get("prompts", {})
     prompt_names = (
