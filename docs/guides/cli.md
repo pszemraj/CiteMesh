@@ -26,7 +26,7 @@ Output directories, standalone files, and collection updates follow the [output-
 
 ### Accepted identifiers
 
-- DOI, bare or with a `doi:` prefix or `https://doi.org/` URL, canonicalized to lowercase (DOI names are case-insensitive)
+- DOI, bare or with a `doi:` prefix or `doi.org` URL; prefixed and URL forms normalize to lowercase, while a bare DOI keeps its input case
 - arXiv ID or URL (`arxiv:1706.03762`, `https://arxiv.org/abs/1706.03762`, `.../pdf/1706.03762.pdf`), `vN` suffixes normalized away; bare `1706.03762` works when S2 resolves it
 - Semantic Scholar paper ID
 - Free-form text under `--strategy embedding`, when S2 says the input is not a known paper (outages stay errors)

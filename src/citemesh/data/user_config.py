@@ -1,10 +1,9 @@
 """
 Persistent user configuration (``config.toml``) for CiteMesh.
 
-The config file lives at ``<cache_root>/config.toml`` (HuggingFace-style,
-``~/.cache/citemesh/config.toml`` by default) and stores durable personal
-defaults for build flags plus optional API credentials. Effective precedence
-is: explicit CLI flag > environment variable > config.toml > built-in default.
+The file at ``<cache_root>/config.toml`` stores validated CLI defaults and an
+optional Semantic Scholar API key. CLI code applies loaded values to parsed
+commands.
 
 Option vocabularies come from dependency-free core constants, so loading
 configuration never imports strategy or visualization modules.

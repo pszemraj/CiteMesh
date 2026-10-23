@@ -23,7 +23,7 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
 ## 2. Candidate acquisition
 
-S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. An embedding candidate pool allocates roughly a quarter to recommendations and a quarter to references, each capped at 100; citations receive the remainder. Hybrid's citation branch uses its own fetch budgets, while its semantic branch adds recommendations up to the smallest of 100, `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, and `--candidate-pool-size`.
+S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid keeps separate S2 citation budgets in either source mode; its semantic branch fetches recommendations in `candidates` mode, capped at the smallest of 100, `candidate_pool_size`, and `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, or searches the corpus in `arxiv-corpus` mode.
 
 When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references).
 

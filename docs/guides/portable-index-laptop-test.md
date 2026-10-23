@@ -91,6 +91,9 @@ citemesh cache scan
 certified corpus with 3,215,242 active/physical rows and 512-dimensional int8
 storage. Its origin records the publication above. Import performs data transfer
 and local binary-index reconstruction, with no model loading or calibration.
+If the pinned snapshot is unavailable, select a replacement publication and use
+its snapshot ID, namespace, row count, and contract settings consistently for
+the remaining checks.
 See [Portable corpus indexes](caching.md#portable-corpus-indexes) for import
 resume and snapshot-retention behavior.
 
@@ -140,6 +143,7 @@ pinned encoder, imported corpus retrieval, and separate graph embedding cache.
 
 ```python
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from citemesh import EmbeddingGraphBuilder, Paper
@@ -156,7 +160,13 @@ DEVICE = "mps"  # cuda on NVIDIA Windows; cpu for a CPU test
 class CorpusOnlyClient(SemanticScholarClient):
     """Skip optional external citation counts during local-index acceptance."""
 
-    def get_papers(self, paper_ids: list[str], **kwargs: object) -> dict[str, Paper]:
+    def get_papers(
+        self,
+        paper_ids: Sequence[str],
+        *,
+        raise_on_unavailable: bool = False,
+    ) -> dict[str, Paper]:
+        """Skip external paper lookups during local-index acceptance."""
         return {}
 
 

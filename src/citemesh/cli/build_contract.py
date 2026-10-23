@@ -263,13 +263,10 @@ def _resolve_implied_semantic_source(
 
 
 def _drop_ignored_corpus_config_defaults(context: _BuildContractContext) -> None:
-    """Reset corpus-only config defaults a candidates run announced it ignores.
-
-    "Ignored" must mean ignored: the values are reset so the builder never
-    receives corpus settings the run said it would not apply.
+    """Reset corpus-only config defaults when candidates mode is effective.
 
     :param _BuildContractContext context: Shared validation inputs.
-    :return None: Mutates the namespace in place.
+    :return None: Resets ignored corpus options to their built-in values.
     """
     ignored_config_corpus_dests = sorted(
         set(context.config_defaults) & _CORPUS_ONLY_OPTION_DESTS

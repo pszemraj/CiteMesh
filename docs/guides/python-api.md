@@ -1,6 +1,6 @@
 # Python API
 
-Import the builders and exporters directly when a notebook or script beats shelling out to the CLI.
+Import the builders and exporters in a notebook or script; the worked example uses the [`recommended` extra](../../README.md#quick-start).
 
 > [!IMPORTANT]
 > **Unstable, pre-1.0.** The CLI is the supported interface; signatures, keyword names, and payload shapes here can change in any release. Only the names below are meant for import - anything behind a leading underscore or in an unlisted submodule is internal.
