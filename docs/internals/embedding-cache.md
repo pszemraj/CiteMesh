@@ -97,6 +97,16 @@ record. Membership reflects the selected revision at clean EOF; removed
 papers' stored rows remain inactive. Failure after replacement leaves the
 operation incomplete, since the old source no longer exists intact.
 
+Full and newest-N refreshes share a temporary SQLite staging pass, resolving
+canonical IDs across the entire pinned split before calibration or encoding.
+Duplicate precedence is update time, numeric arXiv version, version creation
+time, then sorted normalized JSON for otherwise tied conflicts. Missing or
+unparseable timestamps rank below valid ones; timestamps are compared in UTC.
+Newest-N selection runs on the resolved records. Staging bounds memory by the
+record batch and uses temporary disk space proportional to source metadata.
+Refresh retries rebuild membership from these winners while preserving native
+vectors and calibration; import retries retain their committed prefix.
+
 Ordinary ingest and corpus metadata writes reject a managed corpus outside
 its owned operation. Both locked ingest phases check ownership, so an encoder
 started before certification cannot commit afterwards. Read-only vector lookup

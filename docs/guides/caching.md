@@ -113,6 +113,15 @@ fixed. Removed source papers keep their physical vectors but leave active
 membership, retrieval, and export. Refresh scans source metadata; it does not
 promise a delta download.
 
+Repeated source IDs are resolved before calibration, encoding, or newest-N
+selection. The most recent valid `update_date` wins, followed by the highest
+arXiv version number and its creation time. When conflicting records have equal
+or unavailable revision information, a stable ordering of their normalized
+content breaks the tie and CiteMesh warns once with the number of ambiguous
+comparisons. This tie-break is deterministic; it does not establish freshness.
+The winning record retains its original source position. Equally recent,
+identical records retain the first occurrence.
+
 For a full index, `--corpus-size N` ranks only the newest N active members at
 the completed revision; `--all-corpus` uses every active member. Chronology ties
 prefer later source rows; undated papers fill remaining places in source

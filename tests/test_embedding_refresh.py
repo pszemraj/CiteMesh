@@ -1,6 +1,8 @@
 """Pinned source reconciliation and installed-corpus consumer contracts."""
 
+import runpy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
@@ -212,7 +214,10 @@ def test_installed_consumers_preserve_binding_and_smaller_view(monkeypatch, runt
     assert builder._embedding_runtime_metadata()["dataset_revision"] == "one"
 
 
-def test_newest_source_selection_deduplicates_before_cap(monkeypatch):
+@pytest.mark.parametrize("selection", ["all", "newest"])
+def test_source_selection_identical_duplicates_keep_first_ordinal(
+    monkeypatch, selection
+):
     revisions = {
         "one": [
             row("2501.00001"),
@@ -222,14 +227,23 @@ def test_newest_source_selection_deduplicates_before_cap(monkeypatch):
         ]
     }
     install_source(monkeypatch, revisions, ["one"])
-    source = CorpusSource("org/source", None, "train", "one", "newest", 2)
+    source = CorpusSource(
+        "org/source",
+        None,
+        "train",
+        "one",
+        selection,
+        2 if selection == "newest" else None,
+    )
     stats = {}
     records = list(corpus_source.iter_source_records(source, stats))
-    assert [record["paper_id"] for record in records] == [
-        "arxiv:2501.00001",
-        "arxiv:2401.00001",
-    ]
-    assert [record["source_ordinal"] for record in records] == [0, 2]
+    expected = ["arxiv:2501.00001", "arxiv:2401.00001"]
+    ordinals = [0, 2]
+    if selection == "all":
+        expected.append("arxiv:2301.00001")
+        ordinals.append(3)
+    assert [record["paper_id"] for record in records] == expected
+    assert [record["source_ordinal"] for record in records] == ordinals
     assert stats["source_records_examined"] == 4
 
 
@@ -307,22 +321,268 @@ def test_managed_reranking_reads_hits_and_encodes_external_papers_in_memory(
     assert cache.embedding_count() == 1
 
 
-def test_conflicting_duplicates_leave_refresh_incomplete(monkeypatch, runtime):
-    from citemesh.strategies.embedding import refresh
-
+def test_conflicting_duplicates_refresh_one_deterministic_winner(monkeypatch, runtime):
     install_source(
         monkeypatch,
         {"one": [row("2401.00001"), row("2401.00001", "conflicting")]},
         ["one"],
     )
-    monkeypatch.setattr(refresh, "HYDRATION_FLUSH_SIZE", 1)
     builder = make_builder()
-    with pytest.raises(ValueError, match="Conflicting duplicate"):
-        builder.refresh_corpus()
+    result = builder.refresh_corpus()
+    assert result["source_records_examined"] == 2
+    assert result["active_rows"] == 1
+    assert len(runtime[0]) == 1
+    assert builder.embedding_cache.corpus_state()["membership_complete"]
     assert (
-        builder.embedding_cache.corpus_state()["pending"]["target_source"]["revision"]
-        == "one"
+        builder.embedding_cache.get_paper_metadata_batch(["arxiv:2401.00001"])[
+            "arxiv:2401.00001"
+        ]["abstract"]
+        == "conflicting"
     )
+
+
+@pytest.mark.parametrize("selection", ["all", "newest"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_dated_duplicate_winner_is_shared_and_precedes_newest_cap(
+    monkeypatch, selection, reverse
+):
+    duplicate = [
+        row("2501.00001", "old", update_date="2023-05-25", categories="math-ph"),
+        row(
+            "2501.00001",
+            "new",
+            update_date="2026-10-16 00:00:00",
+            categories="math-ph quant-ph",
+        ),
+    ]
+    if reverse:
+        duplicate.reverse()
+    rows = [duplicate[0], row("2401.00001"), duplicate[1], row("2301.00001")]
+    install_source(monkeypatch, {"one": rows}, ["one"])
+    stats = {}
+    records = list(
+        corpus_source.iter_source_records(
+            CorpusSource(
+                "org/source",
+                None,
+                "train",
+                "one",
+                selection,
+                2 if selection == "newest" else None,
+            ),
+            stats,
+        )
+    )
+    by_id = {record["paper_id"]: record for record in records}
+    winner = by_id["arxiv:2501.00001"]
+    assert winner["abstract"] == "new"
+    assert winner["categories"] == ["math-ph", "quant-ph"]
+    assert winner["source_ordinal"] == (0 if reverse else 2)
+    assert len(records) == (2 if selection == "newest" else 3)
+    assert "arxiv:2401.00001" in by_id
+    assert stats["source_records_examined"] == 4
+
+
+@pytest.mark.parametrize(
+    ("older", "newer"),
+    [
+        ({}, {"update_date": "2026-10-16"}),
+        ({"update_date": "invalid"}, {"update_date": "2026-10-16"}),
+        (
+            {"update_date": "2026-10-16T00:30:00+02:00"},
+            {"update_date": "Thu, 15 Oct 2026 23:00:00 GMT"},
+        ),
+        (
+            {"versions": [{"version": "v9"}]},
+            {"versions": [{"version": "v10"}, {"version": "v2"}]},
+        ),
+        (
+            {"update_date": "2023-05-25", "versions": [{"version": "v10"}]},
+            {"update_date": "2026-10-16", "versions": [{"version": "v9"}]},
+        ),
+        (
+            {"update_date": "invalid", "versions": [{"version": "v9"}]},
+            {"versions": [{"version": "v10"}]},
+        ),
+        (
+            {"update_date": "2026-10-16", "versions": [{"version": "v9"}]},
+            {"update_date": "2026-10-16", "versions": [{"version": "v10"}]},
+        ),
+        (
+            {"versions": [{"version": "v2", "created": "2023-05-24"}]},
+            {
+                "versions": [
+                    {"version": "v2", "created": "Thu, 25 May 2023 00:00:00 GMT"}
+                ]
+            },
+        ),
+        ({"id": "2401.00001v9"}, {"id": "2401.00001v10"}),
+    ],
+)
+def test_source_duplicate_recency_fallbacks(monkeypatch, older, newer):
+    for records in (
+        [row("2401.00001", "z old", **older), row("2401.00001", "a new", **newer)],
+        [row("2401.00001", "a new", **newer), row("2401.00001", "z old", **older)],
+    ):
+        install_source(monkeypatch, {"one": records}, ["one"])
+        source = CorpusSource("org/source", None, "train", "one", "all", None)
+        resolved = list(corpus_source.iter_source_records(source))
+        assert len(resolved) == 1
+        assert resolved[0]["paper_id"] == "arxiv:2401.00001"
+        assert resolved[0]["abstract"] == "a new"
+
+
+@pytest.mark.parametrize("update_date", [None, "2026-10-16", "invalid"])
+def test_ambiguous_duplicates_resolve_stably_with_aggregate_warning(
+    monkeypatch, caplog, update_date
+):
+    records = [
+        row(identifier, abstract, update_date=update_date)
+        for identifier in ("2401.00001", "2401.00002")
+        for abstract in ("alpha", "zulu")
+    ]
+    winners = []
+    for rows in (records, list(reversed(records))):
+        install_source(monkeypatch, {"one": rows}, ["one"])
+        source = CorpusSource("org/source", None, "train", "one", "all", None)
+        resolved = list(corpus_source.iter_source_records(source))
+        winners.append({record["paper_id"]: record["abstract"] for record in resolved})
+        warnings = [
+            record for record in caplog.records if record.levelname == "WARNING"
+        ]
+        assert len(warnings) == 1
+        assert "2 conflicting source rows" in warnings[0].getMessage()
+        caplog.clear()
+    assert winners[0] == winners[1]
+
+
+def test_interrupted_old_duplicate_membership_reconciles_winner(monkeypatch, runtime):
+    initial = [row("2401.00001", "old"), row("2401.00002", "unchanged")]
+    sources = {
+        "one": initial,
+        "two": [*initial, row("2401.00001", "new", update_date="2026-10-16")],
+    }
+    active = ["one"]
+    install_source(monkeypatch, sources, active)
+    builder = EmbeddingGraphBuilder(
+        model_name="org/example",
+        model_revision="a" * 40,
+        truncate_dim=2,
+        storage_precision="int8",
+        semantic_source="arxiv-corpus",
+        calibration_sample_size=2,
+    )
+    builder.refresh_corpus()
+    cache = builder.embedding_cache
+    with h5py.File(cache.h5_path, "r") as handle:
+        vectors = handle["embeddings"][:]
+        ranges = handle["calibration_ranges"][:]
+    old_records = list(
+        corpus_source.iter_source_records(
+            CorpusSource("org/source", None, "train", "one", "all", None)
+        )
+    )
+    normal_batches = corpus_source.iter_source_batches
+
+    def interrupted_old_stream(*args):
+        yield old_records
+        raise RuntimeError("old streaming resolver stopped at duplicate")
+
+    active[0] = "two"
+    monkeypatch.setattr(corpus_source, "iter_source_batches", interrupted_old_stream)
+    with pytest.raises(RuntimeError, match="old streaming resolver"):
+        builder.refresh_corpus()
+    assert cache.corpus_state()["pending"]["target_source"]["revision"] == "two"
+    assert cache.corpus_state()["membership_complete"] is False
+    monkeypatch.setattr(corpus_source, "iter_source_batches", normal_batches)
+    runtime[0].clear()
+    result = builder.refresh_corpus()
+    assert result["encoded_rows"] == 1
+    assert len(runtime[0]) == 1 and "new" in runtime[0][0]
+    assert (
+        cache.get_paper_metadata_batch(["arxiv:2401.00001"])["arxiv:2401.00001"][
+            "abstract"
+        ]
+        == "new"
+    )
+    with cache._read_only_db() as connection:
+        assert dict(
+            connection.execute("SELECT paper_id,source_ordinal FROM corpus_membership")
+        ) == {
+            "arxiv:2401.00001": 2,
+            "arxiv:2401.00002": 1,
+        }
+    with h5py.File(cache.h5_path, "r") as handle:
+        np.testing.assert_array_equal(handle["embeddings"][1], vectors[1])
+        np.testing.assert_array_equal(handle["calibration_ranges"][:], ranges)
+    assert cache.corpus_state()["membership_complete"]
+
+
+def test_source_failure_during_duplicate_staging_encodes_nothing(monkeypatch, runtime):
+    def broken_source():
+        yield row("2401.00001")
+        raise RuntimeError("source stream interrupted")
+
+    install_source(monkeypatch, {"one": broken_source()}, ["one"])
+    builder = make_builder()
+    with pytest.raises(RuntimeError, match="source stream interrupted"):
+        builder.refresh_corpus()
+    assert runtime == ([], [])
+    assert builder.embedding_cache.embedding_count() == 0
+    assert not builder.embedding_cache.corpus_state()["membership_complete"]
+
+
+def test_manual_publisher_resumes_incomplete_selected_namespace(
+    monkeypatch, runtime, tmp_path
+):
+    from citemesh.data.embedding_cache import portable
+    from citemesh.services import embedding_indexes
+
+    active = ["one"]
+    install_source(
+        monkeypatch,
+        {"one": [row("2401.00001")], "two": [row("2401.00001", "new")]},
+        active,
+    )
+    builder = make_builder()
+    builder.refresh_corpus()
+    cache = builder.embedding_cache
+    original = cache.upsert_embeddings
+
+    def interrupt(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("interrupted before membership")
+
+    active[0] = "two"
+    monkeypatch.setattr(cache, "upsert_embeddings", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted before membership"):
+        builder.refresh_corpus()
+    exports = []
+    monkeypatch.setattr(
+        portable,
+        "export_snapshot",
+        lambda cache, *args, **kwargs: exports.append(
+            cache.require_complete_certified_corpus()
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_indexes, "publish_snapshot", lambda *args: "published"
+    )
+    publish = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/publish_arxiv_index.py")
+    )["publish_arxiv_index"]
+    assert (
+        publish(
+            "owner/private-index",
+            tmp_path / "export",
+            config_name="example",
+            namespace=cache.namespace_id,
+            device="cpu",
+        )
+        == "published"
+    )
+    assert len(exports) == 1
+    assert exports[0]["source"]["revision"] == "two"
 
 
 def test_first_int8_calibration_resumes_using_persisted_ranges(monkeypatch, runtime):

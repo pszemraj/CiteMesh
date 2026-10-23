@@ -404,7 +404,7 @@ class CorpusOperationSession:
                 )
             if pending and pending["target_source"] != asdict(self.target_source):
                 raise ValueError("Resume must use the recorded source target")
-            if not pending:
+            if self.kind == "refresh" or not pending:
                 conn.execute("DELETE FROM corpus_membership")
             state.update(
                 contract=asdict(self.contract),
