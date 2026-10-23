@@ -687,9 +687,6 @@ def select_existing_cache(
     return selection
 
 
-read_existing_cache_selection = select_existing_cache
-
-
 def read_existing_cache_metadata(namespace_id: str, cache_dir: Path | None = None):
     """Read legacy metadata under native locks without constructing/repairing payloads."""
     if len(namespace_id) != 12 or any(
@@ -718,13 +715,6 @@ def read_existing_cache_metadata(namespace_id: str, cache_dir: Path | None = Non
             return dict(conn.execute("SELECT key,value FROM cache_metadata"))
         finally:
             conn.close()
-
-
-def read_legacy_model_fingerprint(namespace_id: str, cache_dir: Path | None = None):
-    """Return the artifact identity witnessed by an existing native namespace."""
-    return read_existing_cache_metadata(namespace_id, cache_dir).get(
-        constants.MODEL_FINGERPRINT_KEY
-    )
 
 
 def open_existing_cache(
