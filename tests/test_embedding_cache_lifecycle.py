@@ -237,7 +237,10 @@ def test_strict_missing_half_preserves_database_and_never_repairs(tmp_path):
 
 
 @pytest.mark.parametrize("missing_half", ["db", "h5"])
-def test_strict_selection_refuses_each_missing_half(tmp_path, missing_half):
+@pytest.mark.parametrize("require_ready", [True, False])
+def test_strict_selection_refuses_each_missing_half(
+    tmp_path, missing_half, require_ready
+):
     settings = _settings(tmp_path)
     cache, _, _ = _populate(settings)
     selection = select_existing_cache(cache.namespace_id, tmp_path)
@@ -246,7 +249,7 @@ def test_strict_selection_refuses_each_missing_half(tmp_path, missing_half):
     missing_path.unlink()
     before = remaining_path.read_bytes()
     with pytest.raises(RuntimeError, match="both SQLite and HDF5"):
-        open_existing_cache(selection, tmp_path)
+        open_existing_cache(selection, tmp_path, require_ready=require_ready)
     assert remaining_path.read_bytes() == before
     assert not missing_path.exists()
 

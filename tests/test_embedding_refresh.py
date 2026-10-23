@@ -15,7 +15,10 @@ from citemesh.data.embedding_contract import CorpusSource
 from citemesh.strategies.embedding import builder as builder_module
 from citemesh.strategies.embedding import corpus_source, deps
 from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
-from citemesh.strategies.embedding.refresh import adopt_legacy_cache
+from citemesh.strategies.embedding.refresh import (
+    adopt_legacy_cache,
+    refresh_cache_selection,
+)
 
 
 @pytest.fixture
@@ -47,12 +50,12 @@ def runtime(monkeypatch):
     return encoded, loads
 
 
-def make_builder(**kwargs):
+def make_builder(*, storage_precision="float32", **kwargs):
     return EmbeddingGraphBuilder(
         model_name="org/example",
         model_revision="a" * 40,
         truncate_dim=2,
-        storage_precision="float32",
+        storage_precision=storage_precision,
         semantic_source="arxiv-corpus",
         **kwargs,
     )
@@ -242,6 +245,28 @@ def test_installed_consumers_preserve_binding_and_smaller_view(monkeypatch, runt
     assert builder.embedding_cache.db_path == original.embedding_cache.db_path
     assert builder.graph_embedding_cache.db_path != builder.embedding_cache.db_path
     assert builder._embedding_runtime_metadata()["dataset_revision"] == "one"
+
+
+def test_refresh_refuses_missing_matrix_of_open_selected_cache(monkeypatch, runtime):
+    active = ["one"]
+    install_source(
+        monkeypatch,
+        {"one": [row("2401.00001")], "two": [row("2401.00002")]},
+        active,
+    )
+    original = make_builder()
+    original.refresh_corpus()
+    selection = select_existing_cache(original.embedding_cache.namespace_id)
+    builder = EmbeddingGraphBuilder(cache_selection=selection)
+    cache = builder.embedding_cache
+    cache.h5_path.unlink()
+    runtime[0].clear()
+    active[0] = "two"
+
+    with pytest.raises(RuntimeError, match="both SQLite and HDF5"):
+        builder.refresh_corpus()
+    assert not cache.h5_path.exists()
+    assert not runtime[0]
 
 
 @pytest.mark.parametrize("selection", ["all", "newest"])
@@ -548,18 +573,44 @@ def test_interrupted_old_duplicate_membership_reconciles_winner(monkeypatch, run
     assert cache.corpus_state()["membership_complete"]
 
 
-def test_source_failure_during_duplicate_staging_encodes_nothing(monkeypatch, runtime):
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("missing_h5", [False, True])
+def test_source_failure_during_duplicate_staging_can_be_resumed(
+    monkeypatch, runtime, storage_precision, missing_h5
+):
     def broken_source():
         yield row("2401.00001")
         raise RuntimeError("source stream interrupted")
 
-    install_source(monkeypatch, {"one": broken_source()}, ["one"])
-    builder = make_builder()
+    sources = {"one": broken_source(), "two": [row("2501.00001")]}
+    active = ["one"]
+    reads, resolutions = install_source(monkeypatch, sources, active)
+    builder = make_builder(storage_precision=storage_precision)
     with pytest.raises(RuntimeError, match="source stream interrupted"):
         builder.refresh_corpus()
     assert runtime == ([], [])
-    assert builder.embedding_cache.embedding_count() == 0
-    assert not builder.embedding_cache.corpus_state()["membership_complete"]
+    cache = builder.embedding_cache
+    assert cache.embedding_count() == 0
+    assert not cache.corpus_state()["membership_complete"]
+    assert cache.corpus_state()["pending"]["kind"] == "refresh"
+    with h5py.File(cache.h5_path, "r") as handle:
+        assert "embeddings" not in handle
+        assert "calibration_ranges" not in handle
+    if missing_h5:
+        cache.h5_path.unlink()
+
+    sources["one"] = [row("2401.00001"), row("2401.00002")]
+    active[0] = "two"
+    reads.clear()
+    resolutions.clear()
+    with pytest.raises(RuntimeError, match="incomplete refresh"):
+        select_existing_cache(cache.namespace_id)
+    selection = select_existing_cache(cache.namespace_id, require_ready=False)
+    assert refresh_cache_selection(selection)["active_rows"] == 2
+    assert set(reads) == {"one"}
+    assert not resolutions
+    assert cache.corpus_state()["source"]["revision"] == "one"
+    assert cache.corpus_state()["membership_complete"]
 
 
 def test_manual_publisher_resumes_incomplete_selected_namespace(

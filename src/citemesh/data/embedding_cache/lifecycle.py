@@ -78,12 +78,17 @@ class _LifecycleMixin:
         self, *, contract: EmbeddingContract | None = None, allow_legacy: bool = False
     ):
         """Inspect both files without repairs, schema changes, or vector writes."""
-        if not self.db_path.is_file() or not self.h5_path.is_file():
+        if not self.db_path.is_file():
             raise RuntimeError(
                 "Existing embedding cache requires both SQLite and HDF5 files; "
                 "the existing files were preserved"
             )
-        with self._read_only_db() as conn, h5py.File(self.h5_path, "r") as h5:
+        with (
+            self._read_only_db() as conn,
+            h5py.File(self.h5_path, "r")
+            if self.h5_path.is_file()
+            else nullcontext() as h5,
+        ):
             state = _read_state(conn)
             if state:
                 require_namespace_contract(
@@ -100,8 +105,24 @@ class _LifecycleMixin:
                     == contract.model_artifact_identity
                 ):
                     raise ValueError("Selected cache embedding contract differs")
-            dataset = self._get_embeddings_dataset(h5)
             count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+            if h5 is None:
+                if (
+                    (state.get("pending") or {}).get("kind") == "refresh"
+                    and not state.get("source")
+                    and not state.get("membership_complete")
+                    and count == 0
+                    and conn.execute(
+                        "SELECT 1 FROM replacement_journal LIMIT 1"
+                    ).fetchone()
+                    is None
+                ):
+                    return state
+                raise RuntimeError(
+                    "Existing embedding cache requires both SQLite and HDF5 files; "
+                    "the existing files were preserved"
+                )
+            dataset = self._get_embeddings_dataset(h5)
             if dataset is None:
                 if count:
                     raise RuntimeError(
@@ -438,6 +459,13 @@ class CorpusOperationSession:
             self.cache._set_cache_metadata(
                 conn, {constants.HYDRATION_COMPLETE_KEY: "0"}
             )
+        if self.kind == "refresh":
+            with self.cache.namespace_lock_only():
+                if not self.cache.h5_path.exists():
+                    self.cache._inspect_existing_locked(contract=self.contract)
+                    with h5py.File(self.cache.h5_path, "a") as h5:
+                        self.cache._set_h5_attrs(h5)
+                        self.cache._flush_h5_file(h5)
         self.cache._operation_owner = (threading.get_ident(), _json(self.identity))
 
     @property
