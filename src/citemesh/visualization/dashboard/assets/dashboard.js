@@ -1056,7 +1056,7 @@
         return String(nodeId);
       }
       if (Array.isArray(node.authors) && node.authors.length) {
-        const surname = String(node.authors[0]).split(" ").filter(Boolean).slice(-1)[0] || "Unknown";
+        const surname = String(node.authors[0]).split(/\s+/).filter(Boolean).slice(-1)[0] || "Unknown";
         const year = hasYear(node) ? String(node.year) : "n.d.";
         return `${surname}, ${year}`;
       }
@@ -1076,7 +1076,7 @@
           return String(nodeId || "");
         }
         if (Array.isArray(node.authors) && node.authors.length) {
-          const surname = String(node.authors[0]).split(" ").filter(Boolean).slice(-1)[0] || "Unknown";
+          const surname = String(node.authors[0]).split(/\s+/).filter(Boolean).slice(-1)[0] || "Unknown";
           const year = hasYear(node) ? String(node.year) : "n.d.";
           return `${surname}, ${year}`;
         }

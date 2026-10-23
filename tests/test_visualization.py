@@ -2906,6 +2906,37 @@ def test_dashboard_semantic_scholar_button_disables_without_a_link(
     assert probed["withoutLink"] == ["disabled"]
 
 
+@pytest.mark.parametrize(
+    "author", ["Ada\tLovelace", "Ada\nLovelace", "Ada\u00a0Lovelace"]
+)
+def test_dashboard_compact_author_labels_match_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, author: str
+) -> None:
+    """Compact browser labels split author names on any whitespace."""
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    graph.nodes[seed_id]["paper"].authors = [Author(name=author)]
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "author-labels.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    expected = nodes_module._node_short_label(graph.nodes[seed_id], seed_id)
+    assert expected == "Lovelace, 2020"
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "({"
+        ' compact: compactNodeLabel("seed"),'
+        " portable: portableGraphPayload(payload).edges.map(edge =>"
+        '   edge.source === "seed" ? edge.source_label : edge.target_label),'
+        "})",
+    )
+    assert probed == {"compact": expected, "portable": [expected]}
+
+
 def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
