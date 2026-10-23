@@ -69,8 +69,12 @@ class Paper:
     is_seed: bool = False
     is_local_corpus: bool = False
 
-    def __post_init__(self):
-        """Validate paper data after initialization."""
+    def __post_init__(self) -> None:
+        """Validate numeric fields and normalize an empty title.
+
+        :raises ValueError: If the year is outside 1900 through next year or
+            the citation count is negative.
+        """
         current_year = datetime.now().year
 
         # Validate year if available
@@ -125,10 +129,10 @@ class Paper:
         return bool(self.author_names & other.author_names)
 
     def category_overlap(self, other: Paper) -> float:
-        """
-        Compute category overlap coefficient.
+        """Return the Jaccard overlap between two papers' categories.
 
-        :return float: Jaccard similarity: |intersection| / |union| Returns 0.0 if either paper has no categories.
+        :param Paper other: Paper to compare categories against.
+        :return float: Jaccard coefficient, or 0.0 if either category set is empty.
         """
         if not self.categories or not other.categories:
             return 0.0
@@ -141,39 +145,41 @@ class Paper:
         return intersection / union if union > 0 else 0.0
 
     def reference_overlap(self, other: Paper) -> float:
-        """
-        Compute bibliographic coupling strength.
+        """Return normalized overlap between two papers' reference lists.
 
-        :return float: Bibliographic coupling coefficient (0.0 to 1.0) Returns 0.0 if either paper has no references.
+        :param Paper other: Paper to compare referenced paper IDs against.
+        :return float: Shared-reference count divided by the geometric mean of
+            list sizes, or 0.0 if either paper has no references.
 
-        Note:
-            Semantic Scholar reference lists are API-limited and can be truncated.
-            When only partial lists are available, shared-reference overlap can be
-            inflated relative to full bibliographies, so treat this score as an
-            approximation.
+        Reference lists may be truncated by the API, so this score can differ
+        from overlap computed from complete bibliographies.
         """
         if not self.references or not other.references:
             return 0.0
 
         refs1 = set(self.references)
-        refs2 = set(other.references)  # Fixed: was using self.references twice
+        refs2 = set(other.references)
         shared = len(refs1 & refs2)
         denominator = (len(refs1) * len(refs2)) ** 0.5
 
         return shared / denominator if denominator > 0 else 0.0
 
-    def __hash__(self):
-        """Make Paper hashable for use in sets/dicts."""
+    def __hash__(self) -> int:
+        """Return the hash derived from this paper's identifier."""
         return hash(self.paper_id)
 
-    def __eq__(self, other):
-        """Papers are equal if they have the same ID."""
+    def __eq__(self, other: object) -> bool:
+        """Compare this paper with another value by paper ID.
+
+        :param object other: Value to compare against this paper.
+        :return bool: Whether ``other`` is a paper with the same ID.
+        """
         if not isinstance(other, Paper):
             return False
         return self.paper_id == other.paper_id
 
-    def __repr__(self):
-        """Concise string representation."""
+    def __repr__(self) -> str:
+        """Return a compact representation with ID, title, and year."""
         return (
             f"Paper(id={self.paper_id[:10]}..., title={self.title[:30]}..., "
             f"year={self.year or 'n.d.'})"

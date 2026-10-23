@@ -196,6 +196,28 @@ def test_payload_conversion_preserves_metadata_quirks() -> None:
     assert paper.references == ["r1", "r2"]
 
 
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"title": 123},
+        {"year": "2024"},
+        {"citationCount": "3"},
+        {"abstract": 456},
+        {"authors": [{"name": "Ada", "authorId": 123}]},
+    ],
+)
+def test_payload_conversion_rejects_invalid_scalar_types(
+    invalid_fields: dict[str, object],
+) -> None:
+    """Malformed API fields follow the existing conversion failure path.
+
+    :param invalid_fields: Raw fields that violate the paper model's types.
+    """
+    payload = {**_paper_payload(), **invalid_fields}
+    assert s2.payloads._convert_recommendation(payload) is None
+    assert s2.payloads._convert_api_paper(payload) is None
+
+
 def test_cache_writes_one_canonical_record_and_alias_stubs() -> None:
     """Paper metadata is stored once while DOI/arXiv/request aliases stay small.
 

@@ -13,9 +13,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TextIO, TypeAlias
 
 from filelock import ReadWriteLock
+
+JSONValue: TypeAlias = (
+    str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
+)
 
 CACHE_COORDINATION_DIRNAME = ".locks"
 CACHE_OPERATION_LOCK_FILENAME = "cache-operations.db"
@@ -179,7 +183,7 @@ def cache_operation_lock(
 
 def _atomic_write_text_payload(
     path: Path,
-    writer: Callable[[TextIO], object],
+    writer: Callable[[TextIO], int | None],
     *,
     newline: str | None,
     mode: int | None = None,
@@ -187,7 +191,7 @@ def _atomic_write_text_payload(
     """Atomically replace a UTF-8 text file using a writer callback.
 
     :param Path path: Target text file path.
-    :param Callable[[TextIO], object] writer: Callback that writes the payload.
+    :param Callable[[TextIO], int | None] writer: Callback that writes the payload.
     :param str | None newline: Text-mode newline translation policy.
     :param int | None mode: Explicit permission bits, or ``None`` to keep the
         target's existing mode (umask default for new files).
@@ -315,7 +319,7 @@ def atomic_write_text(
 
 def atomic_write_json(
     path: Path,
-    payload: Any,
+    payload: object,
     *,
     indent: int | None = None,
     sort_keys: bool = True,
@@ -323,7 +327,7 @@ def atomic_write_json(
     """Persist JSON content with a crash-safe atomic rename.
 
     :param Path path: Target JSON file path.
-    :param Any payload: JSON-serializable payload to write.
+    :param object payload: Value serialized by the JSON encoder; unsupported values raise TypeError.
     :param int | None indent: Optional JSON indentation level.
     :param bool sort_keys: Whether to sort object keys during serialization.
     :return None: Writes the target file in place.
@@ -332,11 +336,11 @@ def atomic_write_json(
     _atomic_write_text_payload(path, writer, newline=None)
 
 
-def read_json_object(path: Path) -> dict[str, Any] | None:
+def read_json_object(path: Path) -> dict[str, JSONValue] | None:
     """Read a JSON object from disk, treating any unusable payload as absent.
 
     :param Path path: JSON file path to read.
-    :return dict[str, Any] | None: Parsed mapping, or ``None`` when the file
+    :return dict[str, JSONValue] | None: Parsed mapping, or ``None`` when the file
         cannot be read or decoded (``OSError``, ``UnicodeDecodeError``,
         ``json.JSONDecodeError``) or its parsed value is not a JSON object.
     """

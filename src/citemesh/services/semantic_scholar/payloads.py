@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import numbers
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict
 
 from citemesh.core import Author, Paper
 from citemesh.core.paper_fields import (
@@ -18,8 +19,45 @@ from citemesh.core.paper_fields import (
     coerce_venue,
 )
 from citemesh.core.paper_ids import external_ids_from_canonical_paper_id
+from citemesh.data.cache import JSONValue
 
 logger = logging.getLogger(__name__)
+
+
+class PaperBatchRequest(TypedDict):
+    """Body sent to the Semantic Scholar paper batch endpoint."""
+
+    ids: list[str]
+
+
+class _RelationPageData(TypedDict):
+    """Envelope returned by citation and reference pagination."""
+
+    data: JSONValue
+
+
+class RelationPage(_RelationPageData, total=False):
+    """Optional pagination cursor returned with a relation page."""
+
+    next: JSONValue
+
+
+class RecommendationResponse(TypedDict):
+    """Envelope returned by the recommendation endpoint."""
+
+    recommendedPapers: list[JSONValue]
+
+
+class _SearchResponseData(TypedDict):
+    """Envelope returned by the paper search endpoint."""
+
+    data: list[JSONValue]
+
+
+class SearchResponse(_SearchResponseData, total=False):
+    """Optional pagination cursor returned with search results."""
+
+    next: JSONValue
 
 
 DEFAULT_PAPER_FIELDS = (
@@ -45,27 +83,29 @@ def _default_paper_fields() -> list[str]:
     return list(DEFAULT_PAPER_FIELDS)
 
 
-def _reference_id_candidate(raw_value: Any) -> str | None:
+def _reference_id_candidate(raw_value: object) -> str | None:
     """Extract a paper ID from accepted reference payload shapes.
 
     Supports current cache entries and legacy mixed-format cache entries.
 
-    :param Any raw_value: Raw reference-like entry.
+    :param object raw_value: Raw reference-like entry.
     :return str | None: Candidate paper ID string, or ``None`` when absent.
     """
     if isinstance(raw_value, str):
         return raw_value
 
     if isinstance(raw_value, dict):
+        record: dict[object, object] = raw_value
         for key in ("paperId", "paper_id"):
-            candidate = raw_value.get(key)
+            candidate = record.get(key)
             if isinstance(candidate, str):
                 return candidate
 
-        nested_paper = raw_value.get("paper")
+        nested_paper = record.get("paper")
         if isinstance(nested_paper, dict):
+            nested_record: dict[object, object] = nested_paper
             for key in ("paperId", "paper_id"):
-                candidate = nested_paper.get(key)
+                candidate = nested_record.get(key)
                 if isinstance(candidate, str):
                     return candidate
         return None
@@ -84,7 +124,7 @@ def _reference_id_candidate(raw_value: Any) -> str | None:
     return None
 
 
-def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
+def _coerce_cached_reference_ids(payload: object) -> list[str] | None:
     """Normalize a reference payload, rejecting one that is malformed.
 
     Accepts current list-of-string payloads and legacy mixed relation-shaped
@@ -92,7 +132,7 @@ def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
     payload, or a non-empty one holding no usable paper ID, is invalid: the
     caller rebuilds the cache entry or reports a contract failure.
 
-    :param Any payload: Cached ``references`` field or live relation records.
+    :param object payload: Cached ``references`` field or live relation records.
     :return list[str] | None: Normalized IDs, or ``None`` when the payload is invalid.
     """
     if not isinstance(payload, list):
@@ -101,7 +141,8 @@ def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
     normalized: list[str] = []
     seen: set[str] = set()
 
-    for raw_value in payload:
+    for untyped_value in payload:
+        raw_value: object = untyped_value
         candidate = _reference_id_candidate(raw_value)
         paper_id = candidate.strip() if candidate is not None else ""
         if not paper_id or paper_id in seen:
@@ -114,13 +155,13 @@ def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
     return normalized
 
 
-def _extract_reference_ids(raw_references: Any) -> list[str]:
+def _extract_reference_ids(raw_references: object) -> list[str]:
     """Extract reference IDs from recommendation/search payload shapes.
 
     Tolerant counterpart of :func:`_coerce_cached_reference_ids`: a malformed
     payload yields no references instead of signalling invalid data.
 
-    :param Any raw_references: Raw ``references`` payload from API response.
+    :param object raw_references: Raw ``references`` payload from API response.
     :return list[str]: Parsed reference ID list (order-preserving, deduplicated).
     """
     return _coerce_cached_reference_ids(raw_references) or []
@@ -177,10 +218,12 @@ def _normalize_external_id(raw_value: object) -> str:
     return raw_value.strip()
 
 
-def _extract_external_ids_from_mapping(mapping: dict[str, Any]) -> tuple[str, str]:
+def _extract_external_ids_from_mapping(
+    mapping: Mapping[object, object],
+) -> tuple[str, str]:
     """Extract arXiv and DOI IDs from external-id style mappings.
 
-    :param dict[str, Any] mapping: External IDs map.
+    :param Mapping[object, object] mapping: External IDs map.
     :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
     """
     normalized = {str(key).lower(): value for key, value in mapping.items()}
@@ -196,7 +239,8 @@ def _extract_external_ids(external_ids: object) -> tuple[str, str]:
     :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
     """
     if isinstance(external_ids, dict):
-        return _extract_external_ids_from_mapping(external_ids)
+        mapping: Mapping[object, object] = external_ids
+        return _extract_external_ids_from_mapping(mapping)
     return "", ""
 
 
@@ -214,17 +258,19 @@ def _resolve_external_ids(external_ids: object, paper_id: object) -> tuple[str, 
     return arxiv_id or fallback_arxiv_id, doi or fallback_doi
 
 
-def _payload_get(payload: object, key: str, default: Any = None) -> Any:
+def _payload_get(payload: object, key: str, default: object = None) -> object:
     """Read a field from dict-like or object-like API payloads.
 
     :param object payload: Raw API payload object or mapping.
     :param str key: Field name to read.
-    :param Any default: Value returned when the field is absent.
-    :return Any: Extracted field value or ``default`` when unavailable.
+    :param object default: Value returned when the field is absent.
+    :return object: Raw field value or ``default`` when unavailable.
     """
     if isinstance(payload, dict):
-        return payload.get(key, default)
-    return getattr(payload, key, default)
+        mapping: dict[object, object] = payload
+        return mapping.get(key, default)
+    value: object = getattr(payload, key, default)
+    return value
 
 
 def _extract_authors(raw_authors: object) -> list[Author]:
@@ -232,18 +278,21 @@ def _extract_authors(raw_authors: object) -> list[Author]:
 
     :param object raw_authors: Raw authors payload from Semantic Scholar.
     :return list[Author]: All normalized author records in source order.
+    :raises TypeError: If an author's ID is neither a string nor ``None``.
     """
     if not isinstance(raw_authors, list):
         return []
 
     authors: list[Author] = []
-    for raw_author in raw_authors:
+    for untyped_author in raw_authors:
+        raw_author: object = untyped_author
         name = coerce_author_name(raw_author)
         if not name:
             continue
-        authors.append(
-            Author(name=name, author_id=_payload_get(raw_author, "authorId"))
-        )
+        author_id = _payload_get(raw_author, "authorId")
+        if author_id is not None and not isinstance(author_id, str):
+            raise TypeError("authorId must be a string or None")
+        authors.append(Author(name=name, author_id=author_id))
     return authors
 
 
@@ -275,10 +324,30 @@ def _convert_payload_paper(
     :param tuple[str, ...] category_keys: Category field names checked in order.
     :param list[str] | None references: Optional normalized reference IDs.
     :return Paper | None: Converted paper or ``None`` when no usable paper ID exists.
+    :raises TypeError: If a non-empty title or abstract, year, or citation count
+        has an unsupported type, or an author's ID is not a string.
     """
     paper_id = _payload_get(payload, "paperId")
     if not isinstance(paper_id, str) or not paper_id:
         return None
+
+    title = _payload_get(payload, "title") or "Unknown"
+    if not isinstance(title, str):
+        raise TypeError("title must be a string")
+
+    raw_year = _payload_get(payload, "year")
+    if raw_year is not None and (
+        isinstance(raw_year, bool) or not isinstance(raw_year, int)
+    ):
+        raise TypeError("year must be an integer or None")
+
+    citation_count = _payload_get(payload, "citationCount", 0) or 0
+    if isinstance(citation_count, bool) or not isinstance(citation_count, int):
+        raise TypeError("citationCount must be an integer")
+
+    abstract = _payload_get(payload, "abstract") or ""
+    if not isinstance(abstract, str):
+        raise TypeError("abstract must be a string")
 
     arxiv_id, doi = _resolve_external_ids(
         _payload_get(payload, "externalIds"),
@@ -286,11 +355,11 @@ def _convert_payload_paper(
     )
     return Paper(
         paper_id=paper_id,
-        title=_payload_get(payload, "title") or "Unknown",
-        year=_payload_get(payload, "year"),
+        title=title,
+        year=raw_year,
         authors=_extract_authors(_payload_get(payload, "authors")),
-        citation_count=_payload_get(payload, "citationCount", 0) or 0,
-        abstract=_payload_get(payload, "abstract") or "",
+        citation_count=citation_count,
+        abstract=abstract,
         venue=_extract_venue(
             _payload_get(payload, "venue"),
             _payload_get(payload, "publicationVenue"),
@@ -306,11 +375,11 @@ def _convert_payload_paper(
     )
 
 
-def _convert_api_paper(api_paper: Any) -> Paper | None:
+def _convert_api_paper(api_paper: object) -> Paper | None:
     """
     Convert Semantic Scholar API response to Paper model.
 
-    :param Any api_paper: Raw paper object from S2 API
+    :param object api_paper: Raw paper object from S2 API
     :return Paper | None: Paper object or None if conversion fails
     """
     try:
@@ -323,10 +392,10 @@ def _convert_api_paper(api_paper: Any) -> Paper | None:
         return None
 
 
-def _convert_recommendation(rec: dict[str, Any]) -> Paper | None:
+def _convert_recommendation(rec: object) -> Paper | None:
     """Convert recommendation/search record dict to a Paper model.
 
-    :param dict[str, Any] rec: Record returned by recommendation/search APIs.
+    :param object rec: Record returned by recommendation/search APIs.
     :return Paper | None: Parsed Paper model or ``None`` on malformed payload.
     """
     try:

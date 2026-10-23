@@ -6,18 +6,21 @@ import contextlib
 import json
 import logging
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
 from functools import wraps
-from typing import Any
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, Protocol, TypeGuard, TypeVar
 from urllib.parse import quote
 
 from citemesh.core import Paper
 from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.data.cache import JSONValue
 
 from . import disk_cache, payloads
 from .errors import (
     SemanticScholarUnavailableError,
     _SemanticScholarResponseContractError,
 )
+from .payloads import RecommendationResponse, RelationPage, SearchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +51,34 @@ def _warn_skipped_recommendations(paper_id: str, skipped_records: int) -> None:
         )
 
 
-def _scoped_endpoint(method: Callable[..., Any]) -> Callable[..., Any]:
+class _ScopedClient(Protocol):
+    """Client state required by the collection-scope endpoint wrapper."""
+
+    def candidate_operation_scope(self) -> AbstractContextManager[None]: ...
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+_ScopedClientT = TypeVar("_ScopedClientT", bound=_ScopedClient)
+
+
+def _scoped_endpoint(
+    method: Callable[Concatenate[_ScopedClientT, P], R],
+) -> Callable[Concatenate[_ScopedClientT, P], R]:
     """Run an endpoint inside the outer candidate collection scope.
 
-    :param Callable[..., Any] method: Endpoint method.
-    :return Callable[..., Any]: Scope-sharing wrapper.
+    :param Callable[Concatenate[_ScopedClientT, P], R] method: Endpoint method.
+    :return Callable[Concatenate[_ScopedClientT, P], R]: Scope-sharing wrapper.
     """
 
     @wraps(method)
-    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+    def wrapped(self: _ScopedClientT, *args: P.args, **kwargs: P.kwargs) -> R:
         """Enter or reuse the collection scope.
 
-        :param Any self: Semantic Scholar client.
-        :param Any args: Endpoint positional arguments.
-        :param Any kwargs: Endpoint keyword arguments.
-        :return Any: Endpoint result.
+        :param _ScopedClient self: Semantic Scholar client.
+        :param P.args args: Endpoint positional arguments.
+        :param P.kwargs kwargs: Endpoint keyword arguments.
+        :return R: Endpoint result.
         """
         with self.candidate_operation_scope():
             return method(self, *args, **kwargs)
@@ -70,8 +86,41 @@ def _scoped_endpoint(method: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
+def _is_relation_page(value: JSONValue) -> TypeGuard[RelationPage]:
+    """Narrow an object that contains the required relation page key.
+
+    :param JSONValue value: Decoded response value.
+    :return bool: Whether the value has the relation page envelope shape.
+    """
+    return isinstance(value, dict) and "data" in value
+
+
+def _is_recommendation_response(value: JSONValue) -> TypeGuard[RecommendationResponse]:
+    """Narrow a recommendation response with its records list.
+
+    :param JSONValue value: Decoded response value.
+    :return bool: Whether the value has a recommendation records list.
+    """
+    return isinstance(value, dict) and isinstance(value.get("recommendedPapers"), list)
+
+
+def _is_search_response(value: JSONValue) -> TypeGuard[SearchResponse]:
+    """Narrow a search response with its records list.
+
+    :param JSONValue value: Decoded response value.
+    :return bool: Whether the value has a search records list.
+    """
+    return isinstance(value, dict) and isinstance(value.get("data"), list)
+
+
 class _EndpointsMixin:
     """Public Semantic Scholar endpoint surface."""
+
+    if TYPE_CHECKING:
+
+        def candidate_operation_scope(self) -> AbstractContextManager[None]:
+            """Scope supplied by the client that hosts this mixin."""
+            ...
 
     @_scoped_endpoint
     def get_paper(
@@ -305,7 +354,7 @@ class _EndpointsMixin:
             )
             if response is None:
                 return None
-            if not isinstance(response, dict) or "data" not in response:
+            if not _is_relation_page(response):
                 raise _SemanticScholarResponseContractError(
                     f"Semantic Scholar returned malformed {relation} pagination data."
                 )
@@ -486,11 +535,11 @@ class _EndpointsMixin:
         return requested, set(payloads.DEFAULT_PAPER_FIELDS).issubset(requested)
 
     def _papers_from_records(
-        self, records: Iterable[Any], *, cache_full_metadata: bool
+        self, records: Iterable[JSONValue], *, cache_full_metadata: bool
     ) -> tuple[list[Paper], int]:
         """Convert records, count malformed rows, and optionally cache them.
 
-        :param Iterable[Any] records: API paper records.
+        :param Iterable[JSONValue] records: Decoded API paper records.
         :param bool cache_full_metadata: Whether records carry default full metadata.
         :return tuple[list[Paper], int]: Converted records and malformed-row count.
         """
@@ -541,7 +590,7 @@ class _EndpointsMixin:
 
         skipped_records = 0
         for pool in ("recent", "all-cs"):
-            params: dict[str, Any] = {
+            params: dict[str, str | int] = {
                 "fields": ",".join(requested_fields)
                 if custom_projection
                 else "paperId",
@@ -562,9 +611,7 @@ class _EndpointsMixin:
                         "HTTP 404 (paper not found)."
                     )
                 return []
-            if not isinstance(response, dict) or not isinstance(
-                response.get("recommendedPapers"), list
-            ):
+            if not _is_recommendation_response(response):
                 raise _SemanticScholarResponseContractError(
                     "Semantic Scholar returned malformed recommendation data."
                 )
@@ -641,7 +688,7 @@ class _EndpointsMixin:
         if fields is not None and "paperId" not in requested_fields:
             requested_fields.append("paperId")
 
-        records: list[Any] = []
+        records: list[JSONValue] = []
         seen_ids: set[str] = set()
         malformed_records = 0
         offset = 0
@@ -664,9 +711,7 @@ class _EndpointsMixin:
                         f"Could not search for {normalized_query!r}: HTTP 404."
                     )
                 return []
-            if not isinstance(response, dict) or not isinstance(
-                response.get("data"), list
-            ):
+            if not _is_search_response(response):
                 raise _SemanticScholarResponseContractError(
                     "Semantic Scholar returned malformed search data."
                 )

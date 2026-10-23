@@ -12,7 +12,6 @@ Stdlib only: this module must stay importable from every layer.
 from __future__ import annotations
 
 import math
-from typing import Any
 
 __all__ = [
     "ValueValidationError",
@@ -33,20 +32,19 @@ class ValueValidationError(ValueError):
 
         :param str reason: Stable token identifying the failed rule.
         :param str message: Default human-readable description of the failure.
-        :return None: Initializes the exception.
         """
         super().__init__(message)
-        self.reason = reason
+        self.reason: str = reason
 
 
-def parse_bounded_int(value: Any, *, minimum: int) -> int:
+def parse_bounded_int(value: object, *, minimum: int) -> int:
     """Parse an integer constrained by an inclusive lower bound.
 
     Booleans are rejected outright because ``bool`` is an ``int`` subclass and
     ``--max-papers true`` is never intended. Strings are trimmed before parsing;
     any other non-integer type is rejected rather than truncated.
 
-    :param Any value: Raw string, integer, or unsupported object.
+    :param object value: Raw string, integer, or unsupported value.
     :param int minimum: Inclusive lower bound for accepted values.
     :return int: Parsed integer greater than or equal to ``minimum``.
     :raises ValueValidationError: With reason ``not_integer`` if the value is not
@@ -68,10 +66,10 @@ def parse_bounded_int(value: Any, *, minimum: int) -> int:
     return parsed
 
 
-def parse_unit_interval_float(value: Any) -> float:
+def parse_unit_interval_float(value: object) -> float:
     """Parse a finite float constrained to the inclusive range ``[0.0, 1.0]``.
 
-    :param Any value: Raw string, number, or unsupported object.
+    :param object value: Raw string, number, or unsupported value.
     :return float: Parsed float between zero and one, inclusive.
     :raises ValueValidationError: With reason ``not_number`` if the value is not
         numeric, ``not_finite`` for NaN/infinity, or ``out_of_range`` if the

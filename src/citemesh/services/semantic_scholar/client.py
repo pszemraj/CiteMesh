@@ -11,12 +11,17 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from types import TracebackType
 
 import requests
 
 from citemesh.core import API_CONFIG
-from citemesh.data.cache import atomic_write_json, cache_operation_lock, get_cache_dir
+from citemesh.data.cache import (
+    JSONValue,
+    atomic_write_json,
+    cache_operation_lock,
+    get_cache_dir,
+)
 
 from . import disk_cache, payloads, retry
 from .endpoints import PAPER_BASE_URL, _EndpointsMixin
@@ -55,7 +60,6 @@ class SemanticScholarClient(_EndpointsMixin):
         :param float | None retry_budget_seconds: Shared recovery-time allowance.
             ``None`` uses 90 seconds for anonymous access and no cap for keyed access;
             ``0`` explicitly disables the cap.
-        :return None: Initializes the client.
         """
         if api_key is None:
             api_key = os.getenv("S2_API_KEY") or None
@@ -103,7 +107,7 @@ class SemanticScholarClient(_EndpointsMixin):
         The outer scope also holds the cache operation lock so cache clearing cannot
         interleave with paper/reference reads and writes.
 
-        :return Iterator[None]: Candidate-collection context.
+        Yields: ``None`` for the scope duration.
         """
         state = getattr(self._candidate_operation, "state", None)
         owns_state = state is None
@@ -138,24 +142,20 @@ class SemanticScholarClient(_EndpointsMixin):
 
     def __exit__(
         self,
-        exc_type: type | None,
+        exc_type: type[BaseException] | None,
         exc: BaseException | None,
-        tb: Any | None,
+        tb: TracebackType | None,
     ) -> None:
         """Close the HTTP session when leaving a context manager.
 
         :param type | None exc_type: Exception type leaving the context.
         :param BaseException | None exc: Exception leaving the context.
-        :param Any | None tb: Associated traceback.
-        :return None: Closes the client.
+        :param TracebackType | None tb: Associated traceback.
         """
         self.close()
 
     def close(self) -> None:
-        """Close the HTTP session and detach the singleton when applicable.
-
-        :return None: Closes the client once.
-        """
+        """Close the HTTP session and detach the singleton when applicable."""
         if self._closed:
             return
         self._closed = True
@@ -167,10 +167,7 @@ class SemanticScholarClient(_EndpointsMixin):
             self._session.close()
 
     def __del__(self) -> None:
-        """Best-effort session cleanup during finalization.
-
-        :return None: Closes any remaining session.
-        """
+        """Best-effort session cleanup during finalization."""
         with contextlib.suppress(Exception):
             self.close()
 
@@ -182,7 +179,6 @@ class SemanticScholarClient(_EndpointsMixin):
         :param Path cache_path: Target JSON path.
         :param str paper_id: Normalized seed identifier.
         :param list[str] reference_ids: Ordered reference identifiers.
-        :return None: Writes best-effort cache data.
         """
         normalized = payloads._coerce_cached_reference_ids(reference_ids) or []
         try:
@@ -216,7 +212,6 @@ class SemanticScholarClient(_EndpointsMixin):
 
         :param _CandidateOperationState state: Active collection state.
         :param float started_at: Monotonic start time.
-        :return None: Updates the state.
         """
         state.recovery_seconds += max(0.0, monotonic() - started_at)
 
@@ -267,7 +262,6 @@ class SemanticScholarClient(_EndpointsMixin):
         :param float | None recovery_started_at: Start of a budgeted attempt.
         :param str operation: Request operation for a budget error.
         :param int attempts: Attempts already started for diagnostics.
-        :return None: Sleeps when the shared request pace requires it.
         :raises _RetryExhaustedError: If pacing cannot fit in the remaining budget.
         """
         min_interval = 1.0 / self.requests_per_second
@@ -291,20 +285,20 @@ class SemanticScholarClient(_EndpointsMixin):
     def _request_json_once(
         self,
         url: str,
-        params: dict[str, Any],
+        params: dict[str, str | int],
         *,
         context: str,
         timeout: float,
-        payload: dict[str, Any] | None = None,
-    ) -> Any:
+        payload: payloads.PaperBatchRequest | None = None,
+    ) -> JSONValue:
         """Issue one HTTP request and classify its response.
 
         :param str url: Semantic Scholar endpoint.
-        :param dict[str, Any] params: Query parameters.
+        :param dict[str, str | int] params: Query parameters.
         :param str context: Request description used in errors.
         :param float timeout: Timeout for this attempt.
-        :param dict[str, Any] | None payload: Optional POST body.
-        :return Any: Decoded JSON, or ``None`` for HTTP 404.
+        :param PaperBatchRequest | None payload: Optional batch POST body.
+        :return JSONValue: Decoded JSON value, or ``None`` for HTTP 404.
         """
         kwargs = {"params": params, "timeout": timeout}
         response = (
@@ -346,23 +340,23 @@ class SemanticScholarClient(_EndpointsMixin):
     def _request_json(
         self,
         url: str,
-        params: dict[str, Any],
+        params: dict[str, str | int],
         *,
         context: str,
-        payload: dict[str, Any] | None = None,
+        payload: payloads.PaperBatchRequest | None = None,
         raise_on_unavailable: bool = False,
         retry_not_found: bool = False,
-    ) -> Any:
+    ) -> JSONValue:
         """Run one HTTP request with per-request retries and shared recovery time.
 
         :param str url: Semantic Scholar endpoint.
-        :param dict[str, Any] params: Query parameters.
+        :param dict[str, str | int] params: Query parameters.
         :param str context: Human-readable operation.
-        :param dict[str, Any] | None payload: Optional POST body.
+        :param PaperBatchRequest | None payload: Optional batch POST body.
         :param bool raise_on_unavailable: Raise after recovery stops.
         :param bool retry_not_found: Treat HTTP 404 as transient only during the
             first three request attempts.
-        :return Any: Decoded payload or ``None`` for a tolerated failure/not-found.
+        :return JSONValue: Decoded payload or ``None`` for a tolerated failure/not-found.
         """
         if getattr(self._candidate_operation, "state", None) is None:
             with self.candidate_operation_scope():
@@ -557,7 +551,6 @@ class SemanticScholarClient(_EndpointsMixin):
 
         :param _RetryExhaustedError exhausted: Terminal retry error.
         :param bool raise_on_unavailable: Whether to raise the public error.
-        :return None: Tolerated requests yield no payload.
         :raises SemanticScholarUnavailableError: In strict mode.
         """
         unavailable = self._unavailable_error(exhausted)
@@ -623,10 +616,7 @@ def get_client() -> SemanticScholarClient:
 
 
 def reset_client() -> None:
-    """Close and clear the process-wide client.
-
-    :return None: Resets singleton state.
-    """
+    """Close and clear the process-wide client."""
     global _client_instance
     with _client_lock:
         client = _client_instance
