@@ -1,9 +1,21 @@
-"""Text similarity helpers for paper ranking."""
+"""Similarity helpers for paper ranking."""
 
 from __future__ import annotations
 
+import numpy as np
+
 from citemesh.core import Paper
+from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data.model_profiles import compose_title_abstract_text
+
+
+def cosine_similarity_to_query(
+    normalized_query: np.ndarray, embedding: np.ndarray
+) -> float:
+    """Score an embedding against an already L2-normalized query."""
+    return float(
+        np.clip(np.dot(normalized_query, l2_normalize_embeddings(embedding)), -1.0, 1.0)
+    )
 
 
 class AbstractSimilarityIndex:

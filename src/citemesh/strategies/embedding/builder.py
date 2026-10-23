@@ -73,6 +73,7 @@ from citemesh.strategies.candidates import (
     scope_candidate_collection,
     select_recovered_references_by_score,
 )
+from citemesh.strategies.similarity import cosine_similarity_to_query
 
 from . import deps
 from .config import (
@@ -1384,16 +1385,7 @@ class EmbeddingGraphBuilder(
         return select_recovered_references_by_score(
             recovered,
             limit,
-            lambda paper: float(
-                np.clip(
-                    np.dot(
-                        query,
-                        l2_normalize_embeddings(embeddings[paper.paper_id]),
-                    ),
-                    -1.0,
-                    1.0,
-                )
-            ),
+            lambda paper: cosine_similarity_to_query(query, embeddings[paper.paper_id]),
         )
 
     def _select_candidates_from_pool(
