@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import os
 import re
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -249,23 +248,23 @@ class _FingerprintMixin:
         validates the logical path before following the file rather than rejecting
         legitimate cache symlink targets.
 
-        :param Path root: Artifact root directory.
+        :param Path root: Resolved artifact root directory.
         :param Path source: Manifest file containing the reference.
         :param object raw_path: Referenced relative path.
         :return Path: Validated logical path below ``root``.
-        :raises RuntimeError: If the reference is absolute or escapes the root.
+        :raises RuntimeError: If the reference is empty or escapes the root.
         """
         reference = str(raw_path or "").strip()
         if not reference:
             raise RuntimeError(f"Empty artifact reference in {source}.")
-        candidate = source.parent / reference
-        root_absolute = os.path.abspath(root)
-        candidate_absolute = os.path.abspath(candidate)
-        if os.path.commonpath([root_absolute, candidate_absolute]) != root_absolute:
+        candidate = source.parent.absolute()
+        for part in Path(reference).parts:
+            candidate = candidate.parent if part == ".." else candidate / part
+        if not candidate.is_relative_to(root):
             raise RuntimeError(
                 f"Artifact reference {reference!r} in {source} escapes {root}."
             )
-        return Path(candidate_absolute)
+        return candidate
 
     @staticmethod
     def _referenced_python_artifact_paths(
