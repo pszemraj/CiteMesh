@@ -32,7 +32,8 @@ Install the project for development with `pip install -e ".[all]"`. Versions com
 from Git tags via setuptools-scm, so fetch tags when a checkout reports an
 unexpected development version.
 
-Run every project command in the configured development environment. Before
+Use the `inf` conda environment for development, validation, and Semble. Run
+project commands with `conda run -n inf --live-stream <command>`. Before
 committing, run:
 
 ```bash
