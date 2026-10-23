@@ -99,32 +99,33 @@ def refresh_builder_corpus(builder, revision: str | None = None) -> dict[str, An
             builder.embedding_cache = open_existing_cache(
                 builder._cache_selection, require_ready=False
             )
-        else:
-            builder._cache_selection = ExistingCacheSelection(
-                namespace_id,
-                namespace,
-                contract,
-                builder.dataset_source,
-                None,
-                builder.dataset_split,
-            )
-            builder.embedding_cache = builder._create_embedding_cache(namespace)
-            builder.embedding_cache.set_model_fingerprint(
-                contract.model_artifact_identity
-            )
+    source = CorpusSource(
+        builder.dataset_source,
+        builder._cache_selection.source_config_name
+        if builder._cache_selection
+        else None,
+        builder.dataset_split,
+        "",
+        "all" if builder.corpus_size is None else "newest",
+        builder.corpus_size,
+    )
+    if builder._cache_selection is None:
+        source = corpus_source.resolve_source_snapshot(source, revision or "main")
+        builder._cache_selection = ExistingCacheSelection(
+            namespace_id,
+            namespace,
+            contract,
+            builder.dataset_source,
+            None,
+            builder.dataset_split,
+        )
+        builder.embedding_cache = builder._create_embedding_cache(namespace)
+        builder.embedding_cache.set_model_fingerprint(contract.model_artifact_identity)
     cache = builder.embedding_cache
     with cache.hydration_operation_lock():
         state = cache.corpus_state()
         if state:
             selectors = state.get("namespace_selectors", selectors)
-        source = CorpusSource(
-            builder.dataset_source,
-            builder._cache_selection.source_config_name,
-            builder.dataset_split,
-            "",
-            "all" if builder.corpus_size is None else "newest",
-            builder.corpus_size,
-        )
         pending = state.get("pending") if state else None
         if pending:
             target = CorpusSource(**pending["target_source"])
@@ -135,7 +136,11 @@ def refresh_builder_corpus(builder, revision: str | None = None) -> dict[str, An
                         f"Refresh is pending at {target.revision}; resume that revision before advancing"
                     )
         else:
-            target = corpus_source.resolve_source_snapshot(source, revision or "main")
+            target = (
+                source
+                if source.revision
+                else corpus_source.resolve_source_snapshot(source, revision or "main")
+            )
             if (
                 state
                 and state.get("membership_complete")

@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 import pytest
 
+from citemesh.data import get_cache_dir
 from citemesh.data.embedding_cache import select_existing_cache
 from citemesh.data.embedding_contract import CorpusSource
 from citemesh.strategies.embedding import builder as builder_module
@@ -80,6 +81,35 @@ def install_source(monkeypatch, revisions, active):
 
 def row(identifier, abstract="body", **metadata):
     return {"id": identifier, "title": identifier, "abstract": abstract, **metadata}
+
+
+@pytest.mark.parametrize("reuse_builder", [False, True])
+def test_initial_source_lookup_failure_can_be_retried(
+    monkeypatch, runtime, reuse_builder
+):
+    reads, resolutions = install_source(
+        monkeypatch, {"one": [row("2401.00001")]}, ["one"]
+    )
+    resolve = corpus_source.resolve_source_snapshot
+
+    def unavailable(*args, **kwargs):
+        raise OSError("source lookup unavailable")
+
+    monkeypatch.setattr(corpus_source, "resolve_source_snapshot", unavailable)
+    builder = make_builder()
+    with pytest.raises(OSError, match="source lookup unavailable"):
+        builder.refresh_corpus()
+    directory = get_cache_dir("embeddings", create=False)
+    assert not list(directory.glob("metadata_*.db"))
+    assert not list(directory.glob("embeddings_*.h5"))
+    assert runtime == ([], [])
+
+    monkeypatch.setattr(corpus_source, "resolve_source_snapshot", resolve)
+    retry = builder if reuse_builder else make_builder()
+    assert retry.refresh_corpus()["active_rows"] == 1
+    assert reads == ["one"]
+    assert resolutions == ["main"]
+    assert retry.embedding_cache.corpus_state()["membership_complete"]
 
 
 def test_revision_refresh_compares_full_records_and_membership(monkeypatch, runtime):
