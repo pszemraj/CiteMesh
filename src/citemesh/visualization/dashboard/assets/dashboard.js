@@ -791,13 +791,7 @@
     }
 
     function clearDashboardStatus() {
-      runtimeStatusMessage = "";
-      runtimeStatusTone = "warning";
-      if (!controls.statusBanner) {
-        return;
-      }
-      controls.statusBanner.textContent = "";
-      controls.statusBanner.classList.remove("visible", "warning", "info");
+      setDashboardStatus("", "warning");
     }
 
     function setDashboardStatus(message, tone) {
