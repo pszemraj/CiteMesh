@@ -82,17 +82,19 @@ See [User Configuration](configuration.md) for saved defaults and [cache mainten
 
 ```bash
 citemesh cache import --path ./arxiv-index
-citemesh cache import --repo OWNER/INDEX --config embeddinggemma-512-int8 \
-  --revision PUBLICATION_COMMIT
+citemesh cache import --bucket OWNER/INDEX --config embeddinggemma-512-int8 \
+  --snapshot SNAPSHOT_ID
 citemesh cache export --namespace NAMESPACE --output ./arxiv-index
 citemesh cache refresh --namespace NAMESPACE --dataset-revision SOURCE_COMMIT
 ```
 
-`cache import` requires exactly one of `--path` and `--repo`. A repository's
+`cache import` requires exactly one of `--path` and `--bucket`. The bucket's
 catalog supplies its default configuration when `--config` is omitted.
-`--revision` selects the publication; `cache refresh --dataset-revision`
-selects the upstream source. Omitting the latter resolves latest once for a new
-refresh and resumes the recorded target for an interrupted one.
+`--snapshot` selects a published snapshot and requires `--config`; omit it to
+use the selected configuration's current snapshot.
+`cache refresh --dataset-revision` selects the upstream source. Omitting it
+resolves latest once for a new refresh and resumes the recorded target for an
+interrupted one.
 
 Import prints the installed namespace and a search command. `cache scan`
 reports contract, origin, source revision, active and physical counts, coverage,

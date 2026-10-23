@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Refresh, export, and publish one complete CiteMesh arXiv index privately.
 
-Requires the installed CiteMesh embeddings extra. Create a private Hugging Face
-dataset repository with an initial README before running this publisher.
+Requires the installed CiteMesh embeddings extra and an existing private
+Hugging Face bucket.
 Existing configurations retain their pinned model contract and calibration.
 """
 
@@ -19,7 +19,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("repo", help="existing private Hugging Face dataset repository")
+    parser.add_argument(
+        "bucket", help="existing private Hugging Face bucket (owner/name)"
+    )
     parser.add_argument(
         "output", type=Path, help="new directory for the complete portable export"
     )
@@ -67,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def publish_arxiv_index(
-    repo_id: str,
+    bucket_id: str,
     output: Path,
     *,
     config_name: str,
@@ -112,11 +114,11 @@ def publish_arxiv_index(
     else:
         builder.refresh_corpus(revision=dataset_revision)
     export_snapshot(builder.embedding_cache, output, config_name=config_name)
-    return publish_snapshot(repo_id, output)
+    return publish_snapshot(bucket_id, output)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one manual publication and print its immutable repository revision."""
+    """Run one manual publication and print its snapshot ID."""
     args = parse_args(argv)
     logging.basicConfig(
         level=max(logging.WARNING - 10 * args.verbose, logging.DEBUG),
@@ -129,8 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
-        revision = publish_arxiv_index(
-            args.repo,
+        snapshot_id = publish_arxiv_index(
+            args.bucket,
             args.output,
             config_name=args.config,
             namespace=args.namespace,
@@ -146,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, ImportError, RuntimeError, HfHubHTTPError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(revision)
+    print(snapshot_id)
     return 0
 
 

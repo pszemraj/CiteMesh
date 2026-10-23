@@ -1286,7 +1286,7 @@ def _add_cache_arguments(
     source = import_parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--path", type=Path, help="Local portable snapshot directory")
     source.add_argument(
-        "--repo", type=_non_empty_str, help="Hugging Face dataset repository"
+        "--bucket", type=_non_empty_str, help="Hugging Face bucket (owner/name)"
     )
     import_parser.add_argument(
         "--config",
@@ -1294,9 +1294,9 @@ def _add_cache_arguments(
         help="Published index variant (default: catalog's declared default)",
     )
     import_parser.add_argument(
-        "--revision",
+        "--snapshot",
         type=_non_empty_str,
-        help="Publication branch, tag, or commit (default: main; resolved once)",
+        help="Published snapshot ID (default: configuration's current snapshot)",
     )
     refresh_parser = cache_subparsers.add_parser(
         "refresh", help="Reconcile an installed corpus with a pinned source revision"
@@ -1457,8 +1457,8 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
                 "namespace": "NAMESPACE",
                 "cache_namespace": "NAMESPACE",
                 "dataset_revision": "REV",
-                "revision": "REV",
-                "repo": "REPO",
+                "snapshot": "ID",
+                "bucket": "BUCKET",
                 "config": "NAME",
                 "browser": "NAME",
             }.get(action.dest, "TEXT")

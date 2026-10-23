@@ -382,7 +382,8 @@ def _installed_corpus_status(db_path: Path) -> str | None:
     ]
     if origin:
         labels.append(
-            f"origin {origin.get('repo_id', 'local')} / {origin.get('config_name', '?')}"
+            f"origin {origin.get('bucket_id', origin.get('repo_id', 'local'))} / "
+            f"{origin.get('config_name', '?')}"
         )
     if pending:
         labels.append(f"pending {pending.get('kind', 'operation')}")

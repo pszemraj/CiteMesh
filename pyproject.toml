@@ -55,7 +55,7 @@ dependencies = [
 viz = ["plotly>=5.18.0", "pyvis>=0.3.2"]
 embeddings = [
     "datasets>=2.14.0",
-    "huggingface_hub>=0.24.0",
+    "huggingface_hub>=1.5.0",
     "pyarrow>=18.0.0",
     "sentence-transformers>=5.7.0",
     "torch>=2.9.0; sys_platform != 'darwin'",

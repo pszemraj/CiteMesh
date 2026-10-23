@@ -112,7 +112,7 @@ def _run_portable_command(args: argparse.Namespace) -> int:
         return 0
     publication = None
     snapshot_path = args.path
-    if args.repo:
+    if args.bucket:
         from citemesh.services.embedding_indexes import (
             IndexSelectionError,
             download_publication,
@@ -122,17 +122,13 @@ def _run_portable_command(args: argparse.Namespace) -> int:
 
         try:
             resolved = resolve_publication(
-                args.repo, config_name=args.config, revision=args.revision or "main"
+                args.bucket, config_name=args.config, snapshot_id=args.snapshot
             )
         except IndexSelectionError as exc:
             raise _CacheUsageError(str(exc)) from exc
         preflight_publication_destination(resolved)
         snapshot_path = download_publication(resolved)
-        publication = {
-            "repo_id": resolved.repo_id,
-            "config_name": resolved.config_name,
-            "revision": resolved.revision,
-        }
+        publication = resolved.origin
     cache = import_snapshot(snapshot_path, publication=publication)
     namespace = cache.db_path.stem.removeprefix("metadata_")
     _print_installed_namespace(namespace)
@@ -151,10 +147,10 @@ def run_cache_command(
     if (
         args.cache_command == "import"
         and args.path is not None
-        and (args.config is not None or args.revision is not None)
+        and (args.config is not None or args.snapshot is not None)
     ):
         cache_parser.error(
-            "--config and --revision require --repo; local files use their manifest."
+            "--config and --snapshot require --bucket; local files use their manifest."
         )
     if args.cache_command in {"export", "import", "refresh"}:
         if (

@@ -799,19 +799,20 @@ def _classify_import_locked(cache, contract, source, identity, ranges, origin):
             publication = state.get("origin") or {}
             resume = ""
             if all(
-                publication.get(key) for key in ("repo_id", "config_name", "revision")
+                publication.get(key)
+                for key in ("bucket_id", "config_name", "snapshot_id")
             ):
                 resume = " Resume with: " + shlex.join(
                     [
                         "citemesh",
                         "cache",
                         "import",
-                        "--repo",
-                        publication["repo_id"],
+                        "--bucket",
+                        publication["bucket_id"],
                         "--config",
                         publication["config_name"],
-                        "--revision",
-                        publication["revision"],
+                        "--snapshot",
+                        publication["snapshot_id"],
                     ]
                 )
             raise ValueError(

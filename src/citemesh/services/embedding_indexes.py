@@ -1,9 +1,8 @@
-"""Resolve, download, and atomically publish portable corpus configurations."""
+"""Distribute portable corpus configurations through Hugging Face Storage Buckets."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
@@ -41,7 +40,15 @@ class IndexCatalog:
                 or "\\" in name
             ):
                 raise ValueError("Invalid index configuration name")
-            if manifest != f"variants/{name}/index.json":
+            parts = PurePosixPath(manifest).parts if isinstance(manifest, str) else ()
+            if (
+                len(parts) != 4
+                or parts[:2] != ("variants", name)
+                or parts[2] in {".", ".."}
+                or parts[3] != "index.json"
+                or "\\" in manifest
+                or str(PurePosixPath(manifest)) != manifest
+            ):
                 raise ValueError(f"Invalid manifest path for configuration {name!r}")
         default = value.get("default_config")
         if default is not None and default not in configs:
@@ -70,57 +77,24 @@ class IndexCatalog:
 
 @dataclass(frozen=True)
 class ResolvedPublication:
-    """Describe one configuration at an immutable publication revision."""
+    """Describe one completed snapshot in a bucket."""
 
-    repo_id: str
+    bucket_id: str
     config_name: str
-    revision: str
+    snapshot_id: str
     manifest_path: Path
     manifest: PortableManifest
-    manifest_repo_path: str
+    manifest_bucket_path: str
     cache_dir: Path | None = None
 
     @property
     def origin(self) -> dict[str, str]:
         """Return the publication identity recorded by native import."""
         return {
-            "repo_id": self.repo_id,
+            "bucket_id": self.bucket_id,
             "config_name": self.config_name,
-            "revision": self.revision,
+            "snapshot_id": self.snapshot_id,
         }
-
-
-def resolve_dataset_revision(repo_id: str, requested_revision: str = "main") -> str:
-    """Resolve a dataset branch or tag once to its immutable commit."""
-    from huggingface_hub import HfApi
-
-    info = HfApi().dataset_info(repo_id=repo_id, revision=requested_revision)
-    if not info.sha:
-        raise RuntimeError(f"Cannot resolve dataset revision for {repo_id}")
-    return info.sha
-
-
-def download_declared_files(
-    repo_id: str,
-    resolved_revision: str,
-    repo_paths: list[str],
-    cache_dir: Path | None = None,
-) -> dict[str, Path]:
-    """Download exact filenames at one resolved revision using the Hub cache."""
-    from huggingface_hub import hf_hub_download
-
-    return {
-        name: Path(
-            hf_hub_download(
-                repo_id=repo_id,
-                repo_type="dataset",
-                revision=resolved_revision,
-                filename=name,
-                cache_dir=cache_dir,
-            )
-        )
-        for name in repo_paths
-    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -130,65 +104,93 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _artifact_repo_paths(
-    manifest: PortableManifest, manifest_repo_path: str
-) -> list[str]:
-    directory = PurePosixPath(manifest_repo_path).parent
-    paths = list(manifest.artifact_paths)
-    if len(set(paths)) != len(paths):
-        raise ValueError("Duplicate portable artifact paths")
-    for path in paths:
-        relative = PurePosixPath(path)
-        if (
-            not path
-            or relative.is_absolute()
-            or any(part in {".", ".."} for part in path.split("/"))
-            or "\\" in path
-        ):
-            raise ValueError(
-                f"Artifact path must stay inside its configuration: {path!r}"
-            )
-    return [str(directory / path) for path in paths]
+def _manifest_bucket_path(config_name: str, snapshot_id: str) -> str:
+    path = f"variants/{config_name}/{snapshot_id}/index.json"
+    IndexCatalog.from_dict({"format_version": 1, "configs": {config_name: path}})
+    return path
+
+
+def _cache_root(bucket_id: str, cache_dir: Path | None) -> Path:
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    return Path(cache_dir) / "citemesh-indexes" / bucket_id
+
+
+def _download_files(bucket_id: str, files: list[tuple[str, Path]]) -> None:
+    """Keep incomplete transfers separate from reusable completed files."""
+    from huggingface_hub import HfApi
+
+    if not files:
+        return
+    partials = [
+        (remote, local.with_name(local.name + ".incomplete")) for remote, local in files
+    ]
+    for _, path in partials:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    HfApi().download_bucket_files(
+        bucket_id, files=partials, raise_on_missing_files=True
+    )
+    for (_, partial), (_, target) in zip(partials, files):
+        partial.replace(target)
+
+
+def _catalog(bucket_id: str) -> IndexCatalog:
+    # The catalog is mutable; fetch it afresh rather than reusing its disk copy.
+    with TemporaryDirectory(prefix="citemesh-catalog-") as directory:
+        path = Path(directory) / "catalog.json"
+        _download_files(bucket_id, [("catalog.json", path)])
+        return IndexCatalog.from_dict(_load_json(path))
 
 
 def resolve_publication(
-    repo_id: str,
+    bucket_id: str,
     config_name: str | None = None,
-    revision: str = "main",
+    snapshot_id: str | None = None,
     cache_dir: Path | None = None,
 ) -> ResolvedPublication:
-    """Resolve the catalog and selected manifest before downloading payloads."""
+    """Select the latest snapshot, or reuse an explicitly named cached snapshot."""
     from citemesh.data.embedding_cache.portable import load_manifest
 
-    resolved = resolve_dataset_revision(repo_id, revision)
-    files = download_declared_files(repo_id, resolved, ["catalog.json"], cache_dir)
-    catalog = IndexCatalog.from_dict(_load_json(files["catalog.json"]))
-    selected = catalog.select(config_name)
-    manifest_repo_path = catalog.configs[selected]
-    files = download_declared_files(repo_id, resolved, [manifest_repo_path], cache_dir)
-    manifest_path = files[manifest_repo_path]
+    if snapshot_id is not None:
+        if config_name is None:
+            raise IndexSelectionError("Specify --config with --snapshot")
+        remote_path = _manifest_bucket_path(config_name, snapshot_id)
+        selected = config_name
+    else:
+        catalog = _catalog(bucket_id)
+        selected = catalog.select(config_name)
+        remote_path = catalog.configs[selected]
+        snapshot_id = PurePosixPath(remote_path).parts[2]
+    manifest_path = _cache_root(bucket_id, cache_dir) / remote_path
+    if not manifest_path.is_file():
+        _download_files(bucket_id, [(remote_path, manifest_path)])
     manifest = load_manifest(manifest_path)
-    if manifest.config_name != selected:
-        raise ValueError("Selected manifest disagrees with the catalog configuration")
-    _artifact_repo_paths(manifest, manifest_repo_path)
+    if manifest.config_name != selected or manifest.snapshot_id != snapshot_id:
+        raise ValueError("Selected manifest disagrees with its bucket snapshot path")
     return ResolvedPublication(
-        repo_id,
+        bucket_id,
         selected,
-        resolved,
+        snapshot_id,
         manifest_path,
         manifest,
-        manifest_repo_path,
+        remote_path,
         cache_dir,
     )
 
 
 def download_publication(publication: ResolvedPublication) -> Path:
-    """Download every declared selected artifact, failing on missing files."""
-    paths = _artifact_repo_paths(publication.manifest, publication.manifest_repo_path)
-    download_declared_files(
-        publication.repo_id, publication.revision, paths, publication.cache_dir
-    )
-    return publication.manifest_path.parent
+    """Download only missing declared artifacts from the selected snapshot."""
+    directory = PurePosixPath(publication.manifest_bucket_path).parent
+    root = publication.manifest_path.parent
+    files = [
+        (str(directory / name), root / name)
+        for name in publication.manifest.artifact_paths
+        if not (root / name).is_file()
+    ]
+    _download_files(publication.bucket_id, files)
+    return root
 
 
 def preflight_publication_destination(
@@ -206,34 +208,18 @@ def preflight_publication_destination(
         source=manifest.source,
         identity=manifest_import_identity(manifest),
         namespace_selectors=manifest.namespace_selectors,
-        origin={"snapshot_id": manifest.snapshot_id, **publication.origin},
+        origin=publication.origin,
     )
 
 
-def _readme(catalog: IndexCatalog, manifests: Mapping[str, PortableManifest]) -> str:
-    lines = ["---", "configs:"]
-    for name, manifest_path in catalog.configs.items():
-        manifest = manifests[name]
-        lines.append(f"  - config_name: {json.dumps(name)}")
-        if name == catalog.default_config:
-            lines.append("    default: true")
-        lines.extend(["    data_files:", "      - split: train", "        path:"])
-        base = PurePosixPath(manifest_path).parent
-        lines.extend(
-            f"          - {json.dumps(str(base / shard.path))}"
-            for shard in manifest.shards
-        )
-    lines.extend(
-        [
-            "---",
-            "",
-            "# CiteMesh corpus indexes",
-            "",
-            "Portable retrieval-document embeddings with normalized paper metadata. "
-            "No model weights are included. Query and graph encoding still use the selected model.",
-            "",
-        ]
-    )
+def _readme(catalog: IndexCatalog, manifests: dict[str, PortableManifest]) -> str:
+    lines = [
+        "# CiteMesh corpus indexes",
+        "",
+        "Portable retrieval-document embeddings with normalized paper metadata. "
+        "No model weights are included. Query and graph encoding still use the selected model.",
+        "",
+    ]
     for name, manifest in manifests.items():
         contract, source = manifest.contract, manifest.source
         lines.extend(
@@ -241,8 +227,9 @@ def _readme(catalog: IndexCatalog, manifests: Mapping[str, PortableManifest]) ->
                 f"## {name}",
                 "",
                 f"{manifest.row_count:,} active papers; {contract.dimension} dimensions; {contract.stored_dtype} storage.",
+                f"Snapshot: `{manifest.snapshot_id}`.",
                 f"Source: [{source.repo_id}](https://huggingface.co/datasets/{source.repo_id}), "
-                f"revision `{source.revision}`, split `{source.split}`. See the source dataset for corpus attribution and licensing.",
+                f"revision `{source.revision}`, split `{source.split}`. See the source dataset for attribution and licensing.",
                 f"Model: [{contract.model_id}](https://huggingface.co/{contract.model_id}), revision `{contract.model_revision}`.",
                 f"Document formatter: `{contract.formatter_identity}`; normalization: `{contract.normalization}`; "
                 f"quantization: `{contract.quantization}`.",
@@ -254,9 +241,12 @@ def _readme(catalog: IndexCatalog, manifests: Mapping[str, PortableManifest]) ->
             "## Install a configuration",
             "",
             "```bash",
-            "citemesh cache import --repo <this-repository> --config <configuration> --revision <publication-commit>",
+            "citemesh cache import --bucket <this-bucket> --config <configuration>",
             "citemesh cache scan",
             "```",
+            "",
+            f"Default configuration: `{catalog.default_config}`. "
+            "Each configuration retains its current snapshot; older snapshot directories are removed after publication.",
             "",
             'Use the installed namespace with `citemesh search --mode local --cache-namespace <namespace> "your query"`. '
             "Run `citemesh cache refresh --namespace <namespace>` to reconcile newer source data locally.",
@@ -266,103 +256,58 @@ def _readme(catalog: IndexCatalog, manifests: Mapping[str, PortableManifest]) ->
     return "\n".join(lines)
 
 
-def publish_complete_snapshot(
-    repo_id: str,
-    files: Mapping[str, Path],
-    obsolete_paths: list[str],
-    parent_revision: str,
-) -> str:
-    """Expose one complete publication with an optimistic parent constraint."""
-    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
-
-    api = HfApi()
-    if not api.dataset_info(repo_id=repo_id, revision=parent_revision).private:
-        raise ValueError(
-            "Publishing is authorized only to private dataset repositories"
-        )
-    operations = [
-        CommitOperationAdd(path_in_repo=name, path_or_fileobj=path)
-        for name, path in files.items()
+def _prune_snapshots(
+    api: Any, bucket_id: str, config_name: str, snapshot_id: str
+) -> None:
+    prefix = f"variants/{config_name}/"
+    current = f"{prefix}{snapshot_id}/"
+    obsolete = [
+        item.path
+        for item in api.list_bucket_tree(bucket_id, prefix=prefix, recursive=True)
+        if item.path.startswith(prefix)
+        and not item.path.startswith(current)
+        and getattr(item, "type", "file") == "file"
     ]
-    operations.extend(
-        CommitOperationDelete(path_in_repo=name)
-        for name in obsolete_paths
-        if name not in files
-    )
-    commit = api.create_commit(
-        repo_id=repo_id,
-        repo_type="dataset",
-        revision="main",
-        parent_commit=parent_revision,
-        operations=operations,
-        commit_message="Publish complete CiteMesh corpus snapshot",
-    )
-    return commit.oid
+    if obsolete:
+        api.batch_bucket_files(bucket_id, delete=obsolete)
 
 
 def publish_snapshot(
-    repo_id: str, snapshot_dir: Path, *, cache_dir: Path | None = None
+    bucket_id: str, snapshot_dir: Path, *, cache_dir: Path | None = None
 ) -> str:
-    """Publish a locally completed export, preserving other configurations."""
+    """Upload payloads, then their manifest, and finally update the catalog."""
     from huggingface_hub import HfApi
 
     from citemesh.data.embedding_cache.portable import load_manifest, validate_snapshot
 
     manifest = validate_snapshot(snapshot_dir)
-    IndexCatalog.from_dict(
-        {
-            "format_version": 1,
-            "configs": {
-                manifest.config_name: f"variants/{manifest.config_name}/index.json"
-            },
-        }
-    )
-    selected_path = f"variants/{manifest.config_name}/index.json"
-    artifact_paths = _artifact_repo_paths(manifest, selected_path)
-    files = {selected_path: snapshot_dir / "index.json"}
-    files.update(
-        zip(artifact_paths, (snapshot_dir / name for name in manifest.artifact_paths))
-    )
-    for path in files.values():
-        if not path.is_file():
-            raise ValueError(f"Missing portable artifact: {path}")
-
-    info = HfApi().dataset_info(repo_id=repo_id, revision="main")
-    if not info.private:
-        raise ValueError(
-            "Publishing is authorized only to private dataset repositories"
-        )
-    parent = info.sha
-    if not parent:
-        raise ValueError(
-            "Create a private dataset repository with an initial README branch before publishing"
-        )
-    repo_paths = {sibling.rfilename for sibling in info.siblings or []}
-    if "catalog.json" in repo_paths:
-        path = download_declared_files(repo_id, parent, ["catalog.json"], cache_dir)[
-            "catalog.json"
-        ]
-        previous = IndexCatalog.from_dict(_load_json(path))
-    elif "README.md" in repo_paths and repo_paths <= {
-        "README.md",
-        ".gitattributes",
-        ".gitignore",
-    }:
-        previous = IndexCatalog({})
+    selected_path = _manifest_bucket_path(manifest.config_name, manifest.snapshot_id)
+    api = HfApi()
+    if not api.bucket_info(bucket_id).private:
+        raise ValueError("Publishing is authorized only to private buckets")
+    bucket_paths = {
+        item.path
+        for item in api.list_bucket_tree(bucket_id, recursive=True)
+        if item.type == "file"
+    }
+    if "catalog.json" in bucket_paths:
+        previous = _catalog(bucket_id)
+    elif any(
+        path.startswith("variants/")
+        and not path.startswith(f"variants/{manifest.config_name}/")
+        for path in bucket_paths
+    ):
+        raise ValueError("Missing catalog in an established index bucket")
     else:
-        raise ValueError(
-            "Missing catalog in an established index repository; initialize only an empty README repository"
-        )
-
+        previous = IndexCatalog({})
     manifests = {}
-    obsolete = []
     for name, path in previous.configs.items():
-        local = download_declared_files(repo_id, parent, [path], cache_dir)[path]
+        local = _cache_root(bucket_id, cache_dir) / path
+        if not local.is_file():
+            _download_files(bucket_id, [(path, local)])
         old = load_manifest(local)
-        if old.config_name != name:
-            raise ValueError(
-                "Published manifest disagrees with its catalog configuration"
-            )
+        if old.config_name != name or old.snapshot_id != PurePosixPath(path).parts[2]:
+            raise ValueError("Published manifest disagrees with its catalog snapshot")
         if name == manifest.config_name:
             if old.contract != manifest.contract:
                 raise ValueError(
@@ -371,12 +316,21 @@ def publish_snapshot(
             if old.calibration_ranges is not None:
                 import numpy as np
 
-                old_path = str(PurePosixPath(path).parent / old.calibration_ranges)
-                downloaded = download_declared_files(
-                    repo_id, parent, [old_path], cache_dir
-                )[old_path]
+                old_ranges = local.parent / old.calibration_ranges
+                if not old_ranges.is_file():
+                    _download_files(
+                        bucket_id,
+                        [
+                            (
+                                str(
+                                    PurePosixPath(path).parent / old.calibration_ranges
+                                ),
+                                old_ranges,
+                            )
+                        ],
+                    )
                 if not np.array_equal(
-                    np.load(downloaded, allow_pickle=False),
+                    np.load(old_ranges, allow_pickle=False),
                     np.load(
                         snapshot_dir / manifest.calibration_ranges, allow_pickle=False
                     ),
@@ -384,39 +338,33 @@ def publish_snapshot(
                     raise ValueError(
                         "Changed calibration ranges require a new configuration name"
                     )
-            if old.snapshot_id == manifest.snapshot_id:
-                return parent
-            obsolete = [path, *_artifact_repo_paths(old, path)]
-        else:
-            manifests[name] = old
-    configs = dict(previous.configs)
-    configs[manifest.config_name] = selected_path
-    catalog = IndexCatalog.from_dict(
-        {
-            "format_version": 1,
-            "configs": configs,
-            "default_config": previous.default_config or manifest.config_name,
-        }
-    )
+        manifests[name] = old
+    if selected_path in bucket_paths:
+        remote = _cache_root(bucket_id, cache_dir) / selected_path
+        if not remote.is_file():
+            _download_files(bucket_id, [(selected_path, remote)])
+        if load_manifest(remote) != manifest:
+            raise ValueError("A different snapshot must use a new snapshot ID")
+    configs = {**previous.configs, manifest.config_name: selected_path}
+    catalog = IndexCatalog(configs, previous.default_config or manifest.config_name)
     manifests[manifest.config_name] = manifest
-    with TemporaryDirectory(prefix="citemesh-publication-") as directory:
-        root = Path(directory)
-        catalog_path, readme_path = root / "catalog.json", root / "README.md"
-        catalog_path.write_text(
-            json.dumps(catalog.to_dict(), indent=2) + "\n", encoding="utf-8"
+    directory = PurePosixPath(selected_path).parent
+    payloads = [
+        (snapshot_dir / name, str(directory / name)) for name in manifest.artifact_paths
+    ]
+    if selected_path not in bucket_paths:
+        if payloads:
+            api.batch_bucket_files(bucket_id, add=payloads)
+        api.batch_bucket_files(
+            bucket_id, add=[(snapshot_dir / "index.json", selected_path)]
         )
-        readme_path.write_text(_readme(catalog, manifests), encoding="utf-8")
-        files.update({"catalog.json": catalog_path, "README.md": readme_path})
-        try:
-            return publish_complete_snapshot(repo_id, files, obsolete, parent)
-        except Exception as error:
-            # A final response can be lost after the commit has become visible.
-            try:
-                current = resolve_publication(
-                    repo_id, manifest.config_name, cache_dir=cache_dir
-                )
-            except Exception:
-                raise error
-            if current.manifest.snapshot_id == manifest.snapshot_id:
-                return current.revision
-            raise
+    if previous.configs.get(manifest.config_name) != selected_path:
+        api.batch_bucket_files(
+            bucket_id,
+            add=[(json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")],
+        )
+    _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
+    api.batch_bucket_files(
+        bucket_id, add=[(_readme(catalog, manifests).encode(), "README.md")]
+    )
+    return manifest.snapshot_id

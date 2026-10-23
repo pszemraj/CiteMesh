@@ -38,7 +38,9 @@ even when that address was created using requested revision `main`. Imported
 producer dtype remains creation provenance; the consumer resolves its own
 device and compute dtype normally. Installing an index needs neither model
 weights nor inference; searching it encodes the query, and graph builds encode
-selected papers separately in the symmetric role.
+selected papers separately in the symmetric role. Bucket snapshot identity is
+publication provenance; model compatibility uses the immutable model revision
+recorded in the portable manifest.
 
 Inputs exceeding the token window, including prompts and special tokens, are truncated and counted in a warning. The ordinary path reports before encoding; CUDA prefetch reports the completed batch counts after encoding and resets partial counts on a compile retry. Reused cached vectors do not repeat the warning.
 

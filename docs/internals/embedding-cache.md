@@ -148,9 +148,19 @@ int8 range shape/type. No normalization or quantization occurs. Defaults are
 is never constructed as Python lists in memory. A fresh export directory gains
 its manifest only after every artifact closes successfully.
 
-Hub transport resolves the publication once, then downloads the catalog,
-selected manifest, and exactly its declared artifacts at that revision. Each
-variant owns its source descriptor. Publication is one parent-constrained Hub
-commit containing the new variant and catalog/README, deleting only obsolete
-files from that variant. The manual publisher uses the same native refresh and
-portable export operations.
+Bucket transport reads the catalog, then downloads the selected manifest and
+exactly its declared artifacts. Snapshots live at
+`variants/<config>/<snapshot>/index.json`, with payloads beside the manifest.
+Each configuration owns its source descriptor. Import origin records
+`bucket_id`, `config_name`, and `snapshot_id`, independently of the upstream
+source revision. Complete downloads stay in the Hugging Face cache for native
+import retries, including after the remote snapshot is retired.
+
+The single publisher uploads payloads first, then the manifest, and writes the
+catalog's current pointer last. After publication it prunes prior and
+incomplete remote snapshots only for that configuration. Other configurations
+remain untouched. One current snapshot per configuration is retained. A
+transfer that has not finished when its snapshot is retired may need to
+restart from the catalog's current snapshot. The manual publisher uses the
+same native refresh and portable export operations and requires an existing
+private bucket.

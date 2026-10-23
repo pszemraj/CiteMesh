@@ -69,10 +69,10 @@ stored int8 or float32 values without loading an encoder; query encoding and
 the selected graph papers' symmetric embeddings still use the recorded model.
 
 ```bash
-# Import a local export, or one configuration from a dataset repository.
+# Import a local export, or one configuration from a Storage Bucket.
 citemesh cache import --path ./arxiv-index
-citemesh cache import --repo OWNER/INDEX --config embeddinggemma-512-int8 \
-  --revision PUBLICATION_COMMIT
+citemesh cache import --bucket OWNER/INDEX --config embeddinggemma-512-int8 \
+  --snapshot SNAPSHOT_ID
 citemesh cache scan
 
 # Use the namespace printed by import or scan.
@@ -85,12 +85,12 @@ citemesh build arxiv:2404.08801 --strategy embedding \
 citemesh cache export --namespace NAMESPACE --output ./arxiv-index
 ```
 
-`--path` and `--repo` are alternatives. Repository imports use the selected
-configuration, or the catalog's default, and resolve the publication revision
-once before downloading its declared files. The publication commit identifies
-the exported files; the manifest separately records the upstream dataset
-revision represented by those files. Each configuration can have different
-coverage and freshness.
+`--path` and `--bucket` are alternatives. Bucket imports use the selected
+configuration, or the catalog's default, and download only its declared files.
+Omit `--snapshot` to install the catalog's current snapshot; an explicit
+snapshot requires `--config`. Snapshot identity identifies the portable files;
+the manifest separately records the immutable model and upstream dataset
+revisions. Each configuration can have different coverage and freshness.
 
 Explicit `--cache-namespace` selects existing files and pins model, profile,
 document formatter, dimension, storage precision, dataset, and split from their
@@ -130,10 +130,13 @@ index cannot supply a larger view or claim full coverage. Seed lookup is
 independent of neighbor eligibility, so an older seed can search newer papers.
 
 An interrupted import or refresh remains unavailable to consumers. Resume an
-import with the same local snapshot or the exact publication command printed
-when import starts. Resume refresh against its recorded source target; a
-moving upstream branch cannot change that pending target. The cache recovers
-committed vector writes and reuses them on retry.
+import with the same local snapshot or the exact bucket command printed when
+import starts. Complete bucket downloads remain in the Hugging Face cache, so
+native import can resume from that copy even after the publisher retires the
+remote snapshot. An unfinished transfer may need to restart from the current
+snapshot if its files have been retired. Resume refresh against its recorded
+source target; a moving upstream branch cannot change that pending target.
+The cache recovers committed vector writes and reuses them on retry.
 
 Import accepts a fresh destination, the same incomplete import, or an identical
 completed import. An occupied incompatible destination is preserved and
@@ -153,10 +156,10 @@ it never labels old vectors with the current moving model revision. A namespace
 whose original settings cannot be established is preserved and refused.
 
 The manual publisher uses these same refresh and export operations. Create a
-private dataset repository with an initial README first, then run from a source
-checkout:
+private Storage Bucket first, then run from a source checkout:
 
 ```bash
+hf buckets create OWNER/PRIVATE_INDEX --private
 python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
   --adopt-namespace NAMESPACE --device cuda
 ```
@@ -164,10 +167,18 @@ python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
 Use `--namespace` for an already certified corpus, or omit both namespace flags
 to create a new configuration. The output directory must be new. The script
 resolves and pins the source, refreshes, exports, and publishes one complete
-configuration in a parent-constrained commit. It preserves other configurations
-and refuses public repositories. Int8 ranges are established once for a new
-configuration and reused on refresh; a different calibration lineage needs a
-different configuration and native destination.
+configuration. It uploads payloads first, then the manifest, and updates the
+catalog's current pointer last. A single publisher maintains the bucket.
+After publication it removes prior and incomplete snapshots for that
+configuration, preserving other configurations. The bucket must already exist
+and be private.
+
+Only the current snapshot of each configuration is retained remotely, so old
+full indexes do not accumulate as repository history. Keep a local export if
+you need an older snapshot later. Downloads and installed native caches remain
+on each consumer until removed there. Int8 ranges are established once for a
+new configuration and reused on refresh; a different calibration lineage needs
+a different configuration and native destination.
 
 ## Corpus records
 

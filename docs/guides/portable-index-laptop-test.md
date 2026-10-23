@@ -9,8 +9,8 @@ to be collected; the preceding full-corpus acceptance ran on Linux.
 
 | Item | Value |
 | --- | --- |
-| Private dataset | [pszemraj/citemesh-arxiv-indexes](https://huggingface.co/datasets/pszemraj/citemesh-arxiv-indexes) |
-| Publication revision | `14afe24816b7474cbb11b361eb96675193af9302` |
+| Private bucket | [pszemraj/citemesh-arxiv-indexes](https://huggingface.co/buckets/pszemraj/citemesh-arxiv-indexes) |
+| Snapshot | `ba59ec2d-cc19-473c-a857-87e63879f936` |
 | Configuration | `embeddinggemma-512-int8` |
 | Installed namespace | `0023623a3303` |
 | Active papers | 3,215,242 |
@@ -55,7 +55,7 @@ If the intended accelerator is unavailable, resolve the installation/device
 issue before calling that accelerator test a pass. CPU can be tested separately.
 For a non-NVIDIA Windows GPU, use CPU; CiteMesh has no DirectML backend.
 
-Authenticate as an account with read access to the private dataset:
+Authenticate as an account with read access to the private bucket:
 
 ```bash
 python -c "from huggingface_hub import login; login()"
@@ -84,7 +84,7 @@ $env:CITEMESH_CACHE_DIR = Join-Path $env:LOCALAPPDATA "CiteMesh-index-test"
 These remaining commands work in either shell; keep each command on one line:
 
 ```bash
-citemesh cache import --repo pszemraj/citemesh-arxiv-indexes --config embeddinggemma-512-int8 --revision 14afe24816b7474cbb11b361eb96675193af9302 --log-file index-import.log
+citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes --config embeddinggemma-512-int8 --snapshot ba59ec2d-cc19-473c-a857-87e63879f936 --log-file index-import.log
 citemesh cache scan
 ```
 
@@ -92,7 +92,10 @@ citemesh cache scan
 certified corpus with 3,215,242 active/physical rows and 512-dimensional int8
 storage. Its origin records the publication above. Import performs data transfer
 and local binary-index reconstruction, with no model loading or calibration.
-An interrupted import resumes by rerunning the exact same command.
+An interrupted native import resumes by rerunning the exact same command,
+using the complete download in the Hugging Face cache. The publisher retains
+one current snapshot per configuration. If this snapshot has been replaced
+before its download finishes, omit `--snapshot` to start with the current one.
 
 ## 3. Search the installed corpus
 
