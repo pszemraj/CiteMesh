@@ -44,7 +44,11 @@ def _hub_http_error_types() -> tuple[type[Exception], ...]:
 def _adopt_legacy_namespace(
     args: argparse.Namespace, error_sink: argparse.ArgumentParser
 ) -> None:
-    """Validate explicit legacy selectors before asking the strategy to prove them."""
+    """Validate selectors and certify a legacy cache namespace.
+
+    :param argparse.Namespace args: Parsed refresh options for the namespace.
+    :param argparse.ArgumentParser error_sink: Parser used to report invalid options.
+    """
     from citemesh.strategies.embedding import EmbeddingGraphBuilder
     from citemesh.strategies.embedding.refresh import adopt_legacy_cache
 
@@ -91,7 +95,11 @@ def _print_installed_namespace(namespace: str) -> None:
 
 
 def _run_portable_command(args: argparse.Namespace) -> int:
-    """Load portable dependencies only when a transfer was requested."""
+    """Export or import a cache snapshot, loading transfer dependencies on demand.
+
+    :param argparse.Namespace args: Parsed export or import options.
+    :return int: Process-style exit code.
+    """
     from citemesh.data.embedding_cache.lifecycle import (
         open_existing_cache,
         select_existing_cache,

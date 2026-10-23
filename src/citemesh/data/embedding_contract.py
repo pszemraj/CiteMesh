@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Literal, TypedDict
 
 INT8_QUANTIZATION = "affine-int8-v1"
 
 
-@dataclass(frozen=True)
-class EmbeddingContract:
+class EmbeddingContractData(TypedDict):
+    """Serialized fields that identify stored embedding vectors."""
+
     model_id: str
     model_revision: str
     model_artifact_identity: str
@@ -23,12 +24,10 @@ class EmbeddingContract:
     quantization: str | None
     calibration_sample_size: int | None
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
+class CorpusSourceData(TypedDict):
+    """Serialized fields that identify a selected source corpus."""
 
-@dataclass(frozen=True)
-class CorpusSource:
     repo_id: str
     config_name: str | None
     split: str
@@ -36,12 +35,85 @@ class CorpusSource:
     selection: Literal["all", "newest"]
     limit: int | None
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+
+class NamespaceSelectors(TypedDict, total=False):
+    """Typed inputs used to reproduce a native embedding namespace."""
+
+    model_identity: str
+    requested_revision: str
+    artifact_identity: str
+    profile_schema: str
+    representation: str
+    normalization: str
+    dimension: int | None
+    stored_dtype: str
+    calibration_sample_size: int | None
+    formatter_identity: str
+    semantic_source: str
+
+
+@dataclass(frozen=True)
+class EmbeddingContract:
+    """Describe the model and vector representation persisted in a corpus cache."""
+
+    model_id: str
+    model_revision: str
+    model_artifact_identity: str
+    profile_key: str
+    profile_schema: str
+    representation: str
+    formatter_identity: str
+    normalization: str
+    dimension: int
+    stored_dtype: Literal["int8", "float32"]
+    quantization: str | None
+    calibration_sample_size: int | None
+
+    def to_dict(self) -> EmbeddingContractData:
+        """Return the contract fields in their portable mapping form."""
+        return {
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "model_artifact_identity": self.model_artifact_identity,
+            "profile_key": self.profile_key,
+            "profile_schema": self.profile_schema,
+            "representation": self.representation,
+            "formatter_identity": self.formatter_identity,
+            "normalization": self.normalization,
+            "dimension": self.dimension,
+            "stored_dtype": self.stored_dtype,
+            "quantization": self.quantization,
+            "calibration_sample_size": self.calibration_sample_size,
+        }
+
+
+@dataclass(frozen=True)
+class CorpusSource:
+    """Describe the source selection used to populate a corpus cache."""
+
+    repo_id: str
+    config_name: str | None
+    split: str
+    revision: str
+    selection: Literal["all", "newest"]
+    limit: int | None
+
+    def to_dict(self) -> CorpusSourceData:
+        """Return the source fields in their portable mapping form."""
+        return {
+            "repo_id": self.repo_id,
+            "config_name": self.config_name,
+            "split": self.split,
+            "revision": self.revision,
+            "selection": self.selection,
+            "limit": self.limit,
+        }
 
 
 @dataclass(frozen=True)
 class ExistingCacheSelection:
+    """Resolved contract and source information for an installed cache."""
+
     namespace_id: str
     namespace_serialization: str
     contract: EmbeddingContract
@@ -64,7 +136,21 @@ def serialize_embedding_namespace(
     formatter_identity: str = "default",
     semantic_source: str = "arxiv-corpus",
 ) -> str:
-    """Serialize the existing native address without adding source provenance."""
+    """Serialize the native cache address from model and representation inputs.
+
+    :param str model_identity: Model identifier used for the cache key.
+    :param str requested_revision: Requested model revision token.
+    :param str artifact_identity: Resolved checkpoint identity.
+    :param str profile_schema: Embedding profile schema token.
+    :param str representation: Semantic role and schema of stored vectors.
+    :param str normalization: Vector normalization contract.
+    :param int | None dimension: Optional truncation dimension.
+    :param str stored_dtype: Stored vector dtype.
+    :param int calibration_sample_size: Calibration sample count for int8.
+    :param str formatter_identity: Document formatter identity.
+    :param str semantic_source: Semantic data source used for the namespace.
+    :return str: Stable native namespace serialization.
+    """
     parts = [
         f"model={model_identity}",
         f"revision={requested_revision}",
@@ -91,10 +177,16 @@ def serialize_embedding_namespace(
 
 def require_namespace_contract(
     contract: EmbeddingContract,
-    selectors: dict[str, Any],
+    selectors: NamespaceSelectors,
     namespace_serialization: str,
 ) -> None:
-    """Check that historical addressing describes the fixed vector contract."""
+    """Check that namespace selectors describe the fixed vector contract.
+
+    :param EmbeddingContract contract: Persisted vector representation.
+    :param NamespaceSelectors selectors: Inputs used to create the namespace.
+    :param str namespace_serialization: Stored native namespace address.
+    :raises ValueError: If the address or selectors conflict with the contract.
+    """
     try:
         namespace = serialize_embedding_namespace(**selectors)
     except TypeError as exc:

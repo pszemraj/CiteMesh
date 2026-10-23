@@ -352,7 +352,11 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
 
 
 def _installed_corpus_status(db_path: Path) -> str | None:
-    """Read certified corpus state without opening vectors or importing models."""
+    """Summarize installed corpus state from SQLite metadata.
+
+    :param Path db_path: Cache metadata database to inspect.
+    :return Optional[str]: Status summary, or ``None`` when no corpus is installed.
+    """
     try:
         with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
             row = connection.execute(

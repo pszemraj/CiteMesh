@@ -7,6 +7,8 @@ from typing import Protocol
 
 
 class _ErrorSink(Protocol):
+    """Provide argparse-style error reporting for selection validation."""
+
     def error(self, message: str) -> None: ...
 
 
@@ -15,7 +17,13 @@ def _apply_cache_selection(
     provided: set[str],
     error_sink: _ErrorSink,
 ) -> set[str]:
-    """Bind stored selectors, rejecting only explicit incompatible arguments."""
+    """Apply an installed corpus contract to parsed build arguments.
+
+    :param argparse.Namespace args: Parsed build options to update.
+    :param set[str] provided: Option destinations explicitly supplied by the user.
+    :param _ErrorSink error_sink: Parser-compatible error reporter.
+    :return set[str]: Option destinations bound from the installed contract.
+    """
     if not getattr(args, "cache_namespace", None):
         return set()
     if args.strategy not in {"embedding", "hybrid"}:

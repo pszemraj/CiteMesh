@@ -195,8 +195,7 @@ class _CorpusHydrationMixin:
     def _ensure_cache_hydrated(self, use_streaming: bool) -> None:
         """Ensure cache contains hydrated corpus embeddings for current split/cap.
 
-        :param bool use_streaming: Whether to use streaming dataset hydration.
-        :return None: Mutates cache state in-place when hydration is required.
+        :param use_streaming: Whether to use streaming dataset hydration.
         """
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():
@@ -205,9 +204,8 @@ class _CorpusHydrationMixin:
     def _ensure_cache_hydrated_locked(self, use_streaming: bool) -> None:
         """Hydrate the active corpus while its operation lock is held.
 
-        Runs the hydration phases in escalating cost: revalidate an already
-        hydrated cache, resume an interrupted one, and only then resolve the
-        dataset and rebuild the namespace from scratch.
+        Reuse a valid cache, resume incomplete hydration, or load the source and
+        rebuild the namespace when existing rows cannot be reused.
 
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
@@ -557,11 +555,10 @@ class _CorpusHydrationMixin:
     def _refresh_cached_corpus_metadata(
         self, source: str | None, use_streaming: bool
     ) -> None:
-        """Backfill bibliographic fields and restore previously discarded summaries.
+        """Refresh cached bibliographic fields from matching source rows.
 
-        :param Optional[str] source: Dataset recorded on the matching cache.
-        :param bool use_streaming: Whether source rows should be streamed.
-        :return None: Refreshes existing SQLite rows once after an adapter change.
+        :param source: Dataset recorded on the matching cache.
+        :param use_streaming: Whether source rows should be streamed.
         """
         cache = self.embedding_cache
         if (
@@ -770,22 +767,15 @@ class _CorpusHydrationMixin:
     def _reuse_resized_complete_corpus_cache(
         self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
     ) -> bool:
-        """Serve a request from a complete cache whose recorded size differs.
+        """Reuse a complete cache when its recorded corpus covers the request.
 
-        The recorded corpus token describes the rows that are actually cached, so
-        a request those rows already contain is satisfiable as-is and a larger one
-        only needs its difference encoded. Only a corpus this policy cannot relate
-        to the request — another split or source, or an unreadable legacy token —
-        falls through to the destructive rebuild.
+        A larger request is extended in place. A different source or split, or an
+        unreadable legacy size, returns ``False`` so normal hydration can proceed.
 
-        Reuse is not a free pass on upstream: every later run at the smaller cap
-        lands here, so a covering cache is still refreshed against the source at
-        the cap it records.
-
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Dataset source recorded on the complete cache.
-        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
-        :return bool: ``True`` when the complete cache was reused or extended.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param source: Dataset source recorded on the complete cache.
+        :param stats: Current namespace payload statistics.
+        :return: Whether the cache was reused or extended.
         """
         coverage = _corpus_size_coverage(stats.hydration_corpus_size, self.corpus_size)
         if coverage not in {"covers", "extends"}:
@@ -820,22 +810,12 @@ class _CorpusHydrationMixin:
     def _refresh_reused_corpus_cache(
         self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
     ) -> None:
-        """Keep a reused covering corpus current with upstream, at its own cap.
+        """Refresh reused rows at the corpus cap recorded in the cache.
 
-        Reuse is settled before the hydrated-cache revalidation can run: the
-        recorded token deliberately stays where the vectors are, so it never
-        matches the smaller request that lands here and the revalidation's
-        refreshes are skipped every time. Without this, a cache reused at a
-        smaller cap would never admit an upstream submission again.
-
-        The refresh therefore runs at the cached cap, not the requested one:
-        that is the corpus the token claims, the corpus the reuse warning just
-        disclosed, and the corpus search reads.
-
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Dataset source recorded on the complete cache.
-        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
-        :return None: Mutates cache rows in-place when upstream has moved.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param source: Dataset source recorded on the complete cache.
+        :param stats: Current namespace payload statistics.
+        :return: Updates cache rows when the source has changed.
         """
         try:
             cached_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
@@ -894,19 +874,13 @@ class _CorpusHydrationMixin:
     def _restore_reused_corpus_completeness(
         self, *, source: str, corpus_size: int | None
     ) -> None:
-        """Re-stamp a reused namespace as complete at the cap it holds.
+        """Restore complete metadata after a failed refresh of reused rows.
 
-        These refresh passes only add rows to a covering corpus. A source error
-        or process interruption therefore leaves its existing vectors usable
-        and the next run can retry the unfinished refresh.
+        Existing vectors remain available at the cache's recorded cap, and a
+        later run can retry source reconciliation.
 
-        Reserved for a refresh that raised: an incomplete marker a refresh left
-        behind on purpose records a decision about the cached rows, and undoing
-        it here would strand the cache in a state nothing revalidates.
-
-        :param str source: Dataset source recorded on the complete cache.
-        :param Optional[int] corpus_size: Cap the cached rows were recorded at.
-        :return None: Restores hydration metadata only when a pass changed it.
+        :param source: Dataset source recorded on the complete cache.
+        :param corpus_size: Cap recorded for the cached rows.
         """
         stats = self.embedding_cache.payload_stats()
         recorded_token = _corpus_size_token(corpus_size)
@@ -930,27 +904,14 @@ class _CorpusHydrationMixin:
     def _extend_cached_corpus_selection(
         self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
     ) -> bool:
-        """Top a complete cache up to a larger requested corpus, in place.
+        """Add rows needed to satisfy a larger corpus-size request.
 
-        The namespace keeps its existing metadata until the extension succeeds, so
-        an interrupted or short pass leaves a cache that is still complete at its
-        recorded size — with at worst a few extra valid rows, the same condition a
-        moved upstream selection already produces — rather than an incomplete one
-        the rebuild path would clear.
+        Existing cache metadata remains usable if the extension is interrupted.
 
-        Success is seeing the whole selection, which for a capped request is
-        reaching the cap rather than draining the source. A newest-first
-        selection is normally exactly cap-sized, making the two the same thing,
-        but the fallbacks for a dataset with no ``id`` column or no parseable
-        arXiv IDs hand back the whole dataset and leave hydration to stop at the
-        cap: the rows are selected and cached, yet the iterator never reports
-        EOF, and treating that as a short read would keep the token frozen at
-        the old size forever while the namespace holds the larger corpus.
-
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Dataset source recorded on the complete cache.
-        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
-        :return bool: ``True`` in every case; the cache is never cleared from here.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param source: Dataset source recorded on the complete cache.
+        :param stats: Current namespace payload statistics.
+        :return: ``True`` after processing the requested extension.
         """
         cached_token = str(stats.hydration_corpus_size or "").strip()
         requested_token = _corpus_size_token(self.corpus_size)
@@ -1142,17 +1103,14 @@ class _CorpusHydrationMixin:
     def _resume_full_corpus_cache(
         self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
     ) -> bool:
-        """Resume an interrupted full corpus by reconciling the complete source.
+        """Resume a full-corpus cache by reconciling its source IDs.
 
-        Cached rows can include historical papers or duplicate-ID coalescing, so
-        their count is neither a source offset nor proof of source coverage.
-        Scanning IDs preserves all committed vectors and encodes only missing
-        papers, even when interruption left the counts coincidentally equal.
+        Existing vectors are retained and only missing papers are encoded.
 
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Dataset source recorded on the incomplete attempt.
-        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
-        :return bool: Whether the complete source was reconciled successfully.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param source: Dataset source recorded on the incomplete attempt.
+        :param stats: Current namespace payload statistics.
+        :return: Whether the complete source was reconciled successfully.
         """
         return self._resume_selected_corpus_cache(
             use_streaming=use_streaming, source=source, stats=stats, corpus_size=None
@@ -1208,28 +1166,23 @@ class _CorpusHydrationMixin:
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
         dataset: Iterable[dict[str, Any]] | None = None,
     ) -> _HydrationSourceSliceResult:
-        """Load an exact-source slice and report cache and source progress.
+        """Hydrate an exact-source slice and report row-consumption state.
 
-        Exceptions from source iteration or cache writes propagate before a
-        result is returned, so callers cannot mistake a failed pass for clean EOF.
+        Source and cache-write exceptions propagate to the caller.
 
-        :param bool use_streaming: Whether to load a streaming dataset iterator.
-        :param str source: Previously recorded dataset source to load.
-        :param Optional[int] progress_total: Expected row count for progress display.
-        :param str progress_label: Progress-bar description label.
-        :param str operation: Caller-facing operation name for mismatch errors.
-        :param Optional[int] row_limit: Optional number of rows to load.
-        :param Optional[int] row_offset: Optional source row offset.
-        :param Optional[Set[str]] existing_paper_ids: IDs to skip during reconciliation.
-        :param Optional[int] max_new_records: Optional cap on newly hydrated records.
-        :param _CorpusSizeArg corpus_size: Cap this pass selects and hydrates at,
+        :param use_streaming: Whether to load a streaming dataset iterator.
+        :param source: Recorded dataset source to load.
+        :param progress_total: Expected row count for progress display.
+        :param progress_label: Progress-bar description.
+        :param operation: Operation name used in source-mismatch errors.
+        :param row_limit: Maximum source rows to load.
+        :param row_offset: Starting source row offset.
+        :param existing_paper_ids: IDs to skip during reconciliation.
+        :param max_new_records: Maximum newly hydrated records.
+        :param corpus_size: Cap this pass selects and hydrates at,
             defaulting to the cap this build requested.
-        :param Optional[Iterable[Dict[str, Any]]] dataset: Rows a caller already
-            loaded for this exact slice, hydrated instead of loading the source
-            again. The caller owns both guarantees the load would have given:
-            that these are the rows this pass would select, and that they came
-            from the recorded source.
-        :return _HydrationSourceSliceResult: Cache writes and source-consumption state.
+        :param dataset: Rows already loaded for this exact source slice.
+        :return: Cache writes and source-consumption state.
         """
         slice_corpus_size = self._effective_corpus_size(corpus_size)
         if dataset is None:
@@ -1325,17 +1278,16 @@ class _CorpusHydrationMixin:
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
         remember_reconciliation: bool = False,
     ) -> bool:
-        """Finalize hydration completion and row-count reconciliation metadata.
+        """Record hydration completion and source-count reconciliation.
 
-        :param str source: Exact dataset source used for hydration.
-        :param int updated_rows: Current cached payload row count.
-        :param Optional[int] upstream_rows: Upstream split row count, if known.
-        :param bool mark_complete: Whether this path has completed hydration.
-        :param _CorpusSizeArg corpus_size: Corpus the rows were hydrated at,
+        :param source: Exact dataset source used for hydration.
+        :param updated_rows: Current cached payload row count.
+        :param upstream_rows: Upstream split row count, if known.
+        :param mark_complete: Whether this pass completed hydration.
+        :param corpus_size: Corpus the rows were hydrated at,
             defaulting to the one this build requested.
-        :param bool remember_reconciliation: Retain the verified source count
-            after an ID scan, even when historical and upstream row counts match.
-        :return bool: ``True`` when row counts match or cannot be compared.
+        :param remember_reconciliation: Retain the verified source count after an ID scan.
+        :return: ``True`` when row counts match or cannot be compared.
         """
         if mark_complete:
             self.embedding_cache.mark_hydrated(
@@ -1395,16 +1347,13 @@ class _CorpusHydrationMixin:
         progress_label: str,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> list[dict]:
-        """Reservoir-sample representative metadata records for int8 calibration.
+        """Deterministically sample metadata records for int8 calibration.
 
-        The sample is deterministic so cache bootstrap remains reproducible under
-        tests and across repeated local runs given the same corpus slice/order.
-
-        :param Iterable[Dict[str, Any]] dataset: Dataset records to sample.
-        :param Optional[int] progress_total: Optional progress-bar total.
-        :param str progress_label: Progress-bar description label.
-        :param _CorpusSizeArg corpus_size: Cap of the corpus being calibrated.
-        :return List[Dict]: Reservoir-sampled metadata records.
+        :param dataset: Dataset records to sample.
+        :param progress_total: Optional progress-bar total.
+        :param progress_label: Progress-bar description.
+        :param corpus_size: Cap of the corpus being calibrated.
+        :return: Reservoir-sampled metadata records.
         """
         rng = random.Random(CALIBRATION_RESERVOIR_SEED)
         sampled_records: list[dict] = []
@@ -1587,15 +1536,11 @@ class _CorpusHydrationMixin:
         return hydrated_records
 
     def _cached_corpus_paper_ids(self) -> set[str]:
-        """Return persisted IDs plus content equivalents of old positional IDs.
+        """Return persisted IDs and content aliases for rows without source IDs.
 
-        The old spelling can also be a legitimate source ID. Aliasing its
-        matching bibliographic content avoids renaming or duplicating that row.
-        These aliases apply when a source row has no explicit ID. New explicit
-        IDs remain authoritative: identical bibliographic text can describe
-        distinct works, so remapping source IDs requires an explicit rebuild.
+        Explicit source IDs remain distinct even when bibliographic content matches.
 
-        :return Set[str]: Identities safe to skip during source reconciliation.
+        :return: IDs safe to skip during source reconciliation.
         """
         paper_ids = self.embedding_cache.get_cached_paper_ids()
         paper_ids.update(
@@ -1814,30 +1759,14 @@ class _CorpusHydrationMixin:
         cached_dataset_source: str | None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> None:
-        """Admit upstream submissions newer than a capped corpus's watermark.
+        """Compare the newest-N selection with cached IDs and admit missing rows.
 
-        A capped corpus is defined as the N newest submissions, and upstream
-        keeps publishing, so without this the cache stays frozen at whatever was
-        newest when it was built. The count-driven refresh cannot serve this
-        shape — cached rows are not a source offset for a selection that
-        reshuffles as upstream grows. The refresh ranks that selection and
-        compares its paper IDs with the cache, admitting new maxima as well as
-        backfilled submissions within the cached chronology range.
+        Split row counts gate source scans. Selected IDs detect backfilled
+        submissions even when the newest chronology key has not changed.
 
-        The upstream row count gates how often that is asked at all. An
-        unchanged split is answered from the memoized marker without touching
-        the source, exactly as the uncapped path memoizes a verified row-count
-        delta. The watermark detects new maxima, while the selected IDs detect
-        backfilled submissions within the cached chronology range; see
-        :meth:`_capped_corpus_selection_is_cached`.
-
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param Optional[str] cached_dataset_source: Hydrated dataset source token.
-        :param _CorpusSizeArg corpus_size: Capped corpus this pass refreshes,
-            defaulting to the one this build requested. A reused larger cache
-            passes the cap it records, which is the corpus its token claims and
-            the one search reads.
-        :return None: Mutates cache in-place when newer papers are admitted.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param cached_dataset_source: Hydrated dataset source token.
+        :param corpus_size: Cap recorded for the cached corpus, or the requested cap.
         """
         refreshed_corpus_size = self._effective_corpus_size(corpus_size)
         if refreshed_corpus_size is None or ":" in str(self.dataset_split):
@@ -1939,25 +1868,12 @@ class _CorpusHydrationMixin:
     def _probe_upstream_capped_selection(
         self, *, use_streaming: bool, source: str, corpus_size: int
     ) -> _CappedCorpusRecencyProbe:
-        """Rank the upstream newest-N selection and read its newest submission.
+        """Return the newest chronology key and reusable newest-N selection.
 
-        The loaded slice is already ranked by submission chronology, so its
-        maximum key is also the upstream maximum; reading it from the selection
-        avoids a second recency policy that could disagree with the one
-        hydration itself applies.
-
-        Ranking it costs a full pass over the source, and under ``--streaming``
-        that is a full drain of the stream, so the slice is returned alongside
-        the key: the pass that admits the missing rows wants exactly these rows
-        and would otherwise pay for the same selection twice. A slice that
-        cannot be traversed again is dropped instead.
-
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Hydrated dataset source token.
-        :param int corpus_size: Capped corpus the selection is ranked for.
-        :return _CappedCorpusRecencyProbe: Newest packed chronology key, ``None``
-            when no selected row carries a parseable arXiv ID, and the selected
-            rows when they can be handed on.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param source: Hydrated dataset source token.
+        :param corpus_size: Cap used to rank the source selection.
+        :return: Newest key, if available, and rows when the selection is reusable.
         """
         dataset = self._load_exact_hydration_source_slice(
             use_streaming=use_streaming,
@@ -1990,18 +1906,12 @@ class _CorpusHydrationMixin:
         watermark: int | None,
         corpus_size: int,
     ) -> bool:
-        """Decide whether upstream's newest-N selection is already in the cache.
+        """Return whether all rows in the newest-N selection are cached.
 
-        A backfilled submission can displace the oldest selected row without
-        changing the newest key. Even an at-cap cache therefore needs an ID
-        comparison against the already-ranked selection. No second source scan
-        is needed for the materialized selection used by production loaders.
-
-        :param _CappedCorpusRecencyProbe probe: Newest upstream key and the
-            selection it was read from, when that slice can be traversed again.
-        :param Optional[int] watermark: Newest cached chronology key, if any.
-        :param int corpus_size: Capped corpus the selection is ranked for.
-        :return bool: ``True`` when every selected paper is already cached.
+        :param probe: Newest key and selected rows from the upstream probe.
+        :param watermark: Newest cached chronology key, if available.
+        :param corpus_size: Cap used to rank the source selection.
+        :return: Whether every selected paper is already cached.
         """
         newest_upstream_key = probe.newest_key
         if newest_upstream_key is not None and (
@@ -2028,24 +1938,16 @@ class _CorpusHydrationMixin:
         corpus_size: int,
         selection: Iterable[dict[str, Any]] | None = None,
     ) -> None:
-        """Encode the newest-N rows the capped cache is missing, in place.
+        """Hydrate missing rows from a ranked newest-N source selection.
 
-        The namespace keeps its complete metadata throughout, so an interrupted
-        pass leaves a cache that is still usable at its recorded size rather than
-        an incomplete one the rebuild path would clear. As in the extension, a
-        pass that consumed its whole cap saw the whole selection even when the
-        slice it was handed runs on past the cap without reporting EOF, so the
-        reconciliation marker is written and the next run is spared the scan.
+        Existing rows remain usable if the pass is interrupted.
 
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Hydrated dataset source token.
-        :param int cached_rows: Cached payload row count before this pass.
-        :param Optional[int] upstream_rows: Upstream split row count, when published.
-        :param int corpus_size: Capped corpus the selection is re-run at.
-        :param Optional[Iterable[Dict[str, Any]]] selection: Newest-N rows the
-            recency probe already selected from this source, hydrated as-is so
-            the pass does not rank the whole source a second time.
-        :return None: Mutates cache rows and the reconciliation marker in-place.
+        :param use_streaming: Whether hydration mode is streaming.
+        :param source: Hydrated dataset source token.
+        :param cached_rows: Cached payload row count before this pass.
+        :param upstream_rows: Upstream split row count, when published.
+        :param corpus_size: Cap used to rank the source selection.
+        :param selection: Rows returned by the recency probe, when reusable.
         """
         logger.debug(
             "Capped corpus for %s/%s is missing rows from the newest-%d "

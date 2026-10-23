@@ -19,6 +19,7 @@ from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
     Any,
+    TypedDict,
 )
 
 import networkx as nx
@@ -53,7 +54,7 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     CacheSearchResult,
 )
-from citemesh.data.embedding_contract import ExistingCacheSelection
+from citemesh.data.embedding_contract import ExistingCacheSelection, NamespaceSelectors
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -96,6 +97,38 @@ from .text import (
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
+
+    from .refresh import RefreshResult
+
+
+class EmbeddingBuilderRuntimeOptions(TypedDict, total=False):
+    """Optional builder arguments accepted by a selected-cache refresh."""
+
+    max_papers: int
+    model_name: str
+    model_profile: str
+    model_revision: str | None
+    dataset_split: str
+    truncate_dim: int | None
+    top_k: int
+    use_streaming: bool
+    force_rebuild_cache: bool
+    force_rebuild_reason: str | None
+    storage_precision: str
+    binary_prefilter: bool | None
+    binary_rescore_multiplier: int | None
+    calibration_sample_size: int
+    cache_compression: str
+    cache_compression_level: int
+    encode_batch_size: int
+    enable_torch_compile: bool
+    device: str | None
+    semantic_source: str
+    candidate_pool_size: int
+    client: SemanticScholarClient | None
+    min_semantic_similarity: float
+    dataset_source: str
+
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +214,8 @@ class EmbeddingGraphBuilder(
         :param int top_k: Number of most similar neighbors per node
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
-        :param Optional[str] force_rebuild_reason: Optional operator rationale logged
-            when ``force_rebuild_cache`` clears the embedding namespace.
+        :param force_rebuild_reason: Optional message recorded when
+            ``force_rebuild_cache`` clears the embedding namespace.
         :param str storage_precision: Persistent cache precision (``int8`` or ``float32``).
         :param Optional[bool] binary_prefilter: Whether cache search uses binary
             Hamming prefiltering. When ``None``, defaults to enabled only for
@@ -207,6 +240,7 @@ class EmbeddingGraphBuilder(
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         :param str dataset_source: HuggingFace dataset repository with arXiv metadata fields.
+        :param cache_selection: Existing cache contract and source selected for this build.
         """
         self._cache_selection = cache_selection
         self._selected_cache_handle = None
@@ -486,14 +520,11 @@ class EmbeddingGraphBuilder(
     def _deferred_force_rebuild_reason(
         force_rebuild_cache: bool, force_rebuild_reason: str | None
     ) -> str | None:
-        """Compose the rebuild rationale logged once the namespace is known.
+        """Return the cache-clear message when a rebuild was requested.
 
-        The clear itself is deferred: the namespace depends on the model that
-        actually loads, so the reason is recorded here and consumed later.
-
-        :param bool force_rebuild_cache: Whether an explicit rebuild was requested.
-        :param Optional[str] force_rebuild_reason: Optional operator rationale.
-        :return Optional[str]: Reason string, or ``None`` when no rebuild is pending.
+        :param force_rebuild_cache: Whether an explicit rebuild was requested.
+        :param force_rebuild_reason: Optional message for the clear.
+        :return: Cache-clear message, or ``None`` when no rebuild is pending.
         """
         if not force_rebuild_cache:
             return None
@@ -784,10 +815,9 @@ class EmbeddingGraphBuilder(
                 )
 
     def _clear_embedding_cache(self, reason: str) -> None:
-        """Clear embedding namespace payload with explicit reason logging.
+        """Clear this cache and record the supplied reason.
 
-        :param str reason: Human-readable reason for cache reset.
-        :return None: Mutates cache files/metadata in-place.
+        :param reason: Message recorded with the cache reset.
         """
         normalized_reason = str(reason).strip() or "unspecified"
         self.embedding_cache.clear(reason=normalized_reason)
@@ -901,12 +931,19 @@ class EmbeddingGraphBuilder(
     def _namespace_selectors(
         self,
         *,
-        representation=_RETRIEVAL_DOCUMENT_REPRESENTATION,
-        artifact_identity=None,
-        storage_precision=None,
-        formatter_identity=None,
-    ) -> dict[str, object]:
-        """Return the original addressing inputs independently of source provenance."""
+        representation: str = _RETRIEVAL_DOCUMENT_REPRESENTATION,
+        artifact_identity: str | None = None,
+        storage_precision: str | None = None,
+        formatter_identity: str | None = None,
+    ) -> NamespaceSelectors:
+        """Return the inputs that reproduce this namespace address.
+
+        :param representation: Vector role and schema identifier.
+        :param artifact_identity: Resolved identity of the model artifact.
+        :param storage_precision: Stored vector precision override.
+        :param formatter_identity: Formatter fingerprint override.
+        :return: Selectors used to serialize the embedding namespace.
+        """
         return {
             "model_identity": self._cache_model_identity(),
             "requested_revision": self._requested_hf_revision_token(),
@@ -1623,8 +1660,12 @@ class EmbeddingGraphBuilder(
         self._ensure_cache_model_fingerprint()
         return self.embedding_cache
 
-    def refresh_corpus(self, revision: str | None = None) -> dict[str, Any]:
-        """Explicitly reconcile the corpus at one pinned upstream revision."""
+    def refresh_corpus(self, revision: str | None = None) -> RefreshResult:
+        """Reconcile the corpus against one pinned upstream revision.
+
+        :param revision: Optional dataset revision to refresh.
+        :return: Refresh outcome with source identity and changed-row counts.
+        """
         from .refresh import refresh_builder_corpus
 
         return refresh_builder_corpus(self, revision)

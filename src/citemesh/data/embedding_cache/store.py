@@ -114,9 +114,9 @@ class EmbeddingCache(
         :param str source_torch_dtype: Source inference dtype token, e.g. ``bfloat16``.
         :param str text_formatter_fingerprint: Deterministic metadata-to-text formatter
             fingerprint used for cache invalidation boundaries.
-        :param Optional[ProgressWrapper] progress: Reporter wrapping long cache scans as
-            ``progress(values, description)``. Storage owns no display policy, so this
-            defaults to no reporting and the CLI layer injects its own renderer.
+        :param progress: Optional ``progress(values, description)`` wrapper for scans.
+        :param strict: Inspect existing files without repairing them.
+        :param _initialize: Whether to initialize or inspect files immediately.
         """
         if storage_precision not in _STORAGE_PRECISIONS:
             expected = ", ".join(sorted(_STORAGE_PRECISIONS))
@@ -273,6 +273,8 @@ class EmbeddingCache(
         :param int top_k: Number of top documents to return.
         :param bool binary_prefilter: Whether to use binary Hamming prefiltering.
         :param int binary_rescore_multiplier: Candidate oversampling factor for rescoring.
+        :param corpus_size: Newest-N active-member view for a managed corpus; ``None`` uses all.
+        :param eligible_rows: Physical-row boolean mask intersected with active membership.
         :return List[CacheSearchResult]: Ranked search results.
         """
         if top_k < 1:

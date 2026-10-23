@@ -10,21 +10,33 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict
 
 import h5py
 import numpy as np
+import numpy.typing as npt
 from filelock import FileLock
 
 from citemesh.data.cache import cache_operation_lock, get_cache_dir
 from citemesh.data.embedding_contract import (
     CorpusSource,
+    CorpusSourceData,
     EmbeddingContract,
+    EmbeddingContractData,
     ExistingCacheSelection,
+    NamespaceSelectors,
     require_namespace_contract,
 )
 
 from . import constants
+from .models import (
+    ActiveCorpusRecord,
+    CorpusRecord,
+    PortableImportIdentity,
+    PortableProducerProvenance,
+    PublicationOrigin,
+    StoredEmbedding,
+)
 from .sql import (
     CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL,
     CORPUS_MEMBERSHIP_TABLE_CREATE_SQL,
@@ -32,21 +44,82 @@ from .sql import (
     _parse_json_list,
 )
 
+if TYPE_CHECKING:
+    from .store import EmbeddingCache
+
 CORPUS_STATE_KEY = "corpus_state"
 
 
-def _json(value: Any) -> str:
+class RefreshOperationIdentity(TypedDict):
+    """Source selection that identifies a corpus refresh."""
+
+    source: CorpusSourceData
+
+
+OperationIdentity: TypeAlias = RefreshOperationIdentity | PortableImportIdentity
+
+
+class PendingOperation(TypedDict):
+    """Persisted identity and source for an unfinished cache operation."""
+
+    kind: Literal["import", "refresh"]
+    identity: OperationIdentity
+    target_source: CorpusSourceData
+
+
+class SnapshotOrigin(TypedDict):
+    """Local snapshot identity recorded when no bucket publication is supplied."""
+
+    snapshot_id: str
+
+
+CorpusOrigin: TypeAlias = SnapshotOrigin | PublicationOrigin
+
+
+class CorpusState(TypedDict, total=False):
+    """Fields persisted for a corpus namespace and its current operation."""
+
+    contract: EmbeddingContractData
+    namespace_serialization: str
+    namespace_selectors: NamespaceSelectors
+    source: CorpusSourceData
+    update_policy: Literal["manual"]
+    membership_complete: bool
+    membership_version: Literal[1]
+    source_records_examined: int
+    pending: PendingOperation
+    origin: CorpusOrigin | None
+    producer_provenance: PortableProducerProvenance
+    completed_import_identity: PortableImportIdentity
+
+
+def _json(value: OperationIdentity | PendingOperation | CorpusState) -> str:
+    """Serialize cache state or an operation identity with stable compact JSON.
+
+    :param OperationIdentity | PendingOperation | CorpusState value: JSON data to encode.
+    :return str: Compact JSON with keys in sorted order.
+    """
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _read_state(conn: sqlite3.Connection) -> dict[str, Any]:
+def _read_state(conn: sqlite3.Connection) -> CorpusState:
+    """Read the persisted corpus state, or return an empty mapping.
+
+    :param sqlite3.Connection conn: Open cache database connection.
+    :return CorpusState: Stored state, or an empty state when no value exists.
+    """
     row = conn.execute(
         "SELECT value FROM cache_metadata WHERE key = ?", (CORPUS_STATE_KEY,)
     ).fetchone()
     return json.loads(row[0]) if row else {}
 
 
-def _write_state(conn: sqlite3.Connection, state: dict[str, Any]) -> None:
+def _write_state(conn: sqlite3.Connection, state: CorpusState) -> None:
+    """Replace the persisted corpus state in SQLite metadata.
+
+    :param sqlite3.Connection conn: Open cache database connection.
+    :param CorpusState state: Current contract, source, and operation state.
+    """
     conn.execute(
         "INSERT OR REPLACE INTO cache_metadata(key,value) VALUES (?,?)",
         (CORPUS_STATE_KEY, _json(state)),
@@ -58,6 +131,11 @@ class _LifecycleMixin:
 
     @contextmanager
     def _read_only_db(self) -> Iterator[sqlite3.Connection]:
+        """Open the cache database in read-only mode.
+
+        Yields:
+            The SQLite connection, closed when the context exits.
+        """
         conn = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             yield conn
@@ -65,6 +143,7 @@ class _LifecycleMixin:
             conn.close()
 
     def _has_corpus_state_read_only(self) -> bool:
+        """Return whether this database contains nonempty corpus state."""
         if not self.db_path.exists():
             return False
         with self._read_only_db() as conn:
@@ -76,8 +155,16 @@ class _LifecycleMixin:
 
     def _inspect_existing_locked(
         self, *, contract: EmbeddingContract | None = None, allow_legacy: bool = False
-    ):
-        """Inspect both files without repairs, schema changes, or vector writes."""
+    ) -> CorpusState:
+        """Inspect the existing SQLite and HDF5 cache without modifying either.
+
+        :param EmbeddingContract | None contract: Optional contract required of the cache.
+        :param bool allow_legacy: Accept matching legacy fingerprint metadata when
+            no corpus state has been recorded.
+        :return CorpusState: The persisted state, or an empty mapping for a legacy cache.
+        :raises RuntimeError: If the existing files do not form a readable cache.
+        :raises ValueError: If the stored contract or matrix differs from ``contract``.
+        """
         if not self.db_path.is_file():
             raise RuntimeError(
                 "Existing embedding cache requires both SQLite and HDF5 files; "
@@ -107,8 +194,10 @@ class _LifecycleMixin:
                     raise ValueError("Selected cache embedding contract differs")
             count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
             if h5 is None:
+                pending = state.get("pending")
                 if (
-                    (state.get("pending") or {}).get("kind") == "refresh"
+                    pending
+                    and pending["kind"] == "refresh"
                     and not state.get("source")
                     and not state.get("membership_complete")
                     and count == 0
@@ -160,12 +249,21 @@ class _LifecycleMixin:
                     self._require_calibration_ranges(h5, int(dataset.shape[1]))
             return state
 
-    def corpus_state(self) -> dict[str, Any]:
-        """Read source and operation state without model construction or repair."""
+    def corpus_state(self) -> CorpusState:
+        """Read the source and operation state without model construction or repair.
+
+        :return CorpusState: State stored in the cache metadata table.
+        """
         with self.namespace_lock_only(), self._read_only_db() as conn:
             return _read_state(conn)
 
-    def _require_ready_locked(self, conn: sqlite3.Connection) -> dict[str, Any]:
+    def _require_ready_locked(self, conn: sqlite3.Connection) -> CorpusState:
+        """Return corpus state after rejecting pending or uncertified membership.
+
+        :param sqlite3.Connection conn: Open cache database connection.
+        :return CorpusState: Ready state, or an empty mapping for an unmanaged cache.
+        :raises RuntimeError: If an operation is pending or membership is uncertified.
+        """
         state = _read_state(conn)
         if state.get("pending"):
             raise RuntimeError(
@@ -178,7 +276,12 @@ class _LifecycleMixin:
             )
         return state
 
-    def require_complete_certified_corpus(self) -> dict[str, Any]:
+    def require_complete_certified_corpus(self) -> CorpusState:
+        """Require ready state with explicitly certified source membership.
+
+        :return CorpusState: Complete persisted corpus state.
+        :raises RuntimeError: If membership has not been explicitly reconciled.
+        """
         with self.namespace_lock_only(), self._read_only_db() as conn:
             state = self._require_ready_locked(conn)
             if not state.get("membership_complete"):
@@ -188,6 +291,11 @@ class _LifecycleMixin:
             return state
 
     def _require_write_owned_locked(self, conn: sqlite3.Connection) -> None:
+        """Require writes to respect any pending or manually managed operation.
+
+        :param sqlite3.Connection conn: Open cache database connection.
+        :raises RuntimeError: If this thread does not own the pending operation.
+        """
         state = _read_state(conn)
         if not state:
             return
@@ -202,6 +310,7 @@ class _LifecycleMixin:
 
     @property
     def namespace_id(self) -> str:
+        """Return the twelve-character native namespace ID from the DB filename."""
         return self.db_path.stem.removeprefix("metadata_")
 
     def _eligible_rows_locked(
@@ -209,8 +318,20 @@ class _LifecycleMixin:
         conn: sqlite3.Connection,
         row_count: int,
         corpus_size: int | None = None,
-        eligible_rows: np.ndarray | None = None,
-    ) -> np.ndarray | None:
+        eligible_rows: npt.NDArray[np.bool_] | None = None,
+    ) -> npt.NDArray[np.bool_] | None:
+        """Build the physical-row mask allowed by corpus and caller selections.
+
+        :param sqlite3.Connection conn: Open cache database connection.
+        :param int row_count: Number of physical embedding rows.
+        :param int | None corpus_size: Optional newest-N active-member limit.
+        :param npt.NDArray[np.bool_] | None eligible_rows: Optional boolean mask to intersect with
+            certified corpus membership.
+        :return npt.NDArray[np.bool_] | None: Eligible physical rows, or ``None`` when no
+            filtering is needed.
+        :raises ValueError: If a requested mask or corpus size is invalid.
+        :raises RuntimeError: If an exact view is requested without certification.
+        """
         state = self._require_ready_locked(conn)
         mask = None
         if state.get("membership_complete"):
@@ -254,8 +375,15 @@ class _LifecycleMixin:
             mask = requested if mask is None else mask & requested
         return mask
 
-    def get_cached_embeddings(self, paper_ids: Sequence[str]) -> dict[str, np.ndarray]:
-        """Read existing vectors without updating metadata or invoking an encoder."""
+    def get_cached_embeddings(
+        self, paper_ids: Sequence[str]
+    ) -> dict[str, npt.NDArray[np.float32]]:
+        """Read cached vectors without changing metadata or invoking an encoder.
+
+        :param Sequence[str] paper_ids: Paper IDs whose stored vectors to read.
+        :return dict[str, npt.NDArray[np.float32]]: Normalized float32 vectors keyed by
+            paper ID; missing IDs are omitted.
+        """
         with self._cache_lock(), self._connect_db() as conn:
             self._require_ready_locked(conn)
             with h5py.File(self.h5_path, "r") as h5:
@@ -273,14 +401,26 @@ class _LifecycleMixin:
     def operation_session(
         self,
         *,
-        kind: str,
-        identity: dict[str, Any],
+        kind: Literal["import", "refresh"],
+        identity: OperationIdentity,
         target_source: CorpusSource,
         contract: EmbeddingContract,
-        namespace_selectors: dict[str, Any],
-        origin: dict[str, Any] | None = None,
-        producer_provenance: dict[str, Any] | None = None,
+        namespace_selectors: NamespaceSelectors,
+        origin: CorpusOrigin | None = None,
+        producer_provenance: PortableProducerProvenance | None = None,
     ) -> Iterator[CorpusOperationSession]:
+        """Own cache writes while recording an import or refresh operation.
+
+        :param str kind: Operation kind, either ``"import"`` or ``"refresh"``.
+        :param OperationIdentity identity: Stable identity used to resume the operation.
+        :param CorpusSource target_source: Source selection being installed.
+        :param EmbeddingContract contract: Fixed vector storage contract.
+        :param NamespaceSelectors namespace_selectors: Inputs that reproduce the native namespace.
+        :param CorpusOrigin | None origin: Optional import origin recorded with the corpus.
+        :param PortableProducerProvenance | None producer_provenance: Optional embedding runtime metadata.
+        Yields:
+            The operation session that validates and records corpus batches.
+        """
         with self.hydration_operation_lock():
             session = CorpusOperationSession(
                 self,
@@ -300,6 +440,12 @@ class _LifecycleMixin:
 
     @contextmanager
     def export_snapshot_view(self) -> Iterator[NativeSnapshotView]:
+        """Hold the locks needed to read a complete corpus snapshot.
+
+        Yields:
+            A bounded view over active metadata rows and their vectors.
+        :raises RuntimeError: If the corpus membership is not certified.
+        """
         with self.hydration_operation_lock(), self.namespace_lock_only():
             with self._read_only_db() as conn:
                 state = self._require_ready_locked(conn)
@@ -314,7 +460,20 @@ class _LifecycleMixin:
 class NativeSnapshotView:
     """Bounded read view held under the corpus and namespace locks."""
 
-    def __init__(self, cache, conn, h5, state):
+    def __init__(
+        self,
+        cache: EmbeddingCache,
+        conn: sqlite3.Connection,
+        h5: h5py.File,
+        state: CorpusState,
+    ) -> None:
+        """Create a read view over cache handles held by the caller.
+
+        :param EmbeddingCache cache: Cache supplying the native row layout and locks.
+        :param sqlite3.Connection conn: Open metadata database connection.
+        :param h5py.File h5: Open read-only embedding matrix file.
+        :param CorpusState state: Complete corpus state returned by the cache.
+        """
         self.cache, self.conn, self.h5 = cache, conn, h5
         self.contract = EmbeddingContract(**state["contract"])
         self.completed_source = CorpusSource(**state["source"])
@@ -329,10 +488,24 @@ class NativeSnapshotView:
             else None
         )
 
-    def require_complete_certified_corpus(self):
+    def require_complete_certified_corpus(self) -> None:
+        """This view is created only after corpus membership is certified."""
         return None
 
-    def iter_active_rows(self, *, batch_size=8192, order_by_native_row=True):
+    def iter_active_rows(
+        self, *, batch_size: int = 8192, order_by_native_row: bool = True
+    ) -> Iterator[tuple[list[ActiveCorpusRecord], StoredEmbedding]]:
+        """Yield active metadata rows with their corresponding stored vectors.
+
+        Rows and vectors are returned in ascending physical row order and limited
+        to ``batch_size`` rows per yield.
+
+        :param int batch_size: Maximum number of rows in each yielded batch.
+        :param bool order_by_native_row: Accepted by the view protocol; this view
+            always returns rows in native physical order.
+        Yields:
+            A pair of metadata records and their matching embedding matrix batch.
+        """
         cursor = self.conn.execute(
             "SELECT p.paper_id,p.text_hash,p.row_idx,p.title,p.abstract,p.year,"
             "p.authors_json,p.categories_json,p.venue,p.arxiv_id,p.doi,"
@@ -341,34 +514,43 @@ class NativeSnapshotView:
         )
         dataset = self.h5.get(constants.EMBEDDINGS_DATASET_NAME)
         while rows := cursor.fetchmany(batch_size):
-            records = []
+            records: list[ActiveCorpusRecord] = []
             for row in rows:
+                (
+                    paper_id,
+                    text_hash,
+                    row_idx,
+                    title,
+                    abstract,
+                    year,
+                    authors_json,
+                    categories_json,
+                    venue,
+                    arxiv_id,
+                    doi,
+                    chronology_key,
+                    source_ordinal,
+                ) = row
                 records.append(
-                    dict(
-                        zip(
-                            (
-                                "paper_id",
-                                "text_hash",
-                                "row_idx",
-                                "title",
-                                "abstract",
-                                "year",
-                                "authors",
-                                "categories",
-                                "venue",
-                                "arxiv_id",
-                                "doi",
-                                "chronology_key",
-                                "source_ordinal",
-                            ),
-                            row,
-                            strict=True,
-                        )
-                    )
+                    {
+                        "paper_id": paper_id,
+                        "text_hash": text_hash,
+                        "row_idx": row_idx,
+                        "title": title,
+                        "abstract": abstract,
+                        "year": year,
+                        "authors": _parse_json_list(authors_json),
+                        "categories": _parse_json_list(categories_json),
+                        "venue": venue,
+                        "arxiv_id": arxiv_id,
+                        "doi": doi,
+                        "chronology_key": chronology_key,
+                        "source_ordinal": source_ordinal,
+                    }
                 )
-                records[-1]["authors"] = _parse_json_list(row[6])
-                records[-1]["categories"] = _parse_json_list(row[7])
-            indices = np.asarray([row[2] for row in rows], dtype=np.int64)
+            indices = np.asarray(
+                [record["row_idx"] for record in records], dtype=np.int64
+            )
             yield records, np.asarray(dataset[indices])
 
 
@@ -377,16 +559,28 @@ class CorpusOperationSession:
 
     def __init__(
         self,
-        cache,
+        cache: EmbeddingCache,
         *,
-        kind,
-        identity,
-        target_source,
-        contract,
-        namespace_selectors,
-        origin=None,
-        producer_provenance=None,
-    ):
+        kind: Literal["import", "refresh"],
+        identity: OperationIdentity,
+        target_source: CorpusSource,
+        contract: EmbeddingContract,
+        namespace_selectors: NamespaceSelectors,
+        origin: CorpusOrigin | None = None,
+        producer_provenance: PortableProducerProvenance | None = None,
+    ) -> None:
+        """Create a session for one owned corpus import or refresh.
+
+        :param EmbeddingCache cache: Cache whose namespace this session owns.
+        :param str kind: Operation kind, either ``"import"`` or ``"refresh"``.
+        :param OperationIdentity identity: Stable operation identity persisted for resume.
+        :param CorpusSource target_source: Source selection to commit.
+        :param EmbeddingContract contract: Fixed vector storage contract.
+        :param NamespaceSelectors namespace_selectors: Inputs that reproduce the native namespace.
+        :param CorpusOrigin | None origin: Optional import origin stored with corpus state.
+        :param PortableProducerProvenance | None producer_provenance: Optional producer runtime metadata.
+        :raises ValueError: If ``kind`` is not ``"import"`` or ``"refresh"``.
+        """
         if kind not in {"import", "refresh"}:
             raise ValueError("Unsupported corpus operation")
         self.cache = cache
@@ -397,7 +591,11 @@ class CorpusOperationSession:
         self.already_complete = False
         self._committed_rows = None
 
-    def begin(self):
+    def begin(self) -> None:
+        """Persist the pending identity and begin owning cache writes.
+
+        :raises ValueError: If the namespace, source, or pending identity conflicts.
+        """
         require_namespace_contract(
             self.contract, self.namespace_selectors, self.cache.model_name
         )
@@ -407,8 +605,9 @@ class CorpusOperationSession:
             state = _read_state(conn)
             if state.get("contract") and state["contract"] != asdict(self.contract):
                 raise ValueError("Occupied cache has a different embedding contract")
-            existing_source = state.get("source") or state.get("pending", {}).get(
-                "target_source"
+            pending = state.get("pending")
+            existing_source = state.get("source") or (
+                pending["target_source"] if pending else None
             )
             if existing_source and any(
                 existing_source.get(key) != asdict(self.target_source)[key]
@@ -470,6 +669,7 @@ class CorpusOperationSession:
 
     @property
     def committed_rows(self) -> int:
+        """Return the dense prefix of vector rows committed in the cache."""
         if self._committed_rows is not None:
             return self._committed_rows
         with self.cache.namespace_lock_only(), self.cache._connect_db() as conn:
@@ -503,14 +703,20 @@ class CorpusOperationSession:
 
     @property
     def membership_count(self) -> int:
+        """Return the number of active source records in corpus membership."""
         with self.cache.namespace_lock_only(), self.cache._read_only_db() as conn:
             return int(
                 conn.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0]
             )
 
-    def validate_records(self, records: Sequence[dict]) -> list[dict]:
-        """Compare duplicate source IDs against their first committed metadata."""
-        unique = {}
+    def validate_records(self, records: Sequence[CorpusRecord]) -> list[CorpusRecord]:
+        """Remove identical duplicate IDs and reject conflicting metadata.
+
+        :param Sequence[CorpusRecord] records: Normalized source records in one batch.
+        :return list[CorpusRecord]: Unique records in their first-seen order.
+        :raises ValueError: If duplicate or previously stored metadata conflicts.
+        """
+        unique: dict[str, CorpusRecord] = {}
         for record in records:
             paper_id = record["paper_id"]
             prior = unique.get(paper_id)
@@ -524,7 +730,7 @@ class CorpusOperationSession:
         with self.cache.namespace_lock_only(), self.cache._connect_db() as conn:
             self.cache._require_write_owned_locked(conn)
             ids = list(unique)
-            seen = []
+            seen: list[str] = []
             for start in range(0, len(ids), constants.SQLITE_QUERY_BATCH_SIZE):
                 batch = ids[start : start + constants.SQLITE_QUERY_BATCH_SIZE]
                 marks = ",".join("?" for _ in batch)
@@ -541,13 +747,25 @@ class CorpusOperationSession:
                     raise ValueError(f"Conflicting duplicate paper ID {paper_id!r}")
         return list(unique.values())
 
-    def _insert_membership(self, conn, records):
+    def _insert_membership(
+        self, conn: sqlite3.Connection, records: Sequence[CorpusRecord]
+    ) -> None:
+        """Insert source IDs and ordinals without replacing existing membership.
+
+        :param sqlite3.Connection conn: Open cache database connection.
+        :param Sequence[CorpusRecord] records: Validated source records to add.
+        """
         conn.executemany(
             "INSERT OR IGNORE INTO corpus_membership (paper_id,source_ordinal) VALUES (?,?)",
             [(record["paper_id"], record["source_ordinal"]) for record in records],
         )
 
-    def record_membership(self, records: Sequence[dict]) -> None:
+    def record_membership(self, records: Sequence[CorpusRecord]) -> None:
+        """Record active source rows whose vectors are already committed.
+
+        :param Sequence[CorpusRecord] records: Normalized source records to certify.
+        :raises ValueError: If a record conflicts or lacks a committed vector row.
+        """
         records = self.validate_records(records)
         with self.cache.namespace_lock_only(), self.cache._connect_db() as conn:
             self.cache._require_write_owned_locked(conn)
@@ -558,7 +776,24 @@ class CorpusOperationSession:
                 raise ValueError("Membership requires a committed vector row")
             self._insert_membership(conn, records)
 
-    def append_stored_embeddings(self, records, vectors, *, first_row: int) -> int:
+    def append_stored_embeddings(
+        self,
+        records: Sequence[CorpusRecord],
+        vectors: StoredEmbedding,
+        *,
+        first_row: int,
+    ) -> int:
+        """Append an import batch at the current dense vector-row prefix.
+
+        The method stores the vectors, paper metadata, and active membership in
+        their native cache files.
+
+        :param Sequence[CorpusRecord] records: Paper metadata paired with the vectors.
+        :param StoredEmbedding vectors: Matrix in the contract's stored dtype and width.
+        :param int first_row: Physical row at which this batch begins.
+        :return int: Number of vector rows committed after this batch.
+        :raises ValueError: If dtype, shape, row order, or IDs conflict.
+        """
         if vectors.dtype != np.dtype(self.contract.stored_dtype):
             raise ValueError("Stored dtype differs from snapshot contract")
         if vectors.shape != (len(records), self.contract.dimension):
@@ -607,6 +842,12 @@ class CorpusOperationSession:
         return self._committed_rows
 
     def finish(self, *, expected_rows: int, source_records_examined: int) -> None:
+        """Certify completed membership and publish source state to the cache.
+
+        :param int expected_rows: Number of active records expected in membership.
+        :param int source_records_examined: Number of source records scanned.
+        :raises ValueError: If membership or matrix row coverage is incomplete.
+        """
         with self.cache.namespace_lock_only(), self.cache._connect_db() as conn:
             self.cache._require_write_owned_locked(conn)
             count = conn.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0]
@@ -667,7 +908,18 @@ class CorpusOperationSession:
             )
 
 
-def _cache_shell(cache_dir, namespace_serialization, contract):
+def _cache_shell(
+    cache_dir: Path | None,
+    namespace_serialization: str,
+    contract: EmbeddingContract,
+) -> EmbeddingCache:
+    """Construct an uninitialized cache object for an existing namespace.
+
+    :param Path | None cache_dir: Directory containing the namespace files, or ``None`` for the configured cache directory.
+    :param str namespace_serialization: Serialized native namespace address.
+    :param EmbeddingContract contract: Vector contract expected by the cache.
+    :return EmbeddingCache: Cache object configured for inspection or import.
+    """
     from .store import EmbeddingCache
 
     return EmbeddingCache(
@@ -681,9 +933,20 @@ def _cache_shell(cache_dir, namespace_serialization, contract):
 
 
 def select_existing_cache(
-    namespace_id: str, cache_dir: Path | None = None, *, require_ready=True
-):
-    """Read the installed selection before constructing a builder or model."""
+    namespace_id: str,
+    cache_dir: Path | None = None,
+    *,
+    require_ready: bool = True,
+) -> ExistingCacheSelection:
+    """Resolve and open a native cache using its persisted source and contract.
+
+    :param str namespace_id: Twelve-character native namespace ID.
+    :param Path | None cache_dir: Optional directory containing the namespace files.
+    :param bool require_ready: Require completed, certified corpus membership.
+    :return ExistingCacheSelection: Selection metadata for the installed cache.
+    :raises RuntimeError: If the cache has no certified embedding contract.
+    :raises ValueError: If ``namespace_id`` is not a native namespace ID.
+    """
     if len(namespace_id) != 12 or any(
         c not in "0123456789abcdef" for c in namespace_id
     ):
@@ -702,7 +965,8 @@ def select_existing_cache(
             "Selected cache has no certified embedding contract; refresh/adopt it first"
         )
     contract = EmbeddingContract(**state["contract"])
-    source = state.get("source") or state.get("pending", {}).get("target_source")
+    pending = state.get("pending")
+    source = state.get("source") or (pending["target_source"] if pending else None)
     selection = ExistingCacheSelection(
         namespace_id,
         state["namespace_serialization"],
@@ -715,8 +979,16 @@ def select_existing_cache(
     return selection
 
 
-def read_existing_cache_metadata(namespace_id: str, cache_dir: Path | None = None):
-    """Read legacy metadata under native locks without constructing/repairing payloads."""
+def read_existing_cache_metadata(
+    namespace_id: str, cache_dir: Path | None = None
+) -> dict[str, str]:
+    """Read SQLite cache metadata under the native cache locks.
+
+    :param str namespace_id: Twelve-character native namespace ID.
+    :param Path | None cache_dir: Optional directory containing the namespace files.
+    :return dict[str, str]: Cache metadata keyed by name.
+    :raises ValueError: If ``namespace_id`` is not a native namespace ID.
+    """
     if len(namespace_id) != 12 or any(
         c not in "0123456789abcdef" for c in namespace_id
     ):
@@ -749,9 +1021,19 @@ def open_existing_cache(
     selection: ExistingCacheSelection,
     cache_dir: Path | None = None,
     *,
-    require_ready=True,
-    allow_legacy=False,
-):
+    require_ready: bool = True,
+    allow_legacy: bool = False,
+) -> EmbeddingCache:
+    """Open an existing native cache and enforce its selected contract.
+
+    :param ExistingCacheSelection selection: Contract and source to match.
+    :param Path | None cache_dir: Optional directory containing the namespace files.
+    :param bool require_ready: Require completed, certified corpus membership.
+    :param bool allow_legacy: Allow matching legacy fingerprint metadata.
+    :return EmbeddingCache: Cache configured for strict use of the selected namespace.
+    :raises RuntimeError: If the selected corpus is incomplete or uncertified.
+    :raises ValueError: If the selected address or contract differs.
+    """
     cache = _cache_shell(
         cache_dir, selection.namespace_serialization, selection.contract
     )
@@ -773,16 +1055,28 @@ def open_existing_cache(
 
 
 def preflight_import_destination(
-    cache_dir,
-    namespace_serialization,
-    contract,
-    source,
-    identity,
-    namespace_selectors=None,
-    calibration_ranges=None,
-    origin=None,
-):
-    """Classify an import destination without creating or repairing payloads."""
+    cache_dir: Path | None,
+    namespace_serialization: str,
+    contract: EmbeddingContract,
+    source: CorpusSource,
+    identity: OperationIdentity,
+    namespace_selectors: NamespaceSelectors | None = None,
+    calibration_ranges: npt.NDArray[np.float32] | None = None,
+    origin: CorpusOrigin | None = None,
+) -> Literal["create", "resume_same_import", "already_complete"]:
+    """Classify whether an import destination can be created or resumed.
+
+    :param Path | None cache_dir: Destination directory, or ``None`` for the configured cache directory.
+    :param str namespace_serialization: Serialized native namespace address.
+    :param EmbeddingContract contract: Embedding contract in the snapshot.
+    :param CorpusSource source: Source represented by the snapshot.
+    :param OperationIdentity identity: Stable identity of the requested import.
+    :param NamespaceSelectors | None namespace_selectors: Inputs that reproduce the native namespace.
+    :param npt.NDArray[np.float32] | None calibration_ranges: Optional exact int8 calibration ranges.
+    :param CorpusOrigin | None origin: Optional snapshot or publication origin.
+    :return Literal["create", "resume_same_import", "already_complete"]: Destination action.
+    :raises ValueError: If the destination is occupied by a conflicting cache.
+    """
     require_namespace_contract(contract, namespace_selectors, namespace_serialization)
     cache = _cache_shell(cache_dir, namespace_serialization, contract)
     with cache.hydration_operation_lock(), cache.namespace_lock_only():
@@ -791,7 +1085,25 @@ def preflight_import_destination(
         )
 
 
-def _classify_import_locked(cache, contract, source, identity, ranges, origin):
+def _classify_import_locked(
+    cache: EmbeddingCache,
+    contract: EmbeddingContract,
+    source: CorpusSource,
+    identity: OperationIdentity,
+    ranges: npt.NDArray[np.float32] | None,
+    origin: CorpusOrigin | None,
+) -> Literal["create", "resume_same_import", "already_complete"]:
+    """Classify a destination while the hydration and namespace locks are held.
+
+    :param EmbeddingCache cache: Cache whose destination files are being inspected.
+    :param EmbeddingContract contract: Embedding contract in the snapshot.
+    :param CorpusSource source: Source represented by the snapshot.
+    :param OperationIdentity identity: Stable identity of the requested import.
+    :param npt.NDArray[np.float32] | None ranges: Optional exact int8 calibration ranges.
+    :param CorpusOrigin | None origin: Optional snapshot or publication origin.
+    :return Literal["create", "resume_same_import", "already_complete"]: Destination action.
+    :raises ValueError: If existing files conflict with the requested import.
+    """
     db, h5 = cache.db_path.exists(), cache.h5_path.exists()
     if not db and not h5:
         return "create"
@@ -807,16 +1119,16 @@ def _classify_import_locked(cache, contract, source, identity, ranges, origin):
             raise ValueError(
                 "Occupied import database is unreadable; files preserved"
             ) from exc
-    pending = state.get("pending", {})
+    pending = state.get("pending")
     if state.get("contract") != asdict(contract):
         raise ValueError(
             "Occupied import destination has a different or unknown contract"
         )
     if pending:
         if pending.get("kind") != "import" or pending.get("identity") != identity:
-            publication = state.get("origin") or {}
+            publication = state.get("origin")
             resume = ""
-            if all(
+            if publication is not None and all(
                 publication.get(key)
                 for key in ("bucket_id", "config_name", "snapshot_id")
             ):
@@ -874,17 +1186,34 @@ def _classify_import_locked(cache, contract, source, identity, ranges, origin):
 
 @contextmanager
 def import_destination_session(
-    cache_dir,
-    namespace_serialization,
-    contract,
-    source,
-    identity,
-    namespace_selectors,
-    calibration_ranges=None,
-    origin=None,
-    producer_provenance=None,
-):
-    """Recognize the same import before any initialization or native recovery."""
+    cache_dir: Path | None,
+    namespace_serialization: str,
+    contract: EmbeddingContract,
+    source: CorpusSource,
+    identity: OperationIdentity,
+    namespace_selectors: NamespaceSelectors,
+    calibration_ranges: npt.NDArray[np.float32] | None = None,
+    origin: CorpusOrigin | None = None,
+    producer_provenance: PortableProducerProvenance | None = None,
+) -> Iterator[CorpusOperationSession]:
+    """Create or resume an import session for a portable snapshot.
+
+    The destination is classified before initialization; a matching completed
+    import yields a session marked ``already_complete``.
+
+    :param Path | None cache_dir: Destination directory, or ``None`` for the configured cache directory.
+    :param str namespace_serialization: Serialized native namespace address.
+    :param EmbeddingContract contract: Embedding contract in the snapshot.
+    :param CorpusSource source: Source represented by the snapshot.
+    :param OperationIdentity identity: Stable identity used to recognize an interrupted import.
+    :param NamespaceSelectors namespace_selectors: Inputs that reproduce the native namespace.
+    :param npt.NDArray[np.float32] | None calibration_ranges: Exact ranges for int8 snapshots.
+    :param CorpusOrigin | None origin: Optional snapshot or publication origin.
+    :param PortableProducerProvenance | None producer_provenance: Optional producer runtime metadata.
+    Yields:
+        The owned operation session used to append and certify rows.
+    :raises ValueError: If the destination conflicts with the requested import.
+    """
     require_namespace_contract(contract, namespace_selectors, namespace_serialization)
     cache = _cache_shell(cache_dir, namespace_serialization, contract)
     if producer_provenance:

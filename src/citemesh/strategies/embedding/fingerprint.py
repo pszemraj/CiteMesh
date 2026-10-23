@@ -39,11 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingCacheFingerprintMismatchError(RuntimeError):
-    """A corpus-scale namespace outlived the model its vectors were built with.
-
-    Raised instead of deleting the payload, so rehydrating hours of GPU time is
-    an explicit operator decision rather than a background heuristic.
-    """
+    """Raised when a hydrated corpus cache belongs to a different model."""
 
 
 class _FingerprintMixin:
@@ -674,19 +670,11 @@ class _FingerprintMixin:
         cached_fingerprint: str | None,
         model_fingerprint: str,
     ) -> None:
-        """Abort before a fingerprint mismatch deletes a hydrated corpus.
+        """Raise when a model mismatch targets a corpus-hydrated namespace.
 
-        A candidate-pool namespace is bounded by ``--candidate-pool-size`` and
-        re-encodes in seconds, so it keeps the silent-rebuild path. A corpus
-        namespace costs GPU-hours, so its deletion must be an operator decision.
-        Any recorded hydration source marks the namespace as corpus-scale --
-        including an interrupted hydration, which is just as costly to redo --
-        and only the corpus paths ever write that metadata.
-
-        :param EmbeddingCache cache: Namespace whose payload the mismatch targets.
-        :param Optional[str] cached_fingerprint: Fingerprint recorded on the payload.
-        :param str model_fingerprint: Fingerprint of the runtime-active model.
-        :return None: Returns when the namespace is cheap enough to auto-rebuild.
+        :param cache: Namespace whose payload the mismatch targets.
+        :param cached_fingerprint: Fingerprint recorded on the payload.
+        :param model_fingerprint: Fingerprint of the runtime-active model.
         :raises EmbeddingCacheFingerprintMismatchError: If the namespace carries
             corpus hydration metadata.
         """

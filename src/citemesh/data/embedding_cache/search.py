@@ -120,6 +120,7 @@ class _SearchMixin:
         :param h5py.Dataset binary_dataset: Packed binary corpus embeddings.
         :param np.ndarray query_embedding: Float32 query embedding.
         :param int candidate_count: Number of candidate rows to keep.
+        :param eligible_rows: Optional boolean mask over physical rows.
         :return np.ndarray: Candidate row indices.
         """
         row_count = int(binary_dataset.shape[0])
@@ -223,6 +224,7 @@ class _SearchMixin:
         :param np.ndarray query_embedding: Float32 query embedding.
         :param int top_k: Top results to keep.
         :param Optional[np.ndarray] row_indices: Optional candidate subset.
+        :param eligible_rows: Physical-row mask used when ``row_indices`` is ``None``.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
         query = query_embedding
@@ -271,6 +273,7 @@ class _SearchMixin:
         :param h5py.Dataset embeddings_dataset: Float matrix dataset.
         :param np.ndarray query_embedding: Float32 query embedding.
         :param int top_k: Top results to keep.
+        :param eligible_rows: Optional boolean mask over physical rows.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
 
@@ -296,6 +299,7 @@ class _SearchMixin:
         :param np.ndarray query_embedding: Float32 query vector.
         :param int top_k: Number of results to retain.
         :param Callable[[int, int], np.ndarray] load_chunk: Matrix chunk loader.
+        :param eligible_rows: Optional boolean mask over physical rows.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and vectors.
         """
         row_count = int(embeddings_dataset.shape[0])

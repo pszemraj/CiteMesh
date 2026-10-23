@@ -207,7 +207,12 @@ _PROFILE_BY_KEY: Mapping[str, EmbeddingModelProfile] = {
 
 
 def embedding_model_profile_key(profile: EmbeddingModelProfile) -> str:
-    """Return the explicit selector that reopens a resolved model profile."""
+    """Return the selector that reopens a resolved model profile.
+
+    :param EmbeddingModelProfile profile: Resolved profile to identify.
+    :return str: Registered profile key.
+    :raises ValueError: If no explicit selector is registered for the profile.
+    """
     for key, registered in _PROFILE_BY_KEY.items():
         if profile == registered:
             return key

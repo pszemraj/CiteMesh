@@ -5,26 +5,71 @@ from __future__ import annotations
 import json
 import platform
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import TYPE_CHECKING, Literal, TypedDict
 from uuid import uuid4
 
 import numpy as np
+from numpy.typing import NDArray
 
+from citemesh.data.embedding_cache.models import (
+    ActiveCorpusRecord,
+    CorpusRecord,
+    PortableImportIdentity,
+    PortableProducerProvenance,
+    PortableShardData,
+    PublicationOrigin,
+    StoredEmbedding,
+)
 from citemesh.data.embedding_contract import (
     CorpusSource,
+    CorpusSourceData,
     EmbeddingContract,
+    EmbeddingContractData,
+    NamespaceSelectors,
     require_namespace_contract,
 )
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+
+    from .store import EmbeddingCache
 
 FORMAT_VERSION = 1
 
 
+class PortableManifestData(TypedDict):
+    """Serialized fields that define a portable corpus snapshot."""
+
+    config_name: str
+    snapshot_id: str
+    created_at: str
+    producer_version: str
+    contract: EmbeddingContractData
+    namespace_serialization: str
+    namespace_selectors: NamespaceSelectors
+    source: CorpusSourceData
+    row_count: int
+    source_records_examined: int
+    shards: list[PortableShardData]
+    calibration_ranges: str | None
+    producer_provenance: PortableProducerProvenance
+    format_version: int
+    row_order: Literal["native-relative"]
+
+
 def _relative_path(value: str) -> str:
+    """Return a safe relative path used by a portable artifact.
+
+    :param str value: Artifact path from the manifest.
+    :return str: Validated portable relative path.
+    """
     path = PurePosixPath(value)
     if (
         not value
@@ -57,15 +102,15 @@ class PortableManifest:
     producer_version: str
     contract: EmbeddingContract
     namespace_serialization: str
-    namespace_selectors: dict[str, Any]
+    namespace_selectors: NamespaceSelectors
     source: CorpusSource
     row_count: int
     source_records_examined: int
     shards: tuple[PortableShard, ...]
     calibration_ranges: str | None = None
-    producer_provenance: dict[str, Any] = field(default_factory=dict)
+    producer_provenance: PortableProducerProvenance = field(default_factory=dict)
     format_version: int = FORMAT_VERSION
-    row_order: str = "native-relative"
+    row_order: Literal["native-relative"] = "native-relative"
 
     @property
     def artifact_paths(self) -> list[str]:
@@ -75,21 +120,66 @@ class PortableManifest:
             paths.append(self.calibration_ranges)
         return paths
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self) -> PortableManifestData:
+        """Return the manifest fields in their portable mapping form."""
+        return {
+            "config_name": self.config_name,
+            "snapshot_id": self.snapshot_id,
+            "created_at": self.created_at,
+            "producer_version": self.producer_version,
+            "contract": self.contract.to_dict(),
+            "namespace_serialization": self.namespace_serialization,
+            "namespace_selectors": deepcopy(self.namespace_selectors),
+            "source": self.source.to_dict(),
+            "row_count": self.row_count,
+            "source_records_examined": self.source_records_examined,
+            "shards": [
+                {
+                    "path": shard.path,
+                    "first_row": shard.first_row,
+                    "row_count": shard.row_count,
+                }
+                for shard in self.shards
+            ],
+            "calibration_ranges": self.calibration_ranges,
+            "producer_provenance": deepcopy(self.producer_provenance),
+            "format_version": self.format_version,
+            "row_order": self.row_order,
+        }
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> PortableManifest:
-        """Parse and validate the supported manifest before opening a cache."""
+    def from_dict(cls, value: Mapping[str, object]) -> PortableManifest:
+        """Parse a serialized manifest and validate its snapshot contract.
+
+        :param Mapping[str, object] value: Raw serialized manifest mapping.
+        :return PortableManifest: Validated snapshot manifest.
+        """
         if "format_version" not in value or "row_order" not in value:
             raise ValueError("Portable manifest requires format and row-order versions")
         try:
+            contract_data = value["contract"]
+            source_data = value["source"]
+            shard_data = value["shards"]
+            if (
+                not isinstance(contract_data, Mapping)
+                or not isinstance(source_data, Mapping)
+                or not isinstance(shard_data, Iterable)
+            ):
+                raise TypeError("Portable manifest fields have invalid mapping shapes")
+            contract_values: Mapping[str, object] = contract_data
+            source_values: Mapping[str, object] = source_data
+            shard_values: Iterable[object] = shard_data
+            shards = []
+            for item in shard_values:
+                if not isinstance(item, Mapping):
+                    raise TypeError("Portable shard fields must be mappings")
+                shards.append(PortableShard(**item))
             manifest = cls(
                 **{
                     **value,
-                    "contract": EmbeddingContract(**value["contract"]),
-                    "source": CorpusSource(**value["source"]),
-                    "shards": tuple(PortableShard(**item) for item in value["shards"]),
+                    "contract": EmbeddingContract(**contract_values),
+                    "source": CorpusSource(**source_values),
+                    "shards": tuple(shards),
                 }
             )
         except (KeyError, TypeError) as exc:
@@ -150,6 +240,11 @@ class PortableManifest:
 
 
 def _validate_manifest_semantics(manifest: PortableManifest) -> None:
+    """Check that source and namespace fields agree with the vector contract.
+
+    :param PortableManifest manifest: Manifest whose semantic fields are checked.
+    :raises ValueError: If the source or namespace is incompatible.
+    """
     contract = manifest.contract
     for name in (
         "model_id",
@@ -205,6 +300,11 @@ def _validate_manifest_semantics(manifest: PortableManifest) -> None:
 
 
 def _validate_contract(contract: EmbeddingContract) -> None:
+    """Check that the embedding shape and stored dtype are supported.
+
+    :param EmbeddingContract contract: Contract to validate.
+    :raises ValueError: If the shape or dtype is unsupported.
+    """
     if contract.stored_dtype not in {"int8", "float32"} or (
         type(contract.dimension) is not int or contract.dimension <= 0
     ):
@@ -212,7 +312,11 @@ def _validate_contract(contract: EmbeddingContract) -> None:
 
 
 def load_manifest(path: Path | str) -> PortableManifest:
-    """Read an export directory or an explicit ``index.json`` path."""
+    """Read and validate a manifest from a directory or ``index.json`` file.
+
+    :param Path | str path: Export directory or manifest path.
+    :return PortableManifest: Validated snapshot manifest.
+    """
     path = Path(path)
     if path.is_dir():
         path /= "index.json"
@@ -220,11 +324,16 @@ def load_manifest(path: Path | str) -> PortableManifest:
         value = json.load(handle)
     if not isinstance(value, dict):
         raise ValueError("Portable manifest must be a JSON object")
-    return PortableManifest.from_dict(value)
+    manifest_data: Mapping[str, object] = value
+    return PortableManifest.from_dict(manifest_data)
 
 
-def portable_schema(contract: EmbeddingContract):
-    """Return the version-one schema; Arrow is optional until invoked."""
+def portable_schema(contract: EmbeddingContract) -> pa.Schema:
+    """Build the Arrow schema for one stored embedding contract.
+
+    :param EmbeddingContract contract: Vector dtype and dimension for the schema.
+    :return pa.Schema: Ordered fields for portable corpus rows and embeddings.
+    """
     import pyarrow as pa
 
     _validate_contract(contract)
@@ -251,7 +360,18 @@ def portable_schema(contract: EmbeddingContract):
     )
 
 
-def _validate_vectors(vectors: np.ndarray, contract: EmbeddingContract, rows: int):
+def _validate_vectors(
+    vectors: StoredEmbedding,
+    contract: EmbeddingContract,
+    rows: int,
+) -> None:
+    """Check a stored-vector batch against its contract and row count.
+
+    :param StoredEmbedding vectors: Stored vector matrix.
+    :param EmbeddingContract contract: Contract that defines dtype and width.
+    :param int rows: Expected number of vectors.
+    :raises ValueError: If the batch does not match the contract.
+    """
     if vectors.dtype != np.dtype(contract.stored_dtype):
         raise ValueError("Stored vector dtype differs from the snapshot contract")
     if vectors.shape != (rows, contract.dimension):
@@ -260,7 +380,13 @@ def _validate_vectors(vectors: np.ndarray, contract: EmbeddingContract, rows: in
         raise ValueError("Stored float32 vectors must contain only finite values")
 
 
-def _validate_ranges(ranges: np.ndarray, contract: EmbeddingContract) -> None:
+def _validate_ranges(ranges: NDArray[np.float32], contract: EmbeddingContract) -> None:
+    """Check that float32 calibration ranges match the embedding dimension.
+
+    :param NDArray[np.float32] ranges: Lower and upper range for each coordinate.
+    :param EmbeddingContract contract: Contract that defines vector width.
+    :raises ValueError: If the range matrix is invalid.
+    """
     if (
         ranges.dtype != np.dtype("float32")
         or ranges.shape != (2, contract.dimension)
@@ -270,7 +396,20 @@ def _validate_ranges(ranges: np.ndarray, contract: EmbeddingContract) -> None:
         raise ValueError("Invalid float32 calibration ranges")
 
 
-def _record_batch(records, vectors, contract, first_row):
+def _record_batch(
+    records: Sequence[ActiveCorpusRecord],
+    vectors: StoredEmbedding,
+    contract: EmbeddingContract,
+    first_row: int,
+) -> pa.RecordBatch:
+    """Create one Arrow batch with portable fields and ordered row numbers.
+
+    :param Sequence[ActiveCorpusRecord] records: Corpus rows in native row order.
+    :param StoredEmbedding vectors: Stored embeddings for those rows.
+    :param EmbeddingContract contract: Vector dtype and dimension.
+    :param int first_row: Portable row number assigned to the first record.
+    :return pa.RecordBatch: Typed Arrow rows for one Parquet write.
+    """
     import pyarrow as pa
 
     _validate_vectors(vectors, contract, len(records))
@@ -295,14 +434,22 @@ def _record_batch(records, vectors, contract, first_row):
 
 
 def export_snapshot(
-    cache,
+    cache: EmbeddingCache,
     output_dir: Path | str,
     *,
     config_name: str = "embeddinggemma-512-int8",
     shard_rows: int = 65_536,
     batch_rows: int = 8_192,
 ) -> PortableManifest:
-    """Stream one locked native corpus into a fresh portable directory."""
+    """Write a bounded portable snapshot from a complete native corpus.
+
+    :param EmbeddingCache cache: Native cache to export under its snapshot lock.
+    :param Path | str output_dir: New directory that receives the manifest and shards.
+    :param str config_name: Published configuration name recorded in the manifest.
+    :param int shard_rows: Maximum data rows per Parquet shard.
+    :param int batch_rows: Native rows read and converted per batch.
+    :return PortableManifest: Manifest describing the completed export.
+    """
     import pyarrow.parquet as pq
 
     if shard_rows < 1 or batch_rows < 1:
@@ -395,8 +542,15 @@ def export_snapshot(
 
 def iter_snapshot_batches(
     snapshot_dir: Path | str, manifest: PortableManifest, *, batch_rows: int = 8_192
-):
-    """Validate ordered shards and yield bounded exact stored-vector batches."""
+) -> Iterator[tuple[int, list[CorpusRecord], StoredEmbedding]]:
+    """Validate ordered shards and yield bounded stored-vector batches.
+
+    :param Path | str snapshot_dir: Directory containing the declared shard files.
+    :param PortableManifest manifest: Validated snapshot description.
+    :param int batch_rows: Maximum records yielded from each Parquet batch.
+    :return Iterator[tuple[int, list[CorpusRecord], StoredEmbedding]]: Batches of
+        first row number, corpus records, and their stored vectors.
+    """
 
     if batch_rows < 1:
         raise ValueError("Batch row count must be positive")
@@ -406,7 +560,21 @@ def iter_snapshot_batches(
             yield from _iter_snapshot_batches(snapshot_dir, manifest, batch_rows, seen)
 
 
-def _iter_snapshot_batches(snapshot_dir, manifest, batch_rows, seen):
+def _iter_snapshot_batches(
+    snapshot_dir: Path | str,
+    manifest: PortableManifest,
+    batch_rows: int,
+    seen: sqlite3.Connection,
+) -> Iterator[tuple[int, list[CorpusRecord], StoredEmbedding]]:
+    """Read, validate, and yield rows from each declared Parquet shard.
+
+    :param Path | str snapshot_dir: Directory containing the declared shard files.
+    :param PortableManifest manifest: Validated snapshot description.
+    :param int batch_rows: Maximum records read from each Parquet batch.
+    :param sqlite3.Connection seen: Temporary index for duplicate paper IDs.
+    :return Iterator[tuple[int, list[CorpusRecord], StoredEmbedding]]: Batches of
+        first row number, corpus records, and their stored vectors.
+    """
     import pyarrow.parquet as pq
 
     schema = portable_schema(manifest.contract)
@@ -440,7 +608,9 @@ def _iter_snapshot_batches(snapshot_dir, manifest, batch_rows, seen):
                     len(batch), manifest.contract.dimension
                 )
                 _validate_vectors(vectors, manifest.contract, len(batch))
-                records = batch.select(schema.names[1:-1]).to_pylist()
+                records: list[CorpusRecord] = batch.select(
+                    schema.names[1:-1]
+                ).to_pylist()
                 if any(record["source_ordinal"] < 0 for record in records):
                     raise ValueError("Portable source ordinals must be nonnegative")
                 if any(
@@ -464,8 +634,15 @@ def _iter_snapshot_batches(snapshot_dir, manifest, batch_rows, seen):
         raise ValueError("Portable payload differs from declared row coverage")
 
 
-def validate_snapshot(snapshot_dir: Path | str, *, batch_rows: int = 8_192):
-    """Validate every declared payload using bounded reads before publication."""
+def validate_snapshot(
+    snapshot_dir: Path | str, *, batch_rows: int = 8_192
+) -> PortableManifest:
+    """Validate every declared payload before publication.
+
+    :param Path | str snapshot_dir: Export directory containing ``index.json``.
+    :param int batch_rows: Maximum Parquet rows read at once.
+    :return PortableManifest: Validated manifest for the snapshot.
+    """
     manifest = load_manifest(snapshot_dir)
     if manifest.calibration_ranges is not None:
         ranges = np.load(
@@ -481,10 +658,17 @@ def import_snapshot(
     snapshot_dir: Path | str,
     destination: Path | None = None,
     *,
-    publication: dict[str, Any] | None = None,
+    publication: PublicationOrigin | None = None,
     batch_rows: int = 8_192,
-):
-    """Resume or install a snapshot through the native append-only session."""
+) -> EmbeddingCache:
+    """Install a portable snapshot into a native cache namespace.
+
+    :param Path | str snapshot_dir: Directory containing the portable manifest.
+    :param Path | None destination: Native cache directory, when explicitly set.
+    :param PublicationOrigin publication: Bucket and snapshot identity, if published.
+    :param int batch_rows: Maximum records imported at once.
+    :return EmbeddingCache: Cache populated from the snapshot.
+    """
     from .lifecycle import import_destination_session
 
     snapshot_dir = Path(snapshot_dir)
@@ -525,11 +709,22 @@ def import_snapshot(
         return session.cache
 
 
-def manifest_import_identity(manifest: PortableManifest) -> dict[str, Any]:
-    """Use one operation identity for preflight, import, and interrupted resume."""
+def manifest_import_identity(manifest: PortableManifest) -> PortableImportIdentity:
+    """Return the manifest fields that identify an import operation.
+
+    :param PortableManifest manifest: Snapshot being imported.
+    :return PortableImportIdentity: Stable identity used to recognize a resumed import.
+    """
     return {
         "snapshot_id": manifest.snapshot_id,
-        "contract": asdict(manifest.contract),
-        "source": asdict(manifest.source),
-        "shards": [asdict(shard) for shard in manifest.shards],
+        "contract": manifest.contract.to_dict(),
+        "source": manifest.source.to_dict(),
+        "shards": [
+            {
+                "path": shard.path,
+                "first_row": shard.first_row,
+                "row_count": shard.row_count,
+            }
+            for shard in manifest.shards
+        ],
     }

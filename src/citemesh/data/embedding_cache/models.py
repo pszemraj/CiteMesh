@@ -10,9 +10,132 @@ incompatible and the namespace must be rebuilt.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict
 
 import numpy as np
+from numpy.typing import NDArray
+
+from ..embedding_contract import CorpusSourceData, EmbeddingContractData
+
+StoredEmbedding = NDArray[np.int8] | NDArray[np.float32]
+
+
+class PaperMetadata(TypedDict, total=False):
+    """Optional bibliographic fields accepted by the embedding cache."""
+
+    title: str | None
+    abstract: str | None
+    year: int | str | None
+    authors: list[str] | None
+    categories: list[str] | None
+    venue: str | None
+    arxiv_id: str | None
+    doi: str | None
+
+
+class CorpusSourceRecord(PaperMetadata):
+    """Normalized source row selected for corpus hydration."""
+
+    paper_id: str
+    source_ordinal: int
+    chronology_key: int | None
+
+
+class CorpusRecord(TypedDict):
+    """Persisted corpus row carried by a portable snapshot."""
+
+    paper_id: str
+    arxiv_id: str | None
+    doi: str | None
+    title: str | None
+    abstract: str | None
+    year: int | None
+    authors: list[str] | None
+    categories: list[str] | None
+    venue: str | None
+    text_hash: str
+    chronology_key: int | None
+    source_ordinal: int
+
+
+class ActiveCorpusRecord(CorpusRecord):
+    """Persisted corpus row with its physical embedding-row index."""
+
+    row_idx: int
+
+
+class PortableShardData(TypedDict):
+    """Serialized row range and payload path for one portable shard."""
+
+    path: str
+    first_row: int
+    row_count: int
+
+
+class PortableImportIdentity(TypedDict):
+    """Manifest fields that identify an import operation for resumption."""
+
+    snapshot_id: str
+    contract: EmbeddingContractData
+    source: CorpusSourceData
+    shards: list[PortableShardData]
+
+
+class RuntimeVersions(TypedDict):
+    """Runtime package versions recorded when exporting a snapshot."""
+
+    python: str
+    numpy: str
+    h5py: str
+    pyarrow: str
+
+
+class PublicationOrigin(TypedDict):
+    """Bucket publication identity attached to an imported cache."""
+
+    bucket_id: str
+    config_name: str
+    snapshot_id: str
+
+
+class PortableProducerProvenance(TypedDict, total=False):
+    """Known producer and runtime details carried by a portable manifest."""
+
+    source_torch_dtype: str
+    embedding_vector_dtype: str
+    binary_prefilter_used: bool | None
+    active_model: str
+    model_fingerprint: str | None
+    resolved_model_revision: str | None
+    truncate_dim: int | None
+    device: str
+    requested_device: str
+    compute_dtype: str
+    autocast: bool
+    retrieval_representation: str
+    graph_representation: str
+    model_profile: str
+    dataset_revision: str | None
+    cache_namespace: str
+    index_origin: PublicationOrigin | None
+    export_runtime_versions: RuntimeVersions
+
+
+PaperRowValues = tuple[
+    str,
+    str,
+    str,
+    int | None,
+    str,
+    int,
+    int,
+    str,
+    str,
+    str,
+    str,
+    str,
+    int | None,
+]
 
 
 class _EmbeddingCacheLayoutError(ValueError):
@@ -25,8 +148,8 @@ class CacheSearchResult:
 
     paper_id: str
     score: float
-    embedding: np.ndarray
-    metadata: dict[str, Any]
+    embedding: NDArray[np.float32]
+    metadata: PaperMetadata
 
 
 @dataclass(frozen=True)
@@ -48,7 +171,7 @@ class PendingEmbeddingRecord:
     """Cache-miss record staged across lookup/encode/commit phases."""
 
     paper_id: str
-    metadata: dict[str, object]
+    metadata: PaperMetadata
     text_hash: str
     text: str
     row_idx: int | None
@@ -58,7 +181,7 @@ class PendingEmbeddingRecord:
 class _CacheLookupPlan:
     """Outcome of the pre-encode cache scan for one embedding request."""
 
-    cached_embeddings: dict[str, np.ndarray]
+    cached_embeddings: dict[str, NDArray[np.float32]]
     papers_to_embed: list[PendingEmbeddingRecord]
 
 
@@ -72,19 +195,20 @@ class _Int8Saturation:
 
 @dataclass
 class _VectorWritePlan:
-    """Row-level write plan derived from one encoded batch.
-
-    ``replacement_rows`` carries ``(row_idx, previous_embedding, previous_binary,
-    replacement_embedding, replacement_binary)`` so the journal can record the
-    prior vectors before the new ones overwrite them.
-    """
+    """Describe metadata and vector writes prepared for one encoded batch."""
 
     existing_row_count: int
-    new_embeddings: dict[str, np.ndarray]
-    rows_to_upsert: list[tuple[Any, ...]]
-    append_embeddings: list[np.ndarray]
-    append_binary_embeddings: list[np.ndarray]
-    append_records: list[tuple[str, dict[str, object], str]]
+    new_embeddings: dict[str, NDArray[np.float32]]
+    rows_to_upsert: list[PaperRowValues]
+    append_embeddings: list[StoredEmbedding]
+    append_binary_embeddings: list[NDArray[np.uint8]]
+    append_records: list[tuple[str, PaperMetadata, str]]
     replacement_rows: list[
-        tuple[int, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray | None]
+        tuple[
+            int,
+            StoredEmbedding,
+            NDArray[np.uint8] | None,
+            StoredEmbedding,
+            NDArray[np.uint8] | None,
+        ]
     ]

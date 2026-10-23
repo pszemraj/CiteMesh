@@ -15,7 +15,11 @@ from pathlib import Path
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse the private publication destination and local corpus settings."""
+    """Parse the private publication destination and local corpus settings.
+
+    :param list[str] argv: Optional argument list; defaults to process arguments.
+    :return argparse.Namespace: Parsed publication options.
+    """
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
@@ -81,7 +85,20 @@ def publish_arxiv_index(
     storage_precision: str = "int8",
     device: str | None = None,
 ) -> str:
-    """Use the native refresh and portable export paths before publication."""
+    """Refresh or adopt a corpus, export it, and publish the snapshot.
+
+    :param str bucket_id: Existing private Hugging Face bucket identifier.
+    :param Path output: Directory for the portable snapshot.
+    :param str config_name: Published snapshot configuration name.
+    :param Optional[str] namespace: Existing native cache namespace to refresh.
+    :param Optional[str] adopt_namespace: Legacy namespace to certify first.
+    :param Optional[str] dataset_revision: Source revision for refresh or adoption.
+    :param Optional[str] model_revision: Model revision for a new cache.
+    :param int dimension: Embedding dimension for a new cache.
+    :param str storage_precision: Stored vector dtype for a new cache.
+    :param Optional[str] device: Encoder device override.
+    :return str: Published snapshot identifier.
+    """
     from citemesh.data.embedding_cache.portable import export_snapshot
     from citemesh.services.embedding_indexes import publish_snapshot
     from citemesh.strategies.embedding import EmbeddingGraphBuilder
@@ -118,7 +135,11 @@ def publish_arxiv_index(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one manual publication and print its snapshot ID."""
+    """Run one manual publication and print its snapshot ID.
+
+    :param list[str] argv: Optional argument list; defaults to process arguments.
+    :return int: Process-style exit code.
+    """
     args = parse_args(argv)
     logging.basicConfig(
         level=max(logging.WARNING - 10 * args.verbose, logging.DEBUG),

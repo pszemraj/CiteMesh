@@ -12,8 +12,10 @@ from contextlib import closing
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import TypedDict
 
 from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
+from citemesh.data.embedding_cache.models import CorpusSourceRecord
 from citemesh.data.embedding_contract import CorpusSource
 
 from . import deps
@@ -22,8 +24,18 @@ from .records import _dataset_record_raw_paper_id, _extract_dataset_paper_metada
 logger = logging.getLogger(__name__)
 
 
-def _source_timestamp(value) -> str:
-    """Compare ISO dates and arXiv version timestamps in UTC."""
+class SourceScanStats(TypedDict):
+    """Counts recorded while iterating an upstream source."""
+
+    source_records_examined: int
+
+
+def _source_timestamp(value: object) -> str:
+    """Normalize a source timestamp to a UTC ISO value.
+
+    :param value: ISO date, date-time, or email-style timestamp.
+    :return: UTC timestamp with microsecond precision, or an empty string.
+    """
     if isinstance(value, date) and not isinstance(value, datetime):
         value = value.isoformat()
     if isinstance(value, str):
@@ -41,8 +53,12 @@ def _source_timestamp(value) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _source_priority(record: dict) -> tuple[str, int, str]:
-    """Rank metadata updates first, then the latest numbered arXiv version."""
+def _source_priority(record: dict[str, object]) -> tuple[str, int, str]:
+    """Return update time, version number, and version creation time.
+
+    :param record: Raw dataset row with source version metadata.
+    :return: Values used to choose the newest duplicate record.
+    """
     versions = []
     for version in record.get("versions") or []:
         if not isinstance(version, dict):
@@ -62,7 +78,12 @@ def _source_priority(record: dict) -> tuple[str, int, str]:
 def resolve_source_snapshot(
     source: CorpusSource, revision: str = "main"
 ) -> CorpusSource:
-    """Resolve a source reference once; every subsequent read uses its commit."""
+    """Resolve a source reference to its immutable commit.
+
+    :param source: Dataset repository and split to resolve.
+    :param revision: Branch, tag, or commit requested from the dataset host.
+    :return: Source selection pinned to the resolved commit.
+    """
     from dataclasses import replace
 
     info = (
@@ -74,8 +95,15 @@ def resolve_source_snapshot(
 
 
 def _source_records(
-    source: CorpusSource, stats: dict | None = None
-) -> Iterator[tuple[dict, tuple[str, int, str]]]:
+    source: CorpusSource, stats: SourceScanStats | None = None
+) -> Iterator[tuple[CorpusSourceRecord, tuple[str, int, str]]]:
+    """Yield normalized rows with their source-version priority.
+
+    :param source: Pinned dataset selection to read.
+    :param stats: Optional counter for raw rows examined.
+    Yields:
+        Normalized source record and its duplicate-selection priority.
+    """
     kwargs = {
         "split": source.split,
         "revision": source.revision,
@@ -96,14 +124,17 @@ def _source_records(
 
 
 def iter_source_records(
-    source: CorpusSource, stats: dict | None = None
-) -> Iterator[dict]:
-    """Resolve repeated IDs before yielding records with their source ordinals.
+    source: CorpusSource, stats: SourceScanStats | None = None
+) -> Iterator[CorpusSourceRecord]:
+    """Yield one selected source row per paper ID.
 
-    All selections share a disk-backed staging pass. Newer metadata updates win,
-    followed by version number and creation time. Conflicting equally recent
-    records use sorted normalized JSON as a stable tie-break, without claiming
-    either is newer. Identical equally recent duplicates keep their first ordinal.
+    Newer update and version metadata win; equal-priority conflicts use stable
+    normalized content ordering, while identical duplicates keep their first row.
+
+    :param source: Pinned dataset selection to read.
+    :param stats: Optional counter for raw rows examined.
+    Yields:
+        Normalized row with its source ordinal and chronology key.
     """
     with (
         tempfile.TemporaryDirectory(prefix="citemesh-source-") as temporary,
@@ -180,10 +211,17 @@ def iter_source_records(
 
 
 def iter_source_batches(
-    source: CorpusSource, batch_size: int, stats: dict | None = None
-) -> Iterator[list[dict]]:
-    """Bound the live normalized record batch independently of corpus size."""
-    batch: list[dict] = []
+    source: CorpusSource, batch_size: int, stats: SourceScanStats | None = None
+) -> Iterator[list[CorpusSourceRecord]]:
+    """Yield bounded batches of normalized source rows.
+
+    :param source: Pinned dataset selection to read.
+    :param batch_size: Maximum number of records in a batch.
+    :param stats: Optional counter for raw rows examined.
+    Yields:
+        A batch of normalized source rows.
+    """
+    batch: list[CorpusSourceRecord] = []
     for record in iter_source_records(source, stats):
         batch.append(record)
         if len(batch) == batch_size:

@@ -168,8 +168,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
-        :param Optional[str] force_rebuild_reason: Optional operator rationale logged
-            when ``force_rebuild_cache`` clears embedding namespace state.
+        :param force_rebuild_reason: Optional message recorded when
+            ``force_rebuild_cache`` clears embedding namespace state.
         :param str storage_precision: Persistent cache precision for semantic branch embeddings.
         :param Optional[bool] binary_prefilter: Whether semantic branch uses binary
             prefiltering. When ``None``, defaults are selected by embedding precision.
@@ -190,6 +190,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int candidate_pool_size: Maximum S2 candidate pool size used by
             the embedding builder in ``candidates`` mode.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
+        :param cache_selection: Existing corpus cache selected for semantic retrieval.
         """
         if cache_selection is not None:
             semantic_source = "arxiv-corpus"

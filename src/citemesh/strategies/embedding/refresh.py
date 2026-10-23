@@ -5,11 +5,15 @@ from __future__ import annotations
 import logging
 import re
 from hashlib import sha256
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict
+
+import numpy as np
 
 from citemesh.data.embedding_contract import (
     INT8_QUANTIZATION,
     CorpusSource,
+    CorpusSourceData,
     EmbeddingContract,
     ExistingCacheSelection,
 )
@@ -18,23 +22,86 @@ from citemesh.data.model_profiles import embedding_model_profile_key
 from . import corpus_source
 from .hydration import HYDRATION_FLUSH_SIZE
 
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from .builder import EmbeddingBuilderRuntimeOptions, EmbeddingGraphBuilder
+
 logger = logging.getLogger(__name__)
 
 
+class _UnchangedRefreshResult(TypedDict):
+    """Refresh result when the pinned source already matches the cache."""
+
+    unchanged: Literal[True]
+    source: CorpusSourceData
+
+
+class _UpdatedRefreshResult(TypedDict):
+    """Refresh result with counts for the reconciled source."""
+
+    unchanged: Literal[False]
+    source: CorpusSourceData
+    source_records_examined: int
+    active_rows: int
+    encoded_rows: int
+
+
+RefreshResult = _UnchangedRefreshResult | _UpdatedRefreshResult
+
+
 class _LazyEncoder:
-    def __init__(self, builder):
+    """Load a builder's model on the first cache miss during refresh."""
+
+    def __init__(self, builder: EmbeddingGraphBuilder) -> None:
+        """Wrap the builder and initialize the encoded-row counter.
+
+        :param builder: Builder that owns the active model and cache namespace.
+        """
         self.builder = builder
         self.encoded_count = 0
 
-    def encode(self, *args, **kwargs):
+    def encode(
+        self,
+        sentences: list[str],
+        *,
+        batch_size: int,
+        convert_to_tensor: Literal[False],
+        normalize_embeddings: Literal[True],
+        show_progress_bar: bool,
+    ) -> np.ndarray:
+        """Encode one cache-miss batch with the builder's active model.
+
+        :param sentences: Retrieval texts to encode.
+        :param batch_size: Maximum number of texts in an encode batch.
+        :param convert_to_tensor: Whether the encoder should return a tensor.
+        :param normalize_embeddings: Whether the encoder should normalize vectors.
+        :param show_progress_bar: Whether the encoder may show a progress bar.
+        :return: Encoded vectors for the supplied texts.
+        """
         self.builder._load_model()
         self.builder._ensure_cache_model_fingerprint()
-        result = self.builder._get_model_for_encoding().encode(*args, **kwargs)
-        self.encoded_count += len(args[0] if args else kwargs["sentences"])
+        result = self.builder._get_model_for_encoding().encode(
+            sentences,
+            batch_size=batch_size,
+            convert_to_tensor=convert_to_tensor,
+            normalize_embeddings=normalize_embeddings,
+            show_progress_bar=show_progress_bar,
+        )
+        self.encoded_count += len(sentences)
         return result
 
 
-def _builder_contract(builder, *, fingerprint: str | None = None) -> EmbeddingContract:
+def _builder_contract(
+    builder: EmbeddingGraphBuilder, *, fingerprint: str | None = None
+) -> EmbeddingContract:
+    """Build the persisted vector contract for a builder configuration.
+
+    :param builder: Builder whose model, formatter, and storage settings define the contract.
+    :param fingerprint: Resolved model identity to use when one is already available.
+    :return: Contract represented by the cache namespace.
+    :raises ValueError: If immutable model identity or embedding dimension is unavailable.
+    """
     fingerprint = fingerprint or builder._resolve_model_fingerprint()
     prefix = f"hf::{builder.model_name}::"
     revision = fingerprint.removeprefix(prefix)
@@ -66,8 +133,15 @@ def _builder_contract(builder, *, fingerprint: str | None = None) -> EmbeddingCo
     )
 
 
-def refresh_builder_corpus(builder, revision: str | None = None) -> dict[str, Any]:
-    """Reconcile one fixed source target, loading weights only for actual misses."""
+def refresh_builder_corpus(
+    builder: EmbeddingGraphBuilder, revision: str | None = None
+) -> RefreshResult:
+    """Reconcile one pinned source target, loading weights only for cache misses.
+
+    :param builder: Builder that owns the cache and corpus selectors.
+    :param revision: Optional dataset revision to reconcile.
+    :return: Source identity and either an unchanged marker or refresh counts.
+    """
     contract = (
         builder._cache_selection.contract
         if builder._cache_selection
@@ -178,7 +252,7 @@ def refresh_builder_corpus(builder, revision: str | None = None) -> dict[str, An
                 builder._load_model()
                 builder._ensure_cache_model_fingerprint()
                 builder._initialize_calibration_ranges(sample)
-            scan_stats = {"source_records_examined": 0}
+            scan_stats: corpus_source.SourceScanStats = {"source_records_examined": 0}
             encoder = _LazyEncoder(builder)
             for records in corpus_source.iter_source_batches(
                 target, HYDRATION_FLUSH_SIZE, scan_stats
@@ -216,9 +290,17 @@ def refresh_builder_corpus(builder, revision: str | None = None) -> dict[str, An
 
 
 def refresh_cache_selection(
-    selection: ExistingCacheSelection, revision: str | None = None, **runtime_options
-) -> dict[str, Any]:
-    """Refresh a selected native destination, including interrupted work."""
+    selection: ExistingCacheSelection,
+    revision: str | None = None,
+    **runtime_options: Unpack[EmbeddingBuilderRuntimeOptions],
+) -> RefreshResult:
+    """Refresh a selected native cache, including interrupted work.
+
+    :param selection: Resolved namespace contract and source selectors.
+    :param revision: Optional dataset revision to reconcile.
+    :param runtime_options: Optional arguments passed to ``EmbeddingGraphBuilder``.
+    :return: Source identity and either an unchanged marker or refresh counts.
+    """
     from citemesh.data.embedding_cache import open_existing_cache
 
     from .builder import EmbeddingGraphBuilder
@@ -234,11 +316,20 @@ def refresh_cache_selection(
     return refresh_builder_corpus(builder, revision)
 
 
-def adopt_legacy_cache(builder, namespace_id: str, *, cache_dir=None, revision=None):
-    """Prove supplied legacy selectors before reconciling their pinned source.
+def adopt_legacy_cache(
+    builder: EmbeddingGraphBuilder,
+    namespace_id: str,
+    *,
+    cache_dir: Path | None = None,
+    revision: str | None = None,
+) -> RefreshResult:
+    """Reconstruct a legacy cache contract before refreshing its source.
 
-    The builder keeps the historical requested revision until the original
-    address is reconstructed. Runtime loading then uses its resolved checkpoint.
+    :param builder: Builder configured with the source selectors for the cache.
+    :param namespace_id: Legacy cache namespace to open.
+    :param cache_dir: Cache directory containing the legacy namespace.
+    :param revision: Optional dataset revision to reconcile.
+    :return: Source identity and either an unchanged marker or refresh counts.
     """
     from citemesh.data.embedding_cache import constants, open_existing_cache
     from citemesh.data.embedding_cache.lifecycle import read_existing_cache_metadata

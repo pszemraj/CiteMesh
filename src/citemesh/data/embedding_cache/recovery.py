@@ -86,7 +86,10 @@ class _RecoveryMixin:
 
     @contextmanager
     def namespace_lock_only(self) -> Iterator[None]:
-        """Acquire the namespace lock without initializing native payloads."""
+        """Acquire the namespace lock without initializing payloads.
+
+        :return: Context manager holding the namespace lock.
+        """
         timeout_seconds = _resolve_cache_lock_timeout_seconds()
         with self._cache_operation_lock():
             self.cache_dir.mkdir(parents=True, exist_ok=True)

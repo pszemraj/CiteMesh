@@ -12,7 +12,12 @@ from citemesh.data.model_profiles import compose_title_abstract_text
 def cosine_similarity_to_query(
     normalized_query: np.ndarray, embedding: np.ndarray
 ) -> float:
-    """Score an embedding against an already L2-normalized query."""
+    """Score an embedding against an already L2-normalized query.
+
+    :param normalized_query: Query vector with unit L2 norm.
+    :param embedding: Candidate embedding to normalize and score.
+    :return: Cosine similarity clipped to ``[-1, 1]``.
+    """
     return float(
         np.clip(np.dot(normalized_query, l2_normalize_embeddings(embedding)), -1.0, 1.0)
     )
