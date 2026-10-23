@@ -118,7 +118,17 @@ class ExportFixture:
 
 
 @pytest.mark.parametrize(
-    "dtype,dimension", [("int8", 4), ("int8", 8), ("float32", 3), ("float32", 7)]
+    "dtype,dimension",
+    [
+        ("int8", 4),
+        ("int8", 8),
+        ("float32", 3),
+        ("float32", 7),
+        ("int8", 256),
+        ("int8", 512),
+        ("float32", 256),
+        ("float32", 512),
+    ],
 )
 def test_exact_bounded_export(dtype, dimension, tmp_path):
     cache = ExportFixture(dtype, dimension)
@@ -145,7 +155,10 @@ def test_exact_bounded_export(dtype, dimension, tmp_path):
     actual = np.concatenate([vectors for _, _, vectors in batches])
     assert actual.dtype == cache.vectors.dtype
     assert actual.tobytes() == cache.vectors.tobytes()
-    assert manifest.producer_provenance == {"source_torch_dtype": "bfloat16"}
+    assert manifest.producer_provenance["source_torch_dtype"] == "bfloat16"
+    runtime_versions = manifest.producer_provenance["export_runtime_versions"]
+    assert set(runtime_versions) == {"python", "numpy", "h5py", "pyarrow"}
+    assert all(isinstance(value, str) and value for value in runtime_versions.values())
     assert manifest.source_records_examined == 9
     if dtype == "int8":
         expected = np.array([[-1.1] * dimension, [2.7] * dimension], dtype=np.float32)
@@ -270,7 +283,17 @@ def test_manifest_is_written_last(tmp_path):
     assert all((snapshot / shard["path"]).is_file() for shard in value["shards"])
 
 
-@pytest.mark.parametrize("dtype,dimension", [("int8", 4), ("float32", 7)])
+@pytest.mark.parametrize(
+    "dtype,dimension",
+    [
+        ("int8", 4),
+        ("float32", 7),
+        ("int8", 256),
+        ("int8", 512),
+        ("float32", 256),
+        ("float32", 512),
+    ],
+)
 def test_native_import_round_trip_and_idempotence(dtype, dimension, tmp_path):
     fixture = ExportFixture(dtype, dimension)
     snapshot = tmp_path / "snapshot"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -369,7 +370,16 @@ def export_snapshot(
                 source=view.completed_source,
                 row_count=next_row,
                 source_records_examined=view.source_records_examined,
-                producer_provenance=view.producer_provenance,
+                producer_provenance={
+                    **view.producer_provenance,
+                    "export_runtime_versions": {
+                        "python": platform.python_version(),
+                        **{
+                            package: version(package)
+                            for package in ("numpy", "h5py", "pyarrow")
+                        },
+                    },
+                },
                 shards=tuple(shards),
                 calibration_ranges=ranges_path,
             )

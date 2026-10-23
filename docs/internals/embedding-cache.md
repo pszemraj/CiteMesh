@@ -128,6 +128,12 @@ revision and coverage, producer provenance, and each shard's row interval.
 Float32 and int8 vectors support the manifest's dimension without a fixed
 512-coordinate assumption.
 
+Producer provenance preserves the original compute and vector dtypes.
+`export_runtime_versions` records Python, NumPy, h5py, and PyArrow versions for
+the current export; these describe the exporter, not the historical encoder.
+Re-exporting an installed snapshot updates this field while retaining its
+creation provenance.
+
 Parquet stores dense `row_number`, stable `paper_id`, `arxiv_id`, `doi`, title,
 abstract, nullable year, authors/categories lists, venue, formatted `text_hash`,
 nullable `chronology_key`, `source_ordinal`, and a non-null fixed-size embedding

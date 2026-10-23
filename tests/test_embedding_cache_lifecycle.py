@@ -11,7 +11,7 @@ import h5py
 import numpy as np
 import pytest
 
-from citemesh.data.embedding_cache import EmbeddingCache, constants
+from citemesh.data.embedding_cache import EmbeddingCache, constants, lifecycle
 from citemesh.data.embedding_cache.lifecycle import (
     import_destination_session,
     open_existing_cache,
@@ -235,11 +235,68 @@ def test_strict_missing_half_preserves_database_and_never_repairs(tmp_path):
     assert not cache.h5_path.exists()
 
 
-def test_recognized_empty_import_initialization_resumes_missing_hdf5(tmp_path):
+@pytest.mark.parametrize("missing_half", ["db", "h5"])
+def test_strict_selection_refuses_each_missing_half(tmp_path, missing_half):
     settings = _settings(tmp_path)
-    with import_destination_session(**settings) as session:
-        cache = session.cache
-    cache.h5_path.unlink()
+    cache, _, _ = _populate(settings)
+    selection = select_existing_cache(cache.namespace_id, tmp_path)
+    missing_path = cache.db_path if missing_half == "db" else cache.h5_path
+    remaining_path = cache.h5_path if missing_half == "db" else cache.db_path
+    missing_path.unlink()
+    before = remaining_path.read_bytes()
+    with pytest.raises(RuntimeError, match="both SQLite and HDF5"):
+        open_existing_cache(selection, tmp_path)
+    assert remaining_path.read_bytes() == before
+    assert not missing_path.exists()
+
+
+def test_unreadable_import_database_is_preserved(tmp_path):
+    settings = _settings(tmp_path)
+    cache, _, _ = _populate(settings)
+    cache.db_path.write_bytes(b"unreadable SQLite payload")
+    before = cache.db_path.read_bytes(), cache.h5_path.read_bytes()
+    with pytest.raises(ValueError, match="database is unreadable"):
+        preflight_import_destination(**settings)
+    assert (cache.db_path.read_bytes(), cache.h5_path.read_bytes()) == before
+
+
+def test_initialization_without_pending_identity_is_preserved_and_refused(
+    tmp_path, monkeypatch
+):
+    settings = _settings(tmp_path)
+
+    def interrupt_pending_identity(*args):
+        raise RuntimeError("before pending identity")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, "_write_state", interrupt_pending_identity)
+        with pytest.raises(RuntimeError, match="before pending identity"):
+            with import_destination_session(**settings):
+                pytest.fail("Initialization should have been interrupted")
+    database = next(tmp_path.glob("metadata_*.db"))
+    before = database.read_bytes()
+    assert not list(tmp_path.glob("*.h5"))
+    with pytest.raises(ValueError, match="different or unknown contract"):
+        with import_destination_session(**settings):
+            pytest.fail("Ambiguous initialization must not be resumed")
+    assert database.read_bytes() == before
+    assert not list(tmp_path.glob("*.h5"))
+
+
+def test_recognized_empty_import_initialization_resumes_missing_hdf5(
+    tmp_path, monkeypatch
+):
+    settings = _settings(tmp_path)
+
+    def interrupt_hdf5_creation(*args, **kwargs):
+        raise RuntimeError("before initial HDF5 creation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle.h5py, "File", interrupt_hdf5_creation)
+        with pytest.raises(RuntimeError, match="before initial HDF5 creation"):
+            with import_destination_session(**settings):
+                pytest.fail("Initialization should have been interrupted")
+    assert not list(tmp_path.glob("*.h5"))
     with import_destination_session(**settings) as session:
         assert session.committed_rows == 0
         session.append_stored_embeddings(
