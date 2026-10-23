@@ -24,6 +24,7 @@ from citemesh.core import (
 from citemesh.core.paper_ids import is_local_corpus_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -142,6 +143,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         client: SemanticScholarClient | None = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
+        cache_selection: ExistingCacheSelection | None = None,
     ):
         """
         Initialize hybrid graph builder.
@@ -188,6 +190,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             the embedding builder in ``candidates`` mode.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
+        if cache_selection is not None:
+            semantic_source = "arxiv-corpus"
         normalized_semantic_source = str(semantic_source).strip().lower()
         if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
             formatted = ", ".join(SEMANTIC_SOURCE_CHOICES)
@@ -215,6 +219,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if self.max_semantic > 0:
             _check_embedding_deps(
                 require_corpus=normalized_semantic_source == "arxiv-corpus"
+                and cache_selection is None
             )
             self._semantic_candidate_cap = max(
                 self.max_semantic,
@@ -250,6 +255,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 semantic_source=normalized_semantic_source,
                 candidate_pool_size=candidate_pool_size,
                 client=self.client,
+                cache_selection=cache_selection,
             )
         else:
             self.embedding_builder = None

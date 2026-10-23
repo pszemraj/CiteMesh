@@ -120,6 +120,11 @@ class _CorpusHydrationMixin:
             top_k=top_k,
             binary_prefilter=self.binary_prefilter,
             binary_rescore_multiplier=self.binary_rescore_multiplier,
+            **(
+                {"corpus_size": self.corpus_size}
+                if getattr(self, "_cache_selection", None) is not None
+                else {}
+            ),
         )
         self._last_search_used_binary_prefilter = (
             self.embedding_cache.last_search_used_binary_prefilter
@@ -207,6 +212,8 @@ class _CorpusHydrationMixin:
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
         """
+        if self._ready_manual_corpus():
+            return
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         if cached_dataset_source == self.dataset_source:
             if self.embedding_cache.prepare_corpus_identity_reconciliation():
@@ -278,6 +285,39 @@ class _CorpusHydrationMixin:
             source_rows=hydration_result.source_rows_consumed,
             capped_upstream_rows=capped_upstream_rows,
         )
+
+    def _ready_manual_corpus(self) -> bool:
+        """Validate a completed managed corpus without consulting the upstream source."""
+        cache = self.embedding_cache
+        state_reader = getattr(cache, "corpus_state", None)
+        if state_reader is None:
+            return False
+        state = state_reader()
+        if not state or state.get("update_policy") != "manual":
+            return False
+        if state.get("pending") or not state.get("membership_complete"):
+            raise RuntimeError(
+                "Installed corpus is incomplete; resume cache refresh or import first"
+            )
+        source = state["source"]
+        if hasattr(source, "to_dict"):
+            source = source.to_dict()
+        if (source["repo_id"], source["split"]) != (
+            self.dataset_source,
+            self.dataset_split,
+        ):
+            raise RuntimeError(
+                "Installed corpus source does not match the requested dataset and split"
+            )
+        if source["selection"] == "newest" and (
+            self.corpus_size is None or self.corpus_size > source["limit"]
+        ):
+            raise ValueError(
+                "Requested corpus view exceeds installed coverage; refresh a larger coverage first"
+            )
+        self._completed_source_revision = source["revision"]
+        self._index_origin = state.get("origin")
+        return True
 
     def _revalidate_hydrated_cache(
         self, cached_dataset_source: str | None, use_streaming: bool

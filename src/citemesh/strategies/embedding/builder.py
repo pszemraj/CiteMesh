@@ -53,6 +53,7 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     CacheSearchResult,
 )
+from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -161,6 +162,7 @@ class EmbeddingGraphBuilder(
         client: SemanticScholarClient | None = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
+        cache_selection: ExistingCacheSelection | None = None,
     ):
         """
         Initialize embedding graph builder.
@@ -205,12 +207,34 @@ class EmbeddingGraphBuilder(
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         :param str dataset_source: HuggingFace dataset repository with arXiv metadata fields.
         """
+        self._cache_selection = cache_selection
+        self._selected_cache_handle = None
+        if cache_selection is not None:
+            contract = cache_selection.contract
+            model_name = contract.model_id
+            model_revision = contract.model_revision
+            model_profile = contract.profile_key
+            truncate_dim = contract.dimension
+            storage_precision = contract.stored_dtype
+            calibration_sample_size = (
+                contract.calibration_sample_size
+                or EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+            )
+            dataset_source = cache_selection.source_repo_id
+            dataset_split = cache_selection.source_split
+            semantic_source = "arxiv-corpus"
+            if force_rebuild_cache:
+                raise ValueError(
+                    "An installed cache cannot be selected with force_rebuild_cache"
+                )
         normalized_semantic_source = str(semantic_source).strip().lower()
         if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
             formatted = ", ".join(SEMANTIC_SOURCE_CHOICES)
             raise ValueError(f"semantic_source must be one of: {formatted}")
         deps._check_embedding_deps(
-            require_corpus=normalized_semantic_source == "arxiv-corpus"
+            require_corpus=(
+                normalized_semantic_source == "arxiv-corpus" and cache_selection is None
+            )
         )
         if candidate_pool_size < 1:
             raise ValueError("candidate_pool_size must be at least 1")
@@ -562,9 +586,18 @@ class EmbeddingGraphBuilder(
         :return EmbeddingCache: Current persistent cache namespace.
         """
         if self._embedding_cache is None:
-            self._embedding_cache = self._create_embedding_cache(
-                self._embedding_cache_namespace()
-            )
+            if self._cache_selection is not None:
+                from citemesh.data.embedding_cache import open_existing_cache
+
+                if self._selected_cache_handle is None:
+                    self._selected_cache_handle = open_existing_cache(
+                        self._cache_selection
+                    )
+                self._embedding_cache = self._selected_cache_handle
+            else:
+                self._embedding_cache = self._create_embedding_cache(
+                    self._embedding_cache_namespace()
+                )
         return self._embedding_cache
 
     @embedding_cache.setter
@@ -575,6 +608,8 @@ class EmbeddingGraphBuilder(
         :return None: Replaces the current cache reference.
         """
         self._embedding_cache = cache
+        if getattr(self, "_cache_selection", None) is not None:
+            self._selected_cache_handle = cache
 
     @property
     def graph_embedding_cache(self) -> EmbeddingCache:
@@ -629,6 +664,11 @@ class EmbeddingGraphBuilder(
             text_formatter_fingerprint=(
                 formatter_identity or self._document_formatter_fingerprint
             ),
+            **(
+                {"_initialize": False}
+                if getattr(self, "_pending_force_rebuild_reason", None) is not None
+                else {}
+            ),
         )
 
     def _graph_embedding_cache_namespace(self) -> str:
@@ -664,6 +704,18 @@ class EmbeddingGraphBuilder(
         :return None: Replaces a provisional requested-model cache when fallback
             selected another checkpoint and applies a deferred explicit clear once.
         """
+        if self._cache_selection is not None:
+            if self._resolved_model_fingerprint is None:
+                return
+            self._require_selected_runtime_match()
+            self.embedding_cache
+            if self._graph_embedding_cache is not None:
+                graph_namespace = self._graph_embedding_cache_namespace()
+                if self._graph_embedding_cache.model_name != graph_namespace:
+                    self._graph_embedding_cache = self._create_graph_embedding_cache(
+                        graph_namespace
+                    )
+            return
         if self._resolved_model_fingerprint is None:
             # A pre-load cache object is only a cheap discovery handle. Never
             # retain it after model fallback has selected the active checkpoint.
@@ -706,6 +758,30 @@ class EmbeddingGraphBuilder(
                 )
                 self._pending_force_rebuild_reason = None
 
+    def _require_selected_runtime_match(self) -> None:
+        """Keep an explicitly selected corpus bound to its immutable vector contract."""
+        from citemesh.data.model_profiles import embedding_model_profile_key
+
+        contract = self._cache_selection.contract
+        actual = {
+            "model_id": self._cache_model_identity(),
+            "model_revision": self.model_revision,
+            "model_artifact_identity": self._resolved_model_fingerprint,
+            "profile_key": embedding_model_profile_key(self.model_profile),
+            "profile_schema": self.model_profile.schema_token,
+            "representation": _RETRIEVAL_DOCUMENT_REPRESENTATION,
+            "formatter_identity": self._document_formatter_fingerprint,
+            "normalization": "l2-v1",
+            "dimension": self.truncate_dim,
+            "stored_dtype": self.storage_precision,
+        }
+        for field, value in actual.items():
+            if getattr(contract, field) != value:
+                raise RuntimeError(
+                    f"Installed cache runtime mismatch for {field}: "
+                    f"stored={getattr(contract, field)!r}, active={value!r}"
+                )
+
     def _clear_embedding_cache(self, reason: str) -> None:
         """Clear embedding namespace payload with explicit reason logging.
 
@@ -745,6 +821,17 @@ class EmbeddingGraphBuilder(
             ),
             "graph_representation": EmbeddingTask.GRAPH_SIMILARITY.value,
             "model_profile": self.model_profile.schema_token,
+            **(
+                {
+                    "dataset_revision": getattr(
+                        self, "_completed_source_revision", None
+                    ),
+                    "cache_namespace": self._cache_selection.namespace_id,
+                    "index_origin": getattr(self, "_index_origin", None),
+                }
+                if self._cache_selection
+                else {}
+            ),
         }
 
     def _cache_model_identity(self) -> str:
@@ -799,38 +886,39 @@ class EmbeddingGraphBuilder(
         :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return str: Namespace key used for embedding cache partitioning.
         """
-        resolved_storage = storage_precision or self.storage_precision
-        resolved_formatter = formatter_identity or self._document_formatter_fingerprint
-        parts = [
-            f"model={self._cache_model_identity()}",
-            f"revision={self._requested_hf_revision_token()}",
-            f"artifact={artifact_identity or 'unresolved'}",
-            f"profile={self.model_profile.schema_token}",
-            f"representation={representation}",
-            "normalization=l2-v1",
-        ]
-        if self.truncate_dim is not None:
-            parts.append(f"truncate_dim={self.truncate_dim}")
-        parts.append(f"storage_precision={resolved_storage}")
-        # Keep the historical default token so existing default caches remain
-        # reachable; the auxiliary index setting does not identify vector rows.
-        parts.append(f"binary_prefilter={int(resolved_storage == 'int8')}")
-        if resolved_storage == "int8":
-            parts.append(f"calibration_sample_size={self.calibration_sample_size}")
-        # Compute dtype is provenance, not identity. It is auto-resolved from the
-        # active device, and the contract already ignores the other execution
-        # choices that shift numerics (attention backend, TF32, torch.compile);
-        # binding it forked one corpus into a per-hardware cache for no gain.
-        parts.append(f"formatter={resolved_formatter}")
-        # Candidate mode gets its own namespace so incremental candidate rows
-        # never mix with (and never distort row counts of) corpus hydrations.
-        # The corpus namespace stays token-free for legacy cache compatibility.
-        if (
-            representation == _RETRIEVAL_DOCUMENT_REPRESENTATION
-            and self.semantic_source != "arxiv-corpus"
-        ):
-            parts.append(f"mode={self.semantic_source}")
-        return "::".join(parts)
+        from citemesh.data.embedding_contract import serialize_embedding_namespace
+
+        return serialize_embedding_namespace(
+            **self._namespace_selectors(
+                representation=representation,
+                artifact_identity=artifact_identity,
+                storage_precision=storage_precision,
+                formatter_identity=formatter_identity,
+            )
+        )
+
+    def _namespace_selectors(
+        self,
+        *,
+        representation=_RETRIEVAL_DOCUMENT_REPRESENTATION,
+        artifact_identity=None,
+        storage_precision=None,
+        formatter_identity=None,
+    ) -> dict[str, object]:
+        """Return the original addressing inputs independently of source provenance."""
+        return {
+            "model_identity": self._cache_model_identity(),
+            "requested_revision": self._requested_hf_revision_token(),
+            "artifact_identity": artifact_identity or "unresolved",
+            "profile_schema": self.model_profile.schema_token,
+            "representation": representation,
+            "dimension": self.truncate_dim,
+            "stored_dtype": storage_precision or self.storage_precision,
+            "calibration_sample_size": self.calibration_sample_size,
+            "formatter_identity": formatter_identity
+            or self._document_formatter_fingerprint,
+            "semantic_source": self.semantic_source,
+        }
 
     def _corpus_operation_lock(self) -> AbstractContextManager[None]:
         """Return the complete-operation lock for corpus consumers.
@@ -977,6 +1065,8 @@ class EmbeddingGraphBuilder(
         :return None: Makes the artifact-bound corpus current for this operation.
         """
         self.prepare_embedding_cache()
+        if self._ready_manual_corpus():
+            return
         self._ensure_cache_hydrated(use_streaming=self.use_streaming)
 
     def enrich_cached_corpus_seed(self, seed: Paper) -> None:
@@ -1379,6 +1469,32 @@ class EmbeddingGraphBuilder(
             }
             for paper_id, paper in papers.items()
         }
+        if self._ready_manual_corpus():
+            cached_metadata = self.embedding_cache.get_paper_metadata_batch(
+                list(metadata_map)
+            )
+            reusable = [
+                paper_id
+                for paper_id, metadata in metadata_map.items()
+                if paper_id in cached_metadata
+                and self._format_retrieval_document_metadata(metadata)
+                == self._format_retrieval_document_metadata(cached_metadata[paper_id])
+            ]
+            embeddings = self.embedding_cache.get_cached_embeddings(reusable)
+            missing = [
+                paper_id for paper_id in metadata_map if paper_id not in embeddings
+            ]
+            if missing:
+                vectors = self._encode_texts(
+                    [
+                        self._format_retrieval_document_metadata(metadata_map[paper_id])
+                        for paper_id in missing
+                    ],
+                    batch_size=self.encode_batch_size,
+                )
+                embeddings.update(zip(missing, vectors, strict=True))
+            self.retrieval_embeddings.update(embeddings)
+            return embeddings
         embeddings = self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
@@ -1490,11 +1606,17 @@ class EmbeddingGraphBuilder(
                 # every cached row keeps sliced builds reachable with default
                 # query settings; only dataset provenance must agree here.
                 self._validate_cached_corpus_source(cache)
+                self._ready_manual_corpus()
             return cache.search(
                 query_embedding=np.asarray(query_embedding, dtype=np.float32),
                 top_k=int(top_k),
                 binary_prefilter=self.binary_prefilter,
                 binary_rescore_multiplier=self.binary_rescore_multiplier,
+                **(
+                    {"corpus_size": self.corpus_size}
+                    if self._cache_selection is not None
+                    else {}
+                ),
             )
 
     def prepare_embedding_cache(self) -> EmbeddingCache:
@@ -1502,9 +1624,18 @@ class EmbeddingGraphBuilder(
 
         :return EmbeddingCache: Artifact-bound cache ready for safe access.
         """
+        if self._cache_selection is not None:
+            with self.embedding_cache.hydration_operation_lock():
+                self._ready_manual_corpus()
         self._load_model()
         self._ensure_cache_model_fingerprint()
         return self.embedding_cache
+
+    def refresh_corpus(self, revision: str | None = None) -> dict[str, Any]:
+        """Explicitly reconcile the corpus at one pinned upstream revision."""
+        from .refresh import refresh_builder_corpus
+
+        return refresh_builder_corpus(self, revision)
 
     def has_persistent_embedding_artifacts(self) -> bool:
         """Return whether a potentially searchable vector cache exists.

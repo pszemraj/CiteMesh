@@ -616,6 +616,16 @@ class _FingerprintMixin:
 
         self._resolved_model_fingerprint = model_fingerprint
         self._bind_embedding_cache_to_active_model()
+        if (
+            getattr(self, "_cache_selection", None) is not None
+            and representation == _RETRIEVAL_DOCUMENT_REPRESENTATION
+        ):
+            self._require_selected_runtime_match()
+            if self.embedding_cache.get_model_fingerprint() != model_fingerprint:
+                raise EmbeddingCacheFingerprintMismatchError(
+                    "Installed cache model fingerprint does not match its pinned runtime"
+                )
+            return
         if representation == _RETRIEVAL_DOCUMENT_REPRESENTATION:
             cache = self.embedding_cache
         elif representation == _GRAPH_SIMILARITY_REPRESENTATION:

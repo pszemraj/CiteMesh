@@ -204,6 +204,14 @@ _PROFILE_BY_KEY: Mapping[str, EmbeddingModelProfile] = {
 }
 
 
+def embedding_model_profile_key(profile: EmbeddingModelProfile) -> str:
+    """Return the explicit selector that reopens a resolved model profile."""
+    for key, registered in _PROFILE_BY_KEY.items():
+        if profile == registered:
+            return key
+    raise ValueError(f"No explicit selector is registered for profile {profile.name!r}")
+
+
 def _read_json_object(path: Path) -> dict[str, object]:
     """Read a JSON object, returning an empty mapping for absent/invalid files.
 
