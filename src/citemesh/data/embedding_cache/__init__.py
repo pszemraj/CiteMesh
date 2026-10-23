@@ -67,6 +67,7 @@ from .constants import (
     _corpus_size_token,  # noqa: F401  (re-exported: white-box test import)
     _resolve_cache_lock_timeout_seconds,  # noqa: F401  (re-exported for tests)
 )
+from .lifecycle import open_existing_cache, select_existing_cache
 from .models import (
     CacheNamespacePayloadStats,
     CacheSearchResult,
@@ -133,4 +134,6 @@ __all__ = [
     "sql",
     "store",
     "validate_compression_filter",
+    "open_existing_cache",
+    "select_existing_cache",
 ]

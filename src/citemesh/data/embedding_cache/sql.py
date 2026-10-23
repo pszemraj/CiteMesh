@@ -46,6 +46,18 @@ REPLACEMENT_JOURNAL_TABLE_CREATE_SQL = """
     )
     """
 
+CORPUS_MEMBERSHIP_TABLE_CREATE_SQL = """
+    CREATE TABLE IF NOT EXISTS corpus_membership (
+        paper_id TEXT PRIMARY KEY,
+        source_ordinal INTEGER NOT NULL
+    )
+    """
+
+CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL = """
+    CREATE INDEX IF NOT EXISTS corpus_membership_source_ordinal
+    ON corpus_membership(source_ordinal)
+    """
+
 PAPER_ROW_UPSERT_SQL = """
     INSERT OR REPLACE INTO papers
     (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx,

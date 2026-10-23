@@ -136,6 +136,7 @@ class _IngestMixin:
             self._connect_db() as conn,
             h5py.File(self.h5_path, "a") as h5,
         ):
+            self._require_write_owned_locked(conn)
             lookup = self._scan_cache_for_hits(
                 conn=conn,
                 h5_file=h5,
@@ -170,6 +171,7 @@ class _IngestMixin:
             self._connect_db() as conn,
             h5py.File(self.h5_path, "a") as h5,
         ):
+            self._require_write_owned_locked(conn)
             new_embeddings = self._commit_encoded_embeddings(
                 conn=conn,
                 h5_file=h5,

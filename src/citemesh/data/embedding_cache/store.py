@@ -62,6 +62,7 @@ from .constants import (
 )
 from .ingest import _IngestMixin
 from .layout import _H5LayoutMixin
+from .lifecycle import _LifecycleMixin
 from .models import (
     CacheNamespacePayloadStats,
     CacheSearchResult,
@@ -81,7 +82,9 @@ logger = logging.getLogger(__name__)
 ProgressWrapper = Callable[[Sequence[Any], str], Iterable[Any]]
 
 
-class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin):
+class EmbeddingCache(
+    _LifecycleMixin, _IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin
+):
     """Persistent cache for paper embeddings and metadata."""
 
     def __init__(
@@ -96,6 +99,8 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         source_torch_dtype: str = "float32",
         text_formatter_fingerprint: str = "default",
         progress: ProgressWrapper | None = None,
+        strict: bool = False,
+        _initialize: bool = True,
     ):
         """Create a persistent embedding cache for a model variant.
 
@@ -161,13 +166,22 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         self.embedding_vector_dtype = "float32"
         self.last_search_used_binary_prefilter: bool | None = None
         self.last_search_total_embeddings: int | None = None
+        self.last_search_physical_embeddings: int | None = None
         self.last_search_rescored_embeddings: int | None = None
         self._int8_saturation_warning_emitted = False
         self._progress = progress
+        self._strict_existing = bool(strict)
+        self._operation_owner = None
 
-        with self._cache_lock():
-            self._init_db()
-            self._ensure_h5_layout()
+        if _initialize:
+            with self.namespace_lock_only():
+                protected = self._has_corpus_state_read_only()
+                if strict or protected:
+                    self._inspect_existing_locked()
+                    self._strict_existing = True
+                else:
+                    self._init_db()
+                    self._ensure_h5_layout()
 
     # ------------------------------------------------------------------
     # Public API
@@ -250,6 +264,8 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         *,
         binary_prefilter: bool,
         binary_rescore_multiplier: int,
+        corpus_size: int | None = None,
+        eligible_rows: np.ndarray | None = None,
     ) -> list[CacheSearchResult]:
         """Search cached embeddings and return ranked metadata-rich candidates.
 
@@ -264,6 +280,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
 
         self.last_search_used_binary_prefilter = None
         self.last_search_total_embeddings = None
+        self.last_search_physical_embeddings = None
         self.last_search_rescored_embeddings = None
         query = np.asarray(query_embedding, dtype=np.float32)
         if query.ndim != 1:
@@ -275,6 +292,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
             self._cache_lock(),
             self._connect_db() as conn,
         ):
+            self._require_ready_locked(conn)
             self._recover_pending_replacements_with_connection_locked(conn)
             if not path_exists(self.h5_path):
                 return []
@@ -282,6 +300,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                 embeddings_dataset = self._get_embeddings_dataset(h5)
                 if embeddings_dataset is None or embeddings_dataset.shape[0] == 0:
                     self.last_search_total_embeddings = 0
+                    self.last_search_physical_embeddings = 0
                     self.last_search_rescored_embeddings = 0
                     return []
                 self._assert_runtime_cache_consistency(
@@ -291,7 +310,17 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                     fail_mode="runtime",
                 )
                 embedding_rows = int(embeddings_dataset.shape[0])
-                self.last_search_total_embeddings = embedding_rows
+                self.last_search_physical_embeddings = embedding_rows
+                eligibility = self._eligible_rows_locked(
+                    conn, embedding_rows, corpus_size, eligible_rows
+                )
+                eligible_count = (
+                    embedding_rows if eligibility is None else int(eligibility.sum())
+                )
+                self.last_search_total_embeddings = eligible_count
+                if eligible_count == 0:
+                    self.last_search_rescored_embeddings = 0
+                    return []
                 if int(embeddings_dataset.shape[1]) != int(query.shape[0]):
                     raise ValueError(
                         "Query embedding dimension mismatch: "
@@ -328,6 +357,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                             binary_dataset=binary_dataset,
                             query_embedding=query,
                             candidate_count=candidate_count,
+                            eligible_rows=eligibility,
                         )
                         self.last_search_rescored_embeddings = int(candidate_rows.size)
                         if candidate_rows.size == 0:
@@ -340,20 +370,22 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                             row_indices=candidate_rows,
                         )
                     else:
-                        self.last_search_rescored_embeddings = embedding_rows
+                        self.last_search_rescored_embeddings = eligible_count
                         rows, scores, embeddings = self._score_int8_rows(
                             embeddings_dataset=embeddings_dataset,
                             h5_file=h5,
                             query_embedding=query,
                             top_k=top_k,
                             row_indices=None,
+                            eligible_rows=eligibility,
                         )
                 else:
-                    self.last_search_rescored_embeddings = embedding_rows
+                    self.last_search_rescored_embeddings = eligible_count
                     rows, scores, embeddings = self._score_float_rows(
                         embeddings_dataset=embeddings_dataset,
                         query_embedding=query,
                         top_k=top_k,
+                        eligible_rows=eligibility,
                     )
                     self.last_search_used_binary_prefilter = False
 
@@ -895,6 +927,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         :return None: Updates only matching SQLite records.
         """
         with self._locked_connection() as conn:
+            self._require_write_owned_locked(conn)
             conn.executemany(
                 "UPDATE papers SET year = ?, doi = ?, venue = ? WHERE paper_id = ?",
                 [

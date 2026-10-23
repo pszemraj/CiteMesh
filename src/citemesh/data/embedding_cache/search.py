@@ -113,6 +113,7 @@ class _SearchMixin:
         binary_dataset: h5py.Dataset,
         query_embedding: np.ndarray,
         candidate_count: int,
+        eligible_rows: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return top candidate row indices via Hamming prefiltering.
 
@@ -127,7 +128,10 @@ class _SearchMixin:
 
         query_binary = _quantize_ubinary_embeddings(query_embedding)[0]
 
-        keep_k = min(max(int(candidate_count), 0), row_count)
+        eligible_count = (
+            row_count if eligible_rows is None else int(eligible_rows.sum())
+        )
+        keep_k = min(max(int(candidate_count), 0), eligible_count)
         if keep_k == 0:
             return np.asarray([], dtype=np.int64)
         all_rows: list[np.ndarray] = []
@@ -137,6 +141,13 @@ class _SearchMixin:
         for start in range(0, row_count, chunk_size):
             end = min(start + chunk_size, row_count)
             chunk = np.asarray(binary_dataset[start:end], dtype=np.uint8)
+            chunk_rows = np.arange(start, end, dtype=np.int64)
+            if eligible_rows is not None:
+                chunk_mask = eligible_rows[start:end]
+                chunk = chunk[chunk_mask]
+                chunk_rows = chunk_rows[chunk_mask]
+            if chunk_rows.size == 0:
+                continue
             xor = np.bitwise_xor(chunk, query_binary[None, :])
             dists = _POPCOUNT_LUT[xor].sum(axis=1, dtype=np.int32)
 
@@ -153,7 +164,7 @@ class _SearchMixin:
                     axis=0,
                 )
 
-            all_rows.append((start + local_idx).astype(np.int64, copy=False))
+            all_rows.append(chunk_rows[local_idx])
             all_dists.append(dists[local_idx])
 
         candidate_rows = np.concatenate(all_rows, axis=0)
@@ -203,6 +214,7 @@ class _SearchMixin:
         query_embedding: np.ndarray,
         top_k: int,
         row_indices: np.ndarray | None,
+        eligible_rows: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Score int8 embeddings against a float32 query.
 
@@ -244,6 +256,7 @@ class _SearchMixin:
             query,
             top_k,
             self._matrix_chunk_loader(embeddings_dataset, dequantize_chunk),
+            eligible_rows=eligible_rows,
         )
 
     def _score_float_rows(
@@ -251,6 +264,7 @@ class _SearchMixin:
         embeddings_dataset: h5py.Dataset,
         query_embedding: np.ndarray,
         top_k: int,
+        eligible_rows: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Score float32 embeddings against a float32 query.
 
@@ -265,6 +279,7 @@ class _SearchMixin:
             query_embedding,
             top_k,
             self._matrix_chunk_loader(embeddings_dataset),
+            eligible_rows=eligible_rows,
         )
 
     def _score_chunked_rows(
@@ -273,6 +288,7 @@ class _SearchMixin:
         query_embedding: np.ndarray,
         top_k: int,
         load_chunk: Callable[[int, int], np.ndarray],
+        eligible_rows: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Score a matrix through a loader while retaining a bounded global top-k.
 
@@ -289,10 +305,16 @@ class _SearchMixin:
 
         for start in range(0, row_count, constants.EMBEDDING_SEARCH_CHUNK_ROWS):
             end = min(start + constants.EMBEDDING_SEARCH_CHUNK_ROWS, row_count)
+            mask = None if eligible_rows is None else eligible_rows[start:end]
+            if mask is not None and not mask.any():
+                continue
             chunk_matrix = load_chunk(start, end)
+            chunk_rows = np.arange(start, end, dtype=np.int64)
+            if mask is not None:
+                chunk_matrix = chunk_matrix[mask]
+                chunk_rows = chunk_rows[mask]
             chunk_scores = chunk_matrix @ query_embedding
             self._require_finite_scores(chunk_scores)
-            chunk_rows = np.arange(start, end, dtype=np.int64)
             rows, scores, embeddings = self._select_top_k(
                 chunk_rows,
                 chunk_scores,

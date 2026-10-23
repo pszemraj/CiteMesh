@@ -71,14 +71,28 @@ class _RecoveryMixin:
 
         :return Iterator[None]: Context manager yielding once lock is acquired.
         """
+        with self.namespace_lock_only():
+            if getattr(self, "_strict_existing", False) and not path_exists(
+                self.h5_path
+            ):
+                raise RuntimeError(
+                    "Selected embedding cache HDF5 file is missing; files preserved"
+                )
+            if not path_exists(self.db_path):
+                if getattr(self, "_strict_existing", False):
+                    raise RuntimeError("Selected embedding cache database is missing")
+                self._init_db()
+            yield
+
+    @contextmanager
+    def namespace_lock_only(self) -> Iterator[None]:
+        """Acquire the namespace lock without initializing native payloads."""
         timeout_seconds = _resolve_cache_lock_timeout_seconds()
         with self._cache_operation_lock():
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             lock = FileLock(str(self.lock_path), timeout=timeout_seconds)
             try:
                 with lock:
-                    if not path_exists(self.db_path):
-                        self._init_db()
                     yield
             except Timeout as exc:
                 raise TimeoutError(

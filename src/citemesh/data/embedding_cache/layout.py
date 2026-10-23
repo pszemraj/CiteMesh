@@ -59,6 +59,8 @@ from .quantization import (
     _storage_dtype_for_precision,
 )
 from .sql import (
+    CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL,
+    CORPUS_MEMBERSHIP_TABLE_CREATE_SQL,
     PAPER_ROW_QUERY_SQL_TEMPLATE,
     PAPERS_TABLE_CREATE_SQL,
     REPLACEMENT_JOURNAL_TABLE_CREATE_SQL,
@@ -123,6 +125,8 @@ class _H5LayoutMixin:
             )
             conn.execute(_metadata_table_create_sql())
             conn.execute(REPLACEMENT_JOURNAL_TABLE_CREATE_SQL)
+            conn.execute(CORPUS_MEMBERSHIP_TABLE_CREATE_SQL)
+            conn.execute(CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL)
 
             # Contract values are seeded, never re-stamped, here: overwriting them
             # would make _assert_runtime_cache_consistency compare the runtime
@@ -723,6 +727,11 @@ class _H5LayoutMixin:
         :param sqlite3.Connection conn: Open SQLite connection.
         :return None: Mutates metadata table in-place.
         """
+        conn.execute("DELETE FROM cache_metadata WHERE key = 'corpus_state'")
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'corpus_membership'"
+        ).fetchone():
+            conn.execute("DELETE FROM corpus_membership")
         _H5LayoutMixin._set_cache_metadata(
             conn,
             {
