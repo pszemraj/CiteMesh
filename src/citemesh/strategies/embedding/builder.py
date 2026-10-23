@@ -24,6 +24,7 @@ from typing import (
 
 import networkx as nx
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core import (
@@ -372,8 +373,8 @@ class EmbeddingGraphBuilder(
 
         self.top_k = top_k
         self.model: SentenceTransformer | None = None
-        self.retrieval_embeddings: dict[str, np.ndarray] = {}
-        self.embeddings: dict[str, np.ndarray] = {}
+        self.retrieval_embeddings: dict[str, NDArray[np.float32]] = {}
+        self.embeddings: dict[str, NDArray[np.float32]] = {}
         self.candidate_source_status: dict[str, str] = {}
         self._client = client
         self._active_model_name: str | None = None
@@ -1269,11 +1270,11 @@ class EmbeddingGraphBuilder(
                 f"--dataset-source {self.dataset_source!r} first."
             )
 
-    def _encode_seed_embedding(self, seed_paper: Paper) -> np.ndarray:
+    def _encode_seed_embedding(self, seed_paper: Paper) -> NDArray[np.float32]:
         """Encode the seed in the model's query prompt space and record it.
 
         :param Paper seed_paper: Resolved seed paper.
-        :return np.ndarray: Normalized seed embedding, also stored for graph export.
+        :return NDArray[np.float32]: Normalized seed embedding stored for graph export.
         """
         logger.debug("Computing seed embedding...")
         formatted_seed_text = format_paper_for_embedding(
@@ -1290,7 +1291,7 @@ class EmbeddingGraphBuilder(
     def _collect_candidate_pool_papers(
         self,
         papers: dict[str, Paper],
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         seed_paper: Paper,
         *,
         seed_identifier: str | None = None,
@@ -1298,7 +1299,7 @@ class EmbeddingGraphBuilder(
         """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Resolved seed paper used to fetch the pool.
         :param str | None seed_identifier: Original arXiv input including version.
         :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
@@ -1318,7 +1319,7 @@ class EmbeddingGraphBuilder(
     def _collect_corpus_cache_papers(
         self,
         papers: dict[str, Paper],
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         seed_paper: Paper,
         *,
         corpus_prepared: bool,
@@ -1326,7 +1327,7 @@ class EmbeddingGraphBuilder(
         """Search the hydrated corpus cache and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
         :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
         :return None: Extends ``papers`` in place and backfills citation counts.
@@ -1467,17 +1468,17 @@ class EmbeddingGraphBuilder(
 
     def _select_candidates_from_pool(
         self,
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         seed_paper: Paper,
         *,
         seed_identifier: str | None = None,
-    ) -> list[tuple[str, Paper, np.ndarray]]:
+    ) -> list[tuple[str, Paper, NDArray[np.float32]]]:
         """Rank S2 candidate-pool papers by cosine similarity to the seed.
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :param NDArray[np.float32] seed_embedding: Normalized seed vector.
         :param Paper seed_paper: Resolved seed paper (S2-backed or query seed).
         :param str | None seed_identifier: Original arXiv input including version.
-        :return List[Tuple[str, Paper, np.ndarray]]: Ranked candidate tuples.
+        :return List[Tuple[str, Paper, NDArray[np.float32]]]: Ranked candidates.
         """
         max_references, max_citations, max_recommendations = (
             self._candidate_pool_budgets()
@@ -1501,7 +1502,7 @@ class EmbeddingGraphBuilder(
 
         embeddings = self.embed_papers(pool.papers)
         query = np.asarray(seed_embedding, dtype=np.float32)
-        scored: list[tuple[float, str, Paper, np.ndarray, int]] = []
+        scored: list[tuple[float, str, Paper, NDArray[np.float32], int]] = []
         for idx, (paper_id, paper) in enumerate(pool.papers.items()):
             embedding = embeddings.get(paper_id)
             if embedding is None:
@@ -1521,11 +1522,11 @@ class EmbeddingGraphBuilder(
         )
         return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
 
-    def embed_papers(self, papers: dict[str, Paper]) -> dict[str, np.ndarray]:
+    def embed_papers(self, papers: dict[str, Paper]) -> dict[str, NDArray[np.float32]]:
         """Embed retrieval documents through cache, encoding only missing ones.
 
         :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
-        :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
+        :return Dict[str, NDArray[np.float32]]: Float32 vectors keyed by paper ID.
         """
         if not papers:
             return {}
@@ -1606,11 +1607,11 @@ class EmbeddingGraphBuilder(
 
     def materialize_graph_embeddings(
         self, papers: dict[str, Paper]
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, NDArray[np.float32]]:
         """Materialize selected papers in a symmetric graph-similarity space.
 
         :param Dict[str, Paper] papers: Final graph papers by canonical ID.
-        :return Dict[str, np.ndarray]: Validated graph-similarity vectors.
+        :return Dict[str, NDArray[np.float32]]: Validated graph-similarity vectors.
         """
         if not papers:
             self.embeddings = {}
@@ -1749,19 +1750,19 @@ class EmbeddingGraphBuilder(
 
     def _select_candidates(
         self,
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         use_streaming: bool,
         *,
         corpus_prepared: bool = False,
-    ) -> list[tuple[str, PaperMetadata, np.ndarray]]:
+    ) -> list[tuple[str, PaperMetadata, NDArray[np.float32]]]:
         """Select candidates from a cache current for this collection operation.
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
         :param bool use_streaming: Whether hydration should stream the dataset.
         :param bool corpus_prepared: Whether the caller completed lifecycle work before
             encoding the seed while retaining the operation lock. The default preserves
             safe standalone helper behavior.
-        :return List[Tuple[str, PaperMetadata, np.ndarray]]: Candidates sorted by similarity.
+        :return List[Tuple[str, PaperMetadata, NDArray[np.float32]]]: Candidates by similarity.
         """
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():

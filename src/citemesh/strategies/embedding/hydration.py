@@ -17,6 +17,7 @@ from itertools import islice
 from typing import Final, Literal
 
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
 from citemesh.data.embedding_cache import (
@@ -106,12 +107,12 @@ class _CorpusHydrationMixin:
     """
 
     def _search_cache_candidates(
-        self, seed_embedding: np.ndarray
-    ) -> list[tuple[str, PaperMetadata, np.ndarray]]:
+        self, seed_embedding: NDArray[np.float32]
+    ) -> list[tuple[str, PaperMetadata, NDArray[np.float32]]]:
         """Run cache-native retrieval and map results to candidate tuples.
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector.
-        :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples ordered by score.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
+        :return List[Tuple[str, PaperMetadata, NDArray[np.float32]]]: Candidates by score.
         """
         top_k = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         search_results = self.embedding_cache.search(

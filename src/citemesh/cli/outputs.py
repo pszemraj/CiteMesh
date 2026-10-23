@@ -56,7 +56,7 @@ _EXPORTER_METHOD: dict[str, str] = {
     "bibtex": "to_bibtex",
     "graphml": "to_graphml",
 }
-_THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
+_THEME_AWARE_FORMATS: frozenset[str] = frozenset({"html", "plotly", "dashboard"})
 
 # Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
 # a dispatch mapping will fail fast here rather than silently skip at runtime.

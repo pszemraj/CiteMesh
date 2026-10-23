@@ -21,6 +21,7 @@ from typing import (
 )
 
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core import EMBEDDING_CONFIG
 from citemesh.core.text_batching import encode_texts
@@ -633,13 +634,13 @@ class _ModelRuntimeMixin:
         texts: list[str],
         batch_size: int | None = None,
         show_progress_bar: bool = False,
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Encode text inputs and return normalized float32 embeddings.
 
         :param List[str] texts: Text payload(s) to encode.
         :param Optional[int] batch_size: Optional batch size override.
         :param bool show_progress_bar: Whether to display encoding progress.
-        :return np.ndarray: Embeddings with shape ``(len(texts), dim)``.
+        :return NDArray[np.float32]: Float32 embeddings shaped ``(len(texts), dim)``.
         """
         encode_model = self._get_model_for_encoding()
         effective_batch_size = len(texts) if batch_size is None else int(batch_size)

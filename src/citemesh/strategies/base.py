@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 import networkx as nx
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core import DEFAULT_MAX_PAPERS, TEMPORAL_CONFIG, Paper
 from citemesh.core.values import coerce_float
@@ -60,20 +61,20 @@ class NoStrategyOptions(TypedDict):
 
 def validate_embedding_vectors(
     required_ids: Iterable[str],
-    embeddings: Mapping[str, np.ndarray],
+    embeddings: Mapping[str, NDArray[np.float32]],
     *,
     context: str,
     vector_label: str = "vector",
     error_factory: Callable[[str], Exception] = RuntimeError,
-) -> dict[str, np.ndarray]:
+) -> dict[str, NDArray[np.float32]]:
     """Validate a complete finite, nonzero, dimensionally consistent vector map.
 
     :param Iterable[str] required_ids: Paper IDs that require vectors.
-    :param Mapping[str, np.ndarray] embeddings: Materialized vectors by paper ID.
+    :param Mapping[str, NDArray[np.float32]] embeddings: Materialized float32 vectors.
     :param str context: User-facing task description for errors.
     :param str vector_label: Noun used for vectors in error messages.
     :param Callable[[str], Exception] error_factory: Exception constructor.
-    :return Dict[str, np.ndarray]: Validated float32 vector map.
+    :return Dict[str, NDArray[np.float32]]: Validated float32 vectors.
     :raises Exception: From ``error_factory`` when a required vector is unusable.
     """
     ordered_ids = list(required_ids)
@@ -84,7 +85,7 @@ def validate_embedding_vectors(
             + ", ".join(missing[:5])
         )
 
-    validated: dict[str, np.ndarray] = {}
+    validated: dict[str, NDArray[np.float32]] = {}
     expected_dimension: int | None = None
     for paper_id in ordered_ids:
         vector = np.asarray(embeddings[paper_id], dtype=np.float32)

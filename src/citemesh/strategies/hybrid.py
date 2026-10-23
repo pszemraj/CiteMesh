@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 import networkx as nx
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core import (
     EMBEDDING_CONFIG,
@@ -84,14 +85,14 @@ def require_complete_embeddings(
     *,
     seed_id: str,
     candidate_ids: list[str],
-    embeddings: dict[str, np.ndarray],
-) -> np.ndarray:
+    embeddings: dict[str, NDArray[np.float32]],
+) -> NDArray[np.float32]:
     """Validate that hybrid reranking has one usable vector per required paper.
 
     :param str seed_id: Seed paper identifier.
     :param List[str] candidate_ids: Candidate identifiers admitted to reranking.
-    :param Dict[str, np.ndarray] embeddings: Materialized retrieval embeddings.
-    :return np.ndarray: Validated seed embedding.
+    :param Dict[str, NDArray[np.float32]] embeddings: Materialized float32 vectors.
+    :return NDArray[np.float32]: Validated seed embedding.
     :raises EmbeddingInferenceError: If vectors are missing, malformed, non-finite,
         zero length, or dimensionally inconsistent.
     """
@@ -357,7 +358,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self,
         candidate_ids: list[str],
         candidates: dict[str, Paper],
-        embeddings_map: dict[str, np.ndarray],
+        embeddings_map: dict[str, NDArray[np.float32]],
     ) -> None:
         """Embed rerank candidates for seed-relevance scoring.
 
@@ -367,7 +368,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         :param List[str] candidate_ids: Candidate IDs needing embeddings.
         :param Dict[str, Paper] candidates: Candidate paper payloads.
-        :param Dict[str, np.ndarray] embeddings_map: In-memory embedding map to update.
+        :param Dict[str, NDArray[np.float32]] embeddings_map: In-memory float32 vectors to update.
         :return None: Mutates ``embeddings_map`` in place.
         :raises EmbeddingInferenceError: If candidate embeddings cannot be completed.
         """
@@ -454,13 +455,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def _ensure_candidate_embeddings(
         self, seed_paper: Paper, candidates: dict[str, Paper]
-    ) -> np.ndarray | None:
+    ) -> NDArray[np.float32] | None:
         """Ensure seed/candidate embeddings are materialized for reranking.
 
         :param Paper seed_paper: Seed paper.
         :param Dict[str, Paper] candidates: Candidate paper pool.
-        :return Optional[np.ndarray]: Seed embedding, or ``None`` only when semantic
-            reranking was explicitly disabled.
+        :return Optional[NDArray[np.float32]]: Seed embedding, or ``None`` when semantic
+            reranking is disabled.
         :raises EmbeddingInferenceError: If required semantic vectors cannot be
             materialized or validated.
         """
@@ -535,7 +536,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def _seed_relevance_score(
         self,
-        seed_embedding: np.ndarray | None,
+        seed_embedding: NDArray[np.float32] | None,
         seed_paper: Paper,
         candidate: Paper,
         source_tags: set[str],
@@ -543,7 +544,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
     ) -> float:
         """Score candidate relevance to seed for hybrid adjudication.
 
-        :param Optional[np.ndarray] seed_embedding: Seed embedding vector when available.
+        :param Optional[NDArray[np.float32]] seed_embedding: Seed vector when available.
         :param Paper seed_paper: Seed paper.
         :param Paper candidate: Candidate paper.
         :param Set[str] source_tags: Candidate provenance tags.

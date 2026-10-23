@@ -19,6 +19,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 from filelock import FileLock, Timeout
+from numpy.typing import NDArray
 
 from ..cache import (
     CACHE_COORDINATION_DIRNAME,
@@ -31,7 +32,7 @@ from .constants import (
     HYDRATION_COMPLETE_KEY,
     _resolve_cache_lock_timeout_seconds,
 )
-from .models import _EmbeddingCacheLayoutError
+from .models import StoredEmbedding, _EmbeddingCacheLayoutError
 
 logger = logging.getLogger(__name__)
 
@@ -171,12 +172,12 @@ class _RecoveryMixin:
     def _persist_replacement_journal(
         self,
         conn: sqlite3.Connection,
-        replacements: Sequence[tuple[int, np.ndarray, np.ndarray | None]],
+        replacements: Sequence[tuple[int, StoredEmbedding, NDArray[np.uint8] | None]],
     ) -> None:
         """Commit prior replacement rows before mutating HDF5 storage.
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
-        :param Sequence[Tuple[int, np.ndarray, Optional[np.ndarray]]] replacements:
+        :param Sequence[Tuple[int, StoredEmbedding, Optional[NDArray[np.uint8]]]] replacements:
             ``(row_idx, embedding, binary_embedding)`` rows to preserve.
         :return None: Inserts and commits durable undo records.
         """

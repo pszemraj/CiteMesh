@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core import Paper
 from citemesh.core.text_batching import l2_normalize_embeddings
@@ -10,7 +11,7 @@ from citemesh.data.model_profiles import compose_title_abstract_text
 
 
 def cosine_similarity_to_query(
-    normalized_query: np.ndarray, embedding: np.ndarray
+    normalized_query: NDArray[np.float32], embedding: NDArray[np.float32]
 ) -> float:
     """Score an embedding against an already L2-normalized query.
 

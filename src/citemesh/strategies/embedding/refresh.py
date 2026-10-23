@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.data.embedding_contract import (
     INT8_QUANTIZATION,
@@ -69,7 +70,7 @@ class _LazyEncoder:
         convert_to_tensor: Literal[False],
         normalize_embeddings: Literal[True],
         show_progress_bar: bool,
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Encode one cache-miss batch with the builder's active model.
 
         :param sentences: Retrieval texts to encode.
@@ -77,7 +78,7 @@ class _LazyEncoder:
         :param convert_to_tensor: Whether the encoder should return a tensor.
         :param normalize_embeddings: Whether the encoder should normalize vectors.
         :param show_progress_bar: Whether the encoder may show a progress bar.
-        :return: Encoded vectors for the supplied texts.
+        :return: Normalized float32 vectors for the supplied texts.
         """
         self.builder._load_model()
         self.builder._ensure_cache_model_fingerprint()
