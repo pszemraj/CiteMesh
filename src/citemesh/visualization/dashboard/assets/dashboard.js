@@ -1044,8 +1044,8 @@
       return Promise.resolve();
     }
 
-    function compactNodeLabel(nodeId) {
-      const node = nodeById.get(nodeId);
+    function compactNodeLabel(nodeId, nodesById = nodeById) {
+      const node = nodesById.get(nodeId);
       if (!node) {
         return String(nodeId);
       }
@@ -1064,18 +1064,6 @@
       const nextNodeById = new Map(
         nextNodes.map((node) => [String(node.id || ""), node])
       );
-      const portableNodeLabel = (nodeId) => {
-        const node = nextNodeById.get(String(nodeId || ""));
-        if (!node) {
-          return String(nodeId || "");
-        }
-        if (Array.isArray(node.authors) && node.authors.length) {
-          const surname = String(node.authors[0]).split(/\s+/).filter(Boolean).slice(-1)[0] || "Unknown";
-          const year = hasYear(node) ? String(node.year) : "n.d.";
-          return `${surname}, ${year}`;
-        }
-        return String(node.title || node.id || nodeId);
-      };
       const summary = {
         nodes: nextNodes.length,
         edges: nextEdges.length,
@@ -1093,8 +1081,8 @@
           target: targetId,
           source_title: sourceNode ? String(sourceNode.title || sourceId) : sourceId,
           target_title: targetNode ? String(targetNode.title || targetId) : targetId,
-          source_label: portableNodeLabel(sourceId),
-          target_label: portableNodeLabel(targetId),
+          source_label: compactNodeLabel(sourceId, nextNodeById),
+          target_label: compactNodeLabel(targetId, nextNodeById),
           weight: Number(edge.weight || 0),
         };
       });

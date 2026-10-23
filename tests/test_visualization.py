@@ -2932,9 +2932,19 @@ def test_dashboard_compact_author_labels_match_python(
         ' compact: compactNodeLabel("seed"),'
         " portable: portableGraphPayload(payload).edges.map(edge =>"
         '   edge.source === "seed" ? edge.source_label : edge.target_label),'
+        " importedPayload: (() => {"
+        "   const nextPayload = deepClone(payload);"
+        '   nextPayload.nodes.find(node => node.id === "seed").authors = ["Grace Hopper"];'
+        "   return portableGraphPayload(nextPayload).edges.map(edge =>"
+        '     edge.source === "seed" ? edge.source_label : edge.target_label);'
+        " })(),"
         "})",
     )
-    assert probed == {"compact": expected, "portable": [expected]}
+    assert probed == {
+        "compact": expected,
+        "portable": [expected],
+        "importedPayload": ["Hopper, 2020"],
+    }
 
 
 def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
