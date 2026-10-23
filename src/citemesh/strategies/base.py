@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from typing import (
-    Any,
+    TYPE_CHECKING,
     ClassVar,
+    TypedDict,
 )
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 import networkx as nx
 import numpy as np
@@ -23,6 +27,35 @@ from citemesh.core.values import coerce_float
 
 logger = logging.getLogger(__name__)
 RELATIONSHIP_DEGREE_CAP = 3
+
+
+class _SeedPaperOption(TypedDict, total=False):
+    """Shared optional seed payload for collection helpers."""
+
+    seed_paper: Paper | None
+
+
+class CitationCollectionOptions(_SeedPaperOption, total=False):
+    """Options accepted by citation collection."""
+
+    validate_source_availability: bool
+    hydrate_references: bool
+    reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]] | None
+    reference_selector: Callable[[Paper, Sequence[Paper], int], list[Paper]] | None
+
+
+class EmbeddingCollectionOptions(_SeedPaperOption, total=False):
+    """Options accepted by embedding graph collection."""
+
+    _corpus_prepared: bool
+
+
+class GraphCollectionOptions(CitationCollectionOptions, EmbeddingCollectionOptions):
+    """Combined keyword options exposed by the abstract graph builder."""
+
+
+class NoStrategyOptions(TypedDict):
+    """Empty keyword contract for strategies with no collection options."""
 
 
 def validate_embedding_vectors(
@@ -80,37 +113,37 @@ def validate_embedding_vectors(
 
 def deterministic_sort_key(
     primary: float,
-    primary_id: Any,
-    secondary_id: Any | None = None,
+    primary_id: Hashable,
+    secondary_id: Hashable | None = None,
     stable_index: int = 0,
-) -> tuple[Any, ...]:
+) -> tuple[float, str, str, int]:
     """Build a strict deterministic ordering key for ranking and heap comparisons.
 
     :param float primary: Primary numeric score used for ordering.
-    :param Any primary_id: Primary tie-breaker key.
-    :param Optional[Any] secondary_id: Optional second tie-breaker key.
+    :param Hashable primary_id: Primary tie-breaker key.
+    :param Optional[Hashable] secondary_id: Optional second tie-breaker key.
     :param int stable_index: Optional deterministic fallback index.
-    :return Tuple[Any, ...]: Tuple-safe comparison key with deterministic stringification.
+    :return tuple[float, str, str, int]: Comparison key with deterministic stringification.
     """
     secondary = "" if secondary_id is None else str(secondary_id)
     return (-float(primary), str(primary_id), secondary, int(stable_index))
 
 
 def select_capped_undirected_edges(
-    edges: Iterable[tuple[Any, Any, Mapping[str, Any]]],
+    edges: Iterable[tuple[Hashable, Hashable, Mapping[str, float]]],
     max_edges_per_node: int,
     *,
-    seed_id: Any | None = None,
-) -> list[tuple[Any, Any, float]]:
+    seed_id: Hashable | None = None,
+) -> list[tuple[Hashable, Hashable, float]]:
     """Select edges for an undirected graph while capping per-node degree.
 
-    :param Iterable[Tuple[Any, Any, Mapping[str, Any]]] edges: Edge tuples with optional
+    :param Iterable[Tuple[Hashable, Hashable, Mapping[str, float]]] edges: Edge tuples with optional
         ``weight`` metadata.
     :param int max_edges_per_node: Maximum degree per node.
-    :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
-    :return List[Tuple[Any, Any, float]]: Selected canonicalized edges with weights.
+    :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
+    :return List[Tuple[Hashable, Hashable, float]]: Selected canonicalized edges with weights.
     """
-    canonical_edges: dict[tuple[str, str], tuple[Any, Any, float]] = {}
+    canonical_edges: dict[tuple[str, str], tuple[Hashable, Hashable, float]] = {}
     for u, v, *_rest in edges:
         data = _rest[0] if _rest else {}
         if not isinstance(data, Mapping):
@@ -139,7 +172,7 @@ def select_capped_undirected_edges(
         node_id: 0 for edge in sorted_edges for node_id in (str(edge[0]), str(edge[1]))
     }
 
-    selected_edges: list[tuple[Any, Any, float]] = []
+    selected_edges: list[tuple[Hashable, Hashable, float]] = []
     for u, v, weight in sorted_edges:
         u_key = str(u)
         v_key = str(v)
@@ -156,13 +189,13 @@ def select_capped_undirected_edges(
 
 
 def build_capped_undirected_graph(
-    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Any | None = None
+    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Hashable | None = None
 ) -> nx.Graph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
     :param nx.Graph graph: Source graph whose nodes and metadata should be preserved.
     :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
-    :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
+    :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
     :return nx.Graph: Rebuilt graph with selected weighted edges.
     """
     filtered_graph = nx.Graph()
@@ -189,7 +222,7 @@ class GraphBuilderStrategy(ABC):
     strategy_name: ClassVar[str] = ""
     """Canonical strategy token persisted into graph-level metadata."""
 
-    def __init__(self, max_papers: int = DEFAULT_MAX_PAPERS):
+    def __init__(self, max_papers: int = DEFAULT_MAX_PAPERS) -> None:
         """
         Initialize the graph builder.
 
@@ -209,7 +242,9 @@ class GraphBuilderStrategy(ABC):
         self._collection_summary: str | None = None
 
     @abstractmethod
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
+    def collect_papers(
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> dict[str, Paper]:
         """
         Collect papers for the graph using strategy-specific method.
 
@@ -271,7 +306,9 @@ class GraphBuilderStrategy(ABC):
         """
         del papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> tuple[nx.Graph, str]:
         """
         Build the complete similarity graph.
 

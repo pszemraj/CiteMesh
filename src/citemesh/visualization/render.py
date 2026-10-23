@@ -10,15 +10,17 @@ from __future__ import annotations
 import logging
 import math
 import textwrap
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
 import matplotlib
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+from matplotlib.backend_bases import RendererBase
+from matplotlib.transforms import Bbox
+from numpy.typing import NDArray
 
 from citemesh.core import VIZ_CONFIG
 from citemesh.core.values import coerce_citation_count, coerce_float
@@ -62,7 +64,7 @@ STATIC_VIEWPORT_MARGIN_RATIO = 0.08
 STATIC_VIEWPORT_MIN_MARGIN = 0.1
 
 
-def _figure_renderer(figure: plt.Figure) -> Any:
+def _figure_renderer(figure: plt.Figure) -> RendererBase:
     """Return a renderer without depending on Matplotlib private APIs.
 
     Interactive and vector canvases do not consistently expose
@@ -70,7 +72,7 @@ def _figure_renderer(figure: plt.Figure) -> Any:
     measurement while the caller's original canvas is restored for export.
 
     :param plt.Figure figure: Figure whose artists need measurement.
-    :return Any: Matplotlib renderer compatible with artist extent methods.
+    :return RendererBase: Renderer used for artist extent calculations.
     """
     original_canvas = figure.canvas
     get_renderer = getattr(original_canvas, "get_renderer", None)
@@ -144,18 +146,18 @@ def _community_index(communities: list[list[Hashable]]) -> dict[Hashable, int]:
 
 
 def _spread_layout_by_communities(
-    pos: dict[Hashable, np.ndarray],
+    pos: dict[Hashable, NDArray[np.float64]],
     graph: nx.Graph,
     communities: list[list[Hashable]],
     layout_seed: int | None,
-) -> dict[Hashable, np.ndarray]:
+) -> dict[Hashable, NDArray[np.float64]]:
     """Shift community centers toward deterministic anchor positions.
 
-    :param Dict[Hashable, np.ndarray] pos: Base node positions.
+    :param dict[Hashable, NDArray[np.float64]] pos: Base node positions.
     :param nx.Graph graph: Canonicalized graph.
     :param List[List[Hashable]] communities: Ordered communities.
     :param Optional[int] layout_seed: Optional deterministic seed.
-    :return Dict[Hashable, np.ndarray]: Updated node positions.
+    :return dict[Hashable, NDArray[np.float64]]: Updated node positions.
     """
     if len(communities) < 2:
         return pos
@@ -241,12 +243,12 @@ def _spread_layout_by_communities(
 
 
 def _choose_metadata_anchor(
-    pos: dict[Hashable, np.ndarray],
+    pos: Mapping[Hashable, NDArray[np.float64]],
 ) -> tuple[float, float, str, str]:
     """
     Choose which corner to place the metadata box in based on node density.
 
-    :param Dict[Hashable, np.ndarray] pos: Mapping of node -> position array
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :return Tuple[float, float, str, str]: Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
     """
     if not pos:
@@ -288,13 +290,14 @@ def _choose_metadata_anchor(
 
 
 def normalize_layout_positions(
-    pos: dict[Hashable, np.ndarray], padding_ratio: float = LAYOUT_PADDING_RATIO
-) -> dict[Hashable, np.ndarray]:
+    pos: Mapping[Hashable, Iterable[float]],
+    padding_ratio: float = LAYOUT_PADDING_RATIO,
+) -> dict[Hashable, NDArray[np.float64]]:
     """Normalize layout positions to a centered square viewport.
 
-    :param Dict[Hashable, np.ndarray] pos: Raw layout map from NetworkX.
+    :param Mapping[Hashable, Iterable[float]] pos: Raw layout positions.
     :param float padding_ratio: Fractional interior padding around graph extents.
-    :return Dict[Hashable, np.ndarray]: Centered and scaled layout in approximately [-1, 1].
+    :return dict[Hashable, NDArray[np.float64]]: Centered and scaled coordinates.
     """
     if not pos:
         return {}
@@ -326,12 +329,12 @@ def normalize_layout_positions(
 
 
 def _orient_layout_horizontally(
-    pos: dict[Hashable, np.ndarray],
-) -> dict[Hashable, np.ndarray]:
+    pos: Mapping[Hashable, Iterable[float]],
+) -> dict[Hashable, NDArray[np.float64]]:
     """Rotate a portrait-oriented layout to use the landscape export viewport.
 
-    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
-    :return Dict[Hashable, np.ndarray]: Copied positions with the longer axis horizontal.
+    :param Mapping[Hashable, Iterable[float]] pos: Raw layout positions.
+    :return dict[Hashable, NDArray[np.float64]]: Positions with the longer axis horizontal.
     """
     if not pos:
         return {}
@@ -356,11 +359,11 @@ def _orient_layout_horizontally(
 
 
 def _layout_viewport_limits(
-    pos: dict[Hashable, np.ndarray], viewport_aspect: float
+    pos: Mapping[Hashable, NDArray[np.float64]], viewport_aspect: float
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     """Fit equal-scale plot limits to the graph and export viewport.
 
-    :param Dict[Hashable, np.ndarray] pos: Normalized node positions.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Normalized node positions.
     :param float viewport_aspect: Physical width-to-height ratio of the axes.
     :return Tuple[Tuple[float, float], Tuple[float, float]]: X and Y axis limits.
     """
@@ -397,13 +400,13 @@ def _layout_viewport_limits(
 
 
 def _pack_disconnected_components(
-    pos: dict[Hashable, np.ndarray], graph: nx.Graph
-) -> dict[Hashable, np.ndarray]:
+    pos: Mapping[Hashable, NDArray[np.float64]], graph: nx.Graph
+) -> dict[Hashable, NDArray[np.float64]]:
     """Pack disconnected components into deterministic size-aware rows.
 
-    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Raw layout positions.
     :param nx.Graph graph: Graph defining connected-component membership.
-    :return Dict[Hashable, np.ndarray]: Size-aware packed component positions.
+    :return dict[Hashable, NDArray[np.float64]]: Size-aware packed positions.
     """
     if not pos or graph.number_of_nodes() == 0:
         return {}
@@ -421,7 +424,7 @@ def _pack_disconnected_components(
     largest_size = max(len(component) for component in components)
     component_layouts: list[
         tuple[
-            dict[Hashable, np.ndarray],
+            dict[Hashable, NDArray[np.float64]],
             tuple[float, float],
             tuple[float, float],
         ]
@@ -469,7 +472,7 @@ def _pack_disconnected_components(
         math.sqrt(padded_area * DISCONNECTED_COMPONENT_TARGET_ASPECT),
     )
 
-    packed: dict[Hashable, np.ndarray] = {}
+    packed: dict[Hashable, NDArray[np.float64]] = {}
     cursor_x = 0.0
     cursor_y = 0.0
     row_height = 0.0
@@ -500,16 +503,16 @@ def _pack_disconnected_components(
 
 def add_metadata_box(
     ax: plt.Axes,
-    metadata: dict[str, Any],
-    pos: dict[Hashable, np.ndarray],
+    metadata: Mapping[str, object],
+    pos: Mapping[Hashable, NDArray[np.float64]],
     theme: Theme,
 ) -> None:
     """
     Render a small metadata block in the plot corner.
 
     :param plt.Axes ax: Matplotlib axes
-    :param Dict[str, Any] metadata: Dictionary of metadata key/value pairs
-    :param Dict[Hashable, np.ndarray] pos: Node position map.
+    :param Mapping[str, object] metadata: Metadata values shown in the plot.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param Theme theme: Active theme (used for text colors).
     :return None: Draws metadata box directly to axes.
     """
@@ -660,14 +663,14 @@ def compute_layout(
     graph: nx.Graph,
     iterations: int = VIZ_CONFIG.spring_iterations,
     layout_seed: int | None = None,
-) -> dict[Hashable, np.ndarray]:
+) -> dict[Hashable, NDArray[np.float64]]:
     """
     Compute force-directed layout with organic clustering.
 
     :param nx.Graph graph: NetworkX graph
     :param int iterations: Number of iterations for spring layout
     :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
-    :return Dict[Hashable, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
+    :return dict[Hashable, NDArray[np.float64]]: Node IDs mapped to (x, y) positions.
     """
     canonical_graph = canonicalize_graph_for_layout(graph)
     # Keep layout dependency-free and deterministic in offline exports:
@@ -727,14 +730,17 @@ def compute_layout(
 
 
 def draw_edges(
-    ax: plt.Axes, graph: nx.Graph, pos: dict[Hashable, np.ndarray], theme: Theme
+    ax: plt.Axes,
+    graph: nx.Graph,
+    pos: Mapping[Hashable, NDArray[np.float64]],
+    theme: Theme,
 ) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
 
     :param plt.Axes ax: Matplotlib axes
     :param nx.Graph graph: NetworkX graph
-    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param Theme theme: Theme palette for edge colors.
     :return None: Draws all edges onto the axes.
     """
@@ -765,7 +771,7 @@ def draw_edges(
 def draw_nodes(
     ax: plt.Axes,
     graph: nx.Graph,
-    pos: dict[Hashable, np.ndarray],
+    pos: Mapping[Hashable, NDArray[np.float64]],
     sizes: list[float],
     colors: list[tuple[float, float, float]],
     theme: Theme,
@@ -775,7 +781,7 @@ def draw_nodes(
 
     :param plt.Axes ax: Matplotlib axes
     :param nx.Graph graph: NetworkX graph
-    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param List[float] sizes: List of node sizes
     :param List[Tuple[float, float, float]] colors: List of node colors (RGB tuples)
     :param Theme theme: Theme palette for edge outlines.
@@ -800,7 +806,7 @@ def draw_nodes(
 def draw_labels(
     ax: plt.Axes,
     graph: nx.Graph,
-    pos: dict[Hashable, np.ndarray],
+    pos: Mapping[Hashable, NDArray[np.float64]],
     seed_id: str,
     theme: Theme,
     sizes: list[float] | None = None,
@@ -810,7 +816,7 @@ def draw_labels(
 
     :param plt.Axes ax: Matplotlib axes
     :param nx.Graph graph: NetworkX graph
-    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param str seed_id: ID of seed paper (gets bold label)
     :param Theme theme: Theme palette for text color.
     :param Optional[List[float]] sizes: Optional node-size list aligned with ``ordered_nodes(graph)``.
@@ -843,8 +849,8 @@ def draw_labels(
         ),
     )
 
-    placed: list[np.ndarray] = []
-    label_bounds: list[Any] = []
+    placed: list[NDArray[np.float64]] = []
+    label_bounds: list[Bbox] = []
     non_seed_label_count = 0
     ax.figure.canvas.draw()
     renderer = _figure_renderer(ax.figure)
@@ -856,7 +862,7 @@ def draw_labels(
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
         if is_seed:
-            title = graph.nodes[node].get("title", "Seed paper")
+            title = str(graph.nodes[node].get("title", "Seed paper"))
             label = _wrap_title(title)
             fontsize = 9
             xytext = (0, node_radius + 8)
@@ -870,7 +876,11 @@ def draw_labels(
         else:
             # Extract author surname
             authors = graph.nodes[node].get("authors", [])
-            author_parts = str(authors[0]).strip().split() if authors else []
+            author_parts = (
+                str(authors[0]).strip().split()
+                if isinstance(authors, Sequence) and authors
+                else []
+            )
             last_name = author_parts[-1] if author_parts else "Unknown"
 
             year = graph.nodes[node].get("year")
@@ -933,9 +943,9 @@ def visualize_graph(
     output_path: Path,
     iterations: int = VIZ_CONFIG.spring_iterations,
     dpi: int = None,
-    metadata: dict[str, Any] | None = None,
+    metadata: Mapping[str, object] | None = None,
     theme_name: str = "dark",
-    layout: dict[Hashable, np.ndarray] | None = None,
+    layout: Mapping[Hashable, Iterable[float]] | None = None,
     layout_seed: int | None = None,
 ) -> None:
     """
@@ -946,9 +956,9 @@ def visualize_graph(
     :param Path output_path: Path for output PNG file
     :param int iterations: Iterations used only if spring fallback layout is triggered.
     :param int dpi: Output resolution (defaults to config value).
-    :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned).
+    :param Optional[Mapping[str, object]] metadata: Optional info to annotate on the figure.
     :param str theme_name: Name of theme to render.
-    :param Optional[Dict[Hashable, np.ndarray]] layout: Optional precomputed layout to
+    :param Optional[Mapping[Hashable, Iterable[float]]] layout: Optional precomputed layout to
         reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.

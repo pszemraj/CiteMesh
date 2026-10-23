@@ -11,24 +11,39 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from itertools import chain
-from typing import (
-    Any,
-)
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from citemesh.core.text_batching import l2_normalize_embeddings, warn_on_truncated_count
 
 from . import deps
 
+if TYPE_CHECKING:
+    import torch
+    from sentence_transformers import SentenceTransformer
+    from typing_extensions import Unpack
+
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
-def _model_floating_dtype_names(model: Any) -> set[str] | None:
+class _EncodeOptions(TypedDict, total=False):
+    """Encoder options used by CiteMesh text batching."""
+
+    batch_size: int
+    convert_to_tensor: bool
+    normalize_embeddings: bool
+    show_progress_bar: bool | None
+
+
+def _model_floating_dtype_names(model: torch.nn.Module) -> set[str] | None:
     """Return floating-point parameter and buffer dtypes from a loaded model.
 
-    :param Any model: Model object that may expose ``parameters()``.
+    :param torch.nn.Module model: Model whose parameter and buffer tensors are inspected.
     :return Optional[Set[str]]: Normalized dtype names, or ``None`` when live
         tensor inspection is unavailable.
     """
@@ -71,16 +86,16 @@ class _PrecisionEncodeProxy:
 
     def __init__(
         self,
-        model: Any,
-        context_factory: Callable[[], Any],
+        model: SentenceTransformer,
+        context_factory: Callable[[], AbstractContextManager[None]],
         restore_eager: Callable[[Exception], bool],
         *,
         prefetch_batches: bool = False,
-    ):
+    ) -> None:
         """Create a model proxy for encode-time precision controls.
 
-        :param Any model: Wrapped model object exposing ``encode``.
-        :param Callable[[], Any] context_factory: Callable returning a context manager.
+        :param SentenceTransformer model: Wrapped encoder model.
+        :param Callable context_factory: Factory for the encode precision context.
         :param Callable[[Exception], bool] restore_eager: Restore eager execution
             after a compiled-call failure; return whether the call can be retried.
         :param bool prefetch_batches: Whether to overlap CPU preprocessing with
@@ -91,11 +106,11 @@ class _PrecisionEncodeProxy:
         self._restore_eager = restore_eager
         self.prefetch_batches = bool(prefetch_batches)
 
-    def _call_with_precision(self, operation: Callable[[], Any]) -> Any:
+    def _call_with_precision(self, operation: Callable[[], _T]) -> _T:
         """Run an operation with precision controls and eager compile recovery.
 
-        :param Callable[[], Any] operation: Encode or forward operation to run.
-        :return Any: Operation result.
+        :param Callable operation: Encode or forward operation to run.
+        :return: Operation result.
         """
         try:
             with self._context_factory():
@@ -110,21 +125,25 @@ class _PrecisionEncodeProxy:
             except Exception as eager_error:
                 raise eager_error from compiled_failure
 
-    def encode(self, *args: Any, **kwargs: Any) -> Any:
+    def encode(
+        self,
+        *sentences: list[str],
+        **kwargs: Unpack[_EncodeOptions],
+    ) -> ArrayLike | torch.Tensor:
         """Run ``encode`` within the configured context manager.
 
-        :param Any args: Positional arguments forwarded to ``encode``.
-        :param Any kwargs: Keyword arguments forwarded to ``encode``.
-        :return Any: Model ``encode`` return value.
+        :param sentences: Positional inputs passed to the wrapped encoder.
+        :param kwargs: Encoder options used by CiteMesh text batching.
+        :return ArrayLike | torch.Tensor: Encoded vectors from the wrapped model.
         """
-        normalize_embeddings = kwargs.get("normalize_embeddings", False)
-        if normalize_embeddings:
+        normalize_output = kwargs.get("normalize_embeddings", False)
+        if normalize_output:
             kwargs["normalize_embeddings"] = False
         embeddings = self._call_with_precision(
-            lambda: self._model.encode(*args, **kwargs)
+            lambda: self._model.encode(*sentences, **kwargs)
         )
         # Normalize once in FP32; CPU autocast would round ST's division to BF16.
-        if normalize_embeddings:
+        if normalize_output:
             return l2_normalize_embeddings(embeddings)
         return embeddings
 
@@ -132,14 +151,14 @@ class _PrecisionEncodeProxy:
         self,
         texts: list[str],
         prompt: str | None,
-    ) -> tuple[dict[str, Any], int]:
+    ) -> tuple[dict[str, torch.Tensor], int]:
         """Preprocess one batch and count inputs that will be truncated.
 
         :param list[str] texts: Text payloads in encode order.
         :param Optional[str] prompt: Model-resolved prompt prepended by preprocessing.
-        :return Tuple[Dict[str, Any], int]: Prepared CPU features and truncation count.
+        :return Tuple[Dict[str, torch.Tensor], int]: Prepared CPU features and truncation count.
         """
-        features = self._model.preprocess(texts, prompt=prompt)
+        features: dict[str, torch.Tensor] = self._model.preprocess(texts, prompt=prompt)
         max_length = getattr(self._model, "max_seq_length", None)
         if max_length is None:
             return features, 0
@@ -182,12 +201,12 @@ class _PrecisionEncodeProxy:
         texts: Sequence[str],
         *,
         batch_size: int,
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Encode normalized FP32 text vectors while prefetching CPU features.
 
         :param Sequence[str] texts: Text payloads to encode.
         :param int batch_size: Maximum rows per prepared batch.
-        :return np.ndarray: Normalized FP32 embeddings in original input order.
+        :return NDArray[np.float32]: Normalized FP32 embeddings in original input order.
         """
         if not texts:
             return np.empty((0, 0), dtype=np.float32)
@@ -200,7 +219,7 @@ class _PrecisionEncodeProxy:
         model.eval()
         prompt = model._resolve_prompt(None, None)
         batches = length_bucketed_index_batches(texts, batch_size)
-        ordered_embeddings: dict[int, np.ndarray] = {}
+        ordered_embeddings: dict[int, NDArray[np.float32]] = {}
         truncated_count = 0
         torch = deps._import_torch()
 
@@ -250,10 +269,10 @@ class _PrecisionEncodeProxy:
         )
         return l2_normalize_embeddings(embeddings)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
         """Delegate unknown attributes to the wrapped model.
 
         :param str name: Attribute name.
-        :return Any: Delegated attribute value.
+        :return object: Delegated attribute value.
         """
         return getattr(self._model, name)

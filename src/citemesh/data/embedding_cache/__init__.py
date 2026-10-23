@@ -1,17 +1,7 @@
 """Persistent embedding cache backed by SQLite metadata and HDF5 vectors.
 
-The cache is split across focused modules and re-exported here so
-``citemesh.data.embedding_cache`` keeps its historical import surface:
-
-- :mod:`.constants` — dataset names, metadata keys, tunables, lock timeout.
-- :mod:`.models` — value dataclasses and the internal layout-error signal.
-- :mod:`.quantization` — int8/binary quantizers and compression validation.
-- :mod:`.sql` — SQLite statements, JSON column codecs, row decoding.
-- :mod:`.layout` — SQLite schema and HDF5 physical-layout management.
-- :mod:`.recovery` — locking, connections, and crash recovery.
-- :mod:`.search` — the query-time scoring kernel.
-- :mod:`.ingest` — the cache-miss/encode/commit ingestion pipeline.
-- :mod:`.store` — the :class:`EmbeddingCache` facade and public API.
+Exports :class:`EmbeddingCache`, corpus selection helpers, shared constants,
+and the storage, quantization, recovery, and search modules.
 """
 
 from __future__ import annotations

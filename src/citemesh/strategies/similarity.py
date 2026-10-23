@@ -26,7 +26,7 @@ def cosine_similarity_to_query(
 class AbstractSimilarityIndex:
     """Simple TF-IDF cosine similarity index over paper abstracts."""
 
-    def __init__(self, max_features: int = 5000):
+    def __init__(self, max_features: int = 5000) -> None:
         """Create a simple TF-IDF cosine similarity index.
 
         :param int max_features: Maximum number of TF-IDF features.

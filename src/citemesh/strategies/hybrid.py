@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 import networkx as nx
 import numpy as np
@@ -28,6 +31,7 @@ from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    NoStrategyOptions,
     build_capped_undirected_graph,
     deterministic_sort_key,
     validate_embedding_vectors,
@@ -145,7 +149,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
         cache_selection: ExistingCacheSelection | None = None,
-    ):
+    ) -> None:
         """
         Initialize hybrid graph builder.
 
@@ -622,11 +626,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return [paper_id for _, paper_id, _ in scored]
 
     @scope_candidate_collection
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
+    def collect_papers(
+        self, seed_id: str, **kwargs: Unpack[NoStrategyOptions]
+    ) -> dict[str, Paper]:
         """Collect papers while retaining any corpus lifecycle operation lock.
 
         :param str seed_id: Seed paper identifier.
-        :param Any kwargs: Strategy-specific options forwarded to collection.
+        :param kwargs: Extra options are passed to collection and ignored.
         :return Dict[str, Paper]: Combined dictionary of papers.
         """
         operation_lock = (
@@ -639,13 +645,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             return self._collect_papers_under_operation_lock(seed_id, **kwargs)
 
     def _collect_papers_under_operation_lock(
-        self, seed_id: str, **kwargs: Any
+        self, seed_id: str, **kwargs: Unpack[NoStrategyOptions]
     ) -> dict[str, Paper]:
         """
         Collect papers from both citation and semantic sources.
 
         :param str seed_id: Seed paper identifier
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Extra options are ignored.
         :return Dict[str, Paper]: Combined dictionary of papers
         """
         papers: dict[str, Paper] = {}
@@ -954,12 +960,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         return min(similarity, 1.0)  # Cap at 1.0
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[NoStrategyOptions]
+    ) -> tuple[nx.Graph, str]:
         """
         Build graph and enforce per-node edge limits for readability.
 
         :param str seed_id: Seed paper identifier
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Extra options are ignored by collection.
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)

@@ -25,17 +25,26 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import h5py
 import numpy as np
+from numpy.typing import NDArray
 
-from citemesh.core.text_batching import encode_texts, l2_normalize_embeddings
+from citemesh.core.text_batching import (
+    _TextEncoder,
+    encode_texts,
+    l2_normalize_embeddings,
+)
 
 from ..model_profiles import compose_title_abstract_text
 from .models import (
+    EmbeddingInputMetadata,
+    PaperRequest,
+    PaperRowValues,
     PendingEmbeddingRecord,
+    StoredEmbedding,
+    VectorReplacement,
     _CacheLookupPlan,
     _Int8Saturation,
     _VectorWritePlan,
@@ -46,19 +55,22 @@ from .quantization import (
     _quantize_ubinary_embeddings,
     _storage_dtype_for_precision,
 )
-from .sql import PAPER_METADATA_REFRESH_SQL, PAPER_ROW_UPSERT_SQL
+from .sql import (
+    PAPER_METADATA_REFRESH_SQL,
+    PAPER_ROW_UPSERT_SQL,
+    PaperMetadataRefreshValues,
+)
 
 
-def _close_progress(iterator: Iterable[Any]) -> None:
+def _close_progress(iterator: Iterable[PaperRequest]) -> None:
     """Tear down a progress reporter that was consumed to completion.
 
     Reporters are generators whose display must be closed; a plain passthrough
     sequence has nothing to close.
 
-    :param Iterable[Any] iterator: Value previously returned by the reporter.
-    :return None: Closes the reporter when it supports closing.
+    :param Iterable[PaperRequest] iterator: Values previously returned by the reporter.
     """
-    close = getattr(iterator, "close", None)
+    close: object = getattr(iterator, "close", None)
     if callable(close):
         close()
 
@@ -68,23 +80,23 @@ class _IngestMixin:
 
     def _process_embeddings(
         self,
-        papers: dict[str, dict],
-        model: Any,
+        papers: Mapping[str, EmbeddingInputMetadata],
+        model: _TextEncoder,
         *,
         batch_size: int,
         show_progress: bool,
-        text_builder: Callable[[dict[str, object]], str] | None,
+        text_builder: Callable[[EmbeddingInputMetadata], str] | None,
         return_embeddings: bool,
-    ) -> dict[str, np.ndarray] | None:
+    ) -> dict[str, NDArray[np.float32]] | None:
         """Coordinate one complete embedding cache operation with root clearing.
 
-        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
-        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
+        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         :param bool return_embeddings: Whether to return float32 embedding payloads.
-        :return Optional[Dict[str, np.ndarray]]: Embedding map when requested, else ``None``.
+        :return Optional[dict[str, NDArray[np.float32]]]: Embedding map when requested, else ``None``.
         """
         with self._cache_operation_lock():
             return self._process_embeddings_locked(
@@ -98,14 +110,14 @@ class _IngestMixin:
 
     def _process_embeddings_locked(
         self,
-        papers: dict[str, dict],
-        model: Any,
+        papers: Mapping[str, EmbeddingInputMetadata],
+        model: _TextEncoder,
         *,
         batch_size: int,
         show_progress: bool,
-        text_builder: Callable[[dict[str, object]], str] | None,
+        text_builder: Callable[[EmbeddingInputMetadata], str] | None,
         return_embeddings: bool,
-    ) -> dict[str, np.ndarray] | None:
+    ) -> dict[str, NDArray[np.float32]] | None:
         """Hydrate cache entries while the root operation lock is held.
 
         Runs three phases in order: a locked scan that separates hits from
@@ -114,13 +126,13 @@ class _IngestMixin:
         HDF5 handle are opened here and handed to each step, so no step widens
         or shortens the window a caller sees.
 
-        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
-        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
+        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         :param bool return_embeddings: Whether to return float32 embedding payloads.
-        :return Optional[Dict[str, np.ndarray]]: Embedding map when requested, else ``None``.
+        :return Optional[dict[str, NDArray[np.float32]]]: Embedding map when requested, else ``None``.
         """
         if not papers:
             if return_embeddings:
@@ -128,9 +140,9 @@ class _IngestMixin:
             return None
 
         builder = text_builder or compose_title_abstract_text
-        items = list(papers.items())
+        items: list[PaperRequest] = list(papers.items())
 
-        calibration_ranges: np.ndarray | None = None
+        calibration_ranges: NDArray[np.float32] | None = None
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -193,8 +205,8 @@ class _IngestMixin:
         *,
         conn: sqlite3.Connection,
         h5_file: h5py.File,
-        items: Sequence[tuple[str, dict]],
-        builder: Callable[[dict[str, object]], str],
+        items: Sequence[PaperRequest],
+        builder: Callable[[EmbeddingInputMetadata], str],
         return_embeddings: bool,
         show_progress: bool,
     ) -> _CacheLookupPlan:
@@ -208,8 +220,8 @@ class _IngestMixin:
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
-        :param Sequence[Tuple[str, Dict]] items: Requested ``(paper_id, metadata)`` pairs.
-        :param Callable[[Dict[str, object]], str] builder: Metadata-to-text formatter.
+        :param Sequence[PaperRequest] items: Requested ``(paper_id, metadata)`` pairs.
+        :param Callable[[EmbeddingInputMetadata], str] builder: Metadata-to-text formatter.
         :param bool return_embeddings: Whether cached vectors must be materialized.
         :param bool show_progress: Whether the scan may report progress.
         :return _CacheLookupPlan: Cached vectors plus the records still to encode.
@@ -233,9 +245,9 @@ class _IngestMixin:
 
         cached_rows: list[tuple[str, int]] = []
         papers_to_embed: list[PendingEmbeddingRecord] = []
-        metadata_updates_on_hit: list[tuple[Any, ...]] = []
+        metadata_updates_on_hit: list[PaperMetadataRefreshValues] = []
 
-        iterator: Iterable[tuple[str, dict]] = self._report_progress(
+        iterator: Iterable[PaperRequest] = self._report_progress(
             items, "Checking cache", enabled=show_progress and len(items) > 50
         )
         for paper_id, metadata in iterator:
@@ -270,7 +282,7 @@ class _IngestMixin:
 
         _close_progress(iterator)
 
-        cached_embeddings: dict[str, np.ndarray] = {}
+        cached_embeddings: dict[str, NDArray[np.float32]] = {}
         if return_embeddings and cached_rows and embeddings_dataset is not None:
             cached_embeddings = self._load_cached_embeddings(
                 h5_file,
@@ -287,14 +299,13 @@ class _IngestMixin:
     def _refresh_hit_metadata(
         conn: sqlite3.Connection,
         cursor: sqlite3.Cursor,
-        updates: Sequence[tuple[Any, ...]],
+        updates: Sequence[PaperMetadataRefreshValues],
     ) -> None:
         """Rewrite non-vector metadata for cache hits whose payload drifted.
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
         :param sqlite3.Cursor cursor: Cursor owned by ``conn``.
-        :param Sequence[Tuple[Any, ...]] updates: Refresh tuples for the UPDATE query.
-        :return None: Commits the metadata-only refresh when there is work to do.
+        :param Sequence[PaperMetadataRefreshValues] updates: Refresh tuples for the UPDATE query.
         """
         if not updates:
             return
@@ -303,22 +314,22 @@ class _IngestMixin:
 
     @staticmethod
     def _encode_pending_texts(
-        model: Any,
+        model: _TextEncoder,
         papers_to_embed: Sequence[PendingEmbeddingRecord],
         *,
         batch_size: int,
         show_progress: bool,
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Encode pending texts and reject any malformed model output.
 
         Runs with no lock held: encoding is the slow phase and must not block
         other processes reading this namespace.
 
-        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param Sequence[PendingEmbeddingRecord] papers_to_embed: Records to encode.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display the encoder progress bar.
-        :return np.ndarray: Validated ``(rows, dim)`` float embedding matrix.
+        :return NDArray[np.float32]: Validated ``(rows, dim)`` float embedding matrix.
         :raises ValueError: If the model returns a malformed or non-finite matrix.
         """
         texts = [record.text for record in papers_to_embed]
@@ -348,17 +359,17 @@ class _IngestMixin:
 
     def _prepare_storage_embeddings(
         self,
-        embeddings_array: np.ndarray,
+        embeddings_array: NDArray[np.float32],
         *,
-        calibration_ranges: np.ndarray | None,
+        calibration_ranges: NDArray[np.float32] | None,
         embedding_dim: int,
-    ) -> tuple[np.ndarray, _Int8Saturation]:
+    ) -> tuple[StoredEmbedding, _Int8Saturation]:
         """Convert encoded float vectors into this namespace's storage dtype.
 
-        :param np.ndarray embeddings_array: Validated float embedding matrix.
-        :param Optional[np.ndarray] calibration_ranges: Ranges captured before encoding.
+        :param NDArray[np.float32] embeddings_array: Validated float embedding matrix.
+        :param Optional[NDArray[np.float32]] calibration_ranges: Ranges captured before encoding.
         :param int embedding_dim: Embedding vector width.
-        :return Tuple[np.ndarray, _Int8Saturation]: Storage matrix and clipping counts.
+        :return Tuple[StoredEmbedding, _Int8Saturation]: Storage matrix and clipping counts.
         :raises RuntimeError: If int8 storage has no persisted calibration ranges.
         :raises ValueError: If persisted ranges do not match the encoded width.
         """
@@ -395,25 +406,25 @@ class _IngestMixin:
         conn: sqlite3.Connection,
         h5_file: h5py.File,
         papers_to_embed: Sequence[PendingEmbeddingRecord],
-        embeddings_array: np.ndarray,
-        storage_embeddings: np.ndarray,
-        calibration_ranges: np.ndarray | None,
+        embeddings_array: NDArray[np.float32],
+        storage_embeddings: StoredEmbedding,
+        calibration_ranges: NDArray[np.float32] | None,
         saturation: _Int8Saturation,
         embedding_dim: int,
         return_embeddings: bool,
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, NDArray[np.float32]]:
         """Persist one encoded batch while the cache lock is held.
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
         :param Sequence[PendingEmbeddingRecord] papers_to_embed: Encoded records.
-        :param np.ndarray embeddings_array: Float matrix returned by the model.
-        :param np.ndarray storage_embeddings: Matrix in this namespace's storage dtype.
-        :param Optional[np.ndarray] calibration_ranges: Ranges captured before encoding.
+        :param NDArray[np.float32] embeddings_array: Float matrix returned by the model.
+        :param StoredEmbedding storage_embeddings: Matrix in this namespace's storage dtype.
+        :param Optional[NDArray[np.float32]] calibration_ranges: Ranges captured before encoding.
         :param _Int8Saturation saturation: Clipping counts from quantization.
         :param int embedding_dim: Embedding vector width.
         :param bool return_embeddings: Whether float32 payloads must be returned.
-        :return Dict[str, np.ndarray]: Embeddings for the newly written papers.
+        :return dict[str, NDArray[np.float32]]: Embeddings for the newly written papers.
         """
         self._recover_pending_replacements_locked(conn=conn, h5_file=h5_file)
         cursor = conn.cursor()
@@ -468,7 +479,7 @@ class _IngestMixin:
         self,
         h5_file: h5py.File,
         *,
-        calibration_ranges: np.ndarray | None,
+        calibration_ranges: NDArray[np.float32] | None,
         saturation: _Int8Saturation,
         embedding_dim: int,
     ) -> None:
@@ -478,10 +489,9 @@ class _IngestMixin:
         re-read here and compared before any row is written.
 
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
-        :param Optional[np.ndarray] calibration_ranges: Ranges captured before encoding.
+        :param Optional[NDArray[np.float32]] calibration_ranges: Ranges captured before encoding.
         :param _Int8Saturation saturation: Clipping counts from quantization.
         :param int embedding_dim: Embedding vector width.
-        :return None: Records saturation telemetry when this batch clipped values.
         :raises RuntimeError: If persisted calibration ranges changed during encoding.
         """
         if self.storage_precision != "int8":
@@ -506,10 +516,10 @@ class _IngestMixin:
         self,
         h5_file: h5py.File,
         *,
-        storage_embeddings: np.ndarray,
-        embeddings_array: np.ndarray,
+        storage_embeddings: StoredEmbedding,
+        embeddings_array: NDArray[np.float32],
         return_embeddings: bool,
-    ) -> tuple[np.ndarray | None, np.ndarray]:
+    ) -> tuple[NDArray[np.uint8] | None, NDArray[np.float32]]:
         """Derive the binary index rows and the vectors handed back to callers.
 
         Callers must see the vectors this cache will return forever after, so
@@ -517,10 +527,10 @@ class _IngestMixin:
         otherwise the encoding run and every later hit disagree.
 
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
-        :param np.ndarray storage_embeddings: Matrix in this namespace's storage dtype.
-        :param np.ndarray embeddings_array: Float matrix returned by the model.
+        :param StoredEmbedding storage_embeddings: Matrix in this namespace's storage dtype.
+        :param NDArray[np.float32] embeddings_array: Float matrix returned by the model.
         :param bool return_embeddings: Whether float32 payloads must be returned.
-        :return Tuple[Optional[np.ndarray], np.ndarray]: Packed binary rows, when the
+        :return Tuple[Optional[NDArray[np.uint8]], NDArray[np.float32]]: Packed binary rows, when the
             prefilter is enabled, and the float32 vectors to return.
         """
         dequantized_embeddings = (
@@ -549,9 +559,9 @@ class _IngestMixin:
         embeddings_dataset: h5py.Dataset,
         binary_dataset: h5py.Dataset | None,
         papers_to_embed: Sequence[PendingEmbeddingRecord],
-        storage_embeddings: np.ndarray,
-        binary_embeddings: np.ndarray | None,
-        returned_embeddings: np.ndarray,
+        storage_embeddings: StoredEmbedding,
+        binary_embeddings: NDArray[np.uint8] | None,
+        returned_embeddings: NDArray[np.float32],
         embedding_dim: int,
         return_embeddings: bool,
     ) -> _VectorWritePlan:
@@ -567,9 +577,9 @@ class _IngestMixin:
         :param h5py.Dataset embeddings_dataset: Resizable embeddings matrix dataset.
         :param Optional[h5py.Dataset] binary_dataset: Packed binary index, when enabled.
         :param Sequence[PendingEmbeddingRecord] papers_to_embed: Encoded records.
-        :param np.ndarray storage_embeddings: Matrix in this namespace's storage dtype.
-        :param Optional[np.ndarray] binary_embeddings: Packed binary rows, when enabled.
-        :param np.ndarray returned_embeddings: Float32 vectors to return to callers.
+        :param StoredEmbedding storage_embeddings: Matrix in this namespace's storage dtype.
+        :param Optional[NDArray[np.uint8]] binary_embeddings: Packed binary rows, when enabled.
+        :param NDArray[np.float32] returned_embeddings: Float32 vectors to return to callers.
         :param int embedding_dim: Embedding vector width.
         :param bool return_embeddings: Whether float32 payloads must be returned.
         :return _VectorWritePlan: Replacement, append and metadata work for this batch.
@@ -668,9 +678,7 @@ class _IngestMixin:
         conn: sqlite3.Connection,
         embeddings_dataset: h5py.Dataset,
         binary_dataset: h5py.Dataset | None,
-        replacement_rows: Sequence[
-            tuple[int, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray | None]
-        ],
+        replacement_rows: Sequence[VectorReplacement],
     ) -> None:
         """Journal the rows about to be overwritten, then overwrite them.
 
@@ -680,9 +688,8 @@ class _IngestMixin:
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
         :param h5py.Dataset embeddings_dataset: Resizable embeddings matrix dataset.
         :param Optional[h5py.Dataset] binary_dataset: Packed binary index, when enabled.
-        :param Sequence[Tuple[int, np.ndarray, Optional[np.ndarray], np.ndarray, Optional[np.ndarray]]] replacement_rows:
+        :param Sequence[VectorReplacement] replacement_rows:
             Rows to overwrite, carrying both their prior and replacement vectors.
-        :return None: Mutates the matrix and binary datasets in-place.
         """
         if not replacement_rows:
             return
@@ -719,7 +726,6 @@ class _IngestMixin:
         :param Optional[h5py.Dataset] binary_dataset: Packed binary index, when enabled.
         :param _VectorWritePlan plan: Write plan whose append rows are persisted.
         :param int embedding_dim: Embedding vector width.
-        :return None: Resizes the datasets and extends ``plan.rows_to_upsert``.
         """
         if not plan.append_embeddings:
             return
@@ -755,10 +761,8 @@ class _IngestMixin:
         *,
         cursor: sqlite3.Cursor,
         h5_file: h5py.File,
-        rows_to_upsert: Sequence[tuple[Any, ...]],
-        replacement_rows: Sequence[
-            tuple[int, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray | None]
-        ],
+        rows_to_upsert: Sequence[PaperRowValues],
+        replacement_rows: Sequence[VectorReplacement],
     ) -> None:
         """Flush vectors, then commit the SQLite rows that point at them.
 
@@ -768,10 +772,9 @@ class _IngestMixin:
 
         :param sqlite3.Cursor cursor: Cursor owned by the active connection.
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
-        :param Sequence[Tuple[Any, ...]] rows_to_upsert: Paper rows to insert or replace.
-        :param Sequence[Tuple[int, np.ndarray, Optional[np.ndarray], np.ndarray, Optional[np.ndarray]]] replacement_rows:
+        :param Sequence[PaperRowValues] rows_to_upsert: Paper rows to insert or replace.
+        :param Sequence[VectorReplacement] replacement_rows:
             Replacement rows whose journal entries are now redundant.
-        :return None: Mutates HDF5 durability state and SQLite rows in-place.
         """
         if not rows_to_upsert:
             return

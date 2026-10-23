@@ -7,6 +7,7 @@ import logging
 import shlex
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
+from typing import TypedDict
 
 from rich.text import Text
 
@@ -57,14 +58,32 @@ _NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
 )
 
 
-def _namespace_overrides(args: argparse.Namespace) -> dict[str, object]:
+class _NamespaceOverrides(TypedDict, total=False):
+    """Namespace selectors explicitly supplied to the search command."""
+
+    model: str
+    model_profile: str
+    model_revision: str
+    device: str
+    semantic_source: str
+    dataset_source: str
+    truncate_dim: int
+    storage_precision: str
+    calibration_sample_size: int
+    cache_namespace: str
+    dataset_split: str
+    corpus_size: int
+    all_corpus: bool
+
+
+def _namespace_overrides(args: argparse.Namespace) -> _NamespaceOverrides:
     """Return cache-selection values supplied directly to ``search``.
 
     Every search selector defaults to ``None``, including integer selectors, so
     this single presence test stays aligned with the parser contracts.
 
     :param argparse.Namespace args: Parsed search command arguments.
-    :return dict[str, object]: Supplied selector destinations and their values.
+    :return _NamespaceOverrides: Supplied selector destinations and their values.
     """
     return {
         dest: value
@@ -73,10 +92,10 @@ def _namespace_overrides(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _namespace_override_labels(overrides: dict[str, object]) -> list[str]:
+def _namespace_override_labels(overrides: _NamespaceOverrides) -> list[str]:
     """Return stable CLI labels for supplied search namespace selectors.
 
-    :param dict[str, object] overrides: Supplied selector destinations and values.
+    :param _NamespaceOverrides overrides: Supplied selector destinations and values.
     :return list[str]: Sorted long-option labels.
     """
     return sorted(f"--{dest.replace('_', '-')}" for dest in overrides)
@@ -294,7 +313,7 @@ def _local_result_build_command(
 
 def _print_search_results(
     title: str,
-    rows: Iterable[tuple[str, str, Sequence[str], object, str]],
+    rows: Iterable[tuple[str, str, Sequence[str], int | str | None, str]],
     *,
     metric: str,
     metric_width: int | None = None,

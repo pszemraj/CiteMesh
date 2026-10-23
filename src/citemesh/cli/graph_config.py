@@ -8,9 +8,16 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from citemesh.core.paper_ids import canonicalize_or_none
+from citemesh.data.cache import JSONValue
+from citemesh.visualization.dashboard.contracts import (
+    CitationConfig,
+    EmbeddingConfig,
+    GraphConfigData,
+)
+from citemesh.visualization.export import ExportMetadata
 
 from .build_options import (
     _CORPUS_ONLY_OPTION_DESTS,
@@ -20,11 +27,11 @@ from .build_options import (
 )
 
 
-def _drop_none_values(value: Any) -> Any:
+def _drop_none_values(value: JSONValue) -> JSONValue:
     """Recursively drop ``None`` entries from dictionaries/lists.
 
-    :param Any value: Arbitrary JSON-serializable object.
-    :return Any: Copy with ``None``-valued mapping entries removed.
+    :param JSONValue value: JSON value to copy.
+    :return JSONValue: Copy with ``None``-valued mapping entries removed.
     """
     if isinstance(value, dict):
         return {
@@ -39,12 +46,12 @@ def _drop_none_values(value: Any) -> Any:
 
 def _build_citation_config_payload(
     cli_args: argparse.Namespace, *, strategy: str
-) -> dict[str, Any] | None:
+) -> CitationConfig | None:
     """Build strategy-scoped citation/reference settings for config sidecars.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
     :param str strategy: Active build strategy.
-    :return Optional[Dict[str, Any]]: Citation config payload when applicable.
+    :return CitationConfig | None: Settings for the active citation/reference branch.
     """
     fetch_references = not bool(cli_args.no_references)
     refresh_reference_cache = bool(cli_args.refresh_reference_cache)
@@ -56,7 +63,7 @@ def _build_citation_config_payload(
             "similarity_threshold": cli_args.similarity_threshold,
         }
     if strategy in {"citation", "hybrid"}:
-        config = {
+        config: CitationConfig = {
             "max_citations": int(cli_args.max_citations),
             "max_references": int(cli_args.max_references),
             "fetch_references": fetch_references,
@@ -71,24 +78,24 @@ def _build_citation_config_payload(
 def _build_graph_config_payload(
     cli_args: argparse.Namespace,
     seed_id: str,
-    metadata: dict[str, Any],
+    metadata: ExportMetadata,
     selected_formats: list[str],
     output_paths: dict[str, Path],
     s2_retry_budget: float,
-) -> dict[str, Any]:
-    """Build sidecar graph-config payload for reproducibility and auditability.
+) -> GraphConfigData:
+    """Build the effective configuration sidecar for one graph export.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
     :param str seed_id: Resolved seed paper identifier.
-    :param Dict[str, Any] metadata: Run metadata payload used by exporters.
+    :param ExportMetadata metadata: Run metadata payload used by exporters.
     :param List[str] selected_formats: Formats requested for export.
     :param Dict[str, Path] output_paths: Resolved export artifact paths.
     :param float s2_retry_budget: Effective recovery-time cap from the selected S2 client.
-    :return Dict[str, Any]: JSON-safe run configuration payload.
+    :return GraphConfigData: Build settings, output paths, and run metadata.
     """
     strategy = str(cli_args.strategy)
     semantic_enabled = _embedding_branch_enabled(cli_args)
-    embedding_config: dict[str, Any] | None = None
+    embedding_config: EmbeddingConfig | None = None
     if semantic_enabled:
         embedding_config = {
             "cache_namespace": getattr(cli_args, "cache_namespace", None),
@@ -182,7 +189,7 @@ def _build_graph_config_payload(
         "outputs": {fmt: str(path) for fmt, path in sorted(output_paths.items())},
         "metadata": metadata,
     }
-    return _drop_none_values(payload)
+    return cast(GraphConfigData, _drop_none_values(cast(JSONValue, payload)))
 
 
 def canonicalize_paper_id_for_metadata(paper_id: str) -> str:

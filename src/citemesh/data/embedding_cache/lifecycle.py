@@ -34,8 +34,16 @@ from .models import (
     CorpusRecord,
     PortableImportIdentity,
     PortableProducerProvenance,
-    PublicationOrigin,
     StoredEmbedding,
+)
+from .models import (
+    CorpusOrigin as CorpusOrigin,
+)
+from .models import (
+    PublicationOrigin as PublicationOrigin,
+)
+from .models import (
+    SnapshotOrigin as SnapshotOrigin,
 )
 from .sql import (
     CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL,
@@ -65,15 +73,6 @@ class PendingOperation(TypedDict):
     kind: Literal["import", "refresh"]
     identity: OperationIdentity
     target_source: CorpusSourceData
-
-
-class SnapshotOrigin(TypedDict):
-    """Local snapshot identity recorded when no bucket publication is supplied."""
-
-    snapshot_id: str
-
-
-CorpusOrigin: TypeAlias = SnapshotOrigin | PublicationOrigin
 
 
 class CorpusState(TypedDict, total=False):

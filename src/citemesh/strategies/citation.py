@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
 
 import networkx as nx
 
@@ -23,7 +26,9 @@ from citemesh.progress import progress_enabled, progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     RELATIONSHIP_DEGREE_CAP,
+    CitationCollectionOptions,
     GraphBuilderStrategy,
+    NoStrategyOptions,
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
@@ -69,7 +74,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
         client: SemanticScholarClient | None = None,
-    ):
+    ) -> None:
         """
         Initialize citation graph builder.
 
@@ -88,7 +93,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.fetch_references = fetch_references
         self.refresh_reference_cache = bool(refresh_reference_cache)
         self.client: SemanticScholarClient = client or get_client()
-        self.reference_cache: dict[str, list] = {}  # Cache reference lists
+        self.reference_cache: dict[str, list[str]] = {}
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
@@ -273,14 +278,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
     def _get_references(
         self, paper_id: str, *, provider_lookup_id: str | None = None
-    ) -> list:
+    ) -> list[str]:
         """
         Get reference IDs for a paper with caching.
 
         :param str paper_id: Local cache key for the paper.
         :param Optional[str] provider_lookup_id: Provider-safe request identifier;
             defaults to ``paper_id``.
-        :return list: List of referenced paper IDs
+        :return list[str]: Referenced paper IDs.
         """
         if not self.refresh_reference_cache and paper_id in self.reference_cache:
             return self.reference_cache[paper_id]
@@ -305,7 +310,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]]
         | None = None,
         reference_selector: ReferenceSelector | None = None,
-        **kwargs: Any,
+        **kwargs: Unpack[NoStrategyOptions],
     ) -> dict[str, Paper]:
         """
         Collect papers via citations and references.
@@ -321,7 +326,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             already prepared corpus for HTML reference recovery.
         :param Callable | None reference_selector: Strategy-specific recovered-reference
             selector.
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Extra options are ignored by citation collection.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         # Scope in-memory references to one collection request so stale entries do
@@ -462,11 +467,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         return papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[CitationCollectionOptions]
+    ) -> tuple[nx.Graph, str]:
         """Build citation graph and persist seed-relation metadata.
 
         :param str seed_id: Seed paper identifier.
-        :param Any kwargs: Strategy-specific options forwarded to parent build.
+        :param kwargs: Collection options forwarded to the parent build.
         :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)

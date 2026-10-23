@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -19,7 +19,11 @@ from citemesh.data.embedding_cache.models import CorpusSourceRecord
 from citemesh.data.embedding_contract import CorpusSource
 
 from . import deps
-from .records import _dataset_record_raw_paper_id, _extract_dataset_paper_metadata
+from .records import (
+    DatasetRecord,
+    _dataset_record_raw_paper_id,
+    _extract_dataset_paper_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +57,20 @@ def _source_timestamp(value: object) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _source_priority(record: dict[str, object]) -> tuple[str, int, str]:
+def _source_priority(record: DatasetRecord) -> tuple[str, int, str]:
     """Return update time, version number, and version creation time.
 
     :param record: Raw dataset row with source version metadata.
     :return: Values used to choose the newest duplicate record.
     """
-    versions = []
-    for version in record.get("versions") or []:
+    versions: list[tuple[int, str]] = []
+    raw_versions = record.get("versions")
+    if raw_versions and not isinstance(raw_versions, Iterable):
+        raise TypeError(f"'{type(raw_versions).__name__}' object is not iterable")
+    source_versions: Iterable[object] = ()
+    if raw_versions and isinstance(raw_versions, Iterable):
+        source_versions = raw_versions
+    for version in source_versions:
         if not isinstance(version, dict):
             continue
         match = re.fullmatch(r"v([0-9]+)", str(version.get("version", "")))
@@ -115,11 +125,12 @@ def _source_records(
     for ordinal, raw_record in enumerate(dataset):
         if stats is not None:
             stats["source_records_examined"] = ordinal + 1
-        metadata = _extract_dataset_paper_metadata(raw_record, ordinal)
-        metadata["source_ordinal"] = ordinal
-        metadata["chronology_key"] = encode_arxiv_id_chronology_key(
-            metadata["paper_id"]
-        )
+        extracted = _extract_dataset_paper_metadata(raw_record, ordinal)
+        metadata: CorpusSourceRecord = {
+            **extracted,
+            "source_ordinal": ordinal,
+            "chronology_key": encode_arxiv_id_chronology_key(extracted["paper_id"]),
+        }
         yield metadata, _source_priority(raw_record)
 
 

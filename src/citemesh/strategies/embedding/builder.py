@@ -18,8 +18,8 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
-    Any,
     TypedDict,
+    TypeVar,
 )
 
 import networkx as nx
@@ -54,11 +54,18 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     CacheSearchResult,
 )
+from citemesh.data.embedding_cache.models import (
+    CorpusOrigin,
+    EmbeddingInputMetadata,
+    PaperMetadata,
+)
 from citemesh.data.embedding_contract import ExistingCacheSelection, NamespaceSelectors
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
+    EmbeddingCollectionOptions,
     GraphBuilderStrategy,
+    NoStrategyOptions,
     build_capped_undirected_graph,
     deterministic_sort_key,
     validate_embedding_vectors,
@@ -96,8 +103,13 @@ from .text import (
 )
 
 if TYPE_CHECKING:
+    import torch
+    from sentence_transformers import SentenceTransformer
+    from typing_extensions import Unpack
+
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
+    from .precision import _PrecisionEncodeProxy
     from .refresh import RefreshResult
 
 
@@ -130,19 +142,47 @@ class EmbeddingBuilderRuntimeOptions(TypedDict, total=False):
     dataset_source: str
 
 
+class _RequiredEmbeddingRuntimeMetadata(TypedDict):
+    """Runtime producer fields present for every embedding build."""
+
+    binary_prefilter_used: bool | None
+    active_model: str
+    model_fingerprint: str | None
+    resolved_model_revision: str | None
+    truncate_dim: int | None
+    device: str
+    requested_device: str
+    compute_dtype: str
+    autocast: bool
+    retrieval_representation: str
+    graph_representation: str
+    model_profile: str
+
+
+class EmbeddingRuntimeMetadata(_RequiredEmbeddingRuntimeMetadata, total=False):
+    """Embedding runtime fields added when a managed corpus is selected."""
+
+    dataset_revision: str | None
+    cache_namespace: str
+    index_origin: CorpusOrigin | None
+
+
+_T = TypeVar("_T")
+
+
 logger = logging.getLogger(__name__)
 
 
-def _cache_scan_progress(values: Sequence[Any], description: str) -> Iterable[Any]:
+def _cache_scan_progress(values: Sequence[_T], description: str) -> Iterable[_T]:
     """Render a progress bar over an embedding-cache scan.
 
     Injected into :class:`EmbeddingCache` so the storage layer stays free of UI
     imports: the TTY gate and the bar's presentation options live here, with the
     rest of this module's progress handling.
 
-    :param Sequence[Any] values: Items the cache is about to iterate.
+    :param Sequence[_T] values: Items the cache is about to iterate.
     :param str description: Label shown ahead of the bar.
-    :return Iterable[Any]: Items from ``values``, unchanged.
+    :return Iterable[_T]: Items from ``values``, unchanged.
     """
     return progress_iterator(
         values,
@@ -197,7 +237,7 @@ class EmbeddingGraphBuilder(
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
         cache_selection: ExistingCacheSelection | None = None,
-    ):
+    ) -> None:
         """
         Initialize embedding graph builder.
 
@@ -331,7 +371,7 @@ class EmbeddingGraphBuilder(
         self._bind_requested_model_contract(device=device, truncate_dim=truncate_dim)
 
         self.top_k = top_k
-        self.model = None
+        self.model: SentenceTransformer | None = None
         self.retrieval_embeddings: dict[str, np.ndarray] = {}
         self.embeddings: dict[str, np.ndarray] = {}
         self.candidate_source_status: dict[str, str] = {}
@@ -345,6 +385,8 @@ class EmbeddingGraphBuilder(
         self.use_streaming = use_streaming
         self._validate_streaming_contract()
         self._reset_model_runtime_state()
+        self._completed_source_revision: str | None = None
+        self._index_origin: CorpusOrigin | None = None
 
     @staticmethod
     def _required_text(value: object, field: str) -> str:
@@ -566,12 +608,12 @@ class EmbeddingGraphBuilder(
         """
         self._profile_logged = False
         self._dim_logged = False
-        self._autocast_dtype: Any | None = None
+        self._autocast_dtype: torch.dtype | None = None
         self._autocast_device_type: str | None = None
         self._autocast_enabled = False
-        self._encode_model: Any | None = None
+        self._encode_model: SentenceTransformer | _PrecisionEncodeProxy | None = None
         self._inner_model_compiled = False
-        self._eager_inner_transformer: Any | None = None
+        self._eager_inner_transformer: torch.nn.Module | None = None
         self._compile_status_reason: str | None = None
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
@@ -822,10 +864,10 @@ class EmbeddingGraphBuilder(
         normalized_reason = str(reason).strip() or "unspecified"
         self.embedding_cache.clear(reason=normalized_reason)
 
-    def _embedding_runtime_metadata(self) -> dict[str, object]:
+    def _embedding_runtime_metadata(self) -> EmbeddingRuntimeMetadata:
         """Return runtime metadata describing effective embedding retrieval behavior.
 
-        :return Dict[str, object]: Runtime metadata payload for downstream export.
+        :return EmbeddingRuntimeMetadata: Effective model and corpus producer metadata.
         """
         active_model = self._cache_model_identity()
         model_fingerprint = self._resolved_model_fingerprint
@@ -854,11 +896,9 @@ class EmbeddingGraphBuilder(
             "model_profile": self.model_profile.schema_token,
             **(
                 {
-                    "dataset_revision": getattr(
-                        self, "_completed_source_revision", None
-                    ),
+                    "dataset_revision": self._completed_source_revision,
                     "cache_namespace": self._cache_selection.namespace_id,
-                    "index_origin": getattr(self, "_index_origin", None),
+                    "index_origin": self._index_origin,
                 }
                 if self._cache_selection
                 else {}
@@ -979,7 +1019,7 @@ class EmbeddingGraphBuilder(
         *,
         seed_paper: Paper | None = None,
         _corpus_prepared: bool = False,
-        **kwargs: Any,
+        **kwargs: Unpack[NoStrategyOptions],
     ) -> dict[str, Paper]:
         """Collect papers while excluding corpus replacement between stages.
 
@@ -987,7 +1027,7 @@ class EmbeddingGraphBuilder(
         :param Optional[Paper] seed_paper: Optional pre-fetched seed metadata.
         :param bool _corpus_prepared: Whether a parent prepared the corpus while
             retaining this same reentrant operation lock.
-        :param Any kwargs: Strategy-specific options forwarded to collection.
+        :param kwargs: Extra options are forwarded to collection.
         :return Dict[str, Paper]: Dictionary of paper ID to paper metadata.
         """
         with self._corpus_operation_lock():
@@ -1004,7 +1044,7 @@ class EmbeddingGraphBuilder(
         *,
         seed_paper: Paper | None = None,
         _corpus_prepared: bool = False,
-        **kwargs: Any,
+        **kwargs: Unpack[NoStrategyOptions],
     ) -> dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
@@ -1014,7 +1054,7 @@ class EmbeddingGraphBuilder(
             reuse instead of fetching the seed from Semantic Scholar again.
         :param bool _corpus_prepared: Whether a hybrid parent prepared this corpus
             under the operation lock that remains held by the caller.
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Extra options are ignored.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers: dict[str, Paper] = {}
@@ -1323,11 +1363,11 @@ class EmbeddingGraphBuilder(
         self._update_citation_counts(papers)
 
     @staticmethod
-    def _paper_from_cached_metadata(paper_id: str, metadata: dict) -> Paper:
+    def _paper_from_cached_metadata(paper_id: str, metadata: PaperMetadata) -> Paper:
         """Build a Paper from one cached corpus metadata row.
 
         :param str paper_id: Canonical cached paper identifier.
-        :param Dict metadata: Normalized metadata row persisted alongside vectors.
+        :param PaperMetadata metadata: Normalized row persisted alongside vectors.
         :return Paper: Paper carrying the cached bibliographic fields.
         """
         return Paper(
@@ -1491,7 +1531,7 @@ class EmbeddingGraphBuilder(
             return {}
         self._load_model()
         self._ensure_cache_model_fingerprint()
-        metadata_map = {
+        metadata_map: dict[str, EmbeddingInputMetadata] = {
             paper_id: {
                 **paper_embedding_metadata(paper),
                 "paper_id": paper_id,
@@ -1534,10 +1574,12 @@ class EmbeddingGraphBuilder(
         self.retrieval_embeddings.update(embeddings)
         return embeddings
 
-    def _format_retrieval_document_metadata(self, metadata: dict[str, object]) -> str:
+    def _format_retrieval_document_metadata(
+        self, metadata: EmbeddingInputMetadata
+    ) -> str:
         """Format cached metadata for retrieval-document encoding.
 
-        :param Dict[str, object] metadata: Cache metadata including paper identity.
+        :param EmbeddingInputMetadata metadata: Cache metadata and optional paper ID.
         :return str: Profile-formatted retrieval-document input.
         """
         return format_embedding_metadata(
@@ -1547,10 +1589,12 @@ class EmbeddingGraphBuilder(
             task=EmbeddingTask.RETRIEVAL_DOCUMENT,
         )
 
-    def _format_graph_similarity_metadata(self, metadata: dict[str, object]) -> str:
+    def _format_graph_similarity_metadata(
+        self, metadata: EmbeddingInputMetadata
+    ) -> str:
         """Format cached paper metadata for symmetric graph similarity.
 
-        :param Dict[str, object] metadata: Cache metadata including paper identity.
+        :param EmbeddingInputMetadata metadata: Cache metadata and optional paper ID.
         :return str: Profile-formatted symmetric similarity input.
         """
         return format_embedding_metadata(
@@ -1575,7 +1619,7 @@ class EmbeddingGraphBuilder(
         self._ensure_cache_model_fingerprint(
             representation=_GRAPH_SIMILARITY_REPRESENTATION
         )
-        metadata_map = {}
+        metadata_map: dict[str, EmbeddingInputMetadata] = {}
         for paper_id, paper in papers.items():
             metadata = paper_embedding_metadata(paper)
             metadata["paper_id"] = paper_id
@@ -1709,7 +1753,7 @@ class EmbeddingGraphBuilder(
         use_streaming: bool,
         *,
         corpus_prepared: bool = False,
-    ) -> list[tuple[str, dict, np.ndarray]]:
+    ) -> list[tuple[str, PaperMetadata, np.ndarray]]:
         """Select candidates from a cache current for this collection operation.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
@@ -1717,7 +1761,7 @@ class EmbeddingGraphBuilder(
         :param bool corpus_prepared: Whether the caller completed lifecycle work before
             encoding the seed while retaining the operation lock. The default preserves
             safe standalone helper behavior.
-        :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
+        :return List[Tuple[str, PaperMetadata, np.ndarray]]: Candidates sorted by similarity.
         """
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():
@@ -1825,12 +1869,14 @@ class EmbeddingGraphBuilder(
         # The build_graph method will filter to top-k
         return similarity > 0.1
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[EmbeddingCollectionOptions]
+    ) -> tuple[nx.Graph, str]:
         """
         Build graph with top-k edge selection.
 
         :param str seed_id: Seed paper identifier
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Embedding collection options passed to collection.
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Use base class to collect papers and create nodes

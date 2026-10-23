@@ -10,14 +10,16 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 import networkx as nx
 
+from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.data.user_config import UserConfig, format_config_value
 from citemesh.services import SemanticScholarClient
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, EmbeddingGraphBuilder
+from citemesh.strategies.embedding.builder import EmbeddingBuilderRuntimeOptions
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -26,6 +28,15 @@ from citemesh.strategies.hybrid import (
     HybridGraphBuilder,
 )
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
+
+if TYPE_CHECKING:
+    from citemesh.strategies.embedding.builder import EmbeddingRuntimeMetadata
+    from citemesh.visualization.export import (
+        EmbeddingExportMetadata,
+        ExportMetadata,
+        PlotOverlayMetadata,
+        ScoreContract,
+    )
 
 from .console import logger
 
@@ -40,6 +51,37 @@ class _StrategyBuilderProtocol(Protocol):
         :return tuple[nx.Graph, str]: Built graph and normalized seed paper ID.
         """
         ...
+
+
+class _ClientOptions(TypedDict, total=False):
+    """HTTP client options supplied by parsed CLI settings."""
+
+    api_key: str | None
+    refresh_paper_cache: bool
+    retry_budget_seconds: float
+
+
+class _ConfiguredClientKwargs(TypedDict, total=False):
+    """Optional client injected into a graph builder."""
+
+    client: SemanticScholarClient
+
+
+class _SharedEmbeddingBuilderKwargs(EmbeddingBuilderRuntimeOptions, total=False):
+    """Embedding builder options shared by CLI strategy factories."""
+
+    corpus_size: int | None
+    cache_selection: ExistingCacheSelection
+
+
+class _CorpusOptionDefaults(TypedDict):
+    """Built-in values restored when corpus options do not apply."""
+
+    dataset_source: str
+    dataset_split: str
+    corpus_size: None
+    all_corpus: bool
+    streaming: bool
 
 
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
@@ -90,7 +132,7 @@ _CORPUS_ONLY_OPTION_DESTS: set[str] = {
 }
 # Built-in parser defaults restored when corpus-only config values are ignored
 # in candidates mode; kept in sync with the build parser by a contract test.
-_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: dict[str, object] = {
+_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: _CorpusOptionDefaults = {
     "dataset_source": DEFAULT_DATASET_SOURCE,
     "dataset_split": "train",
     "corpus_size": None,
@@ -135,11 +177,13 @@ _HYBRID_EMBEDDING_OPTION_DESTS = {
 }
 
 
-def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> dict[str, object]:
+def _shared_embedding_builder_kwargs(
+    cli_args: argparse.Namespace,
+) -> _SharedEmbeddingBuilderKwargs:
     """Build shared embedding kwargs for embedding-aware strategy builders.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :return Dict[str, object]: Shared kwargs consumed by embedding/hybrid builders.
+    :return: Options consumed by embedding and hybrid builders.
     """
     return {
         **_configured_client_kwargs(cli_args),
@@ -186,13 +230,14 @@ def _normalized_cache_reason(raw_reason: str | None) -> str | None:
 
 
 def _embedding_export_metadata(
-    cli_args: argparse.Namespace, runtime_metadata: dict[str, Any] | None = None
-) -> dict[str, object]:
+    cli_args: argparse.Namespace,
+    runtime_metadata: EmbeddingRuntimeMetadata | None = None,
+) -> EmbeddingExportMetadata:
     """Build embedding provenance payload persisted in export metadata.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :param Optional[Dict[str, Any]] runtime_metadata: Optional runtime retrieval metadata.
-    :return Dict[str, object]: Embedding cache/vector provenance + runtime fields.
+    :param runtime_metadata: Optional runtime retrieval metadata.
+    :return EmbeddingExportMetadata: Effective embedding model, cache, and runtime settings.
     """
     int8_mode = str(cli_args.storage_precision) == "int8"
     binary_prefilter_enabled = bool(cli_args.binary_prefilter and int8_mode)
@@ -246,7 +291,7 @@ def _embedding_export_metadata(
         if isinstance(raw_graph_representation, str) and raw_graph_representation:
             graph_representation = raw_graph_representation
 
-    payload: dict[str, object] = {
+    payload: EmbeddingExportMetadata = {
         "effective_vector_dtype": "float32",
         "effective_model": effective_model,
         "effective_model_revision": effective_model_revision,
@@ -270,8 +315,7 @@ def _embedding_export_metadata(
         ),
     }
     if payload["semantic_source"] == "arxiv-corpus":
-        # Corpus builds never consult the candidate pool; recording its default
-        # here contradicted the config sidecar, which omits it.
+        # Candidate pool settings apply only to candidate builds.
         payload.pop("candidate_pool_size")
         for key in ("dataset_revision", "cache_namespace", "index_origin"):
             if isinstance(runtime_metadata, dict) and key in runtime_metadata:
@@ -279,11 +323,11 @@ def _embedding_export_metadata(
     return payload
 
 
-def _plot_overlay_metadata(export_metadata: dict[str, Any]) -> dict[str, Any]:
+def _plot_overlay_metadata(export_metadata: ExportMetadata) -> PlotOverlayMetadata:
     """Return compact metadata suitable for static image overlays.
 
-    :param Dict[str, Any] export_metadata: Full export metadata payload.
-    :return Dict[str, Any]: Reduced metadata subset for on-plot annotation.
+    :param ExportMetadata export_metadata: Full export metadata payload.
+    :return PlotOverlayMetadata: Reduced metadata subset for on-plot annotation.
     """
     overlay_keys = ("paper_id", "strategy", "nodes", "edges", "theme", "timestamp")
     return {
@@ -367,18 +411,18 @@ def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
     return user_config.s2_api_key or None
 
 
-def _configured_client_kwargs(args: argparse.Namespace) -> dict[str, object]:
+def _configured_client_kwargs(args: argparse.Namespace) -> _ConfiguredClientKwargs:
     """Inject a client only when this command has API-specific settings.
 
     :param argparse.Namespace args: Parsed arguments and resolved API key.
-    :return Dict[str, object]: Optional client constructor argument for builders.
+    :return: Optional client constructor argument for builders.
     """
     api_key = getattr(args, "_s2_api_key", None)
     refresh = bool(getattr(args, "refresh_paper_cache", False))
     retry_budget = getattr(args, "s2_retry_budget", None)
     if api_key is None and not refresh and retry_budget is None:
         return {}
-    client_kwargs: dict[str, object] = {
+    client_kwargs: _ClientOptions = {
         "api_key": api_key,
         "refresh_paper_cache": refresh,
     }
@@ -412,11 +456,11 @@ def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
     return False
 
 
-def _strategy_score_contract(strategy: str) -> dict[str, object]:
+def _strategy_score_contract(strategy: str) -> ScoreContract:
     """Return strategy-specific score semantics metadata for export payloads.
 
     :param str strategy: Active build strategy.
-    :return Dict[str, object]: Score semantics metadata.
+    :return ScoreContract: Score semantics metadata.
     """
     base_contract = {
         "strategy": strategy,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Hashable
-from typing import Any
 
 import networkx as nx
 
@@ -19,14 +18,14 @@ def ordered_nodes(graph: nx.Graph) -> list[Hashable]:
 
 def ordered_edges_with_data(
     graph: nx.Graph,
-) -> list[tuple[Hashable, Hashable, dict[str, Any]]]:
+) -> list[tuple[Hashable, Hashable, dict[str, object]]]:
     """Return canonicalized edge tuples with deterministic endpoint ordering.
 
     :param nx.Graph graph: Graph whose edges should be canonicalized.
-    :return List[Tuple[Hashable, Hashable, Dict[str, Any]]]: Sorted
+    :return list[tuple[Hashable, Hashable, dict[str, object]]]: Sorted
         ``(u, v, attrs)`` tuples.
     """
-    canonicalized: list[tuple[Hashable, Hashable, dict[str, Any]]] = []
+    canonicalized: list[tuple[Hashable, Hashable, dict[str, object]]] = []
     for left, right, attrs in graph.edges(data=True):
         edge_left, edge_right = (
             (left, right) if str(left) <= str(right) else (right, left)

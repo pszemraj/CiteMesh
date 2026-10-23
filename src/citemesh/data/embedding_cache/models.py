@@ -18,6 +18,13 @@ from numpy.typing import NDArray
 from ..embedding_contract import CorpusSourceData, EmbeddingContractData
 
 StoredEmbedding = NDArray[np.int8] | NDArray[np.float32]
+VectorReplacement = tuple[
+    int,
+    StoredEmbedding,
+    NDArray[np.uint8] | None,
+    StoredEmbedding,
+    NDArray[np.uint8] | None,
+]
 
 
 class PaperMetadata(TypedDict, total=False):
@@ -33,12 +40,48 @@ class PaperMetadata(TypedDict, total=False):
     doi: str | None
 
 
+class EmbeddingInputMetadata(PaperMetadata, total=False):
+    """Known metadata fields passed with an embedding-cache request."""
+
+    paper_id: str
+    source_ordinal: int
+    chronology_key: int | None
+
+
+PaperRequest = tuple[str, EmbeddingInputMetadata]
+
+
+class CachedPaperMetadata(TypedDict):
+    """Normalized metadata returned from a persisted paper row."""
+
+    title: str
+    abstract: str
+    year: int | None
+    authors: list[str]
+    categories: list[str]
+    venue: str
+    arxiv_id: str
+    doi: str
+
+
+class CachedPaperRecord(CachedPaperMetadata):
+    """Normalized cache metadata with its primary paper ID."""
+
+    paper_id: str
+
+
 class CorpusSourceRecord(PaperMetadata):
     """Normalized source row selected for corpus hydration."""
 
     paper_id: str
     source_ordinal: int
     chronology_key: int | None
+
+
+class CorpusMetadataUpdate(PaperMetadata):
+    """Source metadata fields used to refresh a cached paper row."""
+
+    paper_id: str
 
 
 class CorpusRecord(TypedDict):
@@ -98,6 +141,15 @@ class PublicationOrigin(TypedDict):
     snapshot_id: str
 
 
+class SnapshotOrigin(TypedDict):
+    """Local snapshot identity recorded without a bucket publication."""
+
+    snapshot_id: str
+
+
+CorpusOrigin = SnapshotOrigin | PublicationOrigin
+
+
 class PortableProducerProvenance(TypedDict, total=False):
     """Known producer and runtime details carried by a portable manifest."""
 
@@ -117,7 +169,7 @@ class PortableProducerProvenance(TypedDict, total=False):
     model_profile: str
     dataset_revision: str | None
     cache_namespace: str
-    index_origin: PublicationOrigin | None
+    index_origin: CorpusOrigin | None
     export_runtime_versions: RuntimeVersions
 
 
@@ -149,7 +201,7 @@ class CacheSearchResult:
     paper_id: str
     score: float
     embedding: NDArray[np.float32]
-    metadata: PaperMetadata
+    metadata: CachedPaperMetadata
 
 
 @dataclass(frozen=True)
@@ -171,7 +223,7 @@ class PendingEmbeddingRecord:
     """Cache-miss record staged across lookup/encode/commit phases."""
 
     paper_id: str
-    metadata: PaperMetadata
+    metadata: EmbeddingInputMetadata
     text_hash: str
     text: str
     row_idx: int | None
@@ -202,13 +254,5 @@ class _VectorWritePlan:
     rows_to_upsert: list[PaperRowValues]
     append_embeddings: list[StoredEmbedding]
     append_binary_embeddings: list[NDArray[np.uint8]]
-    append_records: list[tuple[str, PaperMetadata, str]]
-    replacement_rows: list[
-        tuple[
-            int,
-            StoredEmbedding,
-            NDArray[np.uint8] | None,
-            StoredEmbedding,
-            NDArray[np.uint8] | None,
-        ]
-    ]
+    append_records: list[tuple[str, EmbeddingInputMetadata, str]]
+    replacement_rows: list[VectorReplacement]

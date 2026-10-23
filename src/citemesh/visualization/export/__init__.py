@@ -16,16 +16,24 @@ import html
 import io
 import json
 import logging
-from collections.abc import Hashable, Iterable
+from collections.abc import Hashable, Iterable, Mapping
 from pathlib import Path
-from typing import Any
 
 import networkx as nx
 
 from citemesh.core import Paper
 from citemesh.data.cache import atomic_output_path, atomic_write_text
 
-from ..dashboard.contracts import GRAPH_PAYLOAD_KIND, GRAPH_PAYLOAD_SCHEMA_VERSION
+from ..dashboard.contracts import (
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+    EmbeddingExportMetadata,
+    ExportMetadata,
+    GraphPayload,
+    PlotOverlayMetadata,
+    PortableGraphMetadata,
+    ScoreContract,
+)
 from ..dashboard.payload import DashboardPayloadMixin, _dashboard_template
 from ..themes import Theme, get_theme
 from ..years import coerce_publication_year
@@ -115,6 +123,11 @@ __all__ = [
     "GRAPHML_LAYOUT_METADATA_KEY",
     "GRAPHML_LAYOUT_VERSION_KEY",
     "GraphExporter",
+    "EmbeddingExportMetadata",
+    "ExportMetadata",
+    "GraphPayload",
+    "PlotOverlayMetadata",
+    "ScoreContract",
     "_edge_strength_scale",
     "_graphml_determinism_policy",
     "_inject_darkreader_lock",
@@ -130,9 +143,9 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         self,
         graph: nx.Graph,
         seed_id: str,
-        metadata: dict | None = None,
+        metadata: Mapping[str, object] | None = None,
         theme_name: str = "dark",
-        layout: dict[Hashable, Iterable[float]] | None = None,
+        layout: Mapping[Hashable, Iterable[float]] | None = None,
     ):
         """Create exporter bound to a graph and seed paper metadata.
 
@@ -142,7 +155,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             omitted, strategy-sensitive enrichments fall back to graph-level metadata
             when available.
         :param str theme_name: Theme for visual color defaults.
-        :param Optional[Dict[Hashable, Iterable[float]]] layout: Optional precomputed
+        :param Optional[Mapping[Hashable, Iterable[float]]] layout: Optional precomputed
             layout.
         """
         self.graph = graph
@@ -151,12 +164,14 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         self.theme = get_theme(theme_name)
         self._layout = layout
         self._size_map: dict[Hashable, float] | None = None
-        self._color_map_cache: dict[str, dict[Hashable, tuple]] = {}
+        self._color_map_cache: dict[
+            str, dict[Hashable, tuple[float, float, float]]
+        ] = {}
 
     # ------------------------------------------------------------------
     # Public export methods
 
-    def graph_payload(self) -> dict[str, Any]:
+    def graph_payload(self) -> GraphPayload:
         """Build the canonical versioned graph payload shared by JSON consumers.
 
         Dashboard geometry is always embedded (computing a layout on demand when
@@ -164,7 +179,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         loaded back through the dashboard's Load Results flow regardless of
         which export formats were requested or in which order exporters ran.
 
-        :return Dict[str, Any]: Portable CiteMesh graph payload with dashboard data.
+        :return GraphPayload: Portable CiteMesh graph payload with dashboard data.
         :raises ValueError: If the seed identifier is not present among graph nodes.
         """
         sorted_nodes = _sorted_nodes(self.graph)
@@ -184,14 +199,14 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             sorted_edges=sorted_edges,
             include_plotly_geometry=True,
         )
-        portable_meta: dict[str, Any] = {
+        portable_meta: PortableGraphMetadata = {
             "strategy": dashboard_meta["strategy"],
             "year_range": dashboard_meta["year_range"],
         }
         candidate_source_status = dashboard_meta.get("candidate_source_status")
         if isinstance(candidate_source_status, dict):
             portable_meta["candidate_source_status"] = candidate_source_status
-        return {
+        payload: GraphPayload = {
             "kind": GRAPH_PAYLOAD_KIND,
             "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,
             "seed_id": str(self.seed_id),
@@ -214,6 +229,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 for u, v, edge_data in sorted_edges
             ],
         }
+        return payload
 
     def to_json(self, path: Path) -> None:
         """Export the canonical enriched graph payload as atomic UTF-8 JSON.

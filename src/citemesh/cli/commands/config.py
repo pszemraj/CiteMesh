@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any
 
 from rich.text import Text
 
 from citemesh.data.user_config import (
     ConfigFileError,
     ConfigKeyError,
+    ConfigValue,
     ConfigValueError,
     format_config_value,
     load_user_config,
@@ -90,7 +90,7 @@ def _run_config_command(
         user_config = load_user_config()
         if table_name == "api":
             # Direct get is intentionally raw for shell substitution; list is masked.
-            value: Any = user_config.s2_api_key
+            value: ConfigValue | None = user_config.s2_api_key
         else:
             value = user_config.defaults.get(key)
         if value is None:

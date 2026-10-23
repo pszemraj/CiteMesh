@@ -14,18 +14,17 @@ import hashlib
 import logging
 import re
 import sqlite3
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import (
-    Any,
-)
 
 import h5py
 import numpy as np
 from filelock import FileLock
+from numpy.typing import NDArray
 
 from citemesh.core.text_batching import (
+    _TextEncoder,
     l2_normalize_embeddings,
 )
 
@@ -64,8 +63,12 @@ from .ingest import _IngestMixin
 from .layout import _H5LayoutMixin
 from .lifecycle import _LifecycleMixin
 from .models import (
+    CachedPaperMetadata,
     CacheNamespacePayloadStats,
     CacheSearchResult,
+    CorpusMetadataUpdate,
+    EmbeddingInputMetadata,
+    PaperRequest,
 )
 from .quantization import (
     _sanitize_ranges,
@@ -73,13 +76,13 @@ from .quantization import (
 )
 from .recovery import _RecoveryMixin
 from .search import _SearchMixin
-from .sql import _decode_paper_row
+from .sql import DecodedPaperRow, _cached_paper_metadata, _decode_paper_row
 
 logger = logging.getLogger(__name__)
 
 #: Progress reporter injected by the CLI layer: ``progress(values, description)``
 #: returns an iterable over ``values``, optionally rendering a bar as it is consumed.
-ProgressWrapper = Callable[[Sequence[Any], str], Iterable[Any]]
+ProgressWrapper = Callable[[Sequence[PaperRequest], str], Iterable[PaperRequest]]
 
 
 class EmbeddingCache(
@@ -101,7 +104,7 @@ class EmbeddingCache(
         progress: ProgressWrapper | None = None,
         strict: bool = False,
         _initialize: bool = True,
-    ):
+    ) -> None:
         """Create a persistent embedding cache for a model variant.
 
         :param Optional[Path] cache_dir: Cache directory override. Uses global cache when ``None``.
@@ -188,20 +191,20 @@ class EmbeddingCache(
 
     def get_embeddings(
         self,
-        papers: dict[str, dict],
-        model: Any,
+        papers: Mapping[str, EmbeddingInputMetadata],
+        model: _TextEncoder,
         batch_size: int = 32,
         show_progress: bool = True,
-        text_builder: Callable[[dict[str, object]], str] | None = None,
-    ) -> dict[str, np.ndarray]:
+        text_builder: Callable[[EmbeddingInputMetadata], str] | None = None,
+    ) -> dict[str, NDArray[np.float32]]:
         """Return embeddings for provided papers, computing only missing ones.
 
-        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
-        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
-        :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
+        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
+        :return dict[str, NDArray[np.float32]]: Mapping of paper IDs to float32 embeddings.
         """
         result = self._process_embeddings(
             papers,
@@ -216,20 +219,19 @@ class EmbeddingCache(
 
     def upsert_embeddings(
         self,
-        papers: dict[str, dict],
-        model: Any,
+        papers: Mapping[str, EmbeddingInputMetadata],
+        model: _TextEncoder,
         batch_size: int = 32,
         show_progress: bool = False,
-        text_builder: Callable[[dict[str, object]], str] | None = None,
+        text_builder: Callable[[EmbeddingInputMetadata], str] | None = None,
     ) -> None:
         """Persist embeddings for papers without materializing float32 return payloads.
 
-        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
-        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param Mapping[str, EmbeddingInputMetadata] papers: Papers keyed by ID with cache metadata.
+        :param _TextEncoder model: Encoder exposing the model's preferred ``encode`` path.
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
-        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
-        :return None: Persists missing embeddings without materializing them.
+        :param Optional[Callable[[EmbeddingInputMetadata], str]] text_builder: Optional metadata-to-text formatter.
         """
         self._process_embeddings(
             papers,
@@ -259,22 +261,22 @@ class EmbeddingCache(
 
     def search(
         self,
-        query_embedding: np.ndarray,
+        query_embedding: NDArray[np.float32],
         top_k: int,
         *,
         binary_prefilter: bool,
         binary_rescore_multiplier: int,
         corpus_size: int | None = None,
-        eligible_rows: np.ndarray | None = None,
+        eligible_rows: NDArray[np.bool_] | None = None,
     ) -> list[CacheSearchResult]:
         """Search cached embeddings and return ranked metadata-rich candidates.
 
-        :param np.ndarray query_embedding: Query embedding in float32.
+        :param NDArray[np.float32] query_embedding: Query embedding in float32.
         :param int top_k: Number of top documents to return.
         :param bool binary_prefilter: Whether to use binary Hamming prefiltering.
         :param int binary_rescore_multiplier: Candidate oversampling factor for rescoring.
         :param corpus_size: Newest-N active-member view for a managed corpus; ``None`` uses all.
-        :param eligible_rows: Physical-row boolean mask intersected with active membership.
+        :param Optional[NDArray[np.bool_]] eligible_rows: Physical-row boolean mask intersected with active membership.
         :return List[CacheSearchResult]: Ranked search results.
         """
         if top_k < 1:
@@ -284,7 +286,7 @@ class EmbeddingCache(
         self.last_search_total_embeddings = None
         self.last_search_physical_embeddings = None
         self.last_search_rescored_embeddings = None
-        query = np.asarray(query_embedding, dtype=np.float32)
+        query: NDArray[np.float32] = np.asarray(query_embedding, dtype=np.float32)
         if query.ndim != 1:
             raise ValueError("query_embedding must be 1-dimensional")
         if not np.all(np.isfinite(query)):
@@ -490,31 +492,28 @@ class EmbeddingCache(
 
     def get_paper_metadata_batch(
         self, paper_ids: Sequence[str]
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, CachedPaperMetadata]:
         """Return normalized cached metadata for selected paper IDs.
 
         :param Sequence[str] paper_ids: Paper IDs to look up.
-        :return Dict[str, Dict[str, Any]]: Metadata keyed by each cached paper ID.
+        :return dict[str, CachedPaperMetadata]: Metadata keyed by each cached paper ID.
         """
         if not paper_ids or not path_exists(self.db_path):
             return {}
 
-        output: dict[str, dict[str, Any]] = {}
+        output: dict[str, CachedPaperMetadata] = {}
         with self._locked_connection() as conn:
             self._recover_pending_replacements_with_connection_locked(conn)
             for row in self._query_paper_rows(
                 conn, list(paper_ids), lookup_column="paper_id"
             ):
                 decoded = _decode_paper_row(row, parse_json_lists=True)
-                paper_id = str(decoded.pop("paper_id"))
-                decoded.pop("text_hash")
-                decoded.pop("row_idx")
-                output[paper_id] = decoded
+                output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
         return output
 
     def get_paper_metadata_alias_candidates(
         self, identifiers: Sequence[str]
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, CachedPaperMetadata]:
         """Return cached rows matching a primary, arXiv, or DOI identifier.
 
         Exact primary IDs win. For identifiers without a primary match, this
@@ -522,7 +521,7 @@ class EmbeddingCache(
         ambiguity handling because one DOI can occur on multiple local records.
 
         :param Sequence[str] identifiers: Canonical bibliography identifiers.
-        :return Dict[str, Dict[str, Any]]: Candidate metadata keyed by primary ID.
+        :return dict[str, CachedPaperMetadata]: Candidate metadata keyed by primary ID.
         """
         normalized = {
             str(identifier).strip().lower()
@@ -538,7 +537,7 @@ class EmbeddingCache(
             if identifier.startswith("arxiv:")
         }
         lookup_values = sorted(normalized | arxiv_suffixes)
-        output: dict[str, dict[str, Any]] = {}
+        output: dict[str, CachedPaperMetadata] = {}
         with self._locked_connection() as conn:
             self._recover_pending_replacements_with_connection_locked(conn)
             for row in self._query_paper_rows(
@@ -547,10 +546,7 @@ class EmbeddingCache(
                 lookup_column="paper_id",
             ):
                 decoded = _decode_paper_row(row, parse_json_lists=True)
-                paper_id = str(decoded.pop("paper_id"))
-                decoded.pop("text_hash")
-                decoded.pop("row_idx")
-                output[paper_id] = decoded
+                output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
 
             def direct_output_aliases() -> set[str]:
                 """Return normalized primary aliases already resolved exactly."""
@@ -580,10 +576,7 @@ class EmbeddingCache(
                 case_insensitive=True,
             ):
                 decoded = _decode_paper_row(row, parse_json_lists=True)
-                paper_id = str(decoded.pop("paper_id"))
-                decoded.pop("text_hash")
-                decoded.pop("row_idx")
-                output[paper_id] = decoded
+                output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
 
             direct_aliases = direct_output_aliases()
             secondary_values = [
@@ -597,10 +590,7 @@ class EmbeddingCache(
                     case_insensitive=True,
                 ):
                     decoded = _decode_paper_row(row, parse_json_lists=True)
-                    paper_id = str(decoded.pop("paper_id"))
-                    decoded.pop("text_hash")
-                    decoded.pop("row_idx")
-                    output[paper_id] = decoded
+                    output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
         return output
 
     def prepare_corpus_identity_reconciliation(self) -> bool:
@@ -633,7 +623,7 @@ class EmbeddingCache(
         return requires_reconciliation
 
     def get_legacy_corpus_identity_aliases(
-        self, identity_builder: Callable[[dict[str, Any]], str | None]
+        self, identity_builder: Callable[[DecodedPaperRow], str | None]
     ) -> dict[str, set[str]]:
         """Map content identities to positional-looking physical cache IDs.
 
@@ -641,7 +631,7 @@ class EmbeddingCache(
         can also be a legitimate source-provided ID. Callers use these aliases
         only for source membership reconciliation.
 
-        :param Callable identity_builder: Stable ID from normalized cached metadata.
+        :param Callable[[DecodedPaperRow], str | None] identity_builder: Stable ID from normalized cached metadata.
         :return Dict[str, Set[str]]: Physical legacy-looking IDs by content identity.
         """
         if not path_exists(self.db_path):
@@ -682,12 +672,13 @@ class EmbeddingCache(
             with h5py.File(self.h5_path, "r") as h5:
                 return CALIBRATION_RANGES_DATASET_NAME in h5
 
-    def set_calibration_ranges(self, ranges: np.ndarray, embedding_dim: int) -> None:
+    def set_calibration_ranges(
+        self, ranges: NDArray[np.float32], embedding_dim: int
+    ) -> None:
         """Persist int8 calibration ranges for future quantization.
 
-        :param np.ndarray ranges: Range matrix with shape ``(2, embedding_dim)``.
+        :param NDArray[np.float32] ranges: Range matrix with shape ``(2, embedding_dim)``.
         :param int embedding_dim: Embedding dimension used for validation.
-        :return None: Mutates HDF5 state in-place.
         :raises ValueError: If changing ranges would reinterpret existing int8 rows.
         """
         if self.storage_precision != "int8":
@@ -739,7 +730,6 @@ class EmbeddingCache(
         :param h5py.File h5_file: Open HDF5 cache handle.
         :param int clipped_value_count: Number of values clipped for the current write.
         :param int total_value_count: Total quantized values for the current write.
-        :return None: Updates HDF5 attributes and emits best-effort warnings.
         """
         if total_value_count < 1:
             return
@@ -849,17 +839,17 @@ class EmbeddingCache(
 
     def _report_progress(
         self,
-        values: Sequence[Any],
+        values: Sequence[PaperRequest],
         description: str,
         *,
         enabled: bool,
-    ) -> Iterable[Any]:
+    ) -> Iterable[PaperRequest]:
         """Wrap a cache scan in the injected progress reporter.
 
-        :param Sequence[Any] values: Items the cache is about to iterate.
+        :param Sequence[PaperRequest] values: Paper requests the cache is about to iterate.
         :param str description: Label handed to the reporter.
         :param bool enabled: Whether this scan is long enough to be worth reporting.
-        :return Iterable[Any]: Wrapped iterable, or ``values`` when not reporting.
+        :return Iterable[PaperRequest]: Wrapped iterable, or ``values`` when not reporting.
         """
         if not enabled or self._progress is None:
             return values
@@ -885,11 +875,10 @@ class EmbeddingCache(
         with self._locked_connection() as conn:
             return self._load_cache_metadata(conn)
 
-    def _write_cache_metadata(self, values: dict[str, object]) -> None:
+    def _write_cache_metadata(self, values: Mapping[str, str | int]) -> None:
         """Persist metadata key/value pairs under the namespace lock.
 
-        :param Dict[str, object] values: Metadata keys to upsert.
-        :return None: Mutates SQLite metadata in-place.
+        :param Mapping[str, str | int] values: Metadata keys and values to upsert.
         """
         with self._locked_connection() as conn:
             self._set_cache_metadata(conn, values)
@@ -911,10 +900,7 @@ class EmbeddingCache(
         return metadata.get(CORPUS_METADATA_VERSION_KEY) == CORPUS_METADATA_VERSION
 
     def mark_corpus_metadata_current(self) -> None:
-        """Record successful corpus metadata hydration or backfill.
-
-        :return None: Persists the completed metadata adapter version.
-        """
+        """Record successful corpus metadata hydration or backfill."""
         self._write_cache_metadata(
             {
                 CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION,
@@ -922,11 +908,10 @@ class EmbeddingCache(
             }
         )
 
-    def update_corpus_metadata(self, papers: Sequence[dict]) -> None:
+    def update_corpus_metadata(self, papers: Sequence[CorpusMetadataUpdate]) -> None:
         """Correct years, DOIs and venues without touching cached vectors.
 
-        :param Sequence[Dict] papers: Source metadata with IDs, years, DOIs and venues.
-        :return None: Updates only matching SQLite records.
+        :param Sequence[CorpusMetadataUpdate] papers: Source metadata with IDs, years, DOIs and venues.
         """
         with self._locked_connection() as conn:
             self._require_write_owned_locked(conn)
@@ -996,7 +981,6 @@ class EmbeddingCache(
 
         :param int upstream_rows: Upstream split row count observed during reconciliation.
         :param int cached_rows: Local cached row count after reconciliation.
-        :return None: Mutates SQLite metadata in-place.
         """
         resolved_upstream = int(upstream_rows)
         resolved_cached = int(cached_rows)
@@ -1012,10 +996,7 @@ class EmbeddingCache(
         )
 
     def clear_hydration_rowcount_reconciliation(self) -> None:
-        """Clear persisted row-count reconciliation marker metadata.
-
-        :return None: Mutates SQLite metadata in-place.
-        """
+        """Clear persisted row-count reconciliation marker metadata."""
         self._write_cache_metadata(
             {
                 HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY: "",
@@ -1043,7 +1024,6 @@ class EmbeddingCache(
         """Persist model fingerprint for cache invalidation guardrails.
 
         :param str fingerprint: Deterministic model fingerprint token.
-        :return None: Mutates SQLite metadata in-place.
         """
         normalized = str(fingerprint).strip()
         if not normalized:
@@ -1064,7 +1044,6 @@ class EmbeddingCache(
         :param str dataset_split: Dataset split used for hydration.
         :param Optional[int] corpus_size: Corpus-size cap used for hydration.
         :param bool complete: Whether hydration completed successfully.
-        :return None: Mutates SQLite metadata in-place.
         :raises ValueError: If ``dataset_source`` is missing or blank.
         """
         normalized_source = (
@@ -1091,7 +1070,6 @@ class EmbeddingCache(
         """Purge cache artifacts for this cache namespace.
 
         :param Optional[str] reason: Optional rationale for the clear operation.
-        :return None: Removes namespace payload files and reinitializes metadata.
         """
         normalized_reason = str(reason or "").strip() or "unspecified"
         with self._cache_lock():

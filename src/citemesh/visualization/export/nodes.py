@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Hashable, Iterable
-from typing import Any
+from collections.abc import Hashable, Iterable, Mapping
 
 import networkx as nx
+import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core.values import coerce_citation_count, coerce_float
 
+from ..dashboard.contracts import EnrichedNodePayload
 from ..node_data import effective_node_metadata as _serialize_node
 from ..node_data import validate_canonical_node_ids
 from ..ordering import ordered_edges_with_data, ordered_nodes
@@ -62,10 +64,24 @@ def _normalized_edge_weight(raw_weight: object) -> float:
     return parsed
 
 
-def _node_title(attrs: dict[str, Any], node_id: Hashable) -> str:
+def _normalized_text_values(raw_values: object) -> list[str]:
+    """Normalize non-empty items from a graph attribute iterable.
+
+    :param object raw_values: Raw author or category values.
+    :return list[str]: Stripped, non-empty string values.
+    :raises TypeError: If a truthy value is not iterable.
+    """
+    if not raw_values:
+        return []
+    if not isinstance(raw_values, Iterable):
+        raise TypeError(f"'{type(raw_values).__name__}' object is not iterable")
+    return [str(value).strip() for value in raw_values if str(value).strip()]
+
+
+def _node_title(attrs: Mapping[str, object], node_id: Hashable) -> str:
     """Return stable node title for edge-sidecar export fields.
 
-    :param Dict[str, Any] attrs: Node attributes map.
+    :param Mapping[str, object] attrs: Node attributes map.
     :param Hashable node_id: Node identifier fallback.
     :return str: Human-readable title fallback.
     """
@@ -76,10 +92,10 @@ def _node_title(attrs: dict[str, Any], node_id: Hashable) -> str:
     return str(node_id)
 
 
-def _node_short_label(attrs: dict[str, Any], node_id: Hashable) -> str:
+def _node_short_label(attrs: Mapping[str, object], node_id: Hashable) -> str:
     """Return compact node label for edge export fields.
 
-    :param Dict[str, Any] attrs: Node attributes map.
+    :param Mapping[str, object] attrs: Node attributes map.
     :param Hashable node_id: Node identifier fallback.
     :return str: Compact label (author/year or title fallback).
     """
@@ -99,11 +115,11 @@ def _node_short_label(attrs: dict[str, Any], node_id: Hashable) -> str:
     return title
 
 
-def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, Any]]]:
+def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, object]]]:
     """Return nodes sorted by ID for deterministic serialization.
 
     :param nx.Graph graph: Graph whose nodes should be ordered.
-    :return list[tuple[Hashable, Dict[str, Any]]]: Sorted ``(node_id, attrs)``
+    :return list[tuple[Hashable, dict[str, object]]]: Sorted ``(node_id, attrs)``
         pairs.
     :raises ValueError: If an ID is empty, has surrounding whitespace, or collides
         with another ID after string conversion.
@@ -115,11 +131,11 @@ def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, Any]]]:
 
 def _sorted_edges(
     graph: nx.Graph,
-) -> list[tuple[Hashable, Hashable, dict[str, Any]]]:
+) -> list[tuple[Hashable, Hashable, dict[str, object]]]:
     """Return undirected edges with canonical endpoints in stable order.
 
     :param nx.Graph graph: Graph whose edges should be ordered.
-    :return list[tuple[Hashable, Hashable, Dict[str, Any]]]: Sorted edge tuples in
+    :return list[tuple[Hashable, Hashable, dict[str, object]]]: Sorted edge tuples in
         ``(u, v, attrs)`` form.
     :raises ValueError: If an edge weight is null or non-finite.
     """
@@ -144,14 +160,14 @@ def _default_provenance(*, strategy: str) -> str:
     return "citation"
 
 
-def _strategy(graph: nx.Graph, metadata: dict[str, Any]) -> str:
+def _strategy(graph: nx.Graph, metadata: Mapping[str, object]) -> str:
     """Resolve effective strategy token for export metadata and enrichment.
 
     Explicit exporter metadata wins. When omitted, exporter falls back to graph
     metadata persisted by current builders.
 
     :param nx.Graph graph: Graph carrying builder-persisted metadata.
-    :param Dict[str, Any] metadata: Exporter-level metadata mapping.
+    :param Mapping[str, object] metadata: Exporter-level metadata mapping.
     :return str: Normalized strategy token when available.
     """
     metadata_strategy = _normalize_strategy_token(metadata.get("strategy"))
@@ -231,13 +247,13 @@ class NodesMixin:
             serialized_graph.nodes[node_id].update(_serialize_node(node_id, attrs))
         return serialized_graph
 
-    def _enriched_nodes(self) -> list[dict[str, Any]]:
+    def _enriched_nodes(self) -> list[EnrichedNodePayload]:
         """Build enriched node payloads with provenance, relevance, links, and BibTeX.
 
         This is the canonical node enrichment used by JSON export, CSV export,
         BibTeX export, and the dashboard payload.
 
-        :return list[Dict[str, Any]]: Enriched node payloads.
+        :return list[EnrichedNodePayload]: Enriched node payloads.
         """
         provenance = _provenance_map(self.graph)
         seed_relations = _seed_relation_map(self.graph)
@@ -245,49 +261,55 @@ class NodesMixin:
         sorted_nodes = _sorted_nodes(self.graph)
         strategy = _strategy(self.graph, self.metadata)
 
-        node_payloads: list[dict[str, Any]] = []
+        node_payloads: list[EnrichedNodePayload] = []
         for node_id, attrs in sorted_nodes:
             node_str = str(node_id)
             serialized = _serialize_node(node_id, attrs)
-            serialized["id"] = node_str
-            serialized["year"] = coerce_publication_year(serialized.get("year"))
-            serialized["citation_count"] = coerce_citation_count(
-                serialized.get("citation_count")
-            )
-            serialized["authors"] = [
-                str(author).strip()
-                for author in serialized.get("authors", [])
-                if str(author).strip()
-            ]
-            serialized["venue"] = str(serialized.get("venue") or "").strip()
-            serialized["arxiv_id"] = str(serialized.get("arxiv_id") or "").strip()
-            serialized["doi"] = str(serialized.get("doi") or "").strip()
-            serialized["categories"] = [
-                str(category).strip()
-                for category in serialized.get("categories", [])
-                if str(category).strip()
-            ]
-            serialized["abstract"] = str(serialized.get("abstract") or "").strip()
-            serialized["is_seed"] = bool(serialized.get("is_seed", False))
+            title = serialized.get("title", "")
+            year = coerce_publication_year(serialized.get("year"))
+            citation_count = coerce_citation_count(serialized.get("citation_count"))
+            authors = _normalized_text_values(serialized.get("authors", []))
+            venue = str(serialized.get("venue") or "").strip()
+            arxiv_id = str(serialized.get("arxiv_id") or "").strip()
+            doi = str(serialized.get("doi") or "").strip()
+            categories = _normalized_text_values(serialized.get("categories", []))
+            abstract = str(serialized.get("abstract") or "").strip()
+            is_seed = bool(serialized.get("is_seed", False))
+            is_local_corpus = bool(serialized.get("is_local_corpus", False))
 
             provenance_base = provenance.get(
                 node_str, _default_provenance(strategy=strategy)
             )
-            serialized["provenance"] = (
-                "seed" if serialized["is_seed"] else provenance_base
-            )
-            serialized["provenance_base"] = provenance_base
+            node_provenance = "seed" if is_seed else provenance_base
             seed_relation = seed_relations.get(node_str, "")
-            if serialized["is_seed"]:
+            if is_seed:
                 seed_relation = "seed"
-            if not seed_relation and serialized["provenance"] == "semantic":
+            if not seed_relation and node_provenance == "semantic":
                 seed_relation = "semantic_only"
-            serialized["seed_relation"] = seed_relation
-            serialized["seed_relevance"] = float(relevance.get(node_str, 0.0))
-            links = _derive_links(node_str, node_payload=serialized)
-            serialized["links"] = links
-            serialized["bibtex"] = _node_bibtex(serialized, links=links)
-            node_payloads.append(serialized)
+            node_payload: EnrichedNodePayload = {
+                "id": node_str,
+                "title": title,
+                "year": year,
+                "authors": authors,
+                "citation_count": citation_count,
+                "abstract": abstract,
+                "venue": venue,
+                "arxiv_id": arxiv_id,
+                "doi": doi,
+                "categories": categories,
+                "is_seed": is_seed,
+                "is_local_corpus": is_local_corpus,
+                "provenance": node_provenance,
+                "provenance_base": provenance_base,
+                "seed_relation": seed_relation,
+                "seed_relevance": float(relevance.get(node_str, 0.0)),
+                "links": {},
+                "bibtex": "",
+            }
+            links = _derive_links(node_str, node_payload=node_payload)
+            node_payload["links"] = links
+            node_payload["bibtex"] = _node_bibtex(node_payload, links=links)
+            node_payloads.append(node_payload)
         return node_payloads
 
     def _seed_relevance_scores(self) -> dict[str, float]:
@@ -335,10 +357,10 @@ class NodesMixin:
 
         return {str(node_id): float(score) for node_id, score in scores.items()}
 
-    def _get_layout(self) -> dict[Hashable, Iterable[float]]:
+    def _get_layout(self) -> dict[Hashable, NDArray[np.float64]]:
         """Compute or reuse cached graph layout.
 
-        :return Dict[Hashable, Iterable[float]]: Mapping of node ID to coordinates.
+        :return dict[Hashable, NDArray[np.float64]]: Node IDs mapped to coordinates.
         """
         if self._layout is None:
             self._layout = compute_layout(self.graph)

@@ -7,14 +7,15 @@ vectors and cached corpus rows are all formatted identically.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from enum import Enum
-from typing import (
-    Any,
-)
+from typing import TypedDict
 
 from citemesh.core import Paper
-from citemesh.data.model_profiles import compose_title_abstract_text
+from citemesh.data.embedding_cache.models import EmbeddingInputMetadata
+from citemesh.data.model_profiles import (
+    EmbeddingModelProfile,
+    compose_title_abstract_text,
+)
 
 _RETRIEVAL_DOCUMENT_REPRESENTATION = "retrieval-document-v1"
 _GRAPH_SIMILARITY_REPRESENTATION = "graph-similarity-v1"
@@ -37,7 +38,14 @@ class EmbeddingTask(str, Enum):
     GRAPH_SIMILARITY = "graph-similarity"
 
 
-def _embedding_text_metadata(title: object, abstract: object) -> dict[str, str]:
+class _EmbeddingTextFields(TypedDict):
+    """Normalized text fields passed to model-profile formatters."""
+
+    title: str
+    abstract: str
+
+
+def _embedding_text_metadata(title: object, abstract: object) -> _EmbeddingTextFields:
     """Normalize title/abstract fields without treating placeholders as content.
 
     :param object title: Raw paper title.
@@ -54,11 +62,11 @@ def _embedding_text_metadata(title: object, abstract: object) -> dict[str, str]:
 
 
 def format_paper_for_embedding(
-    *, profile: Any, paper: Paper, task: EmbeddingTask
+    *, profile: EmbeddingModelProfile, paper: Paper, task: EmbeddingTask
 ) -> str:
     """Format one paper for a specific retrieval or graph task.
 
-    :param Any profile: Active embedding model profile.
+    :param EmbeddingModelProfile profile: Active model profile.
     :param Paper paper: Paper whose title/abstract should be formatted.
     :param EmbeddingTask task: Required prompt-conditioned vector role.
     :return str: Model input text, falling back to the paper ID when needed.
@@ -74,17 +82,17 @@ def format_paper_for_embedding(
 
 def format_embedding_metadata(
     *,
-    profile: Any,
-    metadata: Mapping[str, object],
+    profile: EmbeddingModelProfile,
+    metadata: EmbeddingInputMetadata,
     task: EmbeddingTask,
-    paper_id: object = "",
+    paper_id: str = "",
 ) -> str:
     """Format paper metadata for one prompt-conditioned embedding role.
 
-    :param Any profile: Active embedding model profile.
-    :param Mapping[str, object] metadata: Paper metadata containing text fields.
+    :param EmbeddingModelProfile profile: Active model profile.
+    :param EmbeddingInputMetadata metadata: Paper metadata containing text fields.
     :param EmbeddingTask task: Required prompt-conditioned vector role.
-    :param object paper_id: Identity fallback when title and abstract are empty.
+    :param str paper_id: Identity fallback when title and abstract are empty.
     :return str: Profile-formatted input with a stable identity fallback.
     :raises ValueError: If ``task`` is unsupported.
     """

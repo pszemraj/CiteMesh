@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from types import ModuleType
 from typing import (
-    Any,
+    TYPE_CHECKING,
+    Literal,
+    Protocol,
+    TypedDict,
+    TypeGuard,
 )
 
 import numpy as np
@@ -39,7 +44,50 @@ from .runtime import (
     _suppress_transformers_progress_when_hidden,
 )
 
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
 logger = logging.getLogger(__name__)
+
+
+class _TransformerModelOptions(TypedDict, total=False):
+    """Known keyword options passed through SentenceTransformer model loading."""
+
+    dtype: Literal["auto"]
+    attn_implementation: str
+
+
+class _SentenceTransformerLoadOptions(TypedDict, total=False):
+    """Known constructor options used for a SentenceTransformer checkpoint."""
+
+    device: str
+    model_kwargs: _TransformerModelOptions
+    truncate_dim: int
+    revision: str
+
+
+class _TorchCompileOptions(TypedDict, total=False):
+    """Compile switches selected for supported embedding devices."""
+
+    dynamic: bool
+    options: dict[str, bool]
+
+
+class _TF32PrecisionBackend(Protocol):
+    """Torch backend setting that supports reversible TF32 precision changes."""
+
+    fp32_precision: str
+
+
+def _is_tf32_precision_backend(
+    value: object | None,
+) -> TypeGuard[_TF32PrecisionBackend]:
+    """Narrow a torch namespace to one with a mutable precision setting.
+
+    :param object | None value: Backend namespace to inspect.
+    :return bool: Whether the namespace exposes ``fp32_precision``.
+    """
+    return value is not None and hasattr(value, "fp32_precision")
 
 
 class _ModelRuntimeMixin:
@@ -138,14 +186,14 @@ class _ModelRuntimeMixin:
             return "bfloat16"
         return "float32"
 
-    def _bf16_autocast_allowed(self, torch: Any) -> bool:
+    def _bf16_autocast_allowed(self, torch: ModuleType) -> bool:
         """Return whether the active device can execute bf16 through autocast.
 
         Model weights use the checkpoint/library's automatic dtype resolution.
         Reduced compute precision is enabled only through a verified autocast
         context; any missing or rejected runtime capability falls back to float32.
 
-        :param Any torch: Imported torch module.
+        :param ModuleType torch: Imported torch module.
         :return bool: ``True`` when bf16 autocast is usable for the active device.
         """
         if self.device not in self.model_profile.autocast_devices:
@@ -189,10 +237,10 @@ class _ModelRuntimeMixin:
             return False
         return True
 
-    def _mps_bf16_allowed(self, torch: Any) -> bool:
+    def _mps_bf16_allowed(self, torch: ModuleType) -> bool:
         """Return whether bf16 autocast is allowed on MPS for this torch build.
 
-        :param Any torch: Imported ``torch`` module object.
+        :param ModuleType torch: Imported ``torch`` module.
         :return bool: ``True`` when torch meets the MPS bf16 policy floor.
         """
         torch_version = _parse_major_minor(
@@ -265,16 +313,16 @@ class _ModelRuntimeMixin:
                 self.truncate_dim,
             )
 
-    def _resolve_model_kwargs(self) -> dict[str, Any]:
+    def _resolve_model_kwargs(self) -> _TransformerModelOptions:
         """Compute SentenceTransformer kwargs and configure autocast policy.
 
-        :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
+        :return _TransformerModelOptions: Transformer model loader options.
         """
         self._autocast_dtype = None
         self._autocast_device_type = None
         self._autocast_enabled = False
         self._encode_model = None
-        model_kwargs: dict[str, Any] = {"dtype": "auto"}
+        model_kwargs: _TransformerModelOptions = {"dtype": "auto"}
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
 
@@ -301,7 +349,7 @@ class _ModelRuntimeMixin:
 
     def _validate_loaded_model_precision(
         self,
-        model: Any,
+        model: SentenceTransformer,
         model_name_or_path: str,
     ) -> None:
         """Reject automatic checkpoint dtypes outside the verified compute policy.
@@ -312,7 +360,7 @@ class _ModelRuntimeMixin:
         everywhere, and bfloat16 tensors are accepted only when this runtime has
         already selected the verified bfloat16 autocast path.
 
-        :param Any model: Newly loaded SentenceTransformer-compatible model.
+        :param SentenceTransformer model: Newly loaded encoder model.
         :param str model_name_or_path: Candidate checkpoint that produced ``model``.
         :return None: The model's automatic dtype is compatible.
         :raises EmbeddingPrecisionCompatibilityError: If live tensors resolve to an
@@ -353,12 +401,12 @@ class _ModelRuntimeMixin:
 
     def _validate_loaded_model_contract(
         self,
-        model: Any,
+        model: SentenceTransformer,
         model_name_or_path: str,
     ) -> None:
         """Require live transformer settings declared by the active model profile.
 
-        :param Any model: Newly loaded SentenceTransformer-compatible model.
+        :param SentenceTransformer model: Newly loaded encoder model.
         :param str model_name_or_path: Candidate checkpoint that produced ``model``.
         :return None: The runtime-active transformer satisfies its profile.
         :raises EmbeddingBackendCompatibilityError: If a required live setting
@@ -385,10 +433,10 @@ class _ModelRuntimeMixin:
                 f"use_bidirectional_attention={bidirectional_attention!r}."
             )
 
-    def _autocast_context(self) -> Any:
+    def _autocast_context(self) -> AbstractContextManager[None]:
         """Return autocast context for model encoding.
 
-        :return Any: Active autocast context manager or no-op context.
+        :return AbstractContextManager[None]: Active autocast or no-op context.
         """
         if (
             not self._autocast_enabled
@@ -450,19 +498,22 @@ class _ModelRuntimeMixin:
         backends = getattr(torch, "backends", None)
         cuda_backend = getattr(backends, "cuda", None)
         cudnn_backend = getattr(backends, "cudnn", None)
-        targets = (
+        targets: tuple[object | None, object | None] = (
             getattr(cuda_backend, "matmul", None),
             getattr(cudnn_backend, "conv", None),
         )
-        if any(
-            target is None or not hasattr(target, "fp32_precision")
-            for target in targets
-        ):
+        cuda_matmul, cudnn_conv = targets
+        if not _is_tf32_precision_backend(
+            cuda_matmul
+        ) or not _is_tf32_precision_backend(cudnn_conv):
             yield
             return
-
-        originals = [(target, target.fp32_precision) for target in targets]
-        changed: list[tuple[Any, Any]] = []
+        precision_targets: tuple[_TF32PrecisionBackend, _TF32PrecisionBackend] = (
+            cuda_matmul,
+            cudnn_conv,
+        )
+        originals = [(target, target.fp32_precision) for target in precision_targets]
+        changed: list[tuple[_TF32PrecisionBackend, str]] = []
         try:
             for target, original in originals:
                 target.fp32_precision = "tf32"
@@ -551,10 +602,10 @@ class _ModelRuntimeMixin:
                 )
             yield
 
-    def _get_model_for_encoding(self) -> Any:
+    def _get_model_for_encoding(self) -> SentenceTransformer | _PrecisionEncodeProxy:
         """Return model object used for embedding encode calls.
 
-        :return Any: Base model or encode-time precision proxy.
+        :return SentenceTransformer | _PrecisionEncodeProxy: Encoder or precision proxy.
         """
         if self.model is None:
             raise RuntimeError("Embedding model is not loaded.")
@@ -662,14 +713,16 @@ class _ModelRuntimeMixin:
         self._load_first_available_candidate(sentence_transformer_cls)
         self._bind_loaded_model_runtime()
 
-    def _load_first_available_candidate(self, sentence_transformer_cls: Any) -> None:
+    def _load_first_available_candidate(
+        self, sentence_transformer_cls: type[SentenceTransformer]
+    ) -> None:
         """Construct the first checkpoint in the fallback chain that loads cleanly.
 
         Backend and precision incompatibilities are policy decisions rather than
         load failures, so they abort the chain instead of falling through to a
         checkpoint that would silently run under a different contract.
 
-        :param Any sentence_transformer_cls: Resolved ``SentenceTransformer`` class.
+        :param type[SentenceTransformer] sentence_transformer_cls: Resolved constructor.
         :return None: Binds ``model`` and ``_active_model_name`` to the winner.
         :raises EmbeddingBackendCompatibilityError: If a candidate needs a newer backend.
         :raises EmbeddingPrecisionCompatibilityError: If loaded weights violate policy.
@@ -720,20 +773,22 @@ class _ModelRuntimeMixin:
             break
 
     def _construct_candidate_model(
-        self, candidate_model: str, sentence_transformer_cls: Any
-    ) -> Any:
+        self,
+        candidate_model: str,
+        sentence_transformer_cls: type[SentenceTransformer],
+    ) -> SentenceTransformer:
         """Bind one candidate's runtime contract, construct it, and validate it.
 
         :param str candidate_model: Checkpoint identifier to construct.
-        :param Any sentence_transformer_cls: Resolved ``SentenceTransformer`` class.
-        :return Any: Loaded model that satisfies the precision and dimension contract.
+        :param type[SentenceTransformer] sentence_transformer_cls: Constructor.
+        :return SentenceTransformer: Model satisfying the precision and dimension contract.
         :raises EmbeddingBackendCompatibilityError: If the backend is too old.
         :raises EmbeddingPrecisionCompatibilityError: If loaded weights violate policy.
         """
         self._bind_model_contract(candidate_model)
         _require_transformers_compatibility(self.model_profile)
         model_kwargs = self._resolve_model_kwargs()
-        st_kwargs: dict[str, Any] = {"device": self.device}
+        st_kwargs: _SentenceTransformerLoadOptions = {"device": self.device}
         if model_kwargs:
             st_kwargs["model_kwargs"] = model_kwargs
         if self.truncate_dim is not None:
@@ -1029,7 +1084,7 @@ class _ModelRuntimeMixin:
             return
 
         try:
-            compile_kwargs: dict[str, Any] = (
+            compile_kwargs: _TorchCompileOptions = (
                 {"dynamic": True} if self.device in {"cuda", "cpu"} else {}
             )
             if self.device == "cpu":

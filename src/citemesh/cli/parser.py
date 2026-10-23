@@ -340,9 +340,9 @@ def _add_logging_arguments(
     :param bool suppress_defaults: Whether logging defaults should be suppressed.
     :return None: Mutates parser in-place.
     """
-    default_log_level: object = "info"
-    default_log_width: object = DEFAULT_LOG_WIDTH
-    default_log_file: object = None
+    default_log_level: str = "info"
+    default_log_width: int | str = DEFAULT_LOG_WIDTH
+    default_log_file: str | None = None
     if suppress_defaults:
         default_log_level = argparse.SUPPRESS
         default_log_width = argparse.SUPPRESS

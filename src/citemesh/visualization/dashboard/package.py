@@ -15,19 +15,28 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import networkx as nx
 from filelock import FileLock, Timeout
 
-from citemesh.data.cache import atomic_write_json, path_exists
+from citemesh.data.cache import JSONValue, atomic_write_json, path_exists
 
 from .contracts import (
     DASHBOARD_COLLECTION_KIND,
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
     GRAPH_PAYLOAD_KIND,
     GRAPH_PAYLOAD_SCHEMA_VERSION,
+    BuildConfig,
+    DashboardCollectionPackage,
+    DashboardResultEntry,
+    ExportMetadata,
+    GraphPayload,
+    ValidatedGraphPayload,
 )
+
+if TYPE_CHECKING:
+    from citemesh.visualization.export import GraphExporter
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +66,7 @@ def _dashboard_package_lock_path(package_path: Path) -> Path:
 
 def _commit_staged_dashboard_artifacts(
     package_path: Path,
-    package: dict[str, Any],
+    package: DashboardCollectionPackage,
     *,
     staged_result_files: dict[Path, Path],
     obsolete_result_paths: set[Path],
@@ -69,7 +78,7 @@ def _commit_staged_dashboard_artifacts(
     completed bundle. Unknown files and other strategy basenames are untouched.
 
     :param Path package_path: Authoritative collection package destination.
-    :param Dict[str, Any] package: Validated package payload to publish last.
+    :param DashboardCollectionPackage package: Validated package written last.
     :param Dict[Path, Path] staged_result_files: Final paths mapped to complete
         same-filesystem staging files.
     :param Set[Path] obsolete_result_paths: Exact known-format files omitted by
@@ -123,12 +132,12 @@ def _commit_staged_dashboard_artifacts(
             raise
 
 
-def _load_package_object(path: Path, *, label: str) -> dict[str, Any]:
+def _load_package_object(path: Path, *, label: str) -> dict[str, JSONValue]:
     """Read one UTF-8 JSON object with a context-rich package error.
 
     :param Path path: JSON file to read.
     :param str label: Human-readable artifact label for errors.
-    :return Dict[str, Any]: Parsed JSON object.
+    :return dict[str, JSONValue]: Parsed JSON object.
     :raises DashboardPackageError: If the file is unreadable, malformed, or not an object.
     """
     try:
@@ -179,12 +188,12 @@ def _validated_dashboard_token(raw: object, *, field: str) -> str:
 
 def _validate_dashboard_graph_payload(
     raw_payload: object, *, result_id: str
-) -> dict[str, Any]:
+) -> ValidatedGraphPayload:
     """Validate one canonical graph payload embedded in a dashboard package.
 
     :param object raw_payload: Candidate graph payload.
     :param str result_id: Owning result identifier for contextual errors.
-    :return Dict[str, Any]: Shallow normalized graph payload copy.
+    :return ValidatedGraphPayload: Shallow copy with its checked fields.
     :raises DashboardPackageError: If the graph payload contract is invalid.
     """
     if not isinstance(raw_payload, dict):
@@ -357,11 +366,11 @@ def _validate_dashboard_graph_payload(
     return dict(raw_payload)
 
 
-def _validate_dashboard_result_entry(raw_entry: object) -> dict[str, Any]:
+def _validate_dashboard_result_entry(raw_entry: object) -> DashboardResultEntry:
     """Validate and normalize one dashboard collection result entry.
 
     :param object raw_entry: Candidate result entry.
-    :return Dict[str, Any]: Normalized result entry.
+    :return DashboardResultEntry: Normalized result entry.
     :raises DashboardPackageError: If required descriptor or payload fields are invalid.
     """
     if not isinstance(raw_entry, dict):
@@ -432,7 +441,7 @@ def _validate_dashboard_result_entry(raw_entry: object) -> dict[str, Any]:
     }
 
 
-def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
+def _validate_dashboard_package(raw_package: object) -> DashboardCollectionPackage:
     """Validate a dashboard collection package and deterministically deduplicate it.
 
     When duplicate result identifiers are present, the first entry wins. Package
@@ -440,7 +449,7 @@ def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
     state deterministically without inventing another recency policy.
 
     :param object raw_package: Candidate package object.
-    :return Dict[str, Any]: Canonical package object.
+    :return DashboardCollectionPackage: Canonical package object.
     :raises DashboardPackageError: If the top-level or entry contract is invalid.
     """
     if not isinstance(raw_package, dict):
@@ -467,7 +476,7 @@ def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
     if not isinstance(raw_results, list):
         raise DashboardPackageError("Dashboard package results must be an array.")
 
-    results: list[dict[str, Any]] = []
+    results: list[DashboardResultEntry] = []
     seen_result_ids: set[str] = set()
     for raw_entry in raw_results:
         entry = _validate_dashboard_result_entry(raw_entry)
@@ -497,11 +506,11 @@ def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
     }
 
 
-def load_dashboard_package(package_path: Path) -> dict[str, Any]:
+def load_dashboard_package(package_path: Path) -> DashboardCollectionPackage:
     """Load and strictly validate an existing dashboard collection package.
 
     :param Path package_path: Package file to load.
-    :return Dict[str, Any]: Canonical validated package.
+    :return DashboardCollectionPackage: Canonical validated package.
     :raises DashboardPackageError: If the package cannot be decoded or validated.
     """
     return _validate_dashboard_package(
@@ -530,14 +539,14 @@ def _resolve_collection_artifact_path(
     return resolved_candidate
 
 
-def _load_legacy_dashboard_results(collection_root: Path) -> list[dict[str, Any]]:
+def _load_legacy_dashboard_results(collection_root: Path) -> list[DashboardResultEntry]:
     """Load valid entries from a legacy manifest without modifying legacy files.
 
     Invalid legacy entries are reported and skipped. Their source files remain
     untouched, allowing manual recovery while safe entries migrate forward.
 
     :param Path collection_root: Collection directory containing a legacy manifest.
-    :return list[Dict[str, Any]]: Valid normalized package entries in manifest order.
+    :return list[DashboardResultEntry]: Valid entries in manifest order.
     """
     manifest_path = collection_root / LEGACY_DASHBOARD_MANIFEST_FILENAME
     if not path_exists(manifest_path):
@@ -557,7 +566,7 @@ def _load_legacy_dashboard_results(collection_root: Path) -> list[dict[str, Any]
         )
         return []
 
-    results: list[dict[str, Any]] = []
+    results: list[DashboardResultEntry] = []
     seen_result_ids: set[str] = set()
     for index, raw_entry in enumerate(manifest["results"]):
         if not isinstance(raw_entry, dict):
@@ -622,11 +631,11 @@ def update_dashboard_package(
     graph: nx.Graph,
     seed_id: str,
     strategy: str,
-    payload: dict[str, Any],
-    build: dict[str, Any],
+    payload: GraphPayload,
+    build: BuildConfig,
     staged_result_files: dict[Path, Path] | None = None,
     obsolete_result_paths: set[Path] | None = None,
-) -> dict[str, Any]:
+) -> DashboardCollectionPackage:
     """Atomically create or update a portable dashboard collection package.
 
     One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
@@ -639,13 +648,13 @@ def update_dashboard_package(
     :param nx.Graph graph: Built graph used for seed metadata.
     :param str seed_id: Seed node identifier.
     :param str strategy: Active strategy name.
-    :param Dict[str, Any] payload: Canonical graph payload from the exporter.
-    :param Dict[str, Any] build: Portable resolved build settings.
+    :param GraphPayload payload: Canonical graph payload from the exporter.
+    :param BuildConfig build: Portable resolved build settings.
     :param Optional[Dict[Path, Path]] staged_result_files: Final result paths mapped
         to fully written same-filesystem staging files.
     :param Optional[Set[Path]] obsolete_result_paths: Exact prior optional exports
         to remove if this result is published successfully.
-    :return Dict[str, Any]: Canonical package written to disk.
+    :return DashboardCollectionPackage: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
     result_id = f"{strategy}:{seed_id}"
@@ -713,10 +722,10 @@ def render_dashboard_collection_snapshot(
     package_path: Path,
     *,
     dashboard_path: Path,
-    exporter: Any,
-    metadata: dict[str, Any],
+    exporter: GraphExporter,
+    metadata: ExportMetadata,
     theme: str,
-) -> dict[str, Any]:
+) -> DashboardCollectionPackage:
     """Render an atomic dashboard snapshot from the latest locked package state.
 
     The package and its embedded HTML snapshot must be serialized by the same
@@ -725,10 +734,10 @@ def render_dashboard_collection_snapshot(
 
     :param Path package_path: Authoritative dashboard collection package.
     :param Path dashboard_path: HTML viewer path to refresh.
-    :param Any exporter: Graph exporter for the build's current graph.
-    :param Dict[str, Any] metadata: Mutable exporter metadata mapping.
+    :param GraphExporter exporter: Exporter bound to the current graph.
+    :param ExportMetadata metadata: Mutable exporter metadata mapping.
     :param str theme: Requested dashboard theme.
-    :return Dict[str, Any]: Latest package embedded in the rendered viewer.
+    :return DashboardCollectionPackage: Package embedded in the viewer.
     """
     lock_path = _dashboard_package_lock_path(package_path)
     lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)

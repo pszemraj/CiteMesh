@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from citemesh.data import format_bytes
+from citemesh.data.model_profiles import DocumentFormatter, SimilarityFormatter
 
 from . import deps
 from .runtime import (
@@ -56,12 +57,12 @@ class _FingerprintMixin:
     def _resolve_formatter_fingerprint(
         self,
         *,
-        formatter: Callable[..., str],
+        formatter: DocumentFormatter | SimilarityFormatter,
         probe_renderer: Callable[[dict[str, str]], str],
     ) -> str:
         """Resolve a deterministic cache fingerprint for one formatter role.
 
-        :param Callable[..., str] formatter: Underlying formatter identity.
+        :param DocumentFormatter | SimilarityFormatter formatter: Profile formatter identity.
         :param Callable[[Dict[str, str]], str] probe_renderer: Probe rendering callback.
         :return str: SHA-256 digest of profile formatter probes.
         """
