@@ -12,18 +12,14 @@ The [environment settings](../reference/environment.md#platform-variables-used-f
 ├── config.toml.lock           # config write coordination
 ├── .locks/
 │   └── cache-operations.db    # SQLite operation/clear coordination
-├── embeddings/
-│   ├── metadata_<hash>.db     # SQLite: ids, text hashes, row_idx, metadata, chronology, hydration
-│   ├── embeddings_<hash>.h5   # HDF5: vectors, int8 calibration ranges, binary index
-│   ├── cache_<hash>.lock      # namespace mutation lock
-│   └── hydration_<hash>.lock  # hydration and consuming-search lock
+├── embeddings/                # native embedding namespaces
 ├── papers/
 │   └── <sha1>.json            # canonical S2 metadata and identifier lookups
 └── references/
     └── <sha1>.json            # S2 reference IDs
 ```
 
-Dashboard collection locks live beside their output packages, not here. Hugging Face downloads stay outside CiteMesh's cache ([`HF_HOME`](../reference/environment.md#other-respected-variables)).
+For embedding files, see [physical layout](../internals/embedding-cache.md#physical-layout). Dashboard collection locks live beside their output packages. Hugging Face downloads stay outside CiteMesh's cache ([`HF_HOME`](../reference/environment.md#other-respected-variables)).
 
 ## Paper metadata and reference IDs
 
@@ -57,7 +53,7 @@ Local custom model fingerprints include declared Python modules, their package i
 - The binary prefilter is not part of the namespace: toggling it reuses the same vectors, ranges, and hydration state, rebuilding or dropping only the derived index.
 - A vector is re-encoded only when the paper is new to the namespace or its input text changed. Metadata-only updates refresh the SQLite row, not the vector.
 
-The migration that removed compute dtype from namespace names deliberately leaves older dtype-keyed `.db` and `.h5` pairs untouched: their filename hashes cannot be retargeted safely. Upgrading rehydrates a new shared namespace while the old vectors remain on disk. `citemesh cache scan` lists every embedding namespace separately and marks these schema-3 pairs as reclaimable; after confirming the replacement cache works, delete the matching `metadata_<namespace>.db` and `embeddings_<namespace>.h5` files to reclaim their space. `citemesh cache clear` also reclaims them, but deletes every namespace.
+Older dtype-keyed `.db` and `.h5` pairs remain separate and appear as reclaimable schema-3 namespaces in `citemesh cache scan`. After confirming the replacement cache works, delete the matching `metadata_<namespace>.db` and `embeddings_<namespace>.h5` files to reclaim their space. `citemesh cache clear` also reclaims them, but deletes every namespace.
 
 Crash safety, the replacement journal, flush ordering, and locking are in [Embedding Cache Internals](../internals/embedding-cache.md).
 
@@ -90,7 +86,8 @@ configuration, or the catalog's default, and download only its declared files.
 Omit `--snapshot` to install the catalog's current snapshot; an explicit
 snapshot requires `--config`. Snapshot identity identifies the portable files;
 the manifest separately records the immutable model and upstream dataset
-revisions. Each configuration can have different coverage and freshness.
+revisions. The upstream source revision is provenance, not namespace identity.
+Each configuration can have different coverage and freshness.
 
 Explicit `--cache-namespace` selects existing files and pins model, profile,
 document formatter, dimension, storage precision, dataset, and split from their
@@ -119,8 +116,9 @@ arXiv version number and its creation time. When conflicting records have equal
 or unavailable revision information, a stable ordering of their normalized
 content breaks the tie and CiteMesh warns once with the number of ambiguous
 comparisons. This tie-break is deterministic; it does not establish freshness.
-The winning record retains its original source position. Equally recent,
-identical records retain the first occurrence.
+Unparseable timestamps rank below valid ones, which are compared in UTC. The
+winning record retains its original source position. Equally recent, identical
+records retain the first occurrence.
 
 For a full index, `--corpus-size N` ranks only the newest N active members at
 the completed revision; `--all-corpus` uses every active member. Chronology ties
@@ -167,11 +165,9 @@ python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
 Use `--namespace` for an already certified corpus, or omit both namespace flags
 to create a new configuration. The output directory must be new. The script
 resolves and pins the source, refreshes, exports, and publishes one complete
-configuration. It uploads payloads first, then the manifest, and updates the
-catalog's current pointer last. A single publisher maintains the bucket.
-After publication it removes prior and incomplete snapshots for that
-configuration, preserving other configurations. The bucket must already exist
-and be private.
+configuration. For upload ordering, see
+[Embedding Cache Internals](../internals/embedding-cache.md#portable-format).
+Use one publisher at a time. The bucket must already exist and be private.
 
 Only the current snapshot of each configuration is retained remotely, so old
 full indexes do not accumulate as repository history. Keep a local export if

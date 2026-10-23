@@ -4,9 +4,7 @@ CiteMesh separates argument handling, paper acquisition, scoring, persistence, a
 
 ## Execution flow
 
-`cli/` parses arguments, applies `config.toml` defaults, validates the effective options in `build_contract.py`, resolves export targets, and calls `build_graph` on the selected `GraphBuilderStrategy`. The strategy collects papers through `strategies/candidates.py` (source fetch, availability policy, identity reconciliation, pool budgets), builds its scoring space in `prepare_graph_scoring`, scores pairs in `compute_similarity`, and returns a `networkx.Graph`. `visualization/` computes one shared layout for `render.visualize_graph`, `export.GraphExporter`, and `dashboard/package.py`.
-
-Every node carries a consistent attribute payload, which keeps visualization and export strategy-agnostic; see the [graph-input contract](../reference/output-artifacts.md#graph-input).
+`cli/` parses arguments, applies `config.toml` defaults, validates effective options in `build_contract.py`, and resolves export targets before dispatching to `GraphBuilderStrategy`. Strategies acquire candidates through `strategies/candidates.py`, prepare scoring in `prepare_graph_scoring`, and return a `networkx.Graph`; `visualization/` lays out and exports it. The [graph-input contract](../reference/output-artifacts.md#graph-input) defines node attributes.
 
 ## Package map
 

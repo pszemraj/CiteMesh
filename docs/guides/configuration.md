@@ -63,7 +63,7 @@ s2_api_key = "your-key-here"
 
 ## The file itself
 
-- [Cache-root settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine its location. [Cache clearing](caching.md#inspecting-and-clearing) preserves it.
+- [Cache-root settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine its location; see [cache maintenance](caching.md#inspecting-and-clearing) for reset behavior.
 - CiteMesh rewrites it with mode `0600` because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
 - Mutations serialize on a file lock, fail after 10 seconds rather than overwrite, and refuse to clobber an unreadable file. Ordinary reads ignore invalid entries, malformed TOML, and non-UTF-8 with a warning, so a broken config never blocks other commands.
 - Unknown keys survive a rewrite; comments do not, since the TOML round-trip is value-level.

@@ -32,15 +32,11 @@ For EmbeddingGemma the symmetric formatter is exactly `task: sentence similarity
 The roles keep independent cache namespaces, fingerprints, and storage contracts, and the graph namespace is always float32 with no binary prefilter, so a matching dimension cannot make asymmetric vectors eligible for symmetric scoring. Namespace identity, cross-device reuse, storage precision, and calibration are in [Caching & Data](../guides/caching.md).
 
 An explicitly selected installed index loads its recorded immutable model
-revision and validates the active artifact against its stored contract. This
-selection survives model initialization and keeps the original native address,
-even when that address was created using requested revision `main`. Imported
-producer dtype remains creation provenance; the consumer resolves its own
-device and compute dtype normally. Installing an index needs neither model
-weights nor inference; searching it encodes the query, and graph builds encode
-selected papers separately in the symmetric role. Bucket snapshot identity is
-publication provenance; model compatibility uses the immutable model revision
-recorded in the portable manifest.
+revision, validates the active artifact against its stored contract, and keeps
+its original native address, including when created with requested revision
+`main`. Imported producer dtype is creation provenance; consumers resolve their
+own device and compute dtype. For the import, search, and graph-build workflow,
+see [Portable corpus indexes](../guides/caching.md#portable-corpus-indexes).
 
 Inputs exceeding the token window, including prompts and special tokens, are truncated and counted in a warning. The ordinary path reports before encoding; CUDA prefetch reports the completed batch counts after encoding and resets partial counts on a compile retry. Reused cached vectors do not repeat the warning.
 

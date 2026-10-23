@@ -2,8 +2,7 @@
 
 This checks that a laptop can install the published corpus without encoding it,
 retrieve from it, and build a graph for a genuinely new paper. Run the same
-checks on either or both machines. Native macOS and Windows results are still
-to be collected; the preceding full-corpus acceptance ran on Linux.
+checks on either or both machines.
 
 ## Published input
 
@@ -92,10 +91,8 @@ citemesh cache scan
 certified corpus with 3,215,242 active/physical rows and 512-dimensional int8
 storage. Its origin records the publication above. Import performs data transfer
 and local binary-index reconstruction, with no model loading or calibration.
-An interrupted native import resumes by rerunning the exact same command,
-using the complete download in the Hugging Face cache. The publisher retains
-one current snapshot per configuration. If this snapshot has been replaced
-before its download finishes, omit `--snapshot` to start with the current one.
+See [Portable corpus indexes](caching.md#portable-corpus-indexes) for import
+resume and snapshot-retention behavior.
 
 ## 3. Search the installed corpus
 
@@ -234,5 +231,5 @@ runtime metadata, and the generated JSON/dashboard outputs. Note optional
 provider failures separately from index/model failures.
 
 Compare semantic relevance across machines rather than requiring bit-identical
-CPU/MPS/CUDA results. No corpus-wide encoding, calibration, source refresh, or
-retrieval-row growth should occur during these query/build checks.
+CPU/MPS/CUDA results. Across query/build checks, no corpus-wide encoding,
+calibration, source refresh, or retrieval-row growth should occur.

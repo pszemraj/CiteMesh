@@ -48,7 +48,7 @@ Those automatic repairs apply to ordinary uncertified caches. Managed corpus
 caches use strict inspection and preserve incompatible or missing-half storage
 until an explicit reset.
 
-Schema **4** requires one-time re-encoding of older namespaces when they are next opened: rows written before it carry no `chronology_key`, leaving a capped corpus with no trustworthy recency watermark and a growth check that would silently decline. Row counts cannot identify those rows, so the schema-mismatch reset rebuilds each old namespace instead of reusing vectors it cannot vouch for.
+Schema **4** requires rebuilding older namespaces whose rows lack `chronology_key`, which capped-corpus growth checks need as a recency watermark.
 
 ## Locking
 
@@ -67,12 +67,11 @@ original source ordinal. This additive change does not invalidate schema-4
 vectors. An empty new membership table means unknown coverage until an
 operation certifies it. Physical rows can outlive source membership.
 
-Structured cache metadata records the immutable vector contract, original
-namespace serialization, imported publication origin, completed source
-descriptor, membership certification, and pending operation target. Source
-revision is provenance rather than namespace identity. A legacy requested
-model revision such as `main` stays in its original address even when model
-loading uses the resolved immutable checkpoint.
+Structured cache metadata records the vector contract, original namespace
+serialization, imported publication origin, completed source descriptor,
+membership certification, and pending operation target. See [portable index
+selection](../guides/caching.md#portable-corpus-indexes) for user-facing
+namespace and source-revision behavior.
 
 Strict opening inspects SQLite and HDF5 read-only before initialization or
 layout repair. Missing halves, incompatible contracts, and ambiguous occupied
@@ -99,11 +98,9 @@ operation incomplete, since the old source no longer exists intact.
 
 Full and newest-N refreshes share a temporary SQLite staging pass, resolving
 canonical IDs across the entire pinned split before calibration or encoding.
-Duplicate precedence is update time, numeric arXiv version, version creation
-time, then sorted normalized JSON for otherwise tied conflicts. Missing or
-unparseable timestamps rank below valid ones; timestamps are compared in UTC.
-Newest-N selection runs on the resolved records. Staging bounds memory by the
-record batch and uses temporary disk space proportional to source metadata.
+Duplicate IDs follow the [source precedence rules](../guides/caching.md#portable-corpus-indexes). Staging
+bounds memory by the record batch and uses temporary disk space proportional to
+source metadata.
 Refresh retries rebuild membership from these winners while preserving native
 vectors and calibration; import retries retain their committed prefix.
 
@@ -113,11 +110,10 @@ started before certification cannot commit afterwards. Read-only vector lookup
 and the separate symmetric graph cache serve consumers.
 
 Native search intersects every requested view with certified membership before
-Hamming candidate selection or int8/float32 scoring. Newest-N uses descending
-chronology and descending source ordinal for dated papers, then ascending
-source ordinal for undated filler. Eligibility is indexed by physical row;
-absolute native positions remain the cutoff tie key. Excluded rows consume no
-candidate slots.
+Hamming candidate selection or int8/float32 scoring. Eligibility is indexed by
+physical row; absolute native positions remain the cutoff tie key, and excluded
+rows consume no candidate slots. Newest-N views use the
+[active membership ordering](../guides/caching.md#portable-corpus-indexes).
 
 ## Portable format
 
@@ -154,13 +150,10 @@ exactly its declared artifacts. Snapshots live at
 Each configuration owns its source descriptor. Import origin records
 `bucket_id`, `config_name`, and `snapshot_id`, independently of the upstream
 source revision. Complete downloads stay in the Hugging Face cache for native
-import retries, including after the remote snapshot is retired.
+import retries; see the [portable index guide](../guides/caching.md#portable-corpus-indexes)
+for resume behavior.
 
-The single publisher uploads payloads first, then the manifest, and writes the
-catalog's current pointer last. After publication it prunes prior and
-incomplete remote snapshots only for that configuration. Other configurations
-remain untouched. One current snapshot per configuration is retained. A
-transfer that has not finished when its snapshot is retired may need to
-restart from the catalog's current snapshot. The manual publisher uses the
-same native refresh and portable export operations and requires an existing
-private bucket.
+The publisher uploads payloads, then the manifest, updates the catalog's current
+pointer, and prunes older files for that configuration. The
+[portable index guide](../guides/caching.md#portable-corpus-indexes) describes
+the publisher command and retention policy.
