@@ -77,6 +77,7 @@ from tests._helpers import (
     BlockingEncodeModel,
     PausedFirstWrite,
     build_seed_graph,
+    fail_stat_for,
     get_paper_id_normalization_cases,
     run_captured_cli,
 )
@@ -4190,22 +4191,15 @@ def test_dashboard_package_existing_errors_fail_closed(
     package_path.write_bytes(existing_bytes)
     graph = build_seed_graph("seed")
 
-    original_stat, original_exists = Path.stat, Path.exists
-
-    def fail_stat(path: Path, **kwargs: Any) -> Any:
-        """Fail one package inspection while leaving other paths usable.
-
-        :param Path path: Inspected path.
-        :param Any kwargs: Remaining stat options.
-        :return Any: Statistics for unaffected paths.
-        """
-        if path == package_path:
-            raise OSError("package stat unavailable")
-        return original_stat(path, **kwargs)
+    original_exists = Path.exists
 
     with monkeypatch.context() as fault:
         if stat_error:
-            fault.setattr(Path, "stat", fail_stat)
+            fault.setattr(
+                Path,
+                "stat",
+                fail_stat_for(package_path, OSError("package stat unavailable")),
+            )
             fault.setattr(
                 Path,
                 "exists",

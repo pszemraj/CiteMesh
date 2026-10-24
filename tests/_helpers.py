@@ -3,15 +3,42 @@
 from __future__ import annotations
 
 import io
+import os
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import networkx as nx
 import numpy as np
 import pytest
+
+
+def fail_stat_for(
+    target_path: Path, error: OSError
+) -> Callable[[Path], os.stat_result]:
+    """Return a ``Path.stat`` wrapper that fails for one path only.
+
+    :param Path target_path: Path whose metadata lookup should fail.
+    :param OSError error: Exception raised for the selected path.
+    :return Callable[[Path], os.stat_result]: Wrapper preserving other stat calls.
+    """
+    original_stat = Path.stat
+
+    def fail_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        """Fail for the selected path and forward other stat requests.
+
+        :param Path path: Path whose metadata is requested.
+        :param bool follow_symlinks: Whether metadata follows symbolic links.
+        :return os.stat_result: Metadata for paths outside the fault scope.
+        """
+        if path == target_path:
+            raise error
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    return fail_stat
 
 
 def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
