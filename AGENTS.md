@@ -37,12 +37,14 @@ project commands with `conda run -n inf --live-stream <command>`. Before
 committing, run:
 
 ```bash
-python -m pytest -n 4 --dist worksteal
+python -m pytest -n logical --dist worksteal
 ruff check .
 ruff format --check .
 ```
 
-The default suite is network-free and excludes slow tests. The command above uses four pytest-xdist worker processes with work stealing; adjust `-n` to choose another worker count or omit it for a serial run. Each test retains its own cache and temporary paths. Keep real CUDA checks serial: `python -m pytest -m "slow and cuda"`; these opt-in tests may download the designated embedding model.
+The default suite is network-free and excludes `slow` tests. The command above uses one pytest-xdist worker per logical CPU with work stealing; the development extra includes `psutil` for CPU counting. Choose another worker count with `-n N`, or use `-n 0` for serial debugging. Cache-locking, subprocess, threaded-export, and rendering tests belong in this parallel suite: each test has isolated cache and temporary paths.
+
+Run opt-in real-model and compilation checks serially with `python -m pytest -n 0 -m slow`. These tests can compete for the same accelerator, CPU inference threads, and compiler resources. For CUDA only, use `python -m pytest -n 0 -m "slow and cuda"`. Some slow tests may download the designated model or fetch live arXiv data; CPU semantic-quality tests require the model already cached.
 
 ## Code conventions
 

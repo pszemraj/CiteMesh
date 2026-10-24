@@ -10223,6 +10223,7 @@ def test_embedding_real_cpu_compile_executes_graphs(
 
 
 @pytest.mark.slow
+@pytest.mark.cuda
 def test_embedding_real_cuda_fa2_compile_executes_graphs() -> None:
     """Exercise the real ST6 compiled forward path and compare eager embeddings.
 
