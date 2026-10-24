@@ -265,6 +265,8 @@ def _parse_doi(doi_data: object) -> str:
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
+    # Trailing separators are record noise, never part of the DOI suffix.
+    source_doi = source_doi.rstrip(",;/")
     canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
     if canonical_source_doi is None:
         return ""

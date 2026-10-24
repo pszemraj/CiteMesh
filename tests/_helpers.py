@@ -200,9 +200,13 @@ def get_paper_id_normalization_cases() -> list[tuple[str, str]]:
         ("https://doi.org/10.1002/example;2-A", "10.1002/example;2-a"),
         ("doi.org/10.1002/example;2-A", "10.1002/example;2-a"),
         ("https://doi.org/10.1002/example%3B2-A", "10.1002/example;2-a"),
-        ("https://doi.org/10.1002/example/", "10.1002/example/"),
-        ("dx.doi.org/10.1002/example/", "10.1002/example/"),
-        ("https://doi.org/10.1002/example%2F", "10.1002/example/"),
+        ("https://doi.org/10.1002/example/", "10.1002/example"),
+        ("dx.doi.org/10.1002/example/", "10.1002/example"),
+        ("https://doi.org/10.1002/example%2F", "10.1002/example"),
+        (
+            "https://doi.org/10.48550/arXiv.1706.03762/",
+            "10.48550/arxiv.1706.03762",
+        ),
     ]
 
 
