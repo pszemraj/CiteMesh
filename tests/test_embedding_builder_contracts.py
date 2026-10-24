@@ -1107,6 +1107,8 @@ def test_cpu_bf16_autocast_uses_native_capabilities(
     assert init_log["kwargs"]["model_kwargs"] == {"dtype": "auto"}
     assert (("call", "cpu", token) in autocast_log) is expected
     if expected:
+        assert encode_log[-1]["convert_to_numpy"] is True
+        assert encode_log[-1]["convert_to_tensor"] is False
         assert encode_log[-1]["normalize_embeddings"] is False
         np.testing.assert_allclose(np.linalg.norm(output, axis=1), 1.0, atol=1e-6)
 

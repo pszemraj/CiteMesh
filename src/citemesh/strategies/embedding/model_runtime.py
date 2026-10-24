@@ -14,7 +14,6 @@ from contextlib import AbstractContextManager, ExitStack, contextmanager, nullco
 from types import ModuleType
 from typing import (
     TYPE_CHECKING,
-    Literal,
     Protocol,
     TypedDict,
     TypeGuard,
@@ -63,18 +62,11 @@ else:
 logger = logging.getLogger(__name__)
 
 
-class _TransformerModelOptions(TypedDict, total=False):
-    """Known keyword options passed through SentenceTransformer model loading."""
-
-    dtype: Literal["auto"]
-    attn_implementation: str
-
-
 class _SentenceTransformerLoadOptions(TypedDict, total=False):
     """Known constructor options used for a SentenceTransformer checkpoint."""
 
     device: str
-    model_kwargs: _TransformerModelOptions
+    model_kwargs: dict[str, str]
     truncate_dim: int
     revision: str
 
@@ -327,16 +319,16 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
                 self.truncate_dim,
             )
 
-    def _resolve_model_kwargs(self) -> _TransformerModelOptions:
+    def _resolve_model_kwargs(self) -> dict[str, str]:
         """Compute SentenceTransformer kwargs and configure autocast policy.
 
-        :return _TransformerModelOptions: Transformer model loader options.
+        :return dict[str, str]: Automatic dtype and optional attention backend.
         """
         self._autocast_dtype = None
         self._autocast_device_type = None
         self._autocast_enabled = False
         self._encode_model = None
-        model_kwargs: _TransformerModelOptions = {"dtype": "auto"}
+        model_kwargs: dict[str, str] = {"dtype": "auto"}
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
 

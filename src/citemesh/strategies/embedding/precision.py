@@ -13,10 +13,10 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from itertools import chain
-from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, overload
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar
 
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 
 from citemesh.core.text_batching import l2_normalize_embeddings, warn_on_truncated_count
 
@@ -36,7 +36,6 @@ class _EncodeOptions(TypedDict, total=False):
     """Encoder options used by CiteMesh text batching."""
 
     batch_size: int
-    convert_to_tensor: bool
     normalize_embeddings: bool
     show_progress_bar: bool | None
 
@@ -126,43 +125,31 @@ class _PrecisionEncodeProxy:
             except Exception as eager_error:
                 raise eager_error from compiled_failure
 
-    @overload
     def encode(
         self,
         sentences: list[str],
         /,
         *,
-        batch_size: int,
-        convert_to_tensor: Literal[False],
-        normalize_embeddings: Literal[True],
-        show_progress_bar: bool,
-    ) -> NDArray[np.float32]: ...
-
-    @overload
-    def encode(
-        self,
-        sentences: list[str],
-        /,
+        convert_to_tensor: Literal[False] = False,
         **kwargs: Unpack[_EncodeOptions],
-    ) -> ArrayLike | torch.Tensor: ...
-
-    def encode(
-        self,
-        sentences: list[str],
-        /,
-        **kwargs: Unpack[_EncodeOptions],
-    ) -> ArrayLike | torch.Tensor:
-        """Run ``encode`` within the configured context manager.
+    ) -> NDArray[np.float32]:
+        """Encode text batches as NumPy vectors within the precision context.
 
         :param list[str] sentences: Text inputs passed to the wrapped encoder.
+        :param Literal[False] convert_to_tensor: Keep text batches as NumPy arrays.
         :param kwargs: Encoder options used by CiteMesh text batching.
-        :return ArrayLike | torch.Tensor: Encoded vectors from the wrapped model.
+        :return NDArray[np.float32]: Encoded vectors in input order.
         """
         normalize_output = kwargs.get("normalize_embeddings", False)
         if normalize_output:
             kwargs["normalize_embeddings"] = False
         embeddings = self._call_with_precision(
-            lambda: self._model.encode(sentences, **kwargs)
+            lambda: self._model.encode(
+                sentences,
+                convert_to_numpy=True,
+                convert_to_tensor=convert_to_tensor,
+                **kwargs,
+            )
         )
         # Normalize once in FP32; CPU autocast would round ST's division to BF16.
         if normalize_output:
