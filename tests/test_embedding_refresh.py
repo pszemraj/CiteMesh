@@ -192,6 +192,41 @@ def test_changed_source_identical_text_never_loads_encoder(monkeypatch, runtime)
     assert not loads and not encoded
 
 
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_refresh_preserves_encoder_batching_capabilities(
+    monkeypatch, runtime, caplog, prefetch
+):
+    install_source(
+        monkeypatch,
+        {"one": [row("2401.00001"), row("2401.00002"), row("2401.00003")]},
+        ["one"],
+    )
+    builder = make_builder(encode_batch_size=1)
+    builder._load_model()
+    model = builder.model
+    calls = []
+
+    def encode_prefetched(texts, *, batch_size):
+        calls.append((list(texts), batch_size))
+        return model.encode(texts)
+
+    model.prefetch_batches = prefetch
+    model.encode_prefetched = encode_prefetched
+    model.max_seq_length = 2
+    model.default_prompt_name = "document"
+    model.prompts = {"document": "prefix "}
+    model.tokenizer = lambda texts, **kwargs: {"length": [3 for _ in texts]}
+    result = builder.refresh_corpus()
+    assert result["encoded_rows"] == 3
+    assert len(runtime[0]) == 3
+    if prefetch:
+        assert len(calls) == 1
+        assert calls[0][1] == 1
+    else:
+        assert not calls
+        assert "truncate 3 of 3 inputs" in caplog.text
+
+
 def test_interrupted_refresh_resumes_recorded_target(monkeypatch, runtime):
     revisions = {
         "one": [row("2401.00001")],

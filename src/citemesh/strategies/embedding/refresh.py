@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 from numpy.typing import ArrayLike
 
+from citemesh.core.text_batching import (
+    _LengthTokenizer,
+    _PrefetchBatchEncoder,
+    _TextEncoder,
+)
 from citemesh.data.embedding_contract import (
     INT8_QUANTIZATION,
     CorpusSource,
@@ -60,6 +66,57 @@ class _LazyEncoder:
         """
         self.builder = builder
         self.encoded_count = 0
+        self._loaded_encoder: _TextEncoder | None = None
+
+    def _encoder(self) -> _TextEncoder:
+        """Return the loaded encoder after validating its persistent identity."""
+        if self._loaded_encoder is None:
+            self.builder._load_model()
+            self.builder._ensure_cache_model_fingerprint()
+            self._loaded_encoder = self.builder._get_model_for_encoding()
+        return self._loaded_encoder
+
+    @property
+    def prefetch_batches(self) -> bool:
+        """Return whether the encoder overlaps tokenization with inference."""
+        enabled: bool = getattr(self._encoder(), "prefetch_batches", False)
+        return enabled
+
+    @property
+    def max_seq_length(self) -> int | None:
+        """Return the encoder's token window when available."""
+        length: int | None = getattr(self._encoder(), "max_seq_length", None)
+        return length
+
+    @property
+    def default_prompt_name(self) -> str | None:
+        """Return the prompt included when measuring input lengths."""
+        name: str | None = getattr(self._encoder(), "default_prompt_name", None)
+        return name
+
+    @property
+    def prompts(self) -> Mapping[str, str]:
+        """Return the encoder's named prompts."""
+        prompts: Mapping[str, str] = getattr(self._encoder(), "prompts")
+        return prompts
+
+    @property
+    def tokenizer(self) -> _LengthTokenizer:
+        """Return the tokenizer used to measure untruncated input lengths."""
+        tokenizer: _LengthTokenizer = getattr(self._encoder(), "tokenizer")
+        return tokenizer
+
+    def encode_prefetched(self, texts: Sequence[str], *, batch_size: int) -> ArrayLike:
+        """Encode and count a batch using the encoder's prefetch path.
+
+        :param texts: Retrieval texts to encode.
+        :param batch_size: Maximum texts per inference batch.
+        :return: Encoded vectors in input order.
+        """
+        encode: _PrefetchBatchEncoder = getattr(self._encoder(), "encode_prefetched")
+        result = encode(texts, batch_size=batch_size)
+        self.encoded_count += len(texts)
+        return result
 
     def encode(
         self,
@@ -80,9 +137,7 @@ class _LazyEncoder:
         :param show_progress_bar: Whether the encoder may show a progress bar.
         :return: Encoded vectors for the supplied texts.
         """
-        self.builder._load_model()
-        self.builder._ensure_cache_model_fingerprint()
-        result = self.builder._get_model_for_encoding().encode(
+        result = self._encoder().encode(
             sentences,
             batch_size=batch_size,
             convert_to_tensor=convert_to_tensor,
