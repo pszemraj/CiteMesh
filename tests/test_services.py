@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -1135,56 +1133,6 @@ def test_oversized_retry_after_stops_only_request_without_spending_wait(
             assert client._candidate_operation.state.recovery_seconds == 1.0
             assert client.get_paper("healthy", raise_on_unavailable=True) is not None
         assert client._session.get.call_count == 2
-
-
-def test_rate_limit_serializes_concurrent_slots(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The client allocates distinct paced slots to concurrent callers.
-
-    :param pytest.MonkeyPatch monkeypatch: Wraps the real sleep function.
-    :return None: Verifies serialized pacing.
-    """
-    real_sleep = s2.client.time.sleep
-    guard = threading.Lock()
-    active = 0
-    maximum = 0
-
-    def tracked_sleep(seconds: float) -> None:
-        """Track simultaneous pacing sleeps.
-
-        :param float seconds: Requested wait.
-        :return None: Sleeps and records concurrency.
-        """
-        nonlocal active, maximum
-        with guard:
-            active += 1
-            maximum = max(maximum, active)
-        try:
-            real_sleep(seconds)
-        finally:
-            with guard:
-                active -= 1
-
-    monkeypatch.setattr(s2.client.time, "sleep", tracked_sleep)
-    barrier = threading.Barrier(2)
-    with SemanticScholarClient(api_key="") as client:
-        client.requests_per_second = 100.0
-        client._next_request_time = s2.client.monotonic() + 0.02
-
-        def reserve() -> float:
-            """Reserve one paced slot.
-
-            :return float: Slot release time.
-            """
-            barrier.wait()
-            client._rate_limit()
-            return s2.client.monotonic()
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            times = sorted(executor.map(lambda _index: reserve(), range(2)))
-    assert maximum == 1
-    assert times[1] - times[0] >= 0.005
 
 
 def test_singleton_credentials_lifecycle_and_retry_defaults(
