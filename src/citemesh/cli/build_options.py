@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import argparse
 import os
-from collections.abc import Callable
-from typing import Any, Protocol
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
-import networkx as nx
-
+from citemesh.data.embedding_contract import ExistingCacheSelection
 from citemesh.data.user_config import UserConfig, format_config_value
 from citemesh.services import SemanticScholarClient
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, EmbeddingGraphBuilder
+from citemesh.strategies.embedding.builder import EmbeddingRuntimeOptions
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -27,19 +27,50 @@ from citemesh.strategies.hybrid import (
 )
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
+    from citemesh.strategies.embedding.builder import EmbeddingRuntimeMetadata
+    from citemesh.visualization.export import (
+        EmbeddingExportMetadata,
+        ExportMetadata,
+        PlotOverlayMetadata,
+        ScoreContract,
+    )
+
 from .console import logger
 
 
 class _StrategyBuilderProtocol(Protocol):
     """Protocol describing strategy builder objects used by CLI dispatch."""
 
-    def build_graph(self, paper_id: str) -> tuple[nx.Graph, str]:
+    def build_graph(self, paper_id: str) -> tuple[PaperGraph, str]:
         """Build a graph for a paper identifier.
 
         :param str paper_id: Raw or normalized seed paper identifier.
-        :return tuple[nx.Graph, str]: Built graph and normalized seed paper ID.
+        :return tuple[PaperGraph, str]: Built graph and normalized seed paper ID.
         """
         ...
+
+
+class _ClientOptions(TypedDict, total=False):
+    """HTTP client options supplied by parsed CLI settings."""
+
+    api_key: str | None
+    refresh_paper_cache: bool
+    retry_budget_seconds: float
+
+
+class _ConfiguredClientKwargs(TypedDict, total=False):
+    """Optional client injected into a graph builder."""
+
+    client: SemanticScholarClient
+
+
+class _SharedEmbeddingBuilderKwargs(EmbeddingRuntimeOptions, total=False):
+    """Embedding builder options shared by CLI strategy factories."""
+
+    corpus_size: int | None
+    cache_selection: ExistingCacheSelection
 
 
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
@@ -52,6 +83,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: dict[str, set[str]] = {
     "no_references": {"citation", "recommendation", "hybrid"},
     "refresh_reference_cache": {"citation", "recommendation", "hybrid"},
     "model": {"embedding", "hybrid"},
+    "cache_namespace": {"embedding", "hybrid"},
     "model_profile": {"embedding", "hybrid"},
     "model_revision": {"embedding", "hybrid"},
     "dataset_source": {"embedding", "hybrid"},
@@ -89,7 +121,7 @@ _CORPUS_ONLY_OPTION_DESTS: set[str] = {
 }
 # Built-in parser defaults restored when corpus-only config values are ignored
 # in candidates mode; kept in sync with the build parser by a contract test.
-_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: dict[str, object] = {
+_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: Mapping[str, str | bool | None] = {
     "dataset_source": DEFAULT_DATASET_SOURCE,
     "dataset_split": "train",
     "corpus_size": None,
@@ -134,14 +166,21 @@ _HYBRID_EMBEDDING_OPTION_DESTS = {
 }
 
 
-def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> dict[str, object]:
+def _shared_embedding_builder_kwargs(
+    cli_args: argparse.Namespace,
+) -> _SharedEmbeddingBuilderKwargs:
     """Build shared embedding kwargs for embedding-aware strategy builders.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :return Dict[str, object]: Shared kwargs consumed by embedding/hybrid builders.
+    :return: Options consumed by embedding and hybrid builders.
     """
     return {
         **_configured_client_kwargs(cli_args),
+        **(
+            {"cache_selection": cli_args._cache_selection}
+            if getattr(cli_args, "_cache_selection", None) is not None
+            else {}
+        ),
         "model_name": cli_args.model,
         "model_profile": cli_args.model_profile,
         "model_revision": cli_args.model_revision,
@@ -180,13 +219,14 @@ def _normalized_cache_reason(raw_reason: str | None) -> str | None:
 
 
 def _embedding_export_metadata(
-    cli_args: argparse.Namespace, runtime_metadata: dict[str, Any] | None = None
-) -> dict[str, object]:
+    cli_args: argparse.Namespace,
+    runtime_metadata: EmbeddingRuntimeMetadata | None = None,
+) -> EmbeddingExportMetadata:
     """Build embedding provenance payload persisted in export metadata.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :param Optional[Dict[str, Any]] runtime_metadata: Optional runtime retrieval metadata.
-    :return Dict[str, object]: Embedding cache/vector provenance + runtime fields.
+    :param runtime_metadata: Optional runtime retrieval metadata.
+    :return EmbeddingExportMetadata: Effective embedding model, cache, and runtime settings.
     """
     int8_mode = str(cli_args.storage_precision) == "int8"
     binary_prefilter_enabled = bool(cli_args.binary_prefilter and int8_mode)
@@ -240,7 +280,7 @@ def _embedding_export_metadata(
         if isinstance(raw_graph_representation, str) and raw_graph_representation:
             graph_representation = raw_graph_representation
 
-    payload: dict[str, object] = {
+    payload: EmbeddingExportMetadata = {
         "effective_vector_dtype": "float32",
         "effective_model": effective_model,
         "effective_model_revision": effective_model_revision,
@@ -264,24 +304,40 @@ def _embedding_export_metadata(
         ),
     }
     if payload["semantic_source"] == "arxiv-corpus":
-        # Corpus builds never consult the candidate pool; recording its default
-        # here contradicted the config sidecar, which omits it.
+        # Candidate pool settings apply only to candidate builds.
         payload.pop("candidate_pool_size")
+        for key in (
+            "dataset_revision",
+            "cache_namespace",
+            "index_origin",
+            "installed_corpus_selection",
+            "installed_corpus_limit",
+        ):
+            if isinstance(runtime_metadata, dict) and key in runtime_metadata:
+                payload[key] = runtime_metadata[key]
     return payload
 
 
-def _plot_overlay_metadata(export_metadata: dict[str, Any]) -> dict[str, Any]:
+def _plot_overlay_metadata(export_metadata: ExportMetadata) -> PlotOverlayMetadata:
     """Return compact metadata suitable for static image overlays.
 
-    :param Dict[str, Any] export_metadata: Full export metadata payload.
-    :return Dict[str, Any]: Reduced metadata subset for on-plot annotation.
+    :param ExportMetadata export_metadata: Full export metadata payload.
+    :return PlotOverlayMetadata: Reduced metadata subset for on-plot annotation.
     """
-    overlay_keys = ("paper_id", "strategy", "nodes", "edges", "theme", "timestamp")
-    return {
-        key: export_metadata[key]
-        for key in overlay_keys
-        if key in export_metadata and export_metadata[key] is not None
-    }
+    overlay: PlotOverlayMetadata = {}
+    if "paper_id" in export_metadata and export_metadata["paper_id"] is not None:
+        overlay["paper_id"] = export_metadata["paper_id"]
+    if "strategy" in export_metadata and export_metadata["strategy"] is not None:
+        overlay["strategy"] = export_metadata["strategy"]
+    if "nodes" in export_metadata and export_metadata["nodes"] is not None:
+        overlay["nodes"] = export_metadata["nodes"]
+    if "edges" in export_metadata and export_metadata["edges"] is not None:
+        overlay["edges"] = export_metadata["edges"]
+    if "theme" in export_metadata and export_metadata["theme"] is not None:
+        overlay["theme"] = export_metadata["theme"]
+    if "timestamp" in export_metadata and export_metadata["timestamp"] is not None:
+        overlay["timestamp"] = export_metadata["timestamp"]
+    return overlay
 
 
 def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
@@ -358,18 +414,18 @@ def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
     return user_config.s2_api_key or None
 
 
-def _configured_client_kwargs(args: argparse.Namespace) -> dict[str, object]:
+def _configured_client_kwargs(args: argparse.Namespace) -> _ConfiguredClientKwargs:
     """Inject a client only when this command has API-specific settings.
 
     :param argparse.Namespace args: Parsed arguments and resolved API key.
-    :return Dict[str, object]: Optional client constructor argument for builders.
+    :return: Optional client constructor argument for builders.
     """
     api_key = getattr(args, "_s2_api_key", None)
     refresh = bool(getattr(args, "refresh_paper_cache", False))
     retry_budget = getattr(args, "s2_retry_budget", None)
     if api_key is None and not refresh and retry_budget is None:
         return {}
-    client_kwargs: dict[str, object] = {
+    client_kwargs: _ClientOptions = {
         "api_key": api_key,
         "refresh_paper_cache": refresh,
     }
@@ -403,46 +459,32 @@ def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
     return False
 
 
-def _strategy_score_contract(strategy: str) -> dict[str, object]:
+def _strategy_score_contract(strategy: str) -> ScoreContract:
     """Return strategy-specific score semantics metadata for export payloads.
 
     :param str strategy: Active build strategy.
-    :return Dict[str, object]: Score semantics metadata.
+    :return ScoreContract: Score semantics metadata.
     """
-    base_contract = {
+    contract: ScoreContract = {
         "strategy": strategy,
         "comparable_across_strategies": False,
         "range_hint": "[0,1] strategy-specific composite score",
-    }
-    if strategy == "citation":
-        return {
-            **base_contract,
-            "score_type": "citation_similarity_composite",
-        }
-    if strategy == "recommendation":
-        return {
-            **base_contract,
-            "score_type": "recommendation_similarity_composite",
-        }
-    if strategy == "embedding":
-        return {
-            **base_contract,
-            "score_type": "embedding_similarity_composite",
-        }
-    if strategy == "hybrid":
-        return {
-            **base_contract,
-            "score_type": "hybrid_similarity_composite",
-            "adjudication_policy": (
-                "seed-relevance-ranked union across citation+semantic candidates "
-                "with overlap priority; purely semantic additions are capped by "
-                "max_semantic."
-            ),
-        }
-    return {
-        **base_contract,
         "score_type": "unknown",
     }
+    if strategy == "citation":
+        contract["score_type"] = "citation_similarity_composite"
+    elif strategy == "recommendation":
+        contract["score_type"] = "recommendation_similarity_composite"
+    elif strategy == "embedding":
+        contract["score_type"] = "embedding_similarity_composite"
+    elif strategy == "hybrid":
+        contract["score_type"] = "hybrid_similarity_composite"
+        contract["adjudication_policy"] = (
+            "seed-relevance-ranked union across citation+semantic candidates "
+            "with overlap priority; purely semantic additions are capped by "
+            "max_semantic."
+        )
+    return contract
 
 
 _STRATEGY_DISPATCH: dict[str, StrategyFactory] = {

@@ -15,19 +15,30 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, TypeGuard, cast
 
-import networkx as nx
 from filelock import FileLock, Timeout
 
-from citemesh.data.cache import atomic_write_json, path_exists
+from citemesh.data.cache import JSONValue, atomic_write_json, path_exists
 
 from .contracts import (
     DASHBOARD_COLLECTION_KIND,
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
     GRAPH_PAYLOAD_KIND,
     GRAPH_PAYLOAD_SCHEMA_VERSION,
+    BuildConfig,
+    DashboardCollectionBundle,
+    DashboardCollectionPackage,
+    DashboardResultEntry,
+    ExportMetadata,
+    GraphPayload,
+    GraphSummary,
+    ValidatedGraphPayload,
 )
+
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
+    from citemesh.visualization.export import GraphExporter
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +48,22 @@ DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS = 60.0
 DASHBOARD_COLLECTION_FILENAME = "dashboard.html"
 DASHBOARD_PACKAGE_FILENAME = "dashboard.citemesh.json"
 LEGACY_DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
+
+
+def _is_object_dict(value: object) -> TypeGuard[dict[object, object]]:
+    """Narrow a raw value to a dictionary without assuming its contents.
+
+    :return TypeGuard[dict[object, object]]: Whether ``value`` is a dictionary.
+    """
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    """Narrow an input array without assuming its element schema.
+
+    :return TypeGuard[list[object]]: Whether ``value`` is a list.
+    """
+    return isinstance(value, list)
 
 
 class DashboardPackageError(ValueError):
@@ -57,7 +84,7 @@ def _dashboard_package_lock_path(package_path: Path) -> Path:
 
 def _commit_staged_dashboard_artifacts(
     package_path: Path,
-    package: dict[str, Any],
+    package: DashboardCollectionPackage,
     *,
     staged_result_files: dict[Path, Path],
     obsolete_result_paths: set[Path],
@@ -69,7 +96,7 @@ def _commit_staged_dashboard_artifacts(
     completed bundle. Unknown files and other strategy basenames are untouched.
 
     :param Path package_path: Authoritative collection package destination.
-    :param Dict[str, Any] package: Validated package payload to publish last.
+    :param DashboardCollectionPackage package: Validated package written last.
     :param Dict[Path, Path] staged_result_files: Final paths mapped to complete
         same-filesystem staging files.
     :param Set[Path] obsolete_result_paths: Exact known-format files omitted by
@@ -103,9 +130,9 @@ def _commit_staged_dashboard_artifacts(
             for target_path, staged_path in sorted(
                 staged_result_files.items(), key=lambda item: str(item[0])
             ):
-                backup_path = backups.get(target_path)
-                if backup_path is not None:
-                    staged_path.chmod(backup_path.stat().st_mode & 0o7777)
+                prior_backup_path = backups.get(target_path)
+                if prior_backup_path is not None:
+                    staged_path.chmod(prior_backup_path.stat().st_mode & 0o7777)
                 staged_path.replace(target_path)
                 promoted_paths.add(target_path)
 
@@ -115,20 +142,20 @@ def _commit_staged_dashboard_artifacts(
             atomic_write_json(package_path, package, indent=2)
         except BaseException:
             for target_path in reversed(target_paths):
-                backup_path = backups.get(target_path)
-                if backup_path is not None:
-                    backup_path.replace(target_path)
+                prior_backup_path = backups.get(target_path)
+                if prior_backup_path is not None:
+                    prior_backup_path.replace(target_path)
                 elif target_path in promoted_paths:
                     target_path.unlink(missing_ok=True)
             raise
 
 
-def _load_package_object(path: Path, *, label: str) -> dict[str, Any]:
+def _load_package_object(path: Path, *, label: str) -> dict[str, JSONValue]:
     """Read one UTF-8 JSON object with a context-rich package error.
 
     :param Path path: JSON file to read.
     :param str label: Human-readable artifact label for errors.
-    :return Dict[str, Any]: Parsed JSON object.
+    :return dict[str, JSONValue]: Parsed JSON object.
     :raises DashboardPackageError: If the file is unreadable, malformed, or not an object.
     """
     try:
@@ -179,15 +206,15 @@ def _validated_dashboard_token(raw: object, *, field: str) -> str:
 
 def _validate_dashboard_graph_payload(
     raw_payload: object, *, result_id: str
-) -> dict[str, Any]:
+) -> ValidatedGraphPayload:
     """Validate one canonical graph payload embedded in a dashboard package.
 
     :param object raw_payload: Candidate graph payload.
     :param str result_id: Owning result identifier for contextual errors.
-    :return Dict[str, Any]: Shallow normalized graph payload copy.
+    :return ValidatedGraphPayload: Shallow copy with its checked fields.
     :raises DashboardPackageError: If the graph payload contract is invalid.
     """
-    if not isinstance(raw_payload, dict):
+    if not _is_object_dict(raw_payload):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} payload must be an object."
         )
@@ -206,7 +233,7 @@ def _validate_dashboard_graph_payload(
     )
     meta = raw_payload.get("meta")
     summary = raw_payload.get("summary")
-    if not isinstance(meta, dict) or not isinstance(summary, dict):
+    if not _is_object_dict(meta) or not _is_object_dict(summary):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} has incomplete graph metadata."
         )
@@ -215,7 +242,7 @@ def _validate_dashboard_graph_payload(
     )
     nodes = raw_payload.get("nodes")
     edges = raw_payload.get("edges")
-    if not isinstance(nodes, list) or not isinstance(edges, list):
+    if not _is_object_list(nodes) or not _is_object_list(edges):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} nodes and edges must be arrays."
         )
@@ -232,7 +259,7 @@ def _validate_dashboard_graph_payload(
         )
     node_ids: list[str] = []
     for node in nodes:
-        if not isinstance(node, dict):
+        if not _is_object_dict(node):
             raise DashboardPackageError(
                 f"Dashboard package result {result_id!r} nodes must be objects."
             )
@@ -247,7 +274,7 @@ def _validate_dashboard_graph_payload(
             "including its seed."
         )
     for edge in edges:
-        if not isinstance(edge, dict):
+        if not _is_object_dict(edge):
             raise DashboardPackageError(
                 f"Dashboard package result {result_id!r} edges must be objects."
             )
@@ -264,8 +291,8 @@ def _validate_dashboard_graph_payload(
             )
 
     dashboard = raw_payload.get("dashboard")
-    dashboard_meta = dashboard.get("meta") if isinstance(dashboard, dict) else None
-    if not isinstance(dashboard_meta, dict):
+    dashboard_meta = dashboard.get("meta") if _is_object_dict(dashboard) else None
+    if not _is_object_dict(dashboard_meta):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} is missing dashboard geometry."
         )
@@ -278,22 +305,18 @@ def _validate_dashboard_graph_payload(
         field=f"result {result_id!r} dashboard strategy",
     )
     dashboard_summary = dashboard_meta.get("summary")
-    dashboard_node_count = (
-        _validated_non_negative_count(
+    if _is_object_dict(dashboard_summary):
+        dashboard_node_count = _validated_non_negative_count(
             dashboard_summary.get("nodes"),
             field=f"result {result_id!r} dashboard summary.nodes",
         )
-        if isinstance(dashboard_summary, dict)
-        else None
-    )
-    dashboard_edge_count = (
-        _validated_non_negative_count(
+        dashboard_edge_count = _validated_non_negative_count(
             dashboard_summary.get("edges"),
             field=f"result {result_id!r} dashboard summary.edges",
         )
-        if isinstance(dashboard_summary, dict)
-        else None
-    )
+    else:
+        dashboard_node_count = None
+        dashboard_edge_count = None
     if (
         dashboard_seed_id != seed_id
         or dashboard_strategy != payload_strategy
@@ -306,8 +329,10 @@ def _validate_dashboard_graph_payload(
     raw_order = dashboard_meta.get("plotly_node_order")
     raw_positions = dashboard_meta.get("plotly_positions")
     raw_sizes = dashboard_meta.get("plotly_node_sizes")
-    if not all(
-        isinstance(value, list) for value in (raw_order, raw_positions, raw_sizes)
+    if (
+        not _is_object_list(raw_order)
+        or not _is_object_list(raw_positions)
+        or not _is_object_list(raw_sizes)
     ):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} has incomplete dashboard geometry."
@@ -332,7 +357,7 @@ def _validate_dashboard_graph_payload(
         )
     for position in raw_positions:
         if (
-            not isinstance(position, list)
+            not _is_object_list(position)
             or len(position) != 2
             or any(
                 isinstance(coordinate, bool)
@@ -354,17 +379,18 @@ def _validate_dashboard_graph_payload(
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} has invalid node sizes."
         )
-    return dict(raw_payload)
+    # This validator checks every field represented by the narrower return type.
+    return cast(ValidatedGraphPayload, dict(raw_payload))
 
 
-def _validate_dashboard_result_entry(raw_entry: object) -> dict[str, Any]:
+def _validate_dashboard_result_entry(raw_entry: object) -> DashboardResultEntry:
     """Validate and normalize one dashboard collection result entry.
 
     :param object raw_entry: Candidate result entry.
-    :return Dict[str, Any]: Normalized result entry.
+    :return DashboardResultEntry: Normalized result entry.
     :raises DashboardPackageError: If required descriptor or payload fields are invalid.
     """
-    if not isinstance(raw_entry, dict):
+    if not _is_object_dict(raw_entry):
         raise DashboardPackageError("Dashboard package result entries must be objects.")
     result_id = str(raw_entry.get("result_id") or "").strip()
     seed_id = str(raw_entry.get("seed_id") or "").strip()
@@ -384,11 +410,11 @@ def _validate_dashboard_result_entry(raw_entry: object) -> dict[str, Any]:
         )
 
     summary = raw_entry.get("summary")
-    if not isinstance(summary, dict):
+    if not _is_object_dict(summary):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} summary must be an object."
         )
-    normalized_summary = {
+    normalized_summary: GraphSummary = {
         "nodes": _validated_non_negative_count(
             summary.get("nodes"), field=f"result {result_id!r} summary.nodes"
         ),
@@ -416,7 +442,7 @@ def _validate_dashboard_result_entry(raw_entry: object) -> dict[str, Any]:
             f"Dashboard package result {result_id!r} summary does not match its payload."
         )
     build = raw_entry.get("build", {})
-    if not isinstance(build, dict):
+    if not _is_object_dict(build):
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} build settings must be an object."
         )
@@ -432,7 +458,7 @@ def _validate_dashboard_result_entry(raw_entry: object) -> dict[str, Any]:
     }
 
 
-def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
+def _validate_dashboard_package(raw_package: object) -> DashboardCollectionPackage:
     """Validate a dashboard collection package and deterministically deduplicate it.
 
     When duplicate result identifiers are present, the first entry wins. Package
@@ -440,10 +466,10 @@ def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
     state deterministically without inventing another recency policy.
 
     :param object raw_package: Candidate package object.
-    :return Dict[str, Any]: Canonical package object.
+    :return DashboardCollectionPackage: Canonical package object.
     :raises DashboardPackageError: If the top-level or entry contract is invalid.
     """
-    if not isinstance(raw_package, dict):
+    if not _is_object_dict(raw_package):
         raise DashboardPackageError("Dashboard package must be a JSON object.")
     try:
         json.dumps(raw_package, allow_nan=False)
@@ -467,7 +493,7 @@ def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
     if not isinstance(raw_results, list):
         raise DashboardPackageError("Dashboard package results must be an array.")
 
-    results: list[dict[str, Any]] = []
+    results: list[DashboardResultEntry] = []
     seen_result_ids: set[str] = set()
     for raw_entry in raw_results:
         entry = _validate_dashboard_result_entry(raw_entry)
@@ -497,11 +523,11 @@ def _validate_dashboard_package(raw_package: object) -> dict[str, Any]:
     }
 
 
-def load_dashboard_package(package_path: Path) -> dict[str, Any]:
+def load_dashboard_package(package_path: Path) -> DashboardCollectionPackage:
     """Load and strictly validate an existing dashboard collection package.
 
     :param Path package_path: Package file to load.
-    :return Dict[str, Any]: Canonical validated package.
+    :return DashboardCollectionPackage: Canonical validated package.
     :raises DashboardPackageError: If the package cannot be decoded or validated.
     """
     return _validate_dashboard_package(
@@ -530,14 +556,14 @@ def _resolve_collection_artifact_path(
     return resolved_candidate
 
 
-def _load_legacy_dashboard_results(collection_root: Path) -> list[dict[str, Any]]:
+def _load_legacy_dashboard_results(collection_root: Path) -> list[DashboardResultEntry]:
     """Load valid entries from a legacy manifest without modifying legacy files.
 
     Invalid legacy entries are reported and skipped. Their source files remain
     untouched, allowing manual recovery while safe entries migrate forward.
 
     :param Path collection_root: Collection directory containing a legacy manifest.
-    :return list[Dict[str, Any]]: Valid normalized package entries in manifest order.
+    :return list[DashboardResultEntry]: Valid entries in manifest order.
     """
     manifest_path = collection_root / LEGACY_DASHBOARD_MANIFEST_FILENAME
     if not path_exists(manifest_path):
@@ -549,17 +575,16 @@ def _load_legacy_dashboard_results(collection_root: Path) -> list[dict[str, Any]
     except DashboardPackageError as exc:
         logger.warning("Skipping invalid legacy dashboard manifest: %s", exc)
         return []
-    if manifest.get("schema_version") != 1 or not isinstance(
-        manifest.get("results"), list
-    ):
+    raw_results = manifest.get("results")
+    if manifest.get("schema_version") != 1 or not isinstance(raw_results, list):
         logger.warning(
             "Skipping unsupported legacy dashboard manifest at %s.", manifest_path
         )
         return []
 
-    results: list[dict[str, Any]] = []
+    results: list[DashboardResultEntry] = []
     seen_result_ids: set[str] = set()
-    for index, raw_entry in enumerate(manifest["results"]):
+    for index, raw_entry in enumerate(raw_results):
         if not isinstance(raw_entry, dict):
             logger.warning(
                 "Skipping invalid legacy dashboard result at index %d.", index
@@ -619,14 +644,14 @@ def _load_legacy_dashboard_results(collection_root: Path) -> list[dict[str, Any]
 def update_dashboard_package(
     package_path: Path,
     *,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
     strategy: str,
-    payload: dict[str, Any],
-    build: dict[str, Any],
+    payload: GraphPayload,
+    build: BuildConfig,
     staged_result_files: dict[Path, Path] | None = None,
     obsolete_result_paths: set[Path] | None = None,
-) -> dict[str, Any]:
+) -> DashboardCollectionPackage:
     """Atomically create or update a portable dashboard collection package.
 
     One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
@@ -636,16 +661,16 @@ def update_dashboard_package(
     mixed successful result bundle.
 
     :param Path package_path: Portable collection package path.
-    :param nx.Graph graph: Built graph used for seed metadata.
+    :param PaperGraph graph: Built graph used for seed metadata.
     :param str seed_id: Seed node identifier.
     :param str strategy: Active strategy name.
-    :param Dict[str, Any] payload: Canonical graph payload from the exporter.
-    :param Dict[str, Any] build: Portable resolved build settings.
+    :param GraphPayload payload: Canonical graph payload from the exporter.
+    :param BuildConfig build: Portable resolved build settings.
     :param Optional[Dict[Path, Path]] staged_result_files: Final result paths mapped
         to fully written same-filesystem staging files.
     :param Optional[Set[Path]] obsolete_result_paths: Exact prior optional exports
         to remove if this result is published successfully.
-    :return Dict[str, Any]: Canonical package written to disk.
+    :return DashboardCollectionPackage: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
     result_id = f"{strategy}:{seed_id}"
@@ -657,7 +682,7 @@ def update_dashboard_package(
         if str(node.get("id")) == str(validated_payload["seed_id"])
     )
     seed_title = str(seed_payload.get("title") or seed_id)
-    entry = {
+    entry_candidate: dict[str, object] = {
         "result_id": result_id,
         "seed_id": seed_id,
         "title": seed_title,
@@ -670,7 +695,7 @@ def update_dashboard_package(
         "payload": validated_payload,
         "build": dict(build),
     }
-    entry = _validate_dashboard_result_entry(entry)
+    entry = _validate_dashboard_result_entry(entry_candidate)
     package_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _dashboard_package_lock_path(package_path)
     lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
@@ -713,10 +738,10 @@ def render_dashboard_collection_snapshot(
     package_path: Path,
     *,
     dashboard_path: Path,
-    exporter: Any,
-    metadata: dict[str, Any],
+    exporter: GraphExporter,
+    metadata: ExportMetadata,
     theme: str,
-) -> dict[str, Any]:
+) -> DashboardCollectionPackage:
     """Render an atomic dashboard snapshot from the latest locked package state.
 
     The package and its embedded HTML snapshot must be serialized by the same
@@ -725,17 +750,19 @@ def render_dashboard_collection_snapshot(
 
     :param Path package_path: Authoritative dashboard collection package.
     :param Path dashboard_path: HTML viewer path to refresh.
-    :param Any exporter: Graph exporter for the build's current graph.
-    :param Dict[str, Any] metadata: Mutable exporter metadata mapping.
+    :param GraphExporter exporter: Exporter bound to the current graph.
+    :param ExportMetadata metadata: Mutable exporter metadata mapping.
     :param str theme: Requested dashboard theme.
-    :return Dict[str, Any]: Latest package embedded in the rendered viewer.
+    :return DashboardCollectionPackage: Package embedded in the viewer.
     """
     lock_path = _dashboard_package_lock_path(package_path)
     lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
     try:
         with lock:
             package = load_dashboard_package(package_path)
-            metadata["dashboard_collection"] = package
+            # The package contains the same wire fields with a narrower result
+            # type; list invariance prevents assigning it directly to the bundle.
+            metadata["dashboard_collection"] = cast(DashboardCollectionBundle, package)
             exporter.to_dashboard_html(dashboard_path, theme=theme)
             return package
     except Timeout as exc:

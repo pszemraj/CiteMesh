@@ -18,6 +18,7 @@ from citemesh.data.embedding_cache.constants import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     SCHEMA_VERSION_KEY,
 )
+from tests._helpers import fail_stat_for
 
 
 def test_cache_operation_lock_blocks_nonblocking_clear(tmp_path: Path) -> None:
@@ -77,38 +78,31 @@ def test_default_cache_root_honors_override_before_platform(
     assert cache_module._default_cache_root() == Path.home() / "paper-cache"
 
 
-def test_default_cache_root_uses_shared_xdg_layout_on_macos(
+@pytest.mark.parametrize(
+    ("platform_name", "environment_variable", "expected_leaf"),
+    [("Darwin", "XDG_CACHE_HOME", "citemesh"), ("Windows", "LOCALAPPDATA", "CiteMesh")],
+)
+def test_default_cache_root_uses_platform_environment_defaults(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    environment_variable: str,
+    expected_leaf: str,
 ) -> None:
-    """macOS should use the documented cross-platform XDG-style cache root.
+    """Platform defaults should use their configured cache environment path.
 
-    :param Path tmp_path: Temporary XDG cache base.
+    :param Path tmp_path: Temporary cache base.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate environment state.
-    :return None: Validates the macOS cache path contract.
+    :param str platform_name: Operating system branch under test.
+    :param str environment_variable: Environment key supplying the base path.
+    :param str expected_leaf: Platform-specific final cache directory name.
+    :return None: Validates the platform cache path contract.
     """
     monkeypatch.delenv("CITEMESH_CACHE_DIR", raising=False)
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(cache_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setenv(environment_variable, str(tmp_path))
+    monkeypatch.setattr(cache_module.platform, "system", lambda: platform_name)
 
-    assert cache_module._default_cache_root() == tmp_path / "citemesh"
-
-
-def test_default_cache_root_uses_local_app_data_on_windows(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Windows should prefer LOCALAPPDATA for the CiteMesh cache root.
-
-    :param Path tmp_path: Temporary LOCALAPPDATA base.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate environment state.
-    :return None: Validates the Windows cache path contract.
-    """
-    monkeypatch.delenv("CITEMESH_CACHE_DIR", raising=False)
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    monkeypatch.setattr(cache_module.platform, "system", lambda: "Windows")
-
-    assert cache_module._default_cache_root() == tmp_path / "CiteMesh"
+    assert cache_module._default_cache_root() == tmp_path / expected_leaf
 
 
 def test_legacy_macos_cache_root_requires_darwin_and_existing_path(
@@ -250,7 +244,6 @@ def test_atomic_write_failure_closes_descriptor_and_preserves_target(
     target = tmp_path / "payload.json"
     target.write_text("original", encoding="utf-8")
     original_mkstemp = cache_module.tempfile.mkstemp
-    original_stat = Path.stat
     descriptors: list[int] = []
 
     def recording_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
@@ -273,21 +266,13 @@ def test_atomic_write_failure_closes_descriptor_and_preserves_target(
         """
         raise PermissionError(f"injected {failure_stage} failure")
 
-    def stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
-        """Fail only the destination lookup, allowing temporary-file setup.
-
-        :param Path path: Inspected path.
-        :param Any args: Additional stat arguments.
-        :param Any kwargs: Additional stat keyword arguments.
-        :return os.stat_result: Original metadata for unrelated paths.
-        """
-        if path == target:
-            fail()
-        return original_stat(path, *args, **kwargs)
-
     monkeypatch.setattr(cache_module.tempfile, "mkstemp", recording_mkstemp)
     if failure_stage == "stat":
-        monkeypatch.setattr(Path, "stat", stat)
+        monkeypatch.setattr(
+            Path,
+            "stat",
+            fail_stat_for(target, PermissionError(f"injected {failure_stage} failure")),
+        )
     elif failure_stage == "chmod":
         monkeypatch.setattr(Path, "chmod", fail)
     else:
@@ -432,3 +417,27 @@ def test_embedding_namespace_scan_groups_artifacts_and_flags_dtype_upgrade_cache
         "Orphaned artifact (metadata database missing)"
     )
     assert cleaned_namespace not in rows
+
+
+@pytest.mark.parametrize(
+    "state",
+    [[], {"source": [1]}, {"source": {"selection": 1, "limit": 5}}],
+)
+def test_embedding_namespace_scan_tolerates_malformed_corpus_state(
+    tmp_path: Path, state: object
+) -> None:
+    """Unreadable corpus state must not prevent inspecting other cache files."""
+    db_path = tmp_path / "metadata_0123456789ab.db"
+    _write_embedding_namespace_schema(db_path, EMBEDDING_CACHE_SCHEMA_VERSION)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE papers (paper_id TEXT)")
+        connection.execute("CREATE TABLE corpus_membership (paper_id TEXT)")
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("corpus_state", json.dumps(state)),
+        )
+
+    rows = cache_ops_module._scan_embedding_namespaces(tmp_path)
+
+    assert len(rows) == 1
+    assert rows[0].status == "Corpus metadata unavailable (inspect before removing)"

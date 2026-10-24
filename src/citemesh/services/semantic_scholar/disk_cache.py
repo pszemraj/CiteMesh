@@ -11,11 +11,12 @@ import hashlib
 import logging
 from dataclasses import asdict
 from pathlib import Path
+from typing import TypedDict, TypeGuard
 
 from citemesh.core import Author, Paper
 from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.data import get_cache_dir
-from citemesh.data.cache import atomic_write_json, read_json_object
+from citemesh.data.cache import JSONValue, atomic_write_json, read_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,112 @@ logger = logging.getLogger(__name__)
 REFERENCE_CACHE_DIR: Path | None = None
 REFERENCE_CACHE_VERSION = 1
 PAPER_CACHE_VERSION = 2
+
+
+class _CachedAuthorBase(TypedDict):
+    """Required decoded fields in a cached author record."""
+
+    name: str
+
+
+class _CachedAuthor(_CachedAuthorBase, total=False):
+    """Optional decoded fields in a cached author record."""
+
+    author_id: str | None
+
+
+class _CachedPaperBase(TypedDict):
+    """Required decoded fields in cached paper metadata."""
+
+    paper_id: str
+    title: str
+    year: int | None
+
+
+class _PaperOptionalFields(TypedDict, total=False):
+    """Optional scalar and list fields carried by paper cache records."""
+
+    citation_count: int
+    abstract: str
+    venue: str
+    arxiv_id: str
+    doi: str
+    categories: list[str]
+    references: list[str]
+    is_seed: bool
+    is_local_corpus: bool
+
+
+class _CachedPaper(_CachedPaperBase, _PaperOptionalFields, total=False):
+    """Decoded paper metadata stored in the cache."""
+
+    authors: list[_CachedAuthor]
+
+
+class _PaperArguments(_CachedPaperBase, _PaperOptionalFields):
+    """Paper fields accepted by the dataclass constructor."""
+
+    authors: list[Author]
+
+
+def _is_cached_author(value: JSONValue) -> TypeGuard[_CachedAuthor]:
+    """Narrow decoded author data to the persisted fields.
+
+    :param JSONValue value: Decoded author value.
+    :return bool: Whether the value has the expected author fields.
+    """
+    if not isinstance(value, dict):
+        return False
+    return isinstance(value.get("name"), str) and (
+        "author_id" not in value
+        or value["author_id"] is None
+        or isinstance(value["author_id"], str)
+    )
+
+
+def _is_cached_paper(value: JSONValue) -> TypeGuard[_CachedPaper]:
+    """Narrow decoded paper metadata before dataclass construction.
+
+    :param JSONValue value: Decoded paper value.
+    :return bool: Whether the value has supported paper fields.
+    """
+    if not isinstance(value, dict):
+        return False
+    if not (
+        isinstance(value.get("paper_id"), str)
+        and isinstance(value.get("title"), str)
+        and "year" in value
+        and (value["year"] is None or isinstance(value["year"], int))
+    ):
+        return False
+    scalar_fields = (
+        ("citation_count", int),
+        ("abstract", str),
+        ("venue", str),
+        ("arxiv_id", str),
+        ("doi", str),
+        ("is_seed", bool),
+        ("is_local_corpus", bool),
+    )
+    if any(
+        key in value and not isinstance(value[key], field_type)
+        for key, field_type in scalar_fields
+    ):
+        return False
+    for key in ("categories", "references"):
+        if key in value:
+            items = value[key]
+            if not isinstance(items, list) or not all(
+                isinstance(item, str) for item in items
+            ):
+                return False
+    if "authors" in value:
+        authors = value["authors"]
+        if not isinstance(authors, list) or not all(
+            _is_cached_author(author) for author in authors
+        ):
+            return False
+    return True
 
 
 def _reference_cache_dir() -> Path:
@@ -87,23 +194,35 @@ def _load_cached_paper(paper_id: str) -> Paper | None:
     try:
         canonical_paper_id = paper_id
         if "canonical_paper_id" in cached:
-            canonical_paper_id = cached["canonical_paper_id"]
+            raw_canonical_paper_id = cached["canonical_paper_id"]
+            if not isinstance(raw_canonical_paper_id, str):
+                return None
+            canonical_paper_id = raw_canonical_paper_id
             canonical = read_json_object(_paper_cache_path(canonical_paper_id))
             if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
                 return None
             cached = canonical
-        elif cached["paper"]["paper_id"] != paper_id:
-            canonical_paper_id = cached["paper"]["paper_id"]
-            canonical = read_json_object(_paper_cache_path(canonical_paper_id))
-            if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
+        else:
+            initial_data = cached.get("paper")
+            if not _is_cached_paper(initial_data):
                 return None
-            cached = canonical
+            if initial_data["paper_id"] != paper_id:
+                canonical_paper_id = initial_data["paper_id"]
+                canonical = read_json_object(_paper_cache_path(canonical_paper_id))
+                if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
+                    return None
+                cached = canonical
 
-        data = cached["paper"]
+        data = cached.get("paper")
+        if not _is_cached_paper(data):
+            return None
         if data["paper_id"] != canonical_paper_id:
             return None
-        data["authors"] = [Author(**author) for author in data["authors"]]
-        return Paper(**data)
+        paper_data: _PaperArguments = {
+            **data,
+            "authors": [Author(**author) for author in data.get("authors", [])],
+        }
+        return Paper(**paper_data)
     except (AttributeError, TypeError, ValueError, KeyError):
         return None
 

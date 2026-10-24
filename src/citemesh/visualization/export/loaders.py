@@ -3,39 +3,54 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol
 
 import networkx as nx
+
+if TYPE_CHECKING:
+    from plotly.graph_objects import Figure, Layout, Scatter
+    from pyvis.network import Network
+
+
+class PlotlyGraphObjects(Protocol):
+    """Constructors used by the lazily imported Plotly graph_objects module."""
+
+    Figure: type[Figure]
+    Layout: type[Layout]
+    Scatter: type[Scatter]
+
 
 GRAPHML_DETERMINISM_POLICY_STRICT = "strict_sorted_nodes_edges"
 GRAPHML_DETERMINISM_POLICY_BEST_EFFORT = "best_effort_sorted_nodes_edges"
 _GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
 
 
-def _load_pyvis_network_class() -> Any:
+def _load_pyvis_network_class() -> type[Network]:
     """Import and return the PyVis ``Network`` class.
 
-    :return Any: Imported ``pyvis.network.Network`` class.
+    :return type[Network]: Imported ``pyvis.network.Network`` class.
     """
     from pyvis.network import Network
 
     return Network
 
 
-def _load_plotly_graph_objects() -> Any:
+def _load_plotly_graph_objects() -> PlotlyGraphObjects:
     """Import and return Plotly graph objects.
 
-    :return Any: Imported ``plotly.graph_objects`` module proxy.
+    :return PlotlyGraphObjects: Imported ``plotly.graph_objects`` module.
     """
     from plotly import graph_objects as go
 
     return go
 
 
-def _load_plotly_dashboard_runtime() -> tuple[Any, Any]:
+def _load_plotly_dashboard_runtime() -> tuple[PlotlyGraphObjects, Callable[[], str]]:
     """Import and return Plotly graph objects plus inline JS provider.
 
-    :return tuple[Any, Any]: Plotly graph objects and ``get_plotlyjs`` callable.
+    :return tuple[PlotlyGraphObjects, Callable[[], str]]: Figure constructors and
+        the Plotly.js source provider.
     """
     from plotly.offline import get_plotlyjs
 

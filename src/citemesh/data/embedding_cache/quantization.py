@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import h5py
 import numpy as np
+from numpy.typing import NDArray
 
 from .constants import (
     _COMPRESSION_FILTER_IDS,
@@ -22,11 +23,13 @@ _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).s
 )
 
 
-def _storage_dtype_for_precision(storage_precision: str) -> np.dtype:
+def _storage_dtype_for_precision(
+    storage_precision: str,
+) -> np.dtype[np.float32] | np.dtype[np.int8]:
     """Map storage precision token to NumPy dtype.
 
     :param str storage_precision: Storage precision token.
-    :return np.dtype: Dtype used for HDF5 embedding matrix.
+    :return np.dtype[np.float32] | np.dtype[np.int8]: Dtype used for the HDF5 embedding matrix.
     """
     if storage_precision == "float32":
         return np.dtype(np.float32)
@@ -63,11 +66,11 @@ def validate_compression_filter(compression: str) -> str:
     return normalized
 
 
-def _sanitize_ranges(ranges: np.ndarray) -> np.ndarray:
+def _sanitize_ranges(ranges: NDArray[np.float32]) -> NDArray[np.float32]:
     """Ensure per-dimension quantization ranges are strictly non-zero.
 
-    :param np.ndarray ranges: Raw ``(2, dim)`` range matrix.
-    :return np.ndarray: Sanitized range matrix.
+    :param NDArray[np.float32] ranges: Raw ``(2, dim)`` range matrix.
+    :return NDArray[np.float32]: Sanitized range matrix.
     """
     normalized = np.asarray(ranges, dtype=np.float32)
     if normalized.ndim != 2 or normalized.shape[0] != 2:
@@ -93,13 +96,13 @@ def _sanitize_ranges(ranges: np.ndarray) -> np.ndarray:
 
 
 def _count_int8_saturated_values(
-    embeddings_array: np.ndarray,
-    ranges: np.ndarray,
+    embeddings_array: NDArray[np.float32],
+    ranges: NDArray[np.float32],
 ) -> tuple[int, int]:
     """Count values that fall outside persisted int8 calibration ranges.
 
-    :param np.ndarray embeddings_array: Float32 embedding matrix being quantized.
-    :param np.ndarray ranges: Persisted ``(2, dim)`` calibration ranges.
+    :param NDArray[np.float32] embeddings_array: Float32 embedding matrix being quantized.
+    :param NDArray[np.float32] ranges: Persisted ``(2, dim)`` calibration ranges.
     :return tuple[int, int]: ``(clipped_values, total_values)``.
     """
     normalized = np.asarray(embeddings_array, dtype=np.float32)
@@ -110,11 +113,13 @@ def _count_int8_saturated_values(
     return int(np.count_nonzero(clipped)), int(normalized.size)
 
 
-def _as_float32_embedding_matrix(embeddings: np.ndarray) -> np.ndarray:
+def _as_float32_embedding_matrix(
+    embeddings: NDArray[np.float32],
+) -> NDArray[np.float32]:
     """Normalize raw embeddings into a 2D float32 matrix.
 
-    :param np.ndarray embeddings: Raw embedding vector or matrix.
-    :return np.ndarray: Float32 matrix with shape ``(rows, dim)``.
+    :param NDArray[np.float32] embeddings: Raw float32 embedding vector or matrix.
+    :return NDArray[np.float32]: Float32 matrix with shape ``(rows, dim)``.
     :raises ValueError: If embeddings are already quantized or not 1D/2D.
     """
     array = np.asarray(embeddings)
@@ -129,16 +134,14 @@ def _as_float32_embedding_matrix(embeddings: np.ndarray) -> np.ndarray:
     return np.asarray(array, dtype=np.float32)
 
 
-def _quantize_int8_embeddings(embeddings: np.ndarray, ranges: np.ndarray) -> np.ndarray:
+def _quantize_int8_embeddings(
+    embeddings: NDArray[np.float32], ranges: NDArray[np.float32]
+) -> NDArray[np.int8]:
     """Quantize float embeddings into signed int8 rows with explicit clipping.
 
-    The cache already owns calibration persistence, saturation reporting, and
-    dequantization. Keeping the forward quantizer local avoids coupling the
-    default embedding/hybrid path to sentence-transformers' internal layout.
-
-    :param np.ndarray embeddings: Float embedding vector or matrix.
-    :param np.ndarray ranges: Persisted ``(2, dim)`` calibration ranges.
-    :return np.ndarray: Int8 embedding matrix.
+    :param NDArray[np.float32] embeddings: Float32 embedding vector or matrix.
+    :param NDArray[np.float32] ranges: Persisted ``(2, dim)`` calibration ranges.
+    :return NDArray[np.int8]: Int8 matrix with values clipped to the calibration ranges.
     """
     matrix = _as_float32_embedding_matrix(embeddings)
     sanitized_ranges = _sanitize_ranges(ranges)
@@ -149,22 +152,26 @@ def _quantize_int8_embeddings(embeddings: np.ndarray, ranges: np.ndarray) -> np.
     return (buckets - 128.0).astype(np.int8)
 
 
-def _quantize_ubinary_embeddings(embeddings: np.ndarray) -> np.ndarray:
+def _quantize_ubinary_embeddings(
+    embeddings: NDArray[np.float32],
+) -> NDArray[np.uint8]:
     """Pack embedding sign bits into unsigned bytes for Hamming prefiltering.
 
-    :param np.ndarray embeddings: Float embedding vector or matrix.
-    :return np.ndarray: Packed unsigned binary embedding matrix.
+    :param NDArray[np.float32] embeddings: Float32 embedding vector or matrix.
+    :return NDArray[np.uint8]: Packed unsigned binary embedding matrix.
     """
     matrix = _as_float32_embedding_matrix(embeddings)
     return np.asarray(np.packbits(matrix > 0, axis=-1), dtype=np.uint8)
 
 
-def _dequantize_int8(h5_file: h5py.File, int8_embeddings: np.ndarray) -> np.ndarray:
+def _dequantize_int8(
+    h5_file: h5py.File, int8_embeddings: NDArray[np.int8]
+) -> NDArray[np.float32]:
     """Dequantize int8 embeddings to float32 using persisted ranges.
 
     :param h5py.File h5_file: Open HDF5 file handle.
-    :param np.ndarray int8_embeddings: Int8 embeddings.
-    :return np.ndarray: Dequantized float32 embeddings.
+    :param NDArray[np.int8] int8_embeddings: Int8 embeddings.
+    :return NDArray[np.float32]: Dequantized float32 embeddings.
     """
     ranges_dataset = h5_file.get(CALIBRATION_RANGES_DATASET_NAME)
     if ranges_dataset is None:

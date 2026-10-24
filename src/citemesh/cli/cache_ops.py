@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from filelock import Timeout
 from rich.text import Text
@@ -23,7 +25,6 @@ from citemesh.data.cache import (
     cache_operation_lock,
     legacy_macos_cache_root,
     path_exists,
-    read_embedding_namespace_schema,
 )
 from citemesh.data.user_config import (
     USER_CONFIG_FILENAME,
@@ -35,6 +36,9 @@ from . import console
 from .build_options import _normalized_cache_reason
 from .console import logger
 from .parser import _output_table
+
+if TYPE_CHECKING:
+    from citemesh.data.embedding_cache.lifecycle import InstalledCorpusSummary
 
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 
@@ -331,19 +335,80 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
         return "Orphaned artifact (metadata database missing)"
 
     from citemesh.data.embedding_cache.constants import EMBEDDING_CACHE_SCHEMA_VERSION
+    from citemesh.data.embedding_cache.lifecycle import (
+        CorpusMetadataBusyError,
+        CorpusRecoveryPendingError,
+        read_installed_corpus_summary,
+    )
 
-    schema_version = read_embedding_namespace_schema(db_path)
+    try:
+        summary = read_installed_corpus_summary(db_path)
+    except CorpusMetadataBusyError:
+        return "Metadata busy (scan again after active operation)"
+    except Timeout:
+        return "SQLite recovery pending (cache operation active; retry scan)"
+    except CorpusRecoveryPendingError:
+        return (
+            "SQLite recovery pending (resume cache import or refresh with write access)"
+        )
+    except (sqlite3.Error, OSError, ValueError):
+        return "Metadata unavailable (inspect before removing)"
+    schema_version = summary.schema_version
     if schema_version is None:
         return "Metadata unavailable (inspect before removing)"
 
     current_schema = str(EMBEDDING_CACHE_SCHEMA_VERSION)
     if schema_version == current_schema:
+        corpus_status = _installed_corpus_status(summary)
+        if corpus_status is not None:
+            return corpus_status
         # This table reports schema reachability, not vector health or readiness;
         # full cache opening owns HDF5 and row-mapping integrity checks.
         return "Current schema"
     if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
         return "Legacy dtype-keyed namespace (reclaim after replacement is ready)"
     return f"Legacy schema v{schema_version} (rebuilt on next access)"
+
+
+def _installed_corpus_status(summary: InstalledCorpusSummary) -> str | None:
+    """Summarize installed corpus state from SQLite metadata.
+
+    :param InstalledCorpusSummary summary: Snapshot of persisted corpus metadata.
+    :return Optional[str]: Status summary, or ``None`` when no corpus is installed.
+    """
+    try:
+        state = summary.state
+        if state == {}:
+            return None
+        physical, active = summary.physical_rows, summary.active_rows
+        contract = state.get("contract")
+        source = state.get("source")
+        origin = state.get("origin")
+        pending = state.get("pending")
+        coverage: str = source.get("selection", "unknown") if source else "unknown"
+        if source and source.get("limit") is not None:
+            coverage += f" {source['limit']}"
+        labels = [
+            f"{contract.get('dimension', '?') if contract else '?'}d "
+            f"{contract.get('stored_dtype', '?') if contract else '?'}",
+            f"active {active:,} / physical {physical:,}",
+            f"source {source.get('revision', 'unknown') if source else 'unknown'}",
+            f"coverage {coverage}",
+        ]
+        if origin:
+            labels.append(
+                f"origin {origin.get('bucket_id', origin.get('repo_id', 'local'))} / "
+                f"{origin.get('config_name', '?')}"
+            )
+        if pending:
+            labels.append(f"pending {pending.get('kind', 'operation')}")
+        elif state.get("membership_complete"):
+            labels.append("ready")
+        else:
+            labels.append("membership uncertified")
+        return "; ".join(labels)
+    except (sqlite3.Error, ValueError, TypeError, AttributeError):
+        return "Corpus metadata unavailable (inspect before removing)"
 
 
 def _scan_embedding_namespaces(

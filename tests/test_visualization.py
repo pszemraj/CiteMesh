@@ -2906,6 +2906,61 @@ def test_dashboard_semantic_scholar_button_disables_without_a_link(
     assert probed["withoutLink"] == ["disabled"]
 
 
+@pytest.mark.parametrize(
+    ("authors", "year", "expected"),
+    [
+        (["Ada\tLovelace"], 2020, "Lovelace, 2020"),
+        (["Ada\nLovelace"], 2020, "Lovelace, 2020"),
+        (["Ada\u00a0Lovelace"], 2020, "Lovelace, 2020"),
+        (["", "Grace Hopper"], 2020, "Hopper, 2020"),
+        ([" "], 2020, "Seed Paper (2020)"),
+        ([], 2020, "Seed Paper (2020)"),
+        (["Ada Lovelace"], 0, "Seed Paper"),
+        (["Ada Lovelace"], None, "Seed Paper"),
+    ],
+)
+def test_dashboard_compact_author_labels_match_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authors: list[str],
+    year: int | None,
+    expected: str,
+) -> None:
+    """Browser and exported labels share author, title, and missing-year fallbacks."""
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    graph.nodes[seed_id].pop("paper")
+    graph.nodes[seed_id].update(authors=authors, year=year)
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "author-labels.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    assert nodes_module._node_short_label(graph.nodes[seed_id], seed_id) == expected
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "({"
+        ' compact: compactNodeLabel("seed"),'
+        " portable: portableGraphPayload(payload).edges.map(edge =>"
+        '   edge.source === "seed" ? edge.source_label : edge.target_label),'
+        " importedPayload: (() => {"
+        "   const nextPayload = deepClone(payload);"
+        '   nextPayload.nodes.find(node => node.id === "seed").authors = ["Grace Hopper"];'
+        "   return portableGraphPayload(nextPayload).edges.map(edge =>"
+        '     edge.source === "seed" ? edge.source_label : edge.target_label);'
+        " })(),"
+        "})",
+    )
+    assert probed == {
+        "compact": expected,
+        "portable": [expected],
+        "importedPayload": ["Hopper, 2020" if year else "Seed Paper"],
+    }
+
+
 def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3318,6 +3373,24 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert graph.nodes["related"]["authors"] == ["Stale Author"]
 
 
+@pytest.mark.parametrize("seed_title", [None, "", "   "])
+def test_visualize_graph_heading_uses_seed_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_title: str | None
+) -> None:
+    """Use the seed label fallback for scalar graph metadata without a title."""
+    import matplotlib.axes
+
+    graph = nx.Graph()
+    graph.add_node("seed", title=seed_title, is_seed=True)
+    title_spy = MagicMock()
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_title", title_spy)
+    visualize_graph(
+        graph, "seed", tmp_path / "graph.png", layout={"seed": (0.0, 0.0)}, dpi=40
+    )
+    assert title_spy.call_args.args[0] == "CiteMesh Visualization: Seed paper"
+    assert graph.nodes["seed"]["title"] == seed_title
+
+
 def test_visualize_graph_metadata_overlay_is_compact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3495,14 +3568,69 @@ def test_dashboard_labels_clear_selection_halos_after_import(
     assert "&lt;b&gt;Imported&lt;/b&gt;" in imported["layout"]["annotations"][0]["text"]
 
 
-def test_static_labels_are_capped_by_citation_priority() -> None:
+@pytest.mark.parametrize("zero_span", [False, True])
+def test_dashboard_title_labels_face_inward_after_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zero_span: bool
+) -> None:
+    """Authorless title labels face inward at edges and stay centered elsewhere."""
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph = nx.Graph()
+    titles = {
+        node: f"The {node} paper has a long title fallback without author metadata"
+        for node in ("left", "middle", "right")
+    }
+    for node, title in titles.items():
+        graph.add_node(node, title=title, authors=[], year=2026, is_seed=node == "left")
+    graph.add_edge("left", "middle", weight=0.8)
+    graph.add_edge("left", "right", weight=0.7)
+    positions = {
+        "left": (0.0, 0.0),
+        "middle": (0.0 if zero_span else 0.5, 0.5),
+        "right": (0.0 if zero_span else 1.0, 1.0),
+    }
+    path = tmp_path / "inward-labels.dashboard.html"
+    GraphExporter(graph, "left", layout=positions).to_dashboard_html(path)
+    rendered = path.read_text(encoding="utf-8")
+    initial = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
+    payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
+    imported = _probe_dashboard_runtime_in_node(
+        path, "buildFigureSpecFromPayload(payload)"
+    )
+    node_order = payload["meta"]["plotly_node_order"]
+    expected = (
+        dict.fromkeys(titles, "center")
+        if zero_span
+        else {"left": "left", "middle": "center", "right": "right"}
+    )
+    initial_labels = initial["layout"]["annotations"]
+    imported_labels = imported["layout"]["annotations"]
+    assert len(initial_labels) == len(imported_labels) == 3
+    assert [label["text"] for label in initial_labels] == [
+        titles[node] for node in node_order
+    ]
+    for figure in (initial, imported):
+        labels = figure["layout"]["annotations"]
+        trace = next(item for item in figure["data"] if item.get("name") == "nodes")
+        assert [label["text"] for label in labels] == trace["text"]
+        assert [label["xanchor"] for label in labels] == [
+            expected[node] for node in node_order
+        ]
+        assert [label["x"] for label in labels] == trace["x"]
+        assert all(label["yanchor"] == "bottom" for label in labels)
+    assert [label["yshift"] for label in initial_labels] == pytest.approx(
+        [label["yshift"] for label in imported_labels]
+    )
+
+
+@pytest.mark.parametrize("seed_title", ["Seed Paper", None, "", "   "])
+def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -> None:
     """Dense static plots should label only the highest-priority non-seed papers."""
     import matplotlib.pyplot as plt
 
     graph = nx.Graph()
     graph.add_node(
         "seed",
-        title="Seed Paper",
+        title=seed_title,
         year=2025,
         authors=["Seed Author"],
         citation_count=0,
@@ -3537,7 +3665,9 @@ def test_static_labels_are_capped_by_citation_priority() -> None:
 
     labels = {text.get_text() for text in axis.texts}
     assert len(labels) == MAX_STATIC_NON_SEED_LABELS + 1
-    assert "Seed Paper" in labels
+    assert (
+        "Seed Paper" if seed_title and seed_title.strip() else "Seed paper"
+    ) in labels
     assert "19, 2019" in labels
     assert "0, 2000" not in labels
     plt.close(figure)

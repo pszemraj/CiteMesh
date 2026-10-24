@@ -8,11 +8,14 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Iterable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import networkx as nx
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from citemesh.core.models import PaperGraph
 
 from citemesh.core import (
     DEFAULT_MAX_PAPERS,
@@ -24,6 +27,8 @@ from citemesh.services import get_client
 from citemesh.strategies.base import (
     RELATIONSHIP_DEGREE_CAP,
     GraphBuilderStrategy,
+    GraphCollectionOptions,
+    _CorpusPreparedOption,
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
@@ -69,7 +74,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
         client: SemanticScholarClient | None = None,
-    ):
+    ) -> None:
         """
         Initialize citation graph builder.
 
@@ -88,7 +93,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.fetch_references = fetch_references
         self.refresh_reference_cache = bool(refresh_reference_cache)
         self.client: SemanticScholarClient = client or get_client()
-        self.reference_cache: dict[str, list] = {}  # Cache reference lists
+        self.reference_cache: dict[str, list[str]] = {}
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
@@ -166,7 +171,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :return list[str]: Processed relation paper IDs in traversal order.
         """
         processed_ids: list[str] = []
-        progress_bar = None
+        progress_bar: Generator[Paper, None, None] | None = None
+        relation_iterator: Iterable[Paper] = relation_records
         if relation_records:
             # Avoid very short-lived progress bars that can render as blank spacer
             # lines in some terminals when rapidly cleared.
@@ -178,10 +184,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                     unit="papers",
                 )
                 relation_iterator = progress_bar
-            else:
-                relation_iterator = relation_records
-        else:
-            relation_iterator = []
 
         for paper in relation_iterator:
             raw_paper_id = str(paper.paper_id).strip()
@@ -253,8 +255,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         elif provider_seed_id is not None:
             self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
 
-        progress_bar = None
-        paper_items = papers.items()
+        progress_bar: Generator[tuple[str, Paper], None, None] | None = None
+        paper_items: Iterable[tuple[str, Paper]] = papers.items()
         if self.fetch_references and progress_enabled() and len(papers) > 25:
             progress_bar = progress_iterator(
                 paper_items,
@@ -273,14 +275,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
     def _get_references(
         self, paper_id: str, *, provider_lookup_id: str | None = None
-    ) -> list:
+    ) -> list[str]:
         """
         Get reference IDs for a paper with caching.
 
         :param str paper_id: Local cache key for the paper.
         :param Optional[str] provider_lookup_id: Provider-safe request identifier;
             defaults to ``paper_id``.
-        :return list: List of referenced paper IDs
+        :return list[str]: Referenced paper IDs.
         """
         if not self.refresh_reference_cache and paper_id in self.reference_cache:
             return self.reference_cache[paper_id]
@@ -305,7 +307,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]]
         | None = None,
         reference_selector: ReferenceSelector | None = None,
-        **kwargs: Any,
+        **kwargs: Unpack[_CorpusPreparedOption],
     ) -> dict[str, Paper]:
         """
         Collect papers via citations and references.
@@ -321,7 +323,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             already prepared corpus for HTML reference recovery.
         :param Callable | None reference_selector: Strategy-specific recovered-reference
             selector.
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Corpus-preparation option accepted by the shared interface.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         # Scope in-memory references to one collection request so stale entries do
@@ -462,12 +464,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         return papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> tuple[PaperGraph, str]:
         """Build citation graph and persist seed-relation metadata.
 
         :param str seed_id: Seed paper identifier.
-        :param Any kwargs: Strategy-specific options forwarded to parent build.
-        :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
+        :param kwargs: Collection options forwarded to the parent build.
+        :return tuple[PaperGraph, str]: Built graph and canonical seed identifier.
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
         graph.graph["seed_relations"] = {
@@ -501,6 +505,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         return self._compute_indexed_similarity(
             paper1,
             paper2,
+            abstract_index=self._abstract_index,
             with_references_weights=(0.40, 0.20, 0.00, 0.40),
             without_references_weights=(0.65, 0.20, 0.15, 0.00),
         )

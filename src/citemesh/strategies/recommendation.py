@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import networkx as nx
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from citemesh.core.models import PaperGraph
 
 from citemesh.core import (
     DEFAULT_MAX_PAPERS,
@@ -18,6 +21,7 @@ from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESU
 from citemesh.strategies.base import (
     RELATIONSHIP_DEGREE_CAP,
     GraphBuilderStrategy,
+    GraphCollectionOptions,
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
@@ -49,7 +53,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         refresh_reference_cache: bool = False,
         similarity_threshold: float = DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
         client: SemanticScholarClient | None = None,
-    ):
+    ) -> None:
         """Initialize recommendation graph builder.
 
         :param int max_papers: Maximum papers to include in graph.
@@ -103,11 +107,13 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             )
 
     @scope_candidate_collection
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
+    def collect_papers(
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> dict[str, Paper]:
         """Collect recommendations for a seed paper.
 
         :param str seed_id: Seed paper identifier.
-        :param Any kwargs: Strategy-specific arguments (currently unused).
+        :param kwargs: Extra options are ignored.
         :return Dict[str, Paper]: Papers included in graph.
         """
         papers: dict[str, Paper] = {}
@@ -194,12 +200,14 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         )
         return papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> tuple[PaperGraph, str]:
         """Build a recommendation graph with candidate-source status metadata.
 
         :param str seed_id: Seed paper identifier.
-        :param Any kwargs: Strategy-specific options forwarded to parent build.
-        :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
+        :param kwargs: Extra options are ignored by collection.
+        :return tuple[PaperGraph, str]: Built graph and canonical seed identifier.
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
         graph.graph["candidate_source_status"] = dict(
@@ -228,6 +236,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         return self._compute_indexed_similarity(
             paper1,
             paper2,
+            abstract_index=self._abstract_index,
             with_references_weights=(0.60, 0.15, 0.00, 0.25),
             without_references_weights=(0.75, 0.25, 0.00, 0.00),
             cap_at_one=True,

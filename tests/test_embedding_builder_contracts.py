@@ -10,7 +10,7 @@ import sys
 import threading
 import types
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -59,6 +59,7 @@ from citemesh.strategies.embedding import text as embedding_text_module
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from tests._helpers import (
     ConstantEncodeModel,
+    LengthRecordingEncodeModel,
     disable_embedding_dep_checks,
     raise_import_error,
 )
@@ -442,6 +443,7 @@ def _concurrent_hydration_worker(
             return original_search(seed_embedding)
 
         builder._ensure_cache_model_fingerprint = ensure_fingerprint
+        builder._resolve_dataset_split_row_count = lambda _: corpus_size
         builder._load_dataset_for_hydration = load_dataset
         builder._ensure_int8_calibration_ranges = no_op
         builder._refresh_cached_corpus_metadata = no_op
@@ -1107,6 +1109,8 @@ def test_cpu_bf16_autocast_uses_native_capabilities(
     assert init_log["kwargs"]["model_kwargs"] == {"dtype": "auto"}
     assert (("call", "cpu", token) in autocast_log) is expected
     if expected:
+        assert encode_log[-1]["convert_to_numpy"] is True
+        assert encode_log[-1]["convert_to_tensor"] is False
         assert encode_log[-1]["normalize_embeddings"] is False
         np.testing.assert_allclose(np.linalg.norm(output, axis=1), 1.0, atol=1e-6)
 
@@ -1331,20 +1335,8 @@ def test_encode_texts_uses_length_bucketed_batches(
         client=MagicMock(),
     )
 
-    captured_batches: list[list[str]] = []
-
-    class _CaptureEncodeModel:
-        def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
-            del kwargs
-            captured_batches.append(list(texts))
-            return np.asarray(
-                [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
-                dtype=np.float32,
-            )
-
-    monkeypatch.setattr(
-        builder, "_get_model_for_encoding", lambda: _CaptureEncodeModel()
-    )
+    model = LengthRecordingEncodeModel()
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
 
     texts = [
         "x " * 120,
@@ -1355,10 +1347,9 @@ def test_encode_texts_uses_length_bucketed_batches(
     ]
     embeddings = builder._encode_texts(texts, batch_size=2, show_progress_bar=False)
 
-    assert [len(batch) for batch in captured_batches] == [2, 2, 1]
+    assert [len(batch) for batch in model.calls] == [2, 2, 1]
     batch_estimates = [
-        [estimate_text_length_bucket(text) for text in batch]
-        for batch in captured_batches
+        [estimate_text_length_bucket(text) for text in batch] for batch in model.calls
     ]
     assert batch_estimates == sorted(
         batch_estimates, key=lambda item: (max(item), item)
@@ -2427,6 +2418,101 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
 
     assert not builder.has_persistent_embedding_artifacts()
     assert builder._embedding_cache is None
+
+
+@pytest.mark.parametrize("payload", [None, b"", b"not an HDF5 file"])
+def test_embedding_artifact_probe_counts_paperless_managed_corpus_state(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes | None
+) -> None:
+    """An interrupted install with zero committed papers is still an installed corpus.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
+    :param bytes | None payload: Absent, empty, or non-empty HDF5 payload content.
+    :return None: Verify managed state, not paper rows or file size, drives the probe
+        and that probing creates nothing.
+    """
+    from citemesh.data.embedding_cache import lifecycle
+
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    cache_dir = builder_module.get_cache_dir("embeddings", create=False)
+    cache_dir.mkdir(parents=True)
+
+    def install(namespace: str, state: str) -> None:
+        with sqlite3.connect(cache_dir / f"metadata_{namespace}.db") as connection:
+            connection.execute(
+                "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+                [("schema_version", "4"), (lifecycle.CORPUS_STATE_KEY, state)],
+            )
+            connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+        connection.close()
+        if payload is not None:
+            (cache_dir / f"embeddings_{namespace}.h5").write_bytes(payload)
+
+    install("cccccccccccc", "{}")
+    assert not builder.has_persistent_embedding_artifacts()
+    (cache_dir / "metadata_cccccccccccc.db").unlink()
+    if payload is not None:
+        (cache_dir / "embeddings_cccccccccccc.h5").unlink()
+
+    install("dddddddddddd", json.dumps({"pending": {"kind": "import"}}))
+    before = sorted(path.name for path in cache_dir.iterdir())
+    assert builder.has_persistent_embedding_artifacts()
+    assert sorted(path.name for path in cache_dir.iterdir()) == before
+    assert builder._embedding_cache is None
+
+
+def test_embedding_artifact_probe_skips_managed_corpus_for_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidates builder can never select a managed corpus, so it does not count.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
+    :return None: Verify a populated managed namespace is invisible to candidates
+        mode, visible to arxiv-corpus mode, and hides no ordinary namespace.
+    """
+    from citemesh.data.embedding_cache import lifecycle
+
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    candidates_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    corpus_builder = EmbeddingGraphBuilder(
+        max_papers=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    cache_dir = builder_module.get_cache_dir("embeddings", create=False)
+    cache_dir.mkdir(parents=True)
+
+    def install(namespace: str, state: str | None) -> None:
+        with closing(sqlite3.connect(cache_dir / f"metadata_{namespace}.db")) as conn:
+            conn.execute(
+                "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO cache_metadata (key, value) VALUES ('schema_version', '4')"
+            )
+            if state is not None:
+                conn.execute(
+                    "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+                    (lifecycle.CORPUS_STATE_KEY, state),
+                )
+            conn.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+            conn.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
+            conn.commit()
+        (cache_dir / f"embeddings_{namespace}.h5").write_bytes(b"not an HDF5 file")
+
+    install("eeeeeeeeeeee", json.dumps({"membership_complete": True}))
+    before = sorted(path.name for path in cache_dir.iterdir())
+    assert not candidates_builder.has_persistent_embedding_artifacts()
+    assert corpus_builder.has_persistent_embedding_artifacts()
+    assert sorted(path.name for path in cache_dir.iterdir()) == before
+    assert candidates_builder._embedding_cache is None
+
+    install("ffffffffffff", None)
+    assert candidates_builder.has_persistent_embedding_artifacts()
 
 
 def test_embedding_cache_namespace_partition_contracts(
@@ -3811,6 +3897,32 @@ def test_corpus_year_uses_publication_or_submission(
         ("10.1234/first; 10.5678/second", "10.1234/first"),
         ("https://doi.org/10.1234/first\n10.5678/second", "10.1234/first"),
         ("doi:10.1234/first", "10.1234/first"),
+        ("10.1002/example;2-A", "10.1002/example;2-A"),
+        ("10.1002/example,part", "10.1002/example,part"),
+        ("https://doi.org/10.1002/example;2-A", "10.1002/example;2-a"),
+        ("10.1002/example;2-A;10.5678/second", "10.1002/example;2-A"),
+        ("10.1002/example,part,doi:10.5678/second", "10.1002/example,part"),
+        ("10.1002/example;2-A;https://doi.org/10.5678/second", "10.1002/example;2-A"),
+        ("10.1002/example;2-A;doi.org/10.5678/second", "10.1002/example;2-A"),
+        ("10.1002/example,part,dx.doi.org/10.5678/second", "10.1002/example,part"),
+        ("10.1002/example;2-A;www.doi.org/10.5678/second", "10.1002/example;2-A"),
+        ("10.1002/example,part,doi.org:443/10.5678/second", "10.1002/example,part"),
+        ("doi: 10.1002/example;2-A", "10.1002/example;2-a"),
+        ("DOI:\n 10.1002/example;2-A", "10.1002/example;2-a"),
+        (
+            "10.1002/1522-2616(200210)244:1<64::AID-MANA64>3.0.CO;2-P",
+            "10.1002/1522-2616(200210)244:1<64::AID-MANA64>3.0.CO;2-P",
+        ),
+        ("10.3847/1538-4357/ae4a19,", "10.3847/1538-4357/ae4a19"),
+        ("10.1016/j.jpaa.2022.107297;", "10.1016/j.jpaa.2022.107297"),
+        ("10.1155/2018/7231354/", "10.1155/2018/7231354"),
+        ("10.1093/imrn/", "10.1093/imrn"),
+        ("10.1234/first;,/", "10.1234/first"),
+        ("10.1234/first; see note", "10.1234/first"),
+        ("10.1103/q1vm-13xl; 0.5281/zenodo.17460429", "10.1103/q1vm-13xl"),
+        ("https://doi.org/10.1234/first/", "10.1234/first"),
+        ("doi:10.1234/first/", "10.1234/first"),
+        (";", ""),
         ("not-a-doi", ""),
         ("", ""),
     ],
@@ -3834,6 +3946,7 @@ def test_cached_reference_metadata_resolves_only_unambiguous_aliases() -> None:
     :return None: Checks secondary-key lookup and ambiguity handling.
     """
     builder = object.__new__(EmbeddingGraphBuilder)
+    builder._cache_selection = None
     builder.embedding_cache = MagicMock()
     builder.embedding_cache.get_paper_metadata_alias_candidates.return_value = {
         "local-unique": {
@@ -6791,6 +6904,7 @@ def test_failed_corpus_extension_retains_complete_cache(
     )
     cache = builder.embedding_cache
     load_mock = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     def extend(**_kwargs: Any) -> records_module._HydrationSourceSliceResult:
@@ -7514,7 +7628,7 @@ def test_full_corpus_refresh_retries_partial_writes_at_matching_counts(
 
 def test_hydration_reset_restores_model_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Hydration reset should restore resolved model fingerprint metadata."""
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
@@ -7527,6 +7641,7 @@ def test_hydration_reset_restores_model_fingerprint(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-before-clear")
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
@@ -7601,12 +7716,12 @@ def test_concurrent_hydration_serializes_spec_through_consuming_search(
 
 def test_int8_hydration_calibration_uses_representative_prepass(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Int8 hydration should reuse repeatable rows for representative sampling.
 
     :param pytest.MonkeyPatch monkeypatch: Dataset, model, and cache stubs.
-    :param Any tmp_path: Temporary cache directory.
+    :param Path tmp_path: Temporary cache directory.
     :return None: Checks calibration sampling without a second dataset load.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
@@ -7629,6 +7744,9 @@ def test_int8_hydration_calibration_uses_representative_prepass(
     ]
     dataset = deps_module._import_datasets_module().Dataset.from_list(records)
     load_mock = MagicMock(return_value=(source, dataset))
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _: len(records)
+    )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     captured_texts: list[list[str]] = []
@@ -7752,7 +7870,7 @@ def test_int8_calibration_reuses_persisted_ranges(
 
 def test_hydration_flush_size_controls_cache_write_bursting(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Hydration should flush metadata batches using configured flush threshold."""
     assert embedding_module.HYDRATION_FLUSH_SIZE == EMBEDDING_DATASET_CHUNK_ROWS
@@ -7769,6 +7887,7 @@ def test_hydration_flush_size_controls_cache_write_bursting(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-flush-threshold")
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 7)
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
@@ -8040,6 +8159,50 @@ def test_embedding_top_k_validation_and_tie_order(
         use_streaming=False,
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "selection,limit,view",
+    [("all", None, None), ("newest", 5, None), ("newest", 5, 2)],
+)
+def test_embedding_runtime_metadata_records_installed_coverage(
+    selection: str, limit: int | None, view: int | None
+) -> None:
+    """Bound source coverage stays distinct from every-member and newest-N views."""
+    from citemesh.data.embedding_contract import CorpusSource
+    from citemesh.strategies.embedding.refresh import _builder_contract
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="arxiv-corpus",
+        corpus_size=view,
+        client=MagicMock(),
+    )
+    contract = _builder_contract(
+        builder, fingerprint=f"hf::{builder.model_name}::" + "a" * 40
+    )
+    source = CorpusSource(
+        builder.dataset_source, None, builder.dataset_split, "b" * 40, selection, limit
+    )
+    state = {
+        "update_policy": "manual",
+        "membership_complete": True,
+        "namespace_serialization": builder._embedding_cache_namespace(),
+        "source": source.to_dict(),
+        "contract": contract.to_dict(),
+    }
+    cache = MagicMock(spec=EmbeddingCache)
+    cache.namespace_id = "0123456789ab"
+    cache.corpus_state.return_value = state
+    cache.require_complete_certified_corpus.return_value = state
+    builder.embedding_cache = cache
+    assert builder._ready_manual_corpus()
+    cache.require_complete_certified_corpus.assert_called_once_with(corpus_size=view)
+    metadata = builder._embedding_runtime_metadata()
+    assert metadata["dataset_revision"] == source.revision
+    assert metadata["installed_corpus_selection"] == selection
+    assert metadata["installed_corpus_limit"] == limit
+    assert builder.corpus_size == view
 
 
 def test_embedding_runtime_metadata_tracks_prefilter_usage(
@@ -9299,6 +9462,11 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
             "_load_dataset_for_hydration",
             lambda **_kwargs: (dataset_source, [dict(row) for row in source_rows]),
         )
+        monkeypatch.setattr(
+            embedding_builder,
+            "_resolve_dataset_split_row_count",
+            lambda _: len(source_rows),
+        )
         return public_builder, embedding_builder, client
 
     _initial_builder, initial_embedding, _initial_client = make_builder()
@@ -10176,6 +10344,7 @@ def test_embedding_real_cpu_compile_executes_graphs(
 
 
 @pytest.mark.slow
+@pytest.mark.cuda
 def test_embedding_real_cuda_fa2_compile_executes_graphs() -> None:
     """Exercise the real ST6 compiled forward path and compare eager embeddings.
 

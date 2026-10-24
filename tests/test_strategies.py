@@ -145,6 +145,17 @@ def _relation_response(key: str, paper_id: str) -> MagicMock:
     return _http_response({"data": [{key: {"paperId": paper_id}}], "next": None})
 
 
+def _reference_outage_transport(url: str, **_kwargs: object) -> MagicMock:
+    """Fail reference requests while serving healthy citations and recommendations."""
+    if url.endswith("/references"):
+        raise requests.ConnectionError("offline")
+    if url.endswith("/citations"):
+        return _relation_response("citingPaper", "healthy-citation")
+    return _http_response(
+        {"recommendedPapers": [_recommendation_payload("healthy-recommendation")]}
+    )
+
+
 def _cache_full_papers(*papers: Paper) -> None:
     """Persist complete paper records for real-client discovery tests.
 
@@ -493,21 +504,7 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
-        def transport(url: str, **_kwargs: object) -> MagicMock:
-            """Fail references while serving healthy direct REST endpoints."""
-            if url.endswith("/references"):
-                raise requests.ConnectionError("offline")
-            if url.endswith("/citations"):
-                return _relation_response("citingPaper", "healthy-citation")
-            return _http_response(
-                {
-                    "recommendedPapers": [
-                        _recommendation_payload("healthy-recommendation")
-                    ]
-                }
-            )
-
-        client._session.get = MagicMock(side_effect=transport)
+        client._session.get = MagicMock(side_effect=_reference_outage_transport)
         if builder_type is CitationGraphBuilder:
             builder = CitationGraphBuilder(
                 max_papers=3,
@@ -603,21 +600,7 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
-        def transport(url: str, **_kwargs: object) -> MagicMock:
-            """Fail references while serving citation and recommendation pages."""
-            if url.endswith("/references"):
-                raise requests.ConnectionError("offline")
-            if url.endswith("/citations"):
-                return _relation_response("citingPaper", "healthy-citation")
-            return _http_response(
-                {
-                    "recommendedPapers": [
-                        _recommendation_payload("healthy-recommendation")
-                    ]
-                }
-            )
-
-        client._session.get = MagicMock(side_effect=transport)
+        client._session.get = MagicMock(side_effect=_reference_outage_transport)
         builder = HybridGraphBuilder(
             max_papers=3,
             max_references=1,
@@ -696,21 +679,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
-        def transport(url: str, **_kwargs: object) -> MagicMock:
-            """Fail references while serving citation and recommendation pages."""
-            if url.endswith("/references"):
-                raise requests.ConnectionError("offline")
-            if url.endswith("/citations"):
-                return _relation_response("citingPaper", "healthy-citation")
-            return _http_response(
-                {
-                    "recommendedPapers": [
-                        _recommendation_payload("healthy-recommendation")
-                    ]
-                }
-            )
-
-        client._session.get = MagicMock(side_effect=transport)
+        client._session.get = MagicMock(side_effect=_reference_outage_transport)
         builder = EmbeddingGraphBuilder(
             max_papers=3,
             semantic_source="candidates",
@@ -3261,24 +3230,17 @@ def test_deterministic_sort_key_is_total_for_secondary_and_stable_fields() -> No
 
 @pytest.mark.parametrize(
     ("paper1_year", "paper2_year", "expected"),
-    [(2020, 2020, 1.0), (2010, 2020, 0.1)],
+    [(2020, 2020, 1.0), (2010, 2020, 0.1), (None, 2020, 0.5)],
 )
 def test_temporal_similarity_extremes(
-    paper1_year: int,
+    paper1_year: int | None,
     paper2_year: int,
     expected: float,
 ) -> None:
-    """Temporal similarity should be stable for known year deltas."""
+    """Temporal scoring handles known year deltas and missing-year fallback."""
     paper1 = Paper(paper_id="p1", title="Test 1", year=paper1_year)
     paper2 = Paper(paper_id="p2", title="Test 2", year=paper2_year)
     assert GraphBuilderStrategy.temporal_similarity(paper1, paper2) == expected
-
-
-def test_temporal_similarity_unknown_year_defaults() -> None:
-    """Unknown years should return neutral fallback for temporal similarity."""
-    paper1 = Paper(paper_id="p1", title="Test 1", year=None)
-    paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
-    assert GraphBuilderStrategy.temporal_similarity(paper1, paper2) == 0.5
 
 
 def test_citation_similarity_branches() -> None:

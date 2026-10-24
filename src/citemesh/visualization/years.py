@@ -22,7 +22,9 @@ def coerce_publication_year(raw_year: object) -> int:
         return int(raw_year)
     if isinstance(raw_year, numbers.Real):
         if math.isfinite(raw_year) and float(raw_year).is_integer():
-            return int(raw_year)
+            # ``numbers.Real`` values support ``int`` at runtime, though the
+            # abstract numeric typing contract omits that overload.
+            return int(raw_year)  # type: ignore[call-overload]
         return 0
     if isinstance(raw_year, str):
         try:

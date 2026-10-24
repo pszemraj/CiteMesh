@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
+from ..dashboard.contracts import EnrichedNodePayload
 from ..years import coerce_publication_year
 from .keys import slug_key
 from .links import _derive_doi_value
@@ -67,10 +67,12 @@ def _bibtex_verbatim(raw_value: str) -> str:
     return re.sub(r"[{}\\]", "", collapsed)
 
 
-def _node_bibtex(node_payload: dict[str, Any], *, links: dict[str, str | None]) -> str:
+def _node_bibtex(
+    node_payload: EnrichedNodePayload, *, links: dict[str, str | None]
+) -> str:
     """Render a deterministic BibTeX entry for dashboard actions.
 
-    :param Dict[str, Any] node_payload: Node payload.
+    :param EnrichedNodePayload node_payload: Enriched node payload.
     :param Dict[str, Optional[str]] links: Derived external links.
     :return str: BibTeX entry string.
     """

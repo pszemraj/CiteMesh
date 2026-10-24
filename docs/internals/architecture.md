@@ -4,9 +4,7 @@ CiteMesh separates argument handling, paper acquisition, scoring, persistence, a
 
 ## Execution flow
 
-`cli/` parses arguments, applies `config.toml` defaults, validates the effective options in `build_contract.py`, resolves export targets, and calls `build_graph` on the selected `GraphBuilderStrategy`. The strategy collects papers through `strategies/candidates.py` (source fetch, availability policy, identity reconciliation, pool budgets), builds its scoring space in `prepare_graph_scoring`, scores pairs in `compute_similarity`, and returns a `networkx.Graph`. `visualization/` computes one shared layout for `render.visualize_graph`, `export.GraphExporter`, and `dashboard/package.py`.
-
-Every node carries a consistent attribute payload, which keeps visualization and export strategy-agnostic; see the [graph-input contract](../reference/output-artifacts.md#graph-input).
+`cli/` parses arguments, applies `config.toml` defaults, validates effective options in `build_contract.py`, and resolves export targets before dispatching to `GraphBuilderStrategy`. Strategies acquire candidates through `strategies/candidates.py`, prepare scoring in `prepare_graph_scoring`, and return a `networkx.Graph`; `visualization/` lays out and exports it. The [graph-input contract](../reference/output-artifacts.md#graph-input) defines node attributes.
 
 ## Package map
 
@@ -37,7 +35,7 @@ The viewer rebuilds its Plotly figure client-side from the embedded payload, so 
 
 **A strategy** subclasses `GraphBuilderStrategy` in `strategies/<name>.py` with `collect_papers` (fetching through `candidates.py`, not the client, to inherit budget splitting, identity reconciliation, and the outage policy) and `compute_similarity`. Register it in the lazy export maps of `strategies/__init__.py` and `citemesh/__init__.py`, in `core/choices.py:STRATEGY_CHOICES`, and in `cli/build_options.py`'s factory dispatch and option-support tables. Add any strategy-specific options and validation to the parser and build contract.
 
-**An export format** adds a writer and a `to_<format>(path, ...)` method on `GraphExporter`. Reuse node enrichment or `graph_payload()` as the format requires. Add the format to `core/choices.py:EXPORT_FORMATS`, its extension and method to `cli/outputs.py`, and its cleanup entry in `dashboard/package.py`. Publish through the atomic writers in `data/cache.py`.
+**An export format** adds a writer, usually through a `to_<format>(path, ...)` method on `GraphExporter`; `png` uses `visualize_graph`. Reuse node enrichment or `graph_payload()` as the format requires. Register it in `core/choices.py:EXPORT_FORMATS` and `cli/outputs.py`'s `EXPORT_EXTENSIONS` and `_EXPORTER_METHOD` tables. Collection cleanup derives optional result paths from `EXPORT_FORMATS` and `EXPORT_EXTENSIONS`. Publish through the atomic writers in `data/cache.py`.
 
 **A corpus source** feeds the [supported record adapter](../guides/caching.md#corpus-records) in `strategies/embedding/records.py` and the selection/resume machinery in `hydration.py`. Preserve stable source IDs and hydration metadata. Parseable arXiv IDs enable chronology-based ranking; other IDs and anonymous records use the documented fallback selection.
 

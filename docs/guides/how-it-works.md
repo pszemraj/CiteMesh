@@ -23,15 +23,15 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
 ## 2. Candidate acquisition
 
-S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. An embedding candidate pool allocates roughly a quarter to recommendations and a quarter to references, each capped at 100; citations receive the remainder. Hybrid's citation branch uses its own fetch budgets, while its semantic branch adds recommendations up to the smallest of 100, `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, and `--candidate-pool-size`.
+S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid keeps separate S2 citation budgets in either source mode; its semantic branch fetches recommendations in `candidates` mode, capped at the smallest of 100, `candidate_pool_size`, and `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, or searches the corpus in `arxiv-corpus` mode.
 
-When S2 returns no usable seed references and the seed has an arXiv ID, the shared acquisition path can recover explicit arXiv IDs and DOIs from an available arXiv HTML bibliography. [CLI Usage](cli.md#missing-semantic-scholar-references) defines the fallback's resolution order and limits.
+When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references).
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
 S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate.
 
-Acquisition follows the [source-failure and retry policy](cli.md#appendix-b-troubleshooting), recording availability in exported metadata.
+Acquisition follows the [source-failure and retry policy](cli.md#troubleshooting), recording availability in exported metadata.
 
 Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py).
 
@@ -59,7 +59,9 @@ Hybrid collects two pools, citation-derived and semantic, and reranks the union 
 score = 0.62 · semantic + 0.16 · temporal + 0.14 · citation + 0.08 · bibliographic
 ```
 
-where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(citations) / log1p(max_citations_in_pool + 1)` compresses the long tail. Then **+0.10** when both branches found the candidate, since citation-plus-semantic agreement is the strongest evidence available, and **+0.02** for citation-derived candidates. `--max-semantic` caps semantic-*only* additions; overlap papers do not count against it. It is a ceiling, not a reservation: if citation-derived candidates fill `--max-papers` first, no semantic-only paper is added.
+where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(max(citations, 0)) / log1p(max(max_citations_in_pool, 1))` compresses the long tail. Add **0.10** when both branches found the candidate, or **0.02** for a citation-derived candidate without semantic overlap; cap the final score at `1.0`.
+
+`--max-semantic` caps semantic-*only* additions; overlap papers do not count against it. It is a ceiling, not a reservation: if citation-derived candidates fill `--max-papers` first, no semantic-only paper is added.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
@@ -78,7 +80,7 @@ similarity = (0.5 · semantic + 0.2 · temporal + 0.2 · category) × author_fac
 author_factor = 1.5 if the papers share an author, else 1.0
 ```
 
-The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), then flattens at `0.1`. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate - they never create an edge.
+The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), scoring `0.2` at exactly five years and flattening at `0.1` for greater differences. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate - they never create an edge.
 
 Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` - `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed - then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
 
@@ -102,6 +104,6 @@ Implementation: [render.py](../../src/citemesh/visualization/render.py); node an
 
 Exports enrich nodes with external links, provenance, seed relation, and personalized PageRank (`alpha=0.85`, weighted). PageRank measures relevance within the final graph; it is separate from the candidate-ranking score.
 
-The dashboard embeds graph data and rebuilds its figure in the browser, so selection, filtering, and imports work offline. The [Python/JavaScript boundary](../internals/architecture.md#python--javascript-duplication) explains how both implementations are tested. [Output Artifacts](../reference/output-artifacts.md) describes formats, schemas, naming, and collection updates.
+The dashboard embeds graph data and rebuilds its figure in the browser. The [Python/JavaScript boundary](../internals/architecture.md#python--javascript-duplication) explains how both implementations are tested; [Output Artifacts](../reference/output-artifacts.md#dashboard-html) describes dashboard behavior.
 
 Implementation: [export](../../src/citemesh/visualization/export/) and [dashboard](../../src/citemesh/visualization/dashboard/).

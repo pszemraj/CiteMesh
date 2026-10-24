@@ -31,6 +31,12 @@ For EmbeddingGemma the symmetric formatter is exactly `task: sentence similarity
 
 The roles keep independent cache namespaces, fingerprints, and storage contracts, and the graph namespace is always float32 with no binary prefilter, so a matching dimension cannot make asymmetric vectors eligible for symmetric scoring. Namespace identity, cross-device reuse, storage precision, and calibration are in [Caching & Data](../guides/caching.md).
 
+An explicitly selected installed index loads its recorded immutable model
+revision, validates the active artifact against its stored contract, and keeps
+its original native address, including when created with requested revision
+`main`. For the import, search, and graph-build workflow, see [portable index
+selection](../guides/caching.md#import-and-selection).
+
 Inputs exceeding the token window, including prompts and special tokens, are truncated and counted in a warning. The ordinary path reports before encoding; CUDA prefetch reports the completed batch counts after encoding and resets partial counts on a compile retry. Reused cached vectors do not repeat the warning.
 
 ## Device selection
@@ -62,7 +68,7 @@ EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support i
 
 ## Dependency floor
 
-The [`embeddings` extra](../../pyproject.toml) declares the dependency floor. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
+The [`embeddings` extra](../../pyproject.toml) declares the dependency floor: torch 2.9.0 (2.13.0 on macOS, matching the MPS bf16 floor above), sentence-transformers 5.7.0, transformers 5.2.0, huggingface_hub 2.3.0, datasets 2.14.0, and pyarrow 18.0.0. Install a PyTorch wheel for your hardware that meets the torch floor before installing CiteMesh: a wheel below it is upgraded from the configured index when the extra installs, which can replace a hardware-specific build. The embedding strategy also rejects torch below 2.9 at runtime. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
 
 The default suite covers prompt routing, cache separation, and complete vector sets. Real-model checks are opt-in with `python -m pytest -m "slow and cuda"`.
 

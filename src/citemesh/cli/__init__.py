@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""CiteMesh: unified CLI for CiteMesh visualizations.
+"""CiteMesh CLI entry point and public command helpers.
 
-This package owns the ``citemesh`` entry point: it builds the parser, configures
-logging once, and dispatches to the per-subcommand modules in
-:mod:`citemesh.cli.commands`. The pieces live in focused submodules --
-:mod:`~citemesh.cli.console` (consoles and logging), :mod:`~citemesh.cli.parser`
-(argparse construction and validators), :mod:`~citemesh.cli.outputs` (export
-formats and output paths), :mod:`~citemesh.cli.build_options` and
-:mod:`~citemesh.cli.build_contract` (build option tables and validation),
-:mod:`~citemesh.cli.graph_config` (reproducible build payloads), and
-:mod:`~citemesh.cli.cache_ops` (cache scan/clear).
-
-Names re-exported here form the CLI's stable import surface.
+Builds the parser, configures logging, and loads the selected subcommand from
+:mod:`citemesh.cli.commands`. Re-exported names remain available to callers.
 """
 
 from __future__ import annotations
@@ -71,7 +62,7 @@ __all__ = [
 
 # Deferred so ``import citemesh.cli`` -- and therefore ``citemesh config``,
 # ``citemesh view`` and ``citemesh cache`` -- never pulls the embedding stack
-# through this module. Attribute access keeps the historical import surface.
+# through this module. The builder remains available through attribute access.
 __getattr__, __dir__ = install_lazy_exports(
     globals(),
     {

@@ -10,33 +10,39 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh.core.text_batching import l2_normalize_embeddings
 
 from . import constants
 from .constants import CALIBRATION_RANGES_DATASET_NAME
-from .models import _EmbeddingCacheLayoutError
+from .models import CachedPaperRecord, _EmbeddingCacheLayoutError
 from .quantization import (
     _POPCOUNT_LUT,
     _dequantize_int8,
     _quantize_ubinary_embeddings,
     _sanitize_ranges,
 )
-from .sql import _decode_paper_row
+from .sql import _cached_paper_record, _decode_paper_row
+
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
 
 
-class _SearchMixin:
+class _SearchMixin(_EmbeddingCacheHost):
     """Query-time scoring and metadata resolution for :class:`EmbeddingCache`."""
 
     def _require_calibration_ranges(
         self,
         h5_file: h5py.File,
         embedding_dim: int | None = None,
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Load persisted int8 calibration ranges or fail closed.
 
         Calibration is intentionally explicit at the strategy layer. Bootstrapping
@@ -45,7 +51,7 @@ class _SearchMixin:
 
         :param h5py.File h5_file: Open HDF5 cache handle.
         :param Optional[int] embedding_dim: Expected embedding dimension, when known.
-        :return np.ndarray: Calibration ranges with shape ``(2, dim)``.
+        :return NDArray[np.float32]: Calibration ranges with shape ``(2, dim)``.
         """
         if self.storage_precision != "int8":
             raise RuntimeError("Calibration ranges are only valid for int8 storage")
@@ -79,13 +85,13 @@ class _SearchMixin:
         h5_file: h5py.File,
         dataset: h5py.Dataset,
         cached_rows: Sequence[tuple[str, int]],
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, NDArray[np.float32]]:
         """Load cached embeddings from matrix dataset in row-index order.
 
         :param h5py.File h5_file: Open HDF5 cache handle.
         :param h5py.Dataset dataset: Matrix dataset containing all embeddings.
         :param Sequence[Tuple[str, int]] cached_rows: Pairs of paper ID and row index.
-        :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
+        :return dict[str, NDArray[np.float32]]: Mapping of paper IDs to float32 embeddings.
         """
         if not cached_rows:
             return {}
@@ -111,15 +117,17 @@ class _SearchMixin:
     def _binary_prefilter_rows(
         self,
         binary_dataset: h5py.Dataset,
-        query_embedding: np.ndarray,
+        query_embedding: NDArray[np.float32],
         candidate_count: int,
-    ) -> np.ndarray:
+        eligible_rows: NDArray[np.bool_] | None = None,
+    ) -> NDArray[np.int64]:
         """Return top candidate row indices via Hamming prefiltering.
 
         :param h5py.Dataset binary_dataset: Packed binary corpus embeddings.
-        :param np.ndarray query_embedding: Float32 query embedding.
+        :param NDArray[np.float32] query_embedding: Float32 query embedding.
         :param int candidate_count: Number of candidate rows to keep.
-        :return np.ndarray: Candidate row indices.
+        :param Optional[NDArray[np.bool_]] eligible_rows: Optional boolean mask over physical rows.
+        :return NDArray[np.int64]: Candidate row indices.
         """
         row_count = int(binary_dataset.shape[0])
         if row_count == 0:
@@ -127,16 +135,26 @@ class _SearchMixin:
 
         query_binary = _quantize_ubinary_embeddings(query_embedding)[0]
 
-        keep_k = min(max(int(candidate_count), 0), row_count)
+        eligible_count = (
+            row_count if eligible_rows is None else int(eligible_rows.sum())
+        )
+        keep_k = min(max(int(candidate_count), 0), eligible_count)
         if keep_k == 0:
             return np.asarray([], dtype=np.int64)
-        all_rows: list[np.ndarray] = []
-        all_dists: list[np.ndarray] = []
+        all_rows: list[NDArray[np.int64]] = []
+        all_dists: list[NDArray[np.int32]] = []
         chunk_size = constants.EMBEDDING_SEARCH_CHUNK_ROWS
 
         for start in range(0, row_count, chunk_size):
             end = min(start + chunk_size, row_count)
             chunk = np.asarray(binary_dataset[start:end], dtype=np.uint8)
+            chunk_rows = np.arange(start, end, dtype=np.int64)
+            if eligible_rows is not None:
+                chunk_mask = eligible_rows[start:end]
+                chunk = chunk[chunk_mask]
+                chunk_rows = chunk_rows[chunk_mask]
+            if chunk_rows.size == 0:
+                continue
             xor = np.bitwise_xor(chunk, query_binary[None, :])
             dists = _POPCOUNT_LUT[xor].sum(axis=1, dtype=np.int32)
 
@@ -153,7 +171,7 @@ class _SearchMixin:
                     axis=0,
                 )
 
-            all_rows.append((start + local_idx).astype(np.int64, copy=False))
+            all_rows.append(chunk_rows[local_idx])
             all_dists.append(dists[local_idx])
 
         candidate_rows = np.concatenate(all_rows, axis=0)
@@ -170,26 +188,26 @@ class _SearchMixin:
     @staticmethod
     def _matrix_chunk_loader(
         embeddings_dataset: h5py.Dataset,
-        dequantize: Callable[[np.ndarray], np.ndarray] | None = None,
-    ) -> Callable[[int, int], np.ndarray]:
+        dequantize: Callable[[NDArray[np.int8]], NDArray[np.float32]] | None = None,
+    ) -> Callable[[int, int], NDArray[np.float32]]:
         """Build the chunk loader :meth:`_score_chunked_rows` reads rows through.
 
         Float32 namespaces read their stored rows directly; int8 namespaces read
         the raw codes and hand them to ``dequantize`` before scoring.
 
         :param h5py.Dataset embeddings_dataset: Matrix dataset whose rows are scored.
-        :param Optional[Callable[[np.ndarray], np.ndarray]] dequantize: Storage-to-float32
+        :param Optional[Callable[[NDArray[np.int8]], NDArray[np.float32]]] dequantize: Storage-to-float32
             conversion applied to each raw chunk; ``None`` reads float32 rows directly.
-        :return Callable[[int, int], np.ndarray]: Loader yielding float32 matrix chunks.
+        :return Callable[[int, int], NDArray[np.float32]]: Loader yielding float32 matrix chunks.
         """
         storage_dtype = np.float32 if dequantize is None else np.int8
 
-        def load_chunk(start: int, end: int) -> np.ndarray:
+        def load_chunk(start: int, end: int) -> NDArray[np.float32]:
             """Load one cache matrix chunk as float32.
 
             :param int start: Inclusive row offset.
             :param int end: Exclusive row offset.
-            :return np.ndarray: Float32 matrix chunk.
+            :return NDArray[np.float32]: Float32 matrix chunk.
             """
             chunk = np.asarray(embeddings_dataset[start:end], dtype=storage_dtype)
             return chunk if dequantize is None else dequantize(chunk)
@@ -200,18 +218,20 @@ class _SearchMixin:
         self,
         embeddings_dataset: h5py.Dataset,
         h5_file: h5py.File,
-        query_embedding: np.ndarray,
+        query_embedding: NDArray[np.float32],
         top_k: int,
-        row_indices: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        row_indices: NDArray[np.int64] | None,
+        eligible_rows: NDArray[np.bool_] | None = None,
+    ) -> tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]:
         """Score int8 embeddings against a float32 query.
 
         :param h5py.Dataset embeddings_dataset: Int8 matrix dataset.
         :param h5py.File h5_file: Open HDF5 file handle.
-        :param np.ndarray query_embedding: Float32 query embedding.
+        :param NDArray[np.float32] query_embedding: Float32 query embedding.
         :param int top_k: Top results to keep.
-        :param Optional[np.ndarray] row_indices: Optional candidate subset.
-        :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
+        :param Optional[NDArray[np.int64]] row_indices: Optional candidate subset.
+        :param Optional[NDArray[np.bool_]] eligible_rows: Physical-row mask used when ``row_indices`` is ``None``.
+        :return Tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]: Rows, scores, and embeddings.
         """
         query = query_embedding
         if row_indices is not None:
@@ -231,11 +251,11 @@ class _SearchMixin:
             self._require_finite_scores(scores)
             return self._select_top_k(rows, scores, matrix, top_k)
 
-        def dequantize_chunk(chunk: np.ndarray) -> np.ndarray:
+        def dequantize_chunk(chunk: NDArray[np.int8]) -> NDArray[np.float32]:
             """Dequantize and normalize one stored int8 chunk.
 
-            :param np.ndarray chunk: Raw int8 rows read from the matrix dataset.
-            :return np.ndarray: Dequantized, normalized float32 matrix.
+            :param NDArray[np.int8] chunk: Raw int8 rows read from the matrix dataset.
+            :return NDArray[np.float32]: Dequantized, normalized float32 matrix.
             """
             return l2_normalize_embeddings(self._dequantize_int8(h5_file, chunk))
 
@@ -244,20 +264,23 @@ class _SearchMixin:
             query,
             top_k,
             self._matrix_chunk_loader(embeddings_dataset, dequantize_chunk),
+            eligible_rows=eligible_rows,
         )
 
     def _score_float_rows(
         self,
         embeddings_dataset: h5py.Dataset,
-        query_embedding: np.ndarray,
+        query_embedding: NDArray[np.float32],
         top_k: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        eligible_rows: NDArray[np.bool_] | None = None,
+    ) -> tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]:
         """Score float32 embeddings against a float32 query.
 
         :param h5py.Dataset embeddings_dataset: Float matrix dataset.
-        :param np.ndarray query_embedding: Float32 query embedding.
+        :param NDArray[np.float32] query_embedding: Float32 query embedding.
         :param int top_k: Top results to keep.
-        :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
+        :param Optional[NDArray[np.bool_]] eligible_rows: Optional boolean mask over physical rows.
+        :return Tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]: Rows, scores, and embeddings.
         """
 
         return self._score_chunked_rows(
@@ -265,22 +288,25 @@ class _SearchMixin:
             query_embedding,
             top_k,
             self._matrix_chunk_loader(embeddings_dataset),
+            eligible_rows=eligible_rows,
         )
 
     def _score_chunked_rows(
         self,
         embeddings_dataset: h5py.Dataset,
-        query_embedding: np.ndarray,
+        query_embedding: NDArray[np.float32],
         top_k: int,
-        load_chunk: Callable[[int, int], np.ndarray],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        load_chunk: Callable[[int, int], NDArray[np.float32]],
+        eligible_rows: NDArray[np.bool_] | None = None,
+    ) -> tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]:
         """Score a matrix through a loader while retaining a bounded global top-k.
 
         :param h5py.Dataset embeddings_dataset: Matrix dataset whose rows are scored.
-        :param np.ndarray query_embedding: Float32 query vector.
+        :param NDArray[np.float32] query_embedding: Float32 query vector.
         :param int top_k: Number of results to retain.
-        :param Callable[[int, int], np.ndarray] load_chunk: Matrix chunk loader.
-        :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and vectors.
+        :param Callable[[int, int], NDArray[np.float32]] load_chunk: Matrix chunk loader.
+        :param Optional[NDArray[np.bool_]] eligible_rows: Optional boolean mask over physical rows.
+        :return Tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]: Rows, scores, and vectors.
         """
         row_count = int(embeddings_dataset.shape[0])
         best_rows = np.asarray([], dtype=np.int64)
@@ -289,10 +315,16 @@ class _SearchMixin:
 
         for start in range(0, row_count, constants.EMBEDDING_SEARCH_CHUNK_ROWS):
             end = min(start + constants.EMBEDDING_SEARCH_CHUNK_ROWS, row_count)
+            mask = None if eligible_rows is None else eligible_rows[start:end]
+            if mask is not None and not mask.any():
+                continue
             chunk_matrix = load_chunk(start, end)
+            chunk_rows = np.arange(start, end, dtype=np.int64)
+            if mask is not None:
+                chunk_matrix = chunk_matrix[mask]
+                chunk_rows = chunk_rows[mask]
             chunk_scores = chunk_matrix @ query_embedding
             self._require_finite_scores(chunk_scores)
-            chunk_rows = np.arange(start, end, dtype=np.int64)
             rows, scores, embeddings = self._select_top_k(
                 chunk_rows,
                 chunk_scores,
@@ -312,14 +344,13 @@ class _SearchMixin:
         return best_rows, best_scores, best_embeddings
 
     @staticmethod
-    def _require_finite_scores(scores: np.ndarray) -> None:
+    def _require_finite_scores(scores: NDArray[np.float32]) -> None:
         """Reject non-finite scores from corrupt cached embedding data.
 
         Query vectors are validated at the public boundary, so non-finite scores
         here indicate a malformed persisted embedding or a numerical failure.
 
-        :param np.ndarray scores: Similarity scores produced from cached vectors.
-        :return None: Raises when a score is not finite.
+        :param NDArray[np.float32] scores: Similarity scores produced from cached vectors.
         :raises RuntimeError: If cached vectors produce a non-finite score.
         """
         if not np.all(np.isfinite(scores)):
@@ -331,18 +362,18 @@ class _SearchMixin:
 
     @staticmethod
     def _select_top_k(
-        rows: np.ndarray,
-        scores: np.ndarray,
-        embeddings: np.ndarray,
+        rows: NDArray[np.int64],
+        scores: NDArray[np.float32],
+        embeddings: NDArray[np.float32],
         top_k: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]:
         """Select top-k rows from scored embedding arrays.
 
-        :param np.ndarray rows: Row-index vector.
-        :param np.ndarray scores: Score vector.
-        :param np.ndarray embeddings: Embedding matrix.
+        :param NDArray[np.int64] rows: Row-index vector.
+        :param NDArray[np.float32] scores: Score vector.
+        :param NDArray[np.float32] embeddings: Embedding matrix.
         :param int top_k: Number of rows to keep.
-        :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Top rows, scores, embeddings.
+        :return Tuple[NDArray[np.int64], NDArray[np.float32], NDArray[np.float32]]: Top rows, scores, embeddings.
         """
         if rows.size == 0:
             return (
@@ -380,34 +411,33 @@ class _SearchMixin:
         self,
         conn: sqlite3.Connection,
         row_indices: Sequence[int],
-    ) -> dict[int, dict[str, Any]]:
+    ) -> dict[int, CachedPaperRecord]:
         """Load metadata rows keyed by embedding matrix row index.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :param Sequence[int] row_indices: Matrix row indices.
-        :return Dict[int, Dict[str, Any]]: Metadata payloads keyed by row index.
+        :return dict[int, CachedPaperRecord]: Metadata payloads keyed by row index.
         """
-        output: dict[int, dict[str, Any]] = {}
+        output: dict[int, CachedPaperRecord] = {}
         for row in self._query_paper_rows(
             conn,
             [int(idx) for idx in row_indices],
             lookup_column="row_idx",
         ):
             decoded = _decode_paper_row(row, parse_json_lists=True)
-            row_idx = decoded.pop("row_idx")
-            decoded.pop("text_hash")
+            row_idx = decoded["row_idx"]
             assert row_idx is not None
-            output[row_idx] = decoded
+            output[row_idx] = _cached_paper_record(decoded)
 
         return output
 
     def _dequantize_int8(
-        self, h5_file: h5py.File, int8_embeddings: np.ndarray
-    ) -> np.ndarray:
+        self, h5_file: h5py.File, int8_embeddings: NDArray[np.int8]
+    ) -> NDArray[np.float32]:
         """Dequantize int8 embeddings to float32 using persisted ranges.
 
         :param h5py.File h5_file: Open HDF5 file handle.
-        :param np.ndarray int8_embeddings: Int8 embeddings.
-        :return np.ndarray: Dequantized float32 embeddings.
+        :param NDArray[np.int8] int8_embeddings: Int8 embeddings.
+        :return NDArray[np.float32]: Dequantized float32 embeddings.
         """
         return _dequantize_int8(h5_file, int8_embeddings)

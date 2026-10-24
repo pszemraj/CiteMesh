@@ -1,6 +1,6 @@
 # Python API
 
-Import the builders and exporters directly when a notebook or script beats shelling out to the CLI.
+Import the builders and exporters in a notebook or script; the worked example uses the [`recommended` extra](../../README.md#quick-start).
 
 > [!IMPORTANT]
 > **Unstable, pre-1.0.** The CLI is the supported interface; signatures, keyword names, and payload shapes here can change in any release. Only the names below are meant for import - anything behind a leading underscore or in an unlisted submodule is internal.
@@ -11,7 +11,7 @@ Import the builders and exporters directly when a notebook or script beats shell
 
 Every builder implements the same two methods:
 
-```python
+```text
 build_graph(seed_id: str, **kwargs) -> tuple[networkx.Graph, str]  # (graph, resolved_seed_id)
 collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 ```
@@ -20,11 +20,26 @@ collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 
 ## Exporting
 
-`GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories before publishing the artifact by atomic replacement. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Format contents are in [Output Artifacts](../reference/output-artifacts.md).
+`GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Formats and artifact publication behavior are in [Output Artifacts](../reference/output-artifacts.md).
 
 Graphs supplied by callers must follow the [graph-input contract](../reference/output-artifacts.md#graph-input) and the writer's requirements for [JSON](../reference/output-artifacts.md#graph-json-strategyjson), [CSV](../reference/output-artifacts.md#csv-strategycsv), or [BibTeX](../reference/output-artifacts.md#bibtex-strategybib).
 
 The collection-package machinery behind `out/dashboard.html` is **not** part of this surface: from Python, write standalone dashboards; use the CLI when you want a collection.
+
+## Portable corpus access
+
+`citemesh.data.embedding_cache` exports `select_existing_cache` and `open_existing_cache`. The first selects a namespace; the second opens it as an `EmbeddingCache`. If supplied, `cache_dir` is the directory containing namespace files, normally `<cache_root>/embeddings`, not the cache root itself. This example uses the default cache directory; replace `NAMESPACE` with the identifier printed by `citemesh cache scan`:
+
+```python
+from citemesh import EmbeddingGraphBuilder
+from citemesh.data.embedding_cache import open_existing_cache, select_existing_cache
+
+selection = select_existing_cache("NAMESPACE")
+cache = open_existing_cache(selection)
+builder = EmbeddingGraphBuilder(cache_selection=selection, device="auto")
+```
+
+Use `cache` for direct cache access. `builder.refresh_corpus(revision=None)` reconciles the corpus against a dataset revision and returns its source identity and changed-row counts. See [Portable corpus indexes](caching.md#portable-corpus-indexes) for selection, import, refresh, and recovery policies.
 
 ## Worked example
 
@@ -59,8 +74,8 @@ visualize_graph(
 
 ## Before you build on this
 
-- **Credentials.** Set `S2_API_KEY` before the first builder creates the shared API client. Saved `api.s2_api_key` values are applied by the CLI, not by direct builder construction. The [API request policy](cli.md#appendix-b-troubleshooting) also applies to Python calls.
-- **S2 recovery budget.** Import `SemanticScholarClient` from `citemesh.services` and pass `SemanticScholarClient(retry_budget_seconds=...)` to a builder to override its shared recovery-time allowance. It follows the CLI's [API request policy](cli.md#appendix-b-troubleshooting).
+- **Credentials.** Set `S2_API_KEY` before the first builder creates the shared API client. Saved `api.s2_api_key` values are applied by the CLI, not by direct builder construction. The [API request policy](cli.md#troubleshooting) also applies to Python calls.
+- **S2 recovery budget.** Import `SemanticScholarClient` from `citemesh.services` and pass `SemanticScholarClient(retry_budget_seconds=...)` to a builder to override its shared recovery-time allowance. It follows the CLI's [API request policy](cli.md#troubleshooting).
 - **Configuration and caches.** Builders take constructor arguments and built-in defaults; they do not load `[defaults]` from `config.toml`. They share the CLI's [cache root and namespaces](caching.md), so Python runs can reuse or extend those caches.
 - **Constructor keywords mirror CLI flags** (`max_semantic=` is `--max-semantic`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants - `0 <= max_semantic <= max_papers - 1`, `top_k >= 1`, `max_papers >= 1` - and raise `ValueError`.
 - **Failures are exceptions, not empty graphs.** A total candidate-source outage raises `CandidateAcquisitionError`, semantic inference that cannot produce a complete ranking space raises `EmbeddingInferenceError`, and an unavailable explicit device raises `ValueError`.

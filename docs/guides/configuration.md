@@ -25,11 +25,11 @@ Configured values behave like *your* built-in defaults rather than like flags yo
 - They outrank tuned implicit defaults such as hybrid's citation and reference budgets.
 - They lose to a flag that implies a mode: `--dataset-source` or `--corpus-size` implies `--semantic-source arxiv-corpus` against a configured `candidates`, and `--candidate-pool-size` implies `candidates` symmetrically, leaving config-only settings for the other mode inert. `--all-corpus` likewise beats a configured `corpus_size`.
 
-Applied config defaults are logged at DEBUG with the keys and the file path. Inert corpus-only defaults are reported at INFO and left out of the build sidecar, which records only settings applicable to the selected source and precision.
+Config defaults, including ignored corpus-only settings, are logged at DEBUG with their keys and file path. The build sidecar records only settings applicable to the selected source and precision.
 
 ## Supported keys
 
-Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size` maps to `--batch-size`; `search_mode` maps to `search --mode`. [Local search](cli.md#find-a-seed-paper) also uses applicable saved embedding settings.
+Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size` maps to `--batch-size`; `search_mode` maps to `search --mode`.
 
 | Group | Keys |
 | --- | --- |
@@ -42,13 +42,13 @@ Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size`
 
 ## API key
 
-For the CLI, `S2_API_KEY` takes precedence over `[api].s2_api_key`, including an explicitly empty environment value, which selects anonymous access. `config list` masks the saved key; `config get api.s2_api_key` prints it in full. The CLI passes the key directly to its API client without adding it to subprocess environments.
+For the CLI, `S2_API_KEY` takes precedence over `[api].s2_api_key`, including an explicitly empty environment value, which selects anonymous access. `config list` masks the saved key; `config get api.s2_api_key` prints it in full. The CLI passes a saved TOML key directly to its API client; it does not inject that saved value into child-process environments.
 
 ```bash
 citemesh config set api.s2_api_key YOUR_KEY
 ```
 
-Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). [Direct Python builders](python-api.md#before-you-build-on-this) do not apply saved CLI configuration.
+Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). Direct-builder behavior is in the [Python API](python-api.md#before-you-build-on-this).
 
 ```toml
 [defaults]
@@ -63,7 +63,7 @@ s2_api_key = "your-key-here"
 
 ## The file itself
 
-- [Cache-root settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine its location. [Cache clearing](caching.md#inspecting-and-clearing) preserves it.
+- [Cache-root settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine its location; see [cache maintenance](caching.md#inspecting-and-clearing) for reset behavior.
 - CiteMesh rewrites it with mode `0600` because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
 - Mutations serialize on a file lock, fail after 10 seconds rather than overwrite, and refuse to clobber an unreadable file. Ordinary reads ignore invalid entries, malformed TOML, and non-UTF-8 with a warning, so a broken config never blocks other commands.
 - Unknown keys survive a rewrite; comments do not, since the TOML round-trip is value-level.

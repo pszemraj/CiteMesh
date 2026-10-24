@@ -16,16 +16,26 @@ import html
 import io
 import json
 import logging
-from collections.abc import Hashable, Iterable
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import networkx as nx
 
 from citemesh.core import Paper
+from citemesh.core.values import parse_float
 from citemesh.data.cache import atomic_output_path, atomic_write_text
 
-from ..dashboard.contracts import GRAPH_PAYLOAD_KIND, GRAPH_PAYLOAD_SCHEMA_VERSION
+from ..dashboard.contracts import (
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+    EmbeddingExportMetadata,
+    ExportMetadata,
+    GraphPayload,
+    PlotOverlayMetadata,
+    PortableGraphMetadata,
+    ScoreContract,
+)
 from ..dashboard.payload import DashboardPayloadMixin, _dashboard_template
 from ..themes import Theme, get_theme
 from ..years import coerce_publication_year
@@ -70,10 +80,13 @@ from .plotly_figure import PlotlyFigureMixin, _plotly_title_text
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
+
 PAGE_TITLE_PREFIX = "CiteMesh"
 
 
-def _export_page_title(graph: nx.Graph, seed_id: str) -> str:
+def _export_page_title(graph: PaperGraph, seed_id: str) -> str:
     """Build the browser tab title shared by CiteMesh HTML exports.
 
     Reuses the Plotly figure title text so the tab and the on-canvas title name
@@ -81,7 +94,7 @@ def _export_page_title(graph: nx.Graph, seed_id: str) -> str:
     joined by ``<br>``), so it is flattened back to plain text here and
     re-escaped by the head injector.
 
-    :param nx.Graph graph: Graph containing the seed node.
+    :param PaperGraph graph: Graph containing the seed node.
     :param str seed_id: Seed paper identifier.
     :return str: Plain-text page title.
     """
@@ -115,6 +128,11 @@ __all__ = [
     "GRAPHML_LAYOUT_METADATA_KEY",
     "GRAPHML_LAYOUT_VERSION_KEY",
     "GraphExporter",
+    "EmbeddingExportMetadata",
+    "ExportMetadata",
+    "GraphPayload",
+    "PlotOverlayMetadata",
+    "ScoreContract",
     "_edge_strength_scale",
     "_graphml_determinism_policy",
     "_inject_darkreader_lock",
@@ -128,35 +146,37 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
 
     def __init__(
         self,
-        graph: nx.Graph,
+        graph: PaperGraph,
         seed_id: str,
-        metadata: dict | None = None,
+        metadata: Mapping[str, object] | None = None,
         theme_name: str = "dark",
-        layout: dict[Hashable, Iterable[float]] | None = None,
+        layout: Mapping[Hashable, Iterable[float]] | None = None,
     ):
         """Create exporter bound to a graph and seed paper metadata.
 
-        :param nx.Graph graph: Graph to export.
+        :param PaperGraph graph: Graph to export.
         :param str seed_id: Seed paper identifier.
-        :param Optional[Dict] metadata: Optional metadata to include in outputs. When
+        :param Mapping[str, object] | None metadata: Optional metadata to include in outputs. When
             omitted, strategy-sensitive enrichments fall back to graph-level metadata
             when available.
         :param str theme_name: Theme for visual color defaults.
-        :param Optional[Dict[Hashable, Iterable[float]]] layout: Optional precomputed
+        :param Optional[Mapping[Hashable, Iterable[float]]] layout: Optional precomputed
             layout.
         """
-        self.graph = graph
+        self.graph: PaperGraph = graph
         self.seed_id = seed_id
-        self.metadata = metadata or {}
+        self.metadata: Mapping[str, object] = metadata or {}
         self.theme = get_theme(theme_name)
-        self._layout = layout
+        self._layout: Mapping[Hashable, Iterable[float]] | None = layout
         self._size_map: dict[Hashable, float] | None = None
-        self._color_map_cache: dict[str, dict[Hashable, tuple]] = {}
+        self._color_map_cache: dict[
+            str, dict[Hashable, tuple[float, float, float]]
+        ] = {}
 
     # ------------------------------------------------------------------
     # Public export methods
 
-    def graph_payload(self) -> dict[str, Any]:
+    def graph_payload(self) -> GraphPayload:
         """Build the canonical versioned graph payload shared by JSON consumers.
 
         Dashboard geometry is always embedded (computing a layout on demand when
@@ -164,7 +184,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         loaded back through the dashboard's Load Results flow regardless of
         which export formats were requested or in which order exporters ran.
 
-        :return Dict[str, Any]: Portable CiteMesh graph payload with dashboard data.
+        :return GraphPayload: Portable CiteMesh graph payload with dashboard data.
         :raises ValueError: If the seed identifier is not present among graph nodes.
         """
         sorted_nodes = _sorted_nodes(self.graph)
@@ -184,14 +204,14 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             sorted_edges=sorted_edges,
             include_plotly_geometry=True,
         )
-        portable_meta: dict[str, Any] = {
+        portable_meta: PortableGraphMetadata = {
             "strategy": dashboard_meta["strategy"],
             "year_range": dashboard_meta["year_range"],
         }
         candidate_source_status = dashboard_meta.get("candidate_source_status")
         if isinstance(candidate_source_status, dict):
             portable_meta["candidate_source_status"] = candidate_source_status
-        return {
+        payload: GraphPayload = {
             "kind": GRAPH_PAYLOAD_KIND,
             "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,
             "seed_id": str(self.seed_id),
@@ -209,11 +229,12 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                     "target_title": _node_title(self.graph.nodes[v], v),
                     "source_label": _node_short_label(self.graph.nodes[u], u),
                     "target_label": _node_short_label(self.graph.nodes[v], v),
-                    "weight": float(edge_data.get("weight", 0.0)),
+                    "weight": parse_float(edge_data.get("weight", 0.0)),
                 }
                 for u, v, edge_data in sorted_edges
             ],
         }
+        return payload
 
     def to_json(self, path: Path) -> None:
         """Export the canonical enriched graph payload as atomic UTF-8 JSON.
@@ -307,7 +328,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 nx.__version__,
             )
 
-        export_graph = nx.Graph()
+        export_graph: PaperGraph = nx.Graph()
         sorted_nodes = _sorted_nodes(self.graph)
         sorted_edges = _sorted_edges(self.graph)
         export_graph.graph[GRAPHML_LAYOUT_METADATA_KEY] = determinism_policy
@@ -319,12 +340,15 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             )
 
         for node, attrs in sorted_nodes:
-            cleaned = _serialize_node(node, attrs)
+            cleaned: dict[str, object] = dict(_serialize_node(node, attrs))
             cleaned["year"] = coerce_publication_year(cleaned.get("year"))
-            if isinstance(cleaned.get("authors"), list):
-                cleaned["authors"] = ", ".join(cleaned["authors"])
-            if isinstance(cleaned.get("categories"), list):
-                cleaned["categories"] = ", ".join(cleaned["categories"])
+            authors = cleaned.get("authors")
+            if isinstance(authors, list):
+                # ``str.join`` keeps its native TypeError for non-string entries.
+                cleaned["authors"] = ", ".join(authors)
+            categories = cleaned.get("categories")
+            if isinstance(categories, list):
+                cleaned["categories"] = ", ".join(categories)
             cleaned["is_seed"] = int(bool(cleaned.get("is_seed")))
             cleaned = {
                 key: _xml_safe_graph_value(value) for key, value in cleaned.items()
@@ -337,7 +361,9 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 v,
                 **_ordered_attrs(
                     {
-                        k: float(val) if k == "weight" else _xml_safe_graph_value(val)
+                        k: parse_float(val)
+                        if k == "weight"
+                        else _xml_safe_graph_value(val)
                         for k, val in data.items()
                     }
                 ),
@@ -403,7 +429,8 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             )
 
         for node, attrs in _sorted_nodes(self.graph):
-            paper: Paper | None = attrs.get("paper")
+            raw_paper = attrs.get("paper")
+            paper = raw_paper if isinstance(raw_paper, Paper) else None
             serialized = _serialize_node(node, attrs)
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
@@ -422,6 +449,10 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 tooltip_lines.append(f"Citations: {serialized['citation_count']}")
                 categories = serialized.get("categories", [])
                 if categories:
+                    if not isinstance(categories, Sequence):
+                        raise TypeError(
+                            f"'{type(categories).__name__}' object is not subscriptable"
+                        )
                     cats = ", ".join(html.escape(str(cat)) for cat in categories[:3])
                     tooltip_lines.append(f"Categories: {cats}")
             else:
@@ -437,7 +468,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             )
 
         for u, v, data in _sorted_edges(self.graph):
-            weight = float(data.get("weight", 0.1))
+            weight = parse_float(data.get("weight", 0.1))
             net.add_edge(u, v, value=max(0.1, weight * 5))
 
         with atomic_output_path(path) as tmp_path:
@@ -477,7 +508,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         with atomic_output_path(path) as tmp_path:
             try:
                 fig.write_html(
-                    str(tmp_path),
+                    tmp_path,
                     div_id=div_id,
                     # Plotly sizes the div from the figure layout by default,
                     # leaving a white band under the plot; the graph should own

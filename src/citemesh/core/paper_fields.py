@@ -18,8 +18,7 @@ from ``citemesh.data``, ``citemesh.services``, or ``citemesh.strategies``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Mapping, Sequence
 
 __all__ = [
     "coerce_author_name",
@@ -29,45 +28,48 @@ __all__ = [
 ]
 
 
-def _display_name(raw: Any) -> str:
+def _display_name(raw: object) -> str:
     """Read a display string from a bare string, a ``name`` key, or a ``name`` attribute.
 
-    :param Any raw: Raw field value in any of the supported shapes.
+    :param object raw: Raw field value in any of the supported shapes.
     :return str: Stripped display string, empty when no usable name is present.
     """
     if isinstance(raw, str):
         return raw.strip()
-    name = raw.get("name") if isinstance(raw, Mapping) else getattr(raw, "name", None)
+    if isinstance(raw, Mapping):
+        name: object = raw.get("name")
+    else:
+        name = getattr(raw, "name", None)
     return name.strip() if isinstance(name, str) else ""
 
 
-def coerce_venue(raw: Any) -> str:
+def coerce_venue(raw: object) -> str:
     """Normalize a venue-like value into a display string.
 
     Accepts a plain string, a ``{"name": ...}`` mapping (Semantic Scholar's
     ``publicationVenue`` and ``journal``), an object exposing ``.name``, or
     ``None``.
 
-    :param Any raw: Raw venue payload value.
+    :param object raw: Raw venue payload value.
     :return str: Stripped venue name, empty when unavailable.
     """
     return _display_name(raw)
 
 
-def coerce_author_name(raw: Any) -> str:
+def coerce_author_name(raw: object) -> str:
     """Normalize one author entry into a display name.
 
     Accepts a plain name, a ``{"name": ...}`` mapping, an object exposing
     ``.name``, or ``None``. Callers that also need the source record's other
     fields (an author ID, say) read those from the entry themselves.
 
-    :param Any raw: Raw author entry.
+    :param object raw: Raw author entry.
     :return str: Stripped author name, empty when unavailable.
     """
     return _display_name(raw)
 
 
-def coerce_authors(raw: Any, *, split_string: bool = True) -> list[str]:
+def coerce_authors(raw: object, *, split_string: bool = True) -> list[str]:
     """Normalize an authors field into a list of display names.
 
     Accepts a list of names, a list of ``{"name": ...}`` mappings or objects, a
@@ -75,7 +77,7 @@ def coerce_authors(raw: Any, *, split_string: bool = True) -> list[str]:
     dropped; source order and duplicates are preserved, because two authors may
     legitimately share a display name.
 
-    :param Any raw: Raw authors payload.
+    :param object raw: Raw authors payload.
     :param bool split_string: Whether a single string is split on commas into
         several names, as HuggingFace arXiv records pack them. Semantic Scholar
         always sends a list, so its callers can pass ``False`` to treat a bare
@@ -91,13 +93,13 @@ def coerce_authors(raw: Any, *, split_string: bool = True) -> list[str]:
     return [name for name in map(coerce_author_name, raw) if name]
 
 
-def coerce_categories(raw: Any, *, split_whitespace: bool = False) -> list[str]:
+def coerce_categories(raw: object, *, split_whitespace: bool = False) -> list[str]:
     """Normalize a categories field into a deduplicated list of labels.
 
     Accepts a list of labels, a single string, or ``None``. Non-string entries,
     blanks, and repeats are dropped; the first occurrence keeps its position.
 
-    :param Any raw: Raw categories payload.
+    :param object raw: Raw categories payload.
     :param bool split_whitespace: Whether each string is split into several
         labels on commas and whitespace. arXiv packs category codes that way
         (``"cs.CL cs.LG"``), while Semantic Scholar's ``fieldsOfStudy`` labels
@@ -105,7 +107,7 @@ def coerce_categories(raw: Any, *, split_whitespace: bool = False) -> list[str]:
     :return list[str]: Labels in source order, stripped and deduplicated.
     """
     if isinstance(raw, str):
-        values: list[Any] = [raw]
+        values: Sequence[object] = (raw,)
     elif isinstance(raw, list):
         values = raw
     else:

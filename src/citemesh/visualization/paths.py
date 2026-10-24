@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from .node_data import effective_node_metadata
 
 if TYPE_CHECKING:
-    import networkx as nx
+    from citemesh.core.models import PaperGraph
 
 MAX_TITLE_CHARS = 40
 
@@ -60,16 +60,20 @@ def _output_dir_name(label: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS)
 
 
 def generate_output_path(
-    graph: nx.Graph, seed_id: str, output_dir: Path = Path("out"), strategy: str = ""
+    graph: PaperGraph,
+    seed_id: str,
+    output_dir: Path = Path("out"),
+    strategy: str = "",
 ) -> Path:
     """
     Generate a title-based output path, reusing an existing seed directory.
 
-    :param nx.Graph graph: NetworkX graph containing the seed paper title.
+    :param PaperGraph graph: NetworkX graph containing the seed paper title.
     :param str seed_id: ID of seed paper
     :param Path output_dir: Output directory
     :param str strategy: Optional strategy suffix used in filename.
     :return Path: Path object for output file
+    :raises TypeError: If the effective seed title is not a string.
     """
     existing_dirs = sorted(
         path for path in output_dir.glob(f"*-{_seed_suffix(seed_id)}") if path.is_dir()
@@ -79,6 +83,8 @@ def generate_output_path(
     else:
         seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
         title = effective_node_metadata(seed_id, seed_attrs).get("title") or seed_id
+        if not isinstance(title, str):
+            raise TypeError("The effective node title must be a string.")
         paper_dir = output_dir / _output_dir_name(label=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,21 +1,19 @@
-"""Optional-dependency probes and import shims for the embedding strategy.
-
-Every optional third-party import used by the embedding builder funnels through
-one of the ``_import_*`` helpers here, so tests can inject fakes by patching a
-single module attribute and the rest of the package never imports ``torch``,
-``sentence_transformers``, ``datasets`` or ``huggingface_hub`` at module scope.
-"""
+"""Import optional embedding dependencies only when their features are needed."""
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
-from typing import Any
+from types import ModuleType
+from typing import TYPE_CHECKING
 
 from citemesh._runtime import stderr_isatty
 from citemesh.progress import progress_enabled
 
 from . import runtime
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 
 def _check_embedding_deps(require_corpus: bool = True) -> None:
@@ -25,7 +23,7 @@ def _check_embedding_deps(require_corpus: bool = True) -> None:
         are required. Candidate mode only needs the encoder stack.
     """
     missing: list[str] = []
-    torch_module: Any | None = None
+    torch_module: ModuleType | None = None
 
     try:
         torch_module = _import_torch()
@@ -50,7 +48,9 @@ def _check_embedding_deps(require_corpus: bool = True) -> None:
         )
 
     raw_torch_version = str(getattr(torch_module, "__version__", "")).strip()
-    torch_version = runtime._parse_major_minor(raw_torch_version, default=(0, 0))
+    torch_version = runtime._parse_major_minor(raw_torch_version)
+    if torch_version is None:
+        torch_version = (0, 0)
     if torch_version < runtime._EMBEDDING_MIN_TORCH_VERSION:
         raise ImportError(
             "Embedding strategy requires torch>=2.9.0 (runtime precision policy). "
@@ -70,50 +70,41 @@ def _module_available(module_name: str) -> bool:
         return False
 
 
-def _import_optional(module_name: str, attribute: str | None = None) -> Any:
-    """Import an optional dependency module, or one attribute from it.
+def _import_optional(module_name: str) -> ModuleType:
+    """Import an optional dependency module.
 
-    Mirrors ``from <module_name> import <attribute>``: a missing module and a
-    missing attribute both surface as ``ImportError``, which is the only
-    exception the dependency check and the model loader expect to catch.
+    Keeping this import behind a function lets the non-embedding package load
+    without importing optional dependencies.
 
     :param str module_name: Absolute module name to import.
-    :param Optional[str] attribute: Attribute to read from the imported module.
-    :return Any: The imported module, or the named attribute when given.
-    :raises ImportError: If the module or the requested attribute is unavailable.
+    :return ModuleType: Imported optional module.
+    :raises ImportError: If the module cannot be imported.
     """
-    module = importlib.import_module(module_name)
-    if attribute is None:
-        return module
-    try:
-        return getattr(module, attribute)
-    except AttributeError as error:
-        raise ImportError(
-            f"cannot import name {attribute!r} from {module_name!r}",
-            name=module_name,
-        ) from error
+    return importlib.import_module(module_name)
 
 
-def _import_torch() -> Any:
+def _import_torch() -> ModuleType:
     """Import and return the ``torch`` module.
 
-    :return Any: Imported ``torch`` module object.
+    :return ModuleType: Imported ``torch`` module.
     """
     return _import_optional("torch")
 
 
-def _import_sentence_transformer_class() -> Any:
+def _import_sentence_transformer_class() -> type[SentenceTransformer]:
     """Import and return ``SentenceTransformer``.
 
-    :return Any: Imported ``SentenceTransformer`` class.
+    :return type[SentenceTransformer]: Imported ``SentenceTransformer`` class.
     """
-    return _import_optional("sentence_transformers", "SentenceTransformer")
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer
 
 
-def _import_datasets_module() -> Any:
+def _import_datasets_module() -> ModuleType:
     """Import ``datasets`` and apply CiteMesh's progress-display policy.
 
-    :return Any: Imported ``datasets`` module object.
+    :return ModuleType: Imported ``datasets`` module.
     """
     datasets_module = _import_optional("datasets")
     progress_bars = getattr(datasets_module, "utils", None)
@@ -124,9 +115,9 @@ def _import_datasets_module() -> Any:
     return datasets_module
 
 
-def _import_huggingface_hub_module() -> Any:
+def _import_huggingface_hub_module() -> ModuleType:
     """Import and return the ``huggingface_hub`` module.
 
-    :return Any: Imported ``huggingface_hub`` module object.
+    :return ModuleType: Imported ``huggingface_hub`` module.
     """
     return _import_optional("huggingface_hub")

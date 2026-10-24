@@ -52,7 +52,8 @@ def _size_console(console: Console, log_width: int, *, interactive: bool) -> Con
     :param bool interactive: Whether the console's stream is attached to a TTY.
     :return Console: The same console, resized.
     """
-    console.width = _resolve_console_width(log_width, interactive=interactive)
+    # Rich accepts None for auto sizing; its setter annotation only permits int.
+    console.width = _resolve_console_width(log_width, interactive=interactive)  # type: ignore[assignment]
     return console
 
 
