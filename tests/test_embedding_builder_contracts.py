@@ -8045,6 +8045,50 @@ def test_embedding_top_k_validation_and_tie_order(
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
 
 
+@pytest.mark.parametrize(
+    "selection,limit,view",
+    [("all", None, None), ("newest", 5, None), ("newest", 5, 2)],
+)
+def test_embedding_runtime_metadata_records_installed_coverage(
+    selection: str, limit: int | None, view: int | None
+) -> None:
+    """Bound source coverage stays distinct from every-member and newest-N views."""
+    from citemesh.data.embedding_contract import CorpusSource
+    from citemesh.strategies.embedding.refresh import _builder_contract
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="arxiv-corpus",
+        corpus_size=view,
+        client=MagicMock(),
+    )
+    contract = _builder_contract(
+        builder, fingerprint=f"hf::{builder.model_name}::" + "a" * 40
+    )
+    source = CorpusSource(
+        builder.dataset_source, None, builder.dataset_split, "b" * 40, selection, limit
+    )
+    state = {
+        "update_policy": "manual",
+        "membership_complete": True,
+        "namespace_serialization": builder._embedding_cache_namespace(),
+        "source": source.to_dict(),
+        "contract": contract.to_dict(),
+    }
+    cache = MagicMock(spec=EmbeddingCache)
+    cache.namespace_id = "0123456789ab"
+    cache.corpus_state.return_value = state
+    cache.require_complete_certified_corpus.return_value = state
+    builder.embedding_cache = cache
+    assert builder._ready_manual_corpus()
+    cache.require_complete_certified_corpus.assert_called_once_with(corpus_size=view)
+    metadata = builder._embedding_runtime_metadata()
+    assert metadata["dataset_revision"] == source.revision
+    assert metadata["installed_corpus_selection"] == selection
+    assert metadata["installed_corpus_limit"] == limit
+    assert builder.corpus_size == view
+
+
 def test_embedding_runtime_metadata_tracks_prefilter_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

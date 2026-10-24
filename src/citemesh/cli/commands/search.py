@@ -12,6 +12,7 @@ from typing import TypedDict, cast
 from rich.text import Text
 
 from citemesh.data.embedding_cache import EmbeddingCache, _corpus_size_from_token
+from citemesh.data.embedding_contract import InstalledCorpusError
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.embedding import (
@@ -542,10 +543,10 @@ def _run_search_command(
         # would answer a question the flags say was not asked.
         logger.error("%s", exc)
         return 2
-    except EmbeddingCacheFingerprintMismatchError as exc:
+    except (EmbeddingCacheFingerprintMismatchError, InstalledCorpusError) as exc:
         # This refusal preserves a costly hydrated corpus. Returning keyword
         # results would hide the operator action needed to resolve it.
-        logger.error("%s", exc)
+        logger.error("%s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
         return 1
     except Exception as exc:
         runtime_selectors = ""

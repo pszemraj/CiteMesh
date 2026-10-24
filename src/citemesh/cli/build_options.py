@@ -306,7 +306,13 @@ def _embedding_export_metadata(
     if payload["semantic_source"] == "arxiv-corpus":
         # Candidate pool settings apply only to candidate builds.
         payload.pop("candidate_pool_size")
-        for key in ("dataset_revision", "cache_namespace", "index_origin"):
+        for key in (
+            "dataset_revision",
+            "cache_namespace",
+            "index_origin",
+            "installed_corpus_selection",
+            "installed_corpus_limit",
+        ):
             if isinstance(runtime_metadata, dict) and key in runtime_metadata:
                 payload[key] = runtime_metadata[key]
     return payload

@@ -39,6 +39,7 @@ from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
 )
+from citemesh.data.embedding_contract import InstalledCorpusError
 from citemesh.progress import progress_task
 from citemesh.strategies.base import deterministic_sort_key
 
@@ -398,7 +399,11 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         )
 
     def _ready_manual_corpus(self) -> bool:
-        """Bind a ready managed corpus and validate its requested source and view."""
+        """Bind a ready managed corpus and validate its requested source and view.
+
+        :return bool: Whether this is a ready manually managed corpus.
+        :raises InstalledCorpusError: If the installed corpus cannot satisfy the request.
+        """
         cache = self.embedding_cache
         state_reader = getattr(cache, "corpus_state", None)
         if state_reader is None:
@@ -407,17 +412,23 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if not state or state.get("update_policy") != "manual":
             return False
         from citemesh.data.embedding_contract import (
+            CorpusSource,
             EmbeddingContract,
             ExistingCacheSelection,
         )
 
-        state = cache.require_complete_certified_corpus(corpus_size=self.corpus_size)
+        try:
+            state = cache.require_complete_certified_corpus(
+                corpus_size=self.corpus_size
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise InstalledCorpusError(str(exc)) from exc
         source = state["source"]
         if (source["repo_id"], source["split"]) != (
             self.dataset_source,
             self.dataset_split,
         ):
-            raise RuntimeError(
+            raise InstalledCorpusError(
                 "Installed corpus source does not match the requested dataset and split"
             )
         if self._cache_selection is None:
@@ -437,7 +448,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             )
         if self._resolved_model_fingerprint is not None:
             self._require_selected_runtime_match()
-        self._completed_source_revision: str | None = source["revision"]
+        self._completed_corpus_source: CorpusSource | None = CorpusSource(**source)
         self._index_origin = state.get("origin")
         return True
 

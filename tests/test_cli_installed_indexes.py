@@ -640,14 +640,29 @@ def test_legacy_adoption_rejects_explicit_all_against_recorded_limit(
 
 
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+@pytest.mark.parametrize("installed_limit", [None, 5])
 def test_selected_build_writes_contract_and_runtime_provenance(
     installed_selection: ExistingCacheSelection,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     strategy: str,
+    installed_limit: int | None,
 ) -> None:
     """The build command carries selected identity through export and sidecar writing."""
     from citemesh.cli.commands import build
+    from citemesh.data.embedding_cache import lifecycle
+
+    installed_scope = "all" if installed_limit is None else "newest"
+    monkeypatch.setattr(
+        lifecycle,
+        "open_existing_cache",
+        lambda _: SimpleNamespace(
+            hydration_operation_lock=nullcontext,
+            corpus_state=lambda: {
+                "source": {"selection": installed_scope, "limit": installed_limit}
+            },
+        ),
+    )
 
     graph = build_seed_graph()
     origin = {
@@ -659,6 +674,8 @@ def test_selected_build_writes_contract_and_runtime_provenance(
         "cache_namespace": installed_selection.namespace_id,
         "dataset_revision": "source-pin",
         "index_origin": origin,
+        "installed_corpus_selection": installed_scope,
+        "installed_corpus_limit": installed_limit,
     }
 
     def build_graph(
@@ -681,6 +698,7 @@ def test_selected_build_writes_contract_and_runtime_provenance(
             strategy,
             "--cache-namespace",
             installed_selection.namespace_id,
+            "--all-corpus",
             "--export",
             "json",
             "--output",
@@ -703,6 +721,9 @@ def test_selected_build_writes_contract_and_runtime_provenance(
     assert embedding["cache_namespace"] == installed_selection.namespace_id
     assert embedding["dataset_revision"] == "source-pin"
     assert embedding["index_origin"] == origin
+    assert embedding["all_corpus"] is True
+    assert embedding["installed_corpus_selection"] == installed_scope
+    assert embedding.get("installed_corpus_limit") == installed_limit
 
 
 def test_minimal_selected_finite_corpus_uses_certified_limit(

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
         CorpusOrigin,
         EmbeddingInputMetadata,
     )
-    from citemesh.data.embedding_contract import ExistingCacheSelection
+    from citemesh.data.embedding_contract import CorpusSource, ExistingCacheSelection
     from citemesh.data.model_profiles import (
         DocumentFormatter,
         EmbeddingModelProfile,
@@ -76,7 +76,7 @@ class _EmbeddingBuilderHost(Protocol):
     _last_search_used_binary_prefilter: bool | None
     _cache_selection: ExistingCacheSelection | None
     _selected_cache_handle: EmbeddingCache | None
-    _completed_source_revision: str | None
+    _completed_corpus_source: CorpusSource | None
     _index_origin: CorpusOrigin | None
     _embedding_cache: EmbeddingCache | None
     _graph_embedding_cache: EmbeddingCache | None

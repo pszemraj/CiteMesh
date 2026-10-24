@@ -61,7 +61,12 @@ from citemesh.data.embedding_cache.models import (
     CorpusOrigin,
     EmbeddingInputMetadata,
 )
-from citemesh.data.embedding_contract import ExistingCacheSelection, NamespaceSelectors
+from citemesh.data.embedding_contract import (
+    CorpusSource,
+    ExistingCacheSelection,
+    InstalledCorpusError,
+    NamespaceSelectors,
+)
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -173,6 +178,8 @@ class EmbeddingRuntimeMetadata(_RequiredEmbeddingRuntimeMetadata, total=False):
     dataset_revision: str | None
     cache_namespace: str
     index_origin: CorpusOrigin | None
+    installed_corpus_selection: Literal["all", "newest"]
+    installed_corpus_limit: int | None
 
 
 class _EmbeddingCacheConstructionOptions(TypedDict, total=False):
@@ -401,7 +408,7 @@ class EmbeddingGraphBuilder(
         self.use_streaming = use_streaming
         self._validate_streaming_contract()
         self._reset_model_runtime_state()
-        self._completed_source_revision: str | None = None
+        self._completed_corpus_source: CorpusSource | None = None
         self._index_origin: CorpusOrigin | None = None
 
     @staticmethod
@@ -861,7 +868,7 @@ class EmbeddingGraphBuilder(
         assert selection is not None
         contract = selection.contract
         if self.model_revision != contract.model_revision:
-            raise RuntimeError(
+            raise InstalledCorpusError(
                 "Installed cache runtime mismatch for model_revision: "
                 f"stored={contract.model_revision!r}, active={self.model_revision!r}"
             )
@@ -870,9 +877,11 @@ class EmbeddingGraphBuilder(
                 self, fingerprint=self._resolved_model_fingerprint
             )
         except ValueError as exc:
-            raise RuntimeError(f"Installed cache runtime mismatch: {exc}") from exc
+            raise InstalledCorpusError(
+                f"Installed cache runtime mismatch: {exc}"
+            ) from exc
         if actual != contract:
-            raise RuntimeError(
+            raise InstalledCorpusError(
                 "Installed cache runtime mismatch: "
                 f"stored={contract!r}, active={actual!r}"
             )
@@ -918,9 +927,13 @@ class EmbeddingGraphBuilder(
         }
         selection = self._cache_selection
         if selection is not None:
-            metadata["dataset_revision"] = self._completed_source_revision
+            source = self._completed_corpus_source
+            metadata["dataset_revision"] = source.revision if source else None
             metadata["cache_namespace"] = selection.namespace_id
             metadata["index_origin"] = self._index_origin
+            if source is not None:
+                metadata["installed_corpus_selection"] = source.selection
+                metadata["installed_corpus_limit"] = source.limit
         return metadata
 
     def _cache_model_identity(self) -> str:
@@ -1681,10 +1694,9 @@ class EmbeddingGraphBuilder(
         :param str query: Free-text search query.
         :param int top_k: Number of results to return.
         :return List[CacheSearchResult]: Ranked results with cached metadata.
-        :raises ValueError: If the query, ``top_k``, or corpus view is invalid,
-            or the view exceeds installed coverage.
-        :raises RuntimeError: If installed state is pending or uncertified, or
-            its source or vector contract differs from the requested runtime.
+        :raises ValueError: If the query is empty or ``top_k`` is invalid.
+        :raises InstalledCorpusError: If installed state, coverage, source or
+            vector contract prevents reuse.
         """
         normalized_query = str(query).strip()
         if not normalized_query:
@@ -1717,9 +1729,8 @@ class EmbeddingGraphBuilder(
         """Resolve the runtime-active model and its exact persistent namespace.
 
         :return EmbeddingCache: Artifact-bound cache ready for safe access.
-        :raises ValueError: If the installed corpus view is invalid or exceeds coverage.
-        :raises RuntimeError: If installed state is pending or uncertified, or
-            its source or vector contract differs from the requested runtime.
+        :raises InstalledCorpusError: If installed state, coverage, source or
+            vector contract prevents reuse.
         """
         if self._cache_selection is not None:
             with self.embedding_cache.hydration_operation_lock():

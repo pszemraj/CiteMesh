@@ -2266,20 +2266,34 @@ def test_search_auto_treats_missing_embedding_dependencies_as_expected(
     s2_search.assert_called_once_with(args)
 
 
-def test_search_auto_refuses_corpus_fingerprint_mismatch(
+@pytest.mark.parametrize(
+    "failure", ["fingerprint", "pending", "uncertified", "contract", "coverage"]
+)
+def test_search_auto_refuses_unusable_installed_corpus(
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
-    """Auto search must surface a protected corpus fingerprint mismatch.
+    """Surface corpus refusals without replacing local retrieval with keyword search."""
+    from citemesh.data.embedding_contract import InstalledCorpusError
 
-    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and S2 path.
-    :return None: Asserts the mismatch exits non-zero without a keyword fallback.
-    """
     fake_builder = _fake_local_search_builder(cached_count=1)
-    fake_builder.prepare_embedding_cache.side_effect = EmbeddingCacheFingerprintMismatchError(
-        "protected corpus cache; run `citemesh build <paper-id> --strategy embedding "
-        "--semantic-source arxiv-corpus --force-rebuild-cache --overwrite-cache` "
-        "with the same model and corpus options"
+    messages = {
+        "fingerprint": (
+            "protected corpus cache; run `citemesh build <paper-id> --strategy embedding "
+            "--semantic-source arxiv-corpus --force-rebuild-cache --overwrite-cache` "
+            "with the same model and corpus options"
+        ),
+        "pending": "Corpus cache has an incomplete refresh operation; resume that operation before using the corpus",
+        "uncertified": "Corpus membership is not certified; run explicit refresh",
+        "contract": "Installed cache runtime mismatch",
+        "coverage": "Requested corpus view exceeds installed coverage",
+    }
+    error_type = (
+        EmbeddingCacheFingerprintMismatchError
+        if failure == "fingerprint"
+        else InstalledCorpusError
     )
+    fake_builder.prepare_embedding_cache.side_effect = error_type(messages[failure])
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
@@ -2296,10 +2310,7 @@ def test_search_auto_refuses_corpus_fingerprint_mismatch(
 
     assert result == 1
     message = str(error_mock.call_args)
-    assert "protected corpus cache" in message
-    assert "citemesh build <paper-id>" in message
-    assert "--strategy embedding" in message
-    assert "--force-rebuild-cache --overwrite-cache" in message
+    assert messages[failure] in message
     s2_search.assert_not_called()
 
 
@@ -5917,6 +5928,44 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
     )
     assert selector_metadata["effective_model_revision"] == resolved_revision
     assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
+
+    for selection, limit, flags in [
+        ("all", None, ["--all-corpus"]),
+        ("newest", 5, ["--all-corpus"]),
+        ("newest", 5, ["--corpus-size", "2"]),
+    ]:
+        corpus_namespace = build_parser.parse_args(
+            [
+                "seed",
+                "--strategy",
+                "embedding",
+                "--semantic-source",
+                "arxiv-corpus",
+                *flags,
+            ]
+        )
+        corpus_metadata = build_options_module._embedding_export_metadata(
+            corpus_namespace,
+            runtime_metadata={
+                "installed_corpus_selection": selection,
+                "installed_corpus_limit": limit,
+            },
+        )
+        corpus_sidecar = graph_config_module._build_graph_config_payload(
+            cli_args=corpus_namespace,
+            seed_id="seed",
+            metadata={"strategy": "embedding", "embedding": corpus_metadata},
+            selected_formats=["json"],
+            output_paths={"json": Path("out/embedding.json")},
+            s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        )
+        replay = corpus_sidecar["build"]["embedding"]
+        assert corpus_metadata["installed_corpus_selection"] == selection
+        assert corpus_metadata["installed_corpus_limit"] == limit
+        assert replay["installed_corpus_selection"] == selection
+        assert replay.get("installed_corpus_limit") == limit
+        assert replay["all_corpus"] == (flags == ["--all-corpus"])
+        assert replay.get("corpus_size") == (2 if "--corpus-size" in flags else None)
 
 
 def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:

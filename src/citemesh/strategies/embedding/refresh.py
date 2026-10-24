@@ -329,7 +329,7 @@ def refresh_builder_corpus(
                 expected_rows=active_rows,
                 source_records_examined=source_rows,
             )
-        builder._completed_source_revision = target.revision
+        builder._completed_corpus_source = target
         logger.info(
             "Corpus refresh complete: %s source rows, %s active papers, %s encoded at %s",
             f"{source_rows:,}",

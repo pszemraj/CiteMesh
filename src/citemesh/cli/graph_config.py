@@ -133,7 +133,13 @@ def _build_graph_config_payload(
         }
         runtime_embedding = metadata.get("embedding")
         if isinstance(runtime_embedding, dict):
-            for key in ("dataset_revision", "cache_namespace", "index_origin"):
+            for key in (
+                "dataset_revision",
+                "cache_namespace",
+                "index_origin",
+                "installed_corpus_selection",
+                "installed_corpus_limit",
+            ):
                 if key in runtime_embedding:
                     embedding_config[key] = runtime_embedding[key]
             effective_model = runtime_embedding.get("effective_model")

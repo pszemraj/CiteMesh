@@ -8,6 +8,10 @@ from typing import Literal, TypedDict
 INT8_QUANTIZATION = "affine-int8-v1"
 
 
+class InstalledCorpusError(RuntimeError):
+    """Refuse an installed corpus that requires operator action before use."""
+
+
 class EmbeddingContractData(TypedDict):
     """Serialized fields that identify stored embedding vectors."""
 

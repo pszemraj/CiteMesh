@@ -90,6 +90,8 @@ class EmbeddingExportMetadata(_EmbeddingExportMetadataRequired, total=False):
     dataset_revision: str | None
     cache_namespace: str
     index_origin: CorpusOrigin | None
+    installed_corpus_selection: Literal["all", "newest"]
+    installed_corpus_limit: int | None
 
 
 class ExportMetadata(TypedDict, total=False):
@@ -358,6 +360,8 @@ class EmbeddingConfig(TypedDict, total=False):
     dataset_split: str
     dataset_revision: str | None
     index_origin: CorpusOrigin | None
+    installed_corpus_selection: Literal["all", "newest"]
+    installed_corpus_limit: int | None
     corpus_size: int | None
     all_corpus: bool
     truncate_dim: int | None

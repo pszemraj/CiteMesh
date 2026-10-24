@@ -1,5 +1,6 @@
 """Pinned source reconciliation and installed-corpus consumer contracts."""
 
+import json
 import runpy
 from dataclasses import replace
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest
 
 from citemesh.data import get_cache_dir
 from citemesh.data.embedding_cache import select_existing_cache
-from citemesh.data.embedding_contract import CorpusSource
+from citemesh.data.embedding_contract import CorpusSource, InstalledCorpusError
 from citemesh.strategies.embedding import builder as builder_module
 from citemesh.strategies.embedding import corpus_source, deps
 from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
@@ -313,21 +314,35 @@ def test_installed_consumers_preserve_binding_and_smaller_view(
     assert "revision=main::" in selection.namespace_serialization
 
 
-@pytest.mark.parametrize("mismatch", ["source", "split", "coverage"])
+@pytest.mark.parametrize(
+    "mismatch", ["source", "split", "coverage", "pending", "uncertified"]
+)
 def test_implicit_installed_cache_rejects_incompatible_corpus_view(
     monkeypatch, runtime, mismatch
 ):
     reads, _ = install_source(monkeypatch, {"one": [row("2401.00001")]}, ["one"])
     original = make_builder(corpus_size=1)
     original.refresh_corpus()
+    if mismatch in {"pending", "uncertified"}:
+        state = original.embedding_cache.corpus_state()
+        state["membership_complete"] = False
+        if mismatch == "pending":
+            state["pending"] = {"kind": "refresh"}
+        original.embedding_cache._write_cache_metadata(
+            {"corpus_state": json.dumps(state)}
+        )
     options = {
         "source": {"dataset_source": "other/source"},
         "split": {"dataset_split": "other"},
         "coverage": {"corpus_size": 2},
+        "pending": {},
+        "uncertified": {},
     }[mismatch]
     builder = make_builder(**options)
     reads.clear()
-    with pytest.raises((RuntimeError, ValueError), match="source|coverage"):
+    with pytest.raises(
+        InstalledCorpusError, match="source|coverage|incomplete|not certified"
+    ):
         builder.prepare_embedding_cache()
     assert not reads
 
@@ -903,7 +918,7 @@ def test_selected_runtime_rejects_contract_mismatch(monkeypatch, runtime, field,
     builder = EmbeddingGraphBuilder(cache_selection=selection)
     builder._resolved_model_fingerprint = selection.contract.model_artifact_identity
     setattr(builder, field, value)
-    with pytest.raises(RuntimeError, match="runtime mismatch"):
+    with pytest.raises(InstalledCorpusError, match="runtime mismatch"):
         builder._require_selected_runtime_match()
 
 
