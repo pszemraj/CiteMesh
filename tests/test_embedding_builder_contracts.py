@@ -442,6 +442,7 @@ def _concurrent_hydration_worker(
             return original_search(seed_embedding)
 
         builder._ensure_cache_model_fingerprint = ensure_fingerprint
+        builder._resolve_dataset_split_row_count = lambda _: corpus_size
         builder._load_dataset_for_hydration = load_dataset
         builder._ensure_int8_calibration_ranges = no_op
         builder._refresh_cached_corpus_metadata = no_op
@@ -6794,6 +6795,7 @@ def test_failed_corpus_extension_retains_complete_cache(
     )
     cache = builder.embedding_cache
     load_mock = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     def extend(**_kwargs: Any) -> records_module._HydrationSourceSliceResult:
@@ -7517,7 +7519,7 @@ def test_full_corpus_refresh_retries_partial_writes_at_matching_counts(
 
 def test_hydration_reset_restores_model_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Hydration reset should restore resolved model fingerprint metadata."""
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
@@ -7530,6 +7532,7 @@ def test_hydration_reset_restores_model_fingerprint(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-before-clear")
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
@@ -7604,12 +7607,12 @@ def test_concurrent_hydration_serializes_spec_through_consuming_search(
 
 def test_int8_hydration_calibration_uses_representative_prepass(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Int8 hydration should reuse repeatable rows for representative sampling.
 
     :param pytest.MonkeyPatch monkeypatch: Dataset, model, and cache stubs.
-    :param Any tmp_path: Temporary cache directory.
+    :param Path tmp_path: Temporary cache directory.
     :return None: Checks calibration sampling without a second dataset load.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
@@ -7632,6 +7635,9 @@ def test_int8_hydration_calibration_uses_representative_prepass(
     ]
     dataset = deps_module._import_datasets_module().Dataset.from_list(records)
     load_mock = MagicMock(return_value=(source, dataset))
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _: len(records)
+    )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     captured_texts: list[list[str]] = []
@@ -7755,7 +7761,7 @@ def test_int8_calibration_reuses_persisted_ranges(
 
 def test_hydration_flush_size_controls_cache_write_bursting(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Hydration should flush metadata batches using configured flush threshold."""
     assert embedding_module.HYDRATION_FLUSH_SIZE == EMBEDDING_DATASET_CHUNK_ROWS
@@ -7772,6 +7778,7 @@ def test_hydration_flush_size_controls_cache_write_bursting(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-flush-threshold")
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 7)
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
@@ -9345,6 +9352,11 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
             embedding_builder,
             "_load_dataset_for_hydration",
             lambda **_kwargs: (dataset_source, [dict(row) for row in source_rows]),
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "_resolve_dataset_split_row_count",
+            lambda _: len(source_rows),
         )
         return public_builder, embedding_builder, client
 
