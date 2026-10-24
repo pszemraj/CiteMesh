@@ -170,6 +170,48 @@ def test_exact_bounded_export(dtype, dimension, tmp_path):
         assert manifest.calibration_ranges is None
 
 
+@pytest.mark.parametrize("completion", ["exhaust", "close", "error"])
+def test_snapshot_reader_closes_database_before_temporary_cleanup(
+    monkeypatch, tmp_path, completion
+):
+    """Close the duplicate-ID index before removing its temporary directory."""
+    from citemesh.data.embedding_cache import portable
+
+    snapshot = tmp_path / "snapshot"
+    manifest = export_snapshot(ExportFixture(), snapshot, config_name="test")
+    temporary_directory = portable.TemporaryDirectory
+    connect = sqlite3.connect
+    connections = []
+
+    def track_connection(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    @contextmanager
+    def check_cleanup(*args, **kwargs):
+        with temporary_directory(*args, **kwargs) as directory:
+            try:
+                yield directory
+            finally:
+                assert connections
+                for connection in connections:
+                    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                        connection.execute("SELECT 1")
+
+    monkeypatch.setattr(portable.sqlite3, "connect", track_connection)
+    monkeypatch.setattr(portable, "TemporaryDirectory", check_cleanup)
+    batches = iter_snapshot_batches(snapshot, manifest, batch_rows=2)
+    next(batches)
+    if completion == "exhaust":
+        list(batches)
+    elif completion == "close":
+        batches.close()
+    else:
+        with pytest.raises(ValueError, match="stop reading"):
+            batches.throw(ValueError("stop reading"))
+
+
 @pytest.mark.parametrize(
     "alteration",
     [

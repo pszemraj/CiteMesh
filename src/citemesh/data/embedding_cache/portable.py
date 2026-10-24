@@ -7,6 +7,7 @@ import platform
 import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -585,7 +586,7 @@ def iter_snapshot_batches(
     if batch_rows < 1:
         raise ValueError("Batch row count must be positive")
     with TemporaryDirectory(prefix="citemesh-portable-") as temporary:
-        with sqlite3.connect(Path(temporary) / "ids.sqlite") as seen:
+        with closing(sqlite3.connect(Path(temporary) / "ids.sqlite")) as seen:
             seen.execute("CREATE TABLE ids (paper_id TEXT PRIMARY KEY)")
             yield from _iter_snapshot_batches(snapshot_dir, manifest, batch_rows, seen)
 
