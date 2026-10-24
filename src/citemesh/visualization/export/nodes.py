@@ -106,11 +106,8 @@ def _node_short_label(attrs: Mapping[str, object], node_id: Hashable) -> str:
     """
     serialized = _serialize_node(node_id, attrs)
     title = str(serialized.get("title") or "").strip() or str(node_id)
-    raw_authors = serialized.get("authors", [])
-    surname = ""
-    if isinstance(raw_authors, list) and raw_authors:
-        first_author = str(raw_authors[0]).strip()
-        surname = first_author.split()[-1] if first_author else ""
+    authors = _normalized_text_values(serialized.get("authors", []))
+    surname = authors[0].split()[-1] if authors else ""
 
     year = coerce_publication_year(serialized.get("year"))
     if surname and year > 0:

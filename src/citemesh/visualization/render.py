@@ -869,7 +869,7 @@ def draw_labels(
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
         if is_seed:
-            title = str(graph.nodes[node].get("title", "Seed paper"))
+            title = str(graph.nodes[node].get("title") or "")
             label = _wrap_title(title)
             fontsize = 9
             xytext = (0, node_radius + 8)

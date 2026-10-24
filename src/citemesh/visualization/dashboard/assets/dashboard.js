@@ -1049,12 +1049,15 @@
       if (!node) {
         return String(nodeId);
       }
-      if (Array.isArray(node.authors) && node.authors.length) {
-        const surname = String(node.authors[0]).split(/\s+/).filter(Boolean).slice(-1)[0] || "Unknown";
-        const year = hasYear(node) ? String(node.year) : "n.d.";
-        return `${surname}, ${year}`;
+      const title = String(node.title || node.id || nodeId).trim() || String(nodeId);
+      const firstAuthor = Array.isArray(node.authors)
+        ? node.authors.map((author) => String(author).trim()).find(Boolean)
+        : "";
+      const surname = firstAuthor ? firstAuthor.split(/\s+/).slice(-1)[0] : "";
+      if (hasYear(node)) {
+        return surname ? `${surname}, ${node.year}` : `${title} (${node.year})`;
       }
-      return String(node.title || node.id || nodeId);
+      return title;
     }
 
     function portableGraphPayload(nextPayload) {
