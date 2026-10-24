@@ -3834,6 +3834,7 @@ def test_cached_reference_metadata_resolves_only_unambiguous_aliases() -> None:
     :return None: Checks secondary-key lookup and ambiguity handling.
     """
     builder = object.__new__(EmbeddingGraphBuilder)
+    builder._cache_selection = None
     builder.embedding_cache = MagicMock()
     builder.embedding_cache.get_paper_metadata_alias_candidates.return_value = {
         "local-unique": {

@@ -16,7 +16,7 @@ from typing import TypedDict, cast
 
 from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
 from citemesh.data.embedding_cache.models import CorpusSourceRecord, PaperMetadata
-from citemesh.data.embedding_contract import CorpusSource
+from citemesh.data.embedding_contract import CorpusSource, newest_corpus_order_sql
 
 from . import deps
 from .records import (
@@ -218,9 +218,9 @@ def iter_source_records(
             parameters: tuple[int | None, ...] = ()
         else:
             query = (
-                "SELECT ordinal,payload FROM records ORDER BY chronology IS NULL, "
-                "chronology DESC, CASE WHEN chronology IS NOT NULL THEN ordinal END DESC, "
-                "ordinal ASC LIMIT ?"
+                "SELECT ordinal,payload FROM records ORDER BY "
+                + newest_corpus_order_sql("chronology", "ordinal")
+                + " LIMIT ?"
             )
             parameters = (source.limit,)
         for ordinal, payload in connection.execute(query, parameters):

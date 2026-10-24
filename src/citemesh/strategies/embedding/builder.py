@@ -854,30 +854,28 @@ class EmbeddingGraphBuilder(
                 self._pending_force_rebuild_reason = None
 
     def _require_selected_runtime_match(self) -> None:
-        """Keep an explicitly selected corpus bound to its immutable vector contract."""
-        from citemesh.data.model_profiles import embedding_model_profile_key
+        """Require the active runtime to match the installed corpus vector contract."""
+        from .refresh import _builder_contract
 
         selection = self._cache_selection
         assert selection is not None
         contract = selection.contract
-        actual = {
-            "model_id": self._cache_model_identity(),
-            "model_revision": self.model_revision,
-            "model_artifact_identity": self._resolved_model_fingerprint,
-            "profile_key": embedding_model_profile_key(self.model_profile),
-            "profile_schema": self.model_profile.schema_token,
-            "representation": _RETRIEVAL_DOCUMENT_REPRESENTATION,
-            "formatter_identity": self._document_formatter_fingerprint,
-            "normalization": "l2-v1",
-            "dimension": self.truncate_dim,
-            "stored_dtype": self.storage_precision,
-        }
-        for field, value in actual.items():
-            if getattr(contract, field) != value:
-                raise RuntimeError(
-                    f"Installed cache runtime mismatch for {field}: "
-                    f"stored={getattr(contract, field)!r}, active={value!r}"
-                )
+        if self.model_revision != contract.model_revision:
+            raise RuntimeError(
+                "Installed cache runtime mismatch for model_revision: "
+                f"stored={contract.model_revision!r}, active={self.model_revision!r}"
+            )
+        try:
+            actual = _builder_contract(
+                self, fingerprint=self._resolved_model_fingerprint
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"Installed cache runtime mismatch: {exc}") from exc
+        if actual != contract:
+            raise RuntimeError(
+                "Installed cache runtime mismatch: "
+                f"stored={contract!r}, active={actual!r}"
+            )
 
     def _clear_embedding_cache(self, reason: str) -> None:
         """Clear this cache and record the supplied reason.
@@ -1413,11 +1411,16 @@ class EmbeddingGraphBuilder(
         :param list[str] identifiers: Canonical bibliography identifiers.
         :return dict[str, Paper]: Unambiguous local papers keyed by requested alias.
         """
+        metadata = (
+            self.embedding_cache.get_paper_metadata_alias_candidates(
+                identifiers, corpus_size=self.corpus_size
+            )
+            if self._cache_selection is not None
+            else self.embedding_cache.get_paper_metadata_alias_candidates(identifiers)
+        )
         candidates = {
-            paper_id: self._paper_from_cached_metadata(paper_id, metadata)
-            for paper_id, metadata in self.embedding_cache.get_paper_metadata_alias_candidates(
-                identifiers
-            ).items()
+            paper_id: self._paper_from_cached_metadata(paper_id, record)
+            for paper_id, record in metadata.items()
         }
         requested_aliases = {
             normalize_paper_id(identifier).lower() for identifier in identifiers
@@ -1669,18 +1672,19 @@ class EmbeddingGraphBuilder(
         self.materialize_graph_embeddings(papers)
 
     def search_local(self, query: str, top_k: int) -> list[CacheSearchResult]:
-        """Semantically search this builder's persistent embedding cache.
+        """Rank local cached vectors against a free-text query.
 
-        Encodes the free-text query in the model's query prompt space and
-        ranks it against every embedding already persisted in the cache
-        namespace (candidate-mode vectors accumulated across builds, or a
-        hydrated corpus). Purely local except for the one-time model download.
+        Managed corpora use active membership and the requested newest-N view;
+        candidate caches use all accumulated vectors. Model weights may download
+        on first use.
 
         :param str query: Free-text search query.
         :param int top_k: Number of results to return.
         :return List[CacheSearchResult]: Ranked results with cached metadata.
-        :raises ValueError: If the query is empty or ``top_k`` is below 1.
-        :raises RuntimeError: If the corpus cache records another dataset source.
+        :raises ValueError: If the query, ``top_k``, or corpus view is invalid,
+            or the view exceeds installed coverage.
+        :raises RuntimeError: If installed state is pending or uncertified, or
+            its source or vector contract differs from the requested runtime.
         """
         normalized_query = str(query).strip()
         if not normalized_query:
@@ -1697,9 +1701,6 @@ class EmbeddingGraphBuilder(
         )
         with operation_lock:
             if self.semantic_source == "arxiv-corpus":
-                # Split and cap describe the rows a build contributed. Searching
-                # every cached row keeps sliced builds reachable with default
-                # query settings; only dataset provenance must agree here.
                 self._validate_cached_corpus_source(cache)
                 self._ready_manual_corpus()
             return cache.search(
@@ -1716,12 +1717,17 @@ class EmbeddingGraphBuilder(
         """Resolve the runtime-active model and its exact persistent namespace.
 
         :return EmbeddingCache: Artifact-bound cache ready for safe access.
+        :raises ValueError: If the installed corpus view is invalid or exceeds coverage.
+        :raises RuntimeError: If installed state is pending or uncertified, or
+            its source or vector contract differs from the requested runtime.
         """
         if self._cache_selection is not None:
             with self.embedding_cache.hydration_operation_lock():
                 self._ready_manual_corpus()
         self._load_model()
         self._ensure_cache_model_fingerprint()
+        if self.semantic_source == "arxiv-corpus":
+            self._ready_manual_corpus()
         return self.embedding_cache
 
     def refresh_corpus(self, revision: str | None = None) -> RefreshResult:

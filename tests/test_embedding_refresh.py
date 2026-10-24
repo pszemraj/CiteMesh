@@ -264,22 +264,72 @@ def test_interrupted_refresh_resumes_recorded_target(monkeypatch, runtime):
     assert builder.embedding_cache.corpus_state()["source"]["revision"] == "two"
 
 
-def test_installed_consumers_preserve_binding_and_smaller_view(monkeypatch, runtime):
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("installed_limit", [None, 2])
+@pytest.mark.parametrize("view", [None, 1])
+def test_installed_consumers_preserve_binding_and_smaller_view(
+    monkeypatch, runtime, explicit, installed_limit, view
+):
     revisions = {"one": [row("2301.00001"), row("2401.00001"), row("2501.00001")]}
     reads, _ = install_source(monkeypatch, revisions, ["one"])
-    original = make_builder()
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_model_fingerprint",
+        lambda self: "hf::org/example::" + "a" * 40,
+    )
+    original = make_builder(corpus_size=installed_limit)
+    original.model_revision = None
     original.refresh_corpus()
     selection = select_existing_cache(original._cache_selection.namespace_id)
-    builder = EmbeddingGraphBuilder(cache_selection=selection, corpus_size=1)
+    if explicit:
+        builder = EmbeddingGraphBuilder(cache_selection=selection, corpus_size=view)
+    else:
+        builder = make_builder(corpus_size=view)
+        builder.model_revision = None
+        assert builder._cache_selection is None
     reads.clear()
     builder._prepare_corpus_for_build()
     builder._embedding_cache = None
     results = builder.search_local("query", 10)
-    assert [result.paper_id for result in results] == ["arxiv:2501.00001"]
+    expected = {"arxiv:2501.00001"}
+    if view is None:
+        expected.add("arxiv:2401.00001")
+        if installed_limit is None:
+            expected.add("arxiv:2301.00001")
+    assert {result.paper_id for result in results} == expected
+    references = builder.cached_reference_metadata(
+        ["arxiv:2301.00001", "arxiv:2401.00001", "arxiv:2501.00001"]
+    )
+    assert set(references) == expected
     assert not reads
+    assert builder.model_revision == "a" * 40
+    assert builder._cache_selection == selection
     assert builder.embedding_cache.db_path == original.embedding_cache.db_path
     assert builder.graph_embedding_cache.db_path != builder.embedding_cache.db_path
-    assert builder._embedding_runtime_metadata()["dataset_revision"] == "one"
+    metadata = builder._embedding_runtime_metadata()
+    assert metadata["dataset_revision"] == "one"
+    assert metadata["cache_namespace"] == selection.namespace_id
+    assert "index_origin" in metadata
+    assert "revision=main::" in selection.namespace_serialization
+
+
+@pytest.mark.parametrize("mismatch", ["source", "split", "coverage"])
+def test_implicit_installed_cache_rejects_incompatible_corpus_view(
+    monkeypatch, runtime, mismatch
+):
+    reads, _ = install_source(monkeypatch, {"one": [row("2401.00001")]}, ["one"])
+    original = make_builder(corpus_size=1)
+    original.refresh_corpus()
+    options = {
+        "source": {"dataset_source": "other/source"},
+        "split": {"dataset_split": "other"},
+        "coverage": {"corpus_size": 2},
+    }[mismatch]
+    builder = make_builder(**options)
+    reads.clear()
+    with pytest.raises((RuntimeError, ValueError), match="source|coverage"):
+        builder.prepare_embedding_cache()
+    assert not reads
 
 
 def test_refresh_refuses_missing_matrix_of_open_selected_cache(monkeypatch, runtime):
@@ -337,7 +387,10 @@ def test_source_selection_identical_duplicates_keep_first_ordinal(
     assert stats["source_records_examined"] == 4
 
 
-def test_explicit_legacy_adoption_retains_requested_main_address(monkeypatch, runtime):
+@pytest.mark.parametrize("missing_chronology", [False, True])
+def test_explicit_legacy_adoption_retains_requested_main_address(
+    monkeypatch, runtime, missing_chronology
+):
     install_source(monkeypatch, {"one": [row("2401.00001")]}, ["one"])
     builder = make_builder()
     builder.model_revision = None
@@ -361,6 +414,10 @@ def test_explicit_legacy_adoption_retains_requested_main_address(monkeypatch, ru
         builder.model,
         text_builder=builder._format_retrieval_document_metadata,
     )
+    if missing_chronology:
+        with cache._connect_db() as connection:
+            connection.execute("DROP INDEX idx_papers_chronology_key")
+            connection.execute("ALTER TABLE papers DROP COLUMN chronology_key")
     namespace_id = cache.db_path.stem.removeprefix("metadata_")
     monkeypatch.setattr(
         builder,
@@ -371,6 +428,26 @@ def test_explicit_legacy_adoption_retains_requested_main_address(monkeypatch, ru
     assert builder.embedding_cache.db_path == cache.db_path
     assert "revision=main::" in builder._cache_selection.namespace_serialization
     assert builder.model_revision == "a" * 40
+    assert builder.embedding_cache.get_max_chronology_key() is not None
+
+
+@pytest.mark.parametrize("stored_size", [None, 2])
+def test_legacy_adoption_rejects_conflicting_explicit_coverage(
+    monkeypatch, runtime, stored_size
+):
+    builder = make_builder(corpus_size=1)
+    cache = builder.embedding_cache
+    cache.set_model_fingerprint("hf::org/example::" + "a" * 40)
+    cache.mark_hydrated(
+        builder.dataset_source, builder.dataset_split, stored_size, complete=True
+    )
+    with pytest.raises(ValueError, match="coverage differs"):
+        adopt_legacy_cache(builder, cache.namespace_id)
+    assert cache.corpus_state() == {}
+    assert runtime == ([], [])
+    assert cache.payload_stats().hydration_corpus_size == (
+        "all" if stored_size is None else "newest:2"
+    )
 
 
 def test_managed_reranking_reads_hits_and_encodes_external_papers_in_memory(
@@ -809,6 +886,27 @@ def test_embeddinggemma_contract_reopens_with_explicit_profile_key(
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_revision", "b" * 40),
+        ("_active_model_name", "org/other"),
+        ("truncate_dim", 1),
+        ("calibration_sample_size", 3),
+    ],
+)
+def test_selected_runtime_rejects_contract_mismatch(monkeypatch, runtime, field, value):
+    install_source(monkeypatch, {"one": [row("2401.00001")]}, ["one"])
+    original = make_builder(storage_precision="int8", calibration_sample_size=2)
+    original.refresh_corpus()
+    selection = select_existing_cache(original.embedding_cache.namespace_id)
+    builder = EmbeddingGraphBuilder(cache_selection=selection)
+    builder._resolved_model_fingerprint = selection.contract.model_artifact_identity
+    setattr(builder, field, value)
+    with pytest.raises(RuntimeError, match="runtime mismatch"):
+        builder._require_selected_runtime_match()
+
+
 def test_explicit_rebuild_resets_managed_missing_half_before_initialization(
     monkeypatch, runtime
 ):
@@ -821,7 +919,8 @@ def test_explicit_rebuild_resets_managed_missing_half_before_initialization(
     reset._resolved_model_fingerprint = (
         builder._cache_selection.contract.model_artifact_identity
     )
-    reset._bind_embedding_cache_to_active_model()
+    reset.prepare_embedding_cache()
+    assert reset._cache_selection is None
     assert reset.embedding_cache.db_path == cache.db_path
     assert reset.embedding_cache.corpus_state() == {}
     assert reset.embedding_cache.embedding_count() == 0

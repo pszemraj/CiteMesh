@@ -62,6 +62,8 @@ from .records import (
 )
 
 if TYPE_CHECKING:
+    from citemesh.data.embedding_cache import EmbeddingCache
+
     from ._host import _EmbeddingBuilderHost
 
     _EmbeddingBuilderHostBase = _EmbeddingBuilderHost
@@ -396,7 +398,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         )
 
     def _ready_manual_corpus(self) -> bool:
-        """Validate a completed managed corpus without consulting the upstream source."""
+        """Bind a ready managed corpus and validate its requested source and view."""
         cache = self.embedding_cache
         state_reader = getattr(cache, "corpus_state", None)
         if state_reader is None:
@@ -404,13 +406,13 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         state = state_reader()
         if not state or state.get("update_policy") != "manual":
             return False
-        if state.get("pending") or not state.get("membership_complete"):
-            raise RuntimeError(
-                "Installed corpus is incomplete; resume cache refresh or import first"
-            )
+        from citemesh.data.embedding_contract import (
+            EmbeddingContract,
+            ExistingCacheSelection,
+        )
+
+        state = cache.require_complete_certified_corpus(corpus_size=self.corpus_size)
         source = state["source"]
-        if hasattr(source, "to_dict"):
-            source = source.to_dict()
         if (source["repo_id"], source["split"]) != (
             self.dataset_source,
             self.dataset_split,
@@ -418,13 +420,24 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             raise RuntimeError(
                 "Installed corpus source does not match the requested dataset and split"
             )
-        if source["selection"] == "newest" and (
-            self.corpus_size is None or self.corpus_size > source["limit"]
-        ):
-            raise ValueError(
-                "Requested corpus view exceeds installed coverage; refresh a larger coverage first"
+        if self._cache_selection is None:
+            self._cache_selection: ExistingCacheSelection | None = (
+                ExistingCacheSelection(
+                    cache.namespace_id,
+                    state["namespace_serialization"],
+                    EmbeddingContract(**state["contract"]),
+                    source["repo_id"],
+                    source["config_name"],
+                    source["split"],
+                )
             )
-        self._completed_source_revision = source["revision"]
+            self._selected_cache_handle: EmbeddingCache | None = cache
+            self.model_revision: str | None = (
+                self._cache_selection.contract.model_revision
+            )
+        if self._resolved_model_fingerprint is not None:
+            self._require_selected_runtime_match()
+        self._completed_source_revision: str | None = source["revision"]
         self._index_origin = state.get("origin")
         return True
 

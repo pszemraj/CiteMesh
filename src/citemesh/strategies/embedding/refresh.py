@@ -151,7 +151,7 @@ class _LazyEncoder:
 def _builder_contract(
     builder: EmbeddingGraphBuilder, *, fingerprint: str | None = None
 ) -> EmbeddingContract:
-    """Build the persisted vector contract for a builder configuration.
+    """Describe the builder's active checkpoint and persisted vector representation.
 
     :param builder: Builder whose model, formatter, and storage settings define the contract.
     :param fingerprint: Resolved model identity to use when one is already available.
@@ -159,7 +159,8 @@ def _builder_contract(
     :raises ValueError: If immutable model identity or embedding dimension is unavailable.
     """
     fingerprint = fingerprint or builder._resolve_model_fingerprint()
-    prefix = f"hf::{builder.model_name}::"
+    model_id = builder._cache_model_identity()
+    prefix = f"hf::{model_id}::"
     revision = fingerprint.removeprefix(prefix)
     if not fingerprint.startswith(prefix) or not re.fullmatch(
         r"[0-9a-fA-F]{40}", revision
@@ -172,7 +173,7 @@ def _builder_contract(
             "Cannot establish embedding dimension; supply truncate_dim explicitly"
         )
     return EmbeddingContract(
-        model_id=builder.model_name,
+        model_id=model_id,
         model_revision=revision,
         model_artifact_identity=fingerprint,
         profile_key=embedding_model_profile_key(builder.model_profile),
@@ -409,7 +410,12 @@ def adopt_legacy_cache(
             raise ValueError(f"Legacy {key} differs from the supplied source selectors")
     coverage = metadata.get(constants.HYDRATION_CORPUS_SIZE_KEY)
     if coverage is not None:
-        builder.corpus_size = constants._corpus_size_from_token(coverage)
+        stored_size = constants._corpus_size_from_token(coverage)
+        if builder.corpus_size is not None and builder.corpus_size != stored_size:
+            raise ValueError(
+                "Legacy corpus coverage differs from the supplied corpus_size"
+            )
+        builder.corpus_size = stored_size
     namespace = builder._embedding_cache_namespace(
         artifact_identity=contract.model_artifact_identity
     )
