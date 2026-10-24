@@ -374,6 +374,7 @@ def test_installed_corpus_guidance_pluralizes_and_skips_the_selected_namespace(
                 "INSERT INTO cache_metadata VALUES (?, '{\"pending\": {}}')",
                 (lifecycle.CORPUS_STATE_KEY,),
             )
+        conn.close()
     args = argparse.Namespace(query="attention")
 
     def guidance(selected: str | None) -> str | None:

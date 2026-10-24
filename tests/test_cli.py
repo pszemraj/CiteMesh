@@ -6,6 +6,7 @@ import argparse
 import io
 import json
 import logging
+import os
 import re
 import runpy
 import shlex
@@ -17,7 +18,7 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext, redirect_stderr
+from contextlib import closing, contextmanager, nullcontext, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -491,7 +492,7 @@ def test_cache_commands_contracts(
 
     legacy_namespace = "0123456789ab"
     legacy_metadata = cache_root / "embeddings" / f"metadata_{legacy_namespace}.db"
-    with sqlite3.connect(legacy_metadata) as connection:
+    with closing(sqlite3.connect(legacy_metadata)) as connection:
         connection.execute(
             "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
@@ -499,6 +500,7 @@ def test_cache_commands_contracts(
             "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
             ("schema_version", "3"),
         )
+        connection.commit()
     (cache_root / "embeddings" / f"embeddings_{legacy_namespace}.h5").write_bytes(
         b"legacy embeddings"
     )
@@ -1959,7 +1961,7 @@ def test_search_auto_falls_back_on_config_contract_error(
     )
     diagnostics = str(debug.call_args_list)
     assert "defaults.device" in diagnostics
-    assert str(config.path) in diagnostics
+    assert repr(str(config.path))[1:-1] in diagnostics
 
 
 def test_search_local_reports_config_contract_error_without_build_usage(
@@ -1989,7 +1991,7 @@ def test_search_local_reports_config_contract_error_without_build_usage(
     message = str(error.call_args)
     assert "Local search unavailable" in message
     assert "defaults.device" in message
-    assert str(config.path) in message
+    assert repr(str(config.path))[1:-1] in message
 
 
 def test_search_device_flag_overrides_config_before_local_validation(
@@ -3270,10 +3272,11 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         run_dir = generate_output_path(
             graph, "seed", output_dir=output, strategy="recommendation"
         ).parent
-        assert {path.name for path in output.iterdir()} == {
+        assert {path.name for path in output.iterdir()} - {
+            f".{DASHBOARD_PACKAGE_FILENAME}.lock"
+        } == {
             "dashboard.html",
             DASHBOARD_PACKAGE_FILENAME,
-            f".{DASHBOARD_PACKAGE_FILENAME}.lock",
             run_dir.name,
         }
         package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
@@ -3385,10 +3388,11 @@ def test_dashboard_default_collection_retains_seed_directory(
     run_dir = generate_output_path(
         graph, "seed", output_dir=output_root, strategy="recommendation"
     ).parent
-    assert {path.name for path in output_root.iterdir()} == {
+    assert {path.name for path in output_root.iterdir()} - {
+        f".{DASHBOARD_PACKAGE_FILENAME}.lock"
+    } == {
         "dashboard.html",
         DASHBOARD_PACKAGE_FILENAME,
-        f".{DASHBOARD_PACKAGE_FILENAME}.lock",
         run_dir.name,
     }
     assert {path.name for path in run_dir.iterdir()} == {
@@ -3857,7 +3861,8 @@ def test_dashboard_commit_failure_restores_promoted_and_removed_files(
     staged_new = tmp_path / "staged.config.json"
     package_path.write_bytes(b"old package")
     existing_path.write_bytes(b"old graph")
-    existing_path.chmod(0o000)
+    if os.name == "posix":
+        existing_path.chmod(0o000)
     obsolete_path.write_bytes(b"old csv")
     staged_existing.write_bytes(b"new graph")
     staged_new.write_bytes(b"new config")
@@ -3909,8 +3914,9 @@ def test_dashboard_commit_failure_restores_promoted_and_removed_files(
         )
 
     assert package_path.read_bytes() == b"old package"
-    assert existing_path.stat().st_mode & 0o7777 == 0o000
-    existing_path.chmod(0o600)
+    if os.name == "posix":
+        assert existing_path.stat().st_mode & 0o7777 == 0o000
+        existing_path.chmod(0o600)
     assert existing_path.read_bytes() == b"old graph"
     assert not new_path.exists()
     assert obsolete_path.read_bytes() == b"old csv"

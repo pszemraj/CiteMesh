@@ -107,13 +107,15 @@ def hub(tmp_path, monkeypatch):
         def list_bucket_tree(self, bucket_id, prefix=None, recursive=None):
             return [
                 SimpleNamespace(
-                    path=str(path.relative_to(self.root)),
+                    # Bucket APIs use POSIX paths on every host, including when
+                    # the in-memory bucket is backed by Windows paths.
+                    path=path.relative_to(self.root).as_posix(),
                     type="file" if path.is_file() else "directory",
                 )
                 for path in self.root.rglob("*")
                 if (
                     prefix is None
-                    or str(path.relative_to(self.root)).startswith(prefix)
+                    or path.relative_to(self.root).as_posix().startswith(prefix)
                 )
             ]
 

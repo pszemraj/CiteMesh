@@ -149,18 +149,23 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
 
 
 def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
-    """config.toml must stay owner-only because it can hold api.s2_api_key.
+    """config.toml must stay owner-only on POSIX because it can hold an API key.
 
     :param Path tmp_path: Pytest temporary directory.
-    :return None: Assertions validate permission bits for new and existing files.
+    :return None: Assertions validate persisted values and POSIX permission bits.
     """
     config_path = tmp_path / "config.toml"
     set_config_value("defaults.max_papers", "25", path=config_path)
-    assert config_path.stat().st_mode & 0o7777 == 0o600
+    if os.name == "posix":
+        assert config_path.stat().st_mode & 0o7777 == 0o600
+    assert load_user_config(config_path).defaults["max_papers"] == 25
 
-    config_path.chmod(0o644)
+    if os.name == "posix":
+        config_path.chmod(0o644)
     set_config_value("defaults.max_papers", "30", path=config_path)
-    assert config_path.stat().st_mode & 0o7777 == 0o600
+    if os.name == "posix":
+        assert config_path.stat().st_mode & 0o7777 == 0o600
+    assert load_user_config(config_path).defaults["max_papers"] == 30
 
 
 def test_config_set_serializes_concurrent_writes(

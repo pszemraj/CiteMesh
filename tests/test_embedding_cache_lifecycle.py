@@ -884,8 +884,8 @@ def test_namespace_scan_reads_a_readonly_managed_cache_without_creating_locks(
     directory = tmp_path / "embeddings"
     cache, _, _ = _populate(_settings(directory))
     shutil.rmtree(tmp_path / ".locks")
-    cache.lock_path.unlink()
-    cache.hydration_lock_path.unlink()
+    cache.lock_path.unlink(missing_ok=True)
+    cache.hydration_lock_path.unlink(missing_ok=True)
     payloads = list(directory.iterdir())
     for path in payloads:
         path.chmod(0o444)

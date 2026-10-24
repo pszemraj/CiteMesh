@@ -2375,6 +2375,7 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
         )
         connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
         connection.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
+    connection.close()
     current_h5 = cache_dir / f"embeddings_{current_namespace}.h5"
     current_h5.write_bytes(b"not an HDF5 file")
     assert builder.has_persistent_embedding_artifacts()
@@ -2395,6 +2396,7 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
             ("schema_version", "4"),
         )
         connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+    connection.close()
     empty_h5 = cache_dir / f"embeddings_{empty_namespace}.h5"
     empty_h5.write_bytes(b"not an HDF5 file")
     assert not builder.has_persistent_embedding_artifacts()
@@ -2413,6 +2415,7 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
         )
         connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
         connection.execute("INSERT INTO papers (paper_id) VALUES ('legacy-paper')")
+    connection.close()
     legacy_h5 = cache_dir / f"embeddings_{legacy_namespace}.h5"
     legacy_h5.write_bytes(b"not an HDF5 file")
 
