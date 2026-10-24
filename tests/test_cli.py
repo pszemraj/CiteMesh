@@ -2139,6 +2139,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         )
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
+    monkeypatch.setattr(cli_module.logger, "handlers", [caplog.handler])
     with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
         result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
