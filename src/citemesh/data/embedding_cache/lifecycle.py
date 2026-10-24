@@ -33,6 +33,7 @@ from citemesh.data.embedding_contract import (
     EmbeddingContractData,
     ExistingCacheSelection,
     NamespaceSelectors,
+    newest_corpus_order_sql,
     require_namespace_contract,
 )
 
@@ -377,14 +378,18 @@ class _LifecycleMixin(_EmbeddingCacheHost):
             )
         return state
 
-    def require_complete_certified_corpus(self) -> CorpusState:
+    def require_complete_certified_corpus(
+        self, *, corpus_size: int | None = None
+    ) -> CorpusState:
         """Require ready state with explicitly certified source membership.
 
+        :param int | None corpus_size: Optional newest-N view within installed coverage.
         :return CorpusState: Complete persisted corpus state.
         :raises RuntimeError: If membership has not been explicitly reconciled.
+        :raises ValueError: If the view is invalid or exceeds installed coverage.
         """
         with self.namespace_lock_only(), self._inspect_db() as conn:
-            state = self._require_ready_locked(conn)
+            state = self._require_corpus_view_locked(conn, corpus_size)
             if not state.get("membership_complete"):
                 raise RuntimeError(
                     "Export requires explicitly reconciled corpus membership"
@@ -414,89 +419,107 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         """Return the twelve-character native namespace ID from the DB filename."""
         return self.db_path.stem.removeprefix("metadata_")
 
+    def _require_corpus_view_locked(
+        self, conn: sqlite3.Connection, corpus_size: int | None
+    ) -> CorpusState:
+        """Require a ready corpus whose certified coverage contains the view.
+
+        :param sqlite3.Connection conn: Open cache database connection.
+        :param int | None corpus_size: Optional newest-N limit within installed coverage.
+        :return CorpusState: Ready persisted state, or an unmanaged cache's empty state.
+        """
+        state = self._require_ready_locked(conn)
+        if corpus_size is not None:
+            if not state.get("membership_complete"):
+                raise RuntimeError(
+                    "Exact corpus views require certified source membership"
+                )
+            if corpus_size < 1:
+                raise ValueError("corpus_size must be positive")
+            source = state["source"]
+            if source["selection"] == "newest" and corpus_size > cast(
+                int, source["limit"]
+            ):
+                raise ValueError("Requested corpus view exceeds installed coverage")
+        return state
+
+    def _corpus_view_query_locked(
+        self, conn: sqlite3.Connection, corpus_size: int | None
+    ) -> tuple[str, tuple[int, ...]] | None:
+        """Build SQL for the active corpus view.
+
+        :param sqlite3.Connection conn: Open cache database connection.
+        :param int | None corpus_size: Optional newest-N limit within installed coverage.
+        :return tuple[str, tuple[int, ...]] | None: Row query and bindings, or ``None`` for unmanaged caches.
+        """
+        state = self._require_corpus_view_locked(conn, corpus_size)
+        if not state.get("membership_complete"):
+            return None
+        query = (
+            "SELECT p.row_idx FROM corpus_membership m "
+            "JOIN papers p ON p.paper_id=m.paper_id"
+        )
+        if corpus_size is None:
+            return query, ()
+        return (
+            query
+            + " ORDER BY "
+            + newest_corpus_order_sql("p.chronology_key", "m.source_ordinal")
+            + " LIMIT ?",
+            (corpus_size,),
+        )
+
     def _eligible_rows_locked(
         self,
         conn: sqlite3.Connection,
         row_count: int,
         corpus_size: int | None = None,
-        eligible_rows: npt.NDArray[np.bool_] | None = None,
     ) -> npt.NDArray[np.bool_] | None:
-        """Build the physical-row mask allowed by corpus and caller selections.
+        """Build the physical-row mask for the active corpus view.
 
         :param sqlite3.Connection conn: Open cache database connection.
         :param int row_count: Number of physical embedding rows.
         :param int | None corpus_size: Optional newest-N active-member limit.
-        :param npt.NDArray[np.bool_] | None eligible_rows: Optional boolean mask to intersect with
-            certified corpus membership.
-        :return npt.NDArray[np.bool_] | None: Eligible physical rows, or ``None`` when no
-            filtering is needed.
-        :raises ValueError: If a requested mask or corpus size is invalid.
-        :raises RuntimeError: If an exact view is requested without certification.
+        :return npt.NDArray[np.bool_] | None: Eligible rows, or no unmanaged filter.
         """
-        state = self._require_ready_locked(conn)
-        mask = None
-        if state.get("membership_complete"):
-            source = state["source"]
-            # Keep the existing newest-limit comparison without runtime coercion.
-            if source["selection"] == "newest" and (
-                corpus_size is None or corpus_size > cast(int, source["limit"])
-            ):
-                if corpus_size is not None:
-                    raise ValueError("Requested corpus view exceeds installed coverage")
-            mask = np.zeros(row_count, dtype=bool)
-            sql = (
-                "SELECT p.row_idx FROM corpus_membership m "
-                "JOIN papers p ON p.paper_id=m.paper_id"
-            )
-            if corpus_size is not None:
-                if corpus_size < 1:
-                    raise ValueError("corpus_size must be positive")
-                sql += (
-                    " ORDER BY (p.chronology_key IS NULL), p.chronology_key DESC, "
-                    "CASE WHEN p.chronology_key IS NOT NULL THEN m.source_ordinal END DESC, "
-                    "m.source_ordinal ASC LIMIT ?"
-                )
-                cursor = conn.execute(sql, (corpus_size,))
-            else:
-                cursor = conn.execute(sql)
-            for rows in iter(lambda: cursor.fetchmany(8192), []):
-                indices = np.asarray([row[0] for row in rows], dtype=np.int64)
-                if np.any(indices < 0) or np.any(indices >= row_count):
-                    raise RuntimeError(
-                        "Corpus membership refers to missing vector rows"
-                    )
-                mask[indices] = True
-        elif corpus_size is not None:
-            raise RuntimeError("Exact corpus views require certified source membership")
-        if eligible_rows is not None:
-            requested = np.asarray(eligible_rows)
-            if requested.dtype != np.bool_ or requested.shape != (row_count,):
-                raise ValueError(
-                    "eligible_rows must be a boolean mask of physical vector rows"
-                )
-            mask = requested if mask is None else mask & requested
+        view = self._corpus_view_query_locked(conn, corpus_size)
+        if view is None:
+            return None
+        query, parameters = view
+        mask = np.zeros(row_count, dtype=bool)
+        cursor = conn.execute(query, parameters)
+        for rows in iter(lambda: cursor.fetchmany(8192), []):
+            indices = np.asarray([row[0] for row in rows], dtype=np.int64)
+            if np.any(indices < 0) or np.any(indices >= row_count):
+                raise RuntimeError("Corpus membership refers to missing vector rows")
+            mask[indices] = True
         return mask
 
     def get_cached_embeddings(
-        self, paper_ids: Sequence[str]
+        self, paper_ids: Sequence[str], *, corpus_size: int | None = None
     ) -> dict[str, npt.NDArray[np.float32]]:
-        """Read cached vectors without changing metadata or invoking an encoder.
+        """Read active cached vectors without invoking an encoder.
 
         :param Sequence[str] paper_ids: Paper IDs whose stored vectors to read.
+        :param int | None corpus_size: Optional newest-N view within active membership.
         :return dict[str, npt.NDArray[np.float32]]: Normalized float32 vectors keyed by
-            paper ID; missing IDs are omitted.
+            paper ID; missing or out-of-view IDs are omitted.
         """
         with self._cache_lock(), self._connect_db() as conn:
-            self._require_ready_locked(conn)
+            view = self._corpus_view_query_locked(conn, corpus_size)
             with h5py.File(self.h5_path, "r") as h5:
                 dataset = self._get_embeddings_dataset(h5)
                 if dataset is None:
                     return {}
-                rows = self._load_existing_rows(conn, list(paper_ids))
-                cached_rows = []
-                for paper_id, row in rows.items():
-                    # Preserve the existing vector lookup path for a missing row index.
-                    cached_rows.append((paper_id, cast(int, row["row_idx"])))
+                cached_rows = [
+                    (row[0], cast(int, row[2]))
+                    for row in self._query_paper_rows(
+                        conn,
+                        list(paper_ids),
+                        lookup_column="paper_id",
+                        corpus_view=view,
+                    )
+                ]
                 return self._load_cached_embeddings(h5, dataset, cached_rows)
 
     @contextmanager
@@ -592,23 +615,14 @@ class NativeSnapshotView:
             else None
         )
 
-    def require_complete_certified_corpus(self) -> None:
-        """This view is created only after corpus membership is certified."""
-        return None
-
     def iter_active_rows(
-        self, *, batch_size: int = 8192, order_by_native_row: bool = True
+        self, *, batch_size: int = 8192
     ) -> Iterator[tuple[list[ActiveCorpusRecord], StoredEmbedding]]:
-        """Yield active metadata rows with their corresponding stored vectors.
-
-        Rows and vectors are returned in ascending physical row order and limited
-        to ``batch_size`` rows per yield.
+        """Yield active metadata and vectors in ascending physical row order.
 
         :param int batch_size: Maximum number of rows in each yielded batch.
-        :param bool order_by_native_row: Accepted by the view protocol; this view
-            always returns rows in native physical order.
         Yields:
-            A pair of metadata records and their matching embedding matrix batch.
+            Metadata records and their matching stored embedding matrix batch.
         """
         cursor = self.conn.execute(
             "SELECT p.paper_id,p.text_hash,p.row_idx,p.title,p.abstract,p.year,"

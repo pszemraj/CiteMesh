@@ -142,11 +142,19 @@ def test_native_search_intersects_membership_and_exact_newest_view(
     kwargs = dict(binary_prefilter=binary, binary_rescore_multiplier=10)
     results = cache.search(np.array([1, 0, 0, 0], dtype=np.float32), 10, **kwargs)
     assert {r.paper_id for r in results} == {"paper-1", "paper-2", "paper-3"}
+    ids = [record["paper_id"] for record in records]
+    for size, expected in [(None, {"paper-1", "paper-2", "paper-3"}), (1, {"paper-2"})]:
+        assert cache.get_cached_paper_ids(corpus_size=size) == expected
+        assert set(cache.get_paper_metadata_batch(ids, corpus_size=size)) == expected
+        assert (
+            set(cache.get_paper_metadata_alias_candidates(ids, corpus_size=size))
+            == expected
+        )
+        assert set(cache.get_cached_embeddings(ids, corpus_size=size)) == expected
     results = cache.search(
         np.ones(4, dtype=np.float32),
         10,
         corpus_size=1,
-        eligible_rows=np.ones(4, dtype=bool),
         **kwargs,
     )
     assert [r.paper_id for r in results] == ["paper-2"]
@@ -214,6 +222,14 @@ def test_pending_import_refuses_search_export_ingest_and_other_identity(tmp_path
     with pytest.raises(RuntimeError, match="incomplete import"):
         with cache.export_snapshot_view():
             pass
+    with pytest.raises(RuntimeError, match="incomplete import"):
+        cache.get_cached_paper_ids()
+    with pytest.raises(RuntimeError, match="incomplete import"):
+        cache.get_paper_metadata_batch(["paper-0"])
+    with pytest.raises(RuntimeError, match="incomplete import"):
+        cache.get_paper_metadata_alias_candidates(["paper-0"])
+    with pytest.raises(RuntimeError, match="incomplete import"):
+        cache.get_cached_embeddings(["paper-0"])
     with pytest.raises(RuntimeError, match="owned import/refresh"):
         cache.upsert_embeddings({"x": {}}, None)
     with pytest.raises(ValueError, match="Conflicting incomplete import"):
@@ -678,3 +694,53 @@ def test_installed_corpus_summary_can_inspect_an_active_import(tmp_path, monkeyp
         assert summary is not None
         assert summary.state["pending"]["kind"] == "import"
         assert summary.physical_rows == summary.active_rows == 0
+
+
+def test_metadata_alias_lookup_ignores_removed_primary_before_secondary_matching(
+    tmp_path,
+):
+    """An inactive primary ID must not hide an active row sharing its DOI."""
+    settings = _settings(tmp_path)
+    records = _records()
+    doi = "10.1234/shared"
+    records[0]["paper_id"] = doi
+    records[1]["doi"] = doi
+    with import_destination_session(**settings) as session:
+        session.append_stored_embeddings(
+            records, np.eye(4, dtype=np.float32), first_row=0
+        )
+        session.finish(expected_rows=4, source_records_examined=4)
+        cache = session.cache
+    with cache.operation_session(
+        kind="refresh",
+        identity={"source": settings["source"].to_dict()},
+        target_source=settings["source"],
+        contract=settings["contract"],
+        namespace_selectors=settings["namespace_selectors"],
+    ) as session:
+        session.record_membership(records[1:])
+        session.finish(expected_rows=3, source_records_examined=3)
+    assert set(cache.get_paper_metadata_alias_candidates([doi])) == {"paper-1"}
+    assert cache.get_paper_metadata_alias_candidates([doi], corpus_size=1) == {}
+    assert cache.embedding_count() == 4
+
+
+def test_nonsearch_readers_enforce_installed_coverage(tmp_path):
+    """Ready-state and reader checks share the installed newest-N coverage limit."""
+    settings = _settings(tmp_path)
+    settings["source"] = replace(settings["source"], selection="newest", limit=4)
+    cache, records, _ = _populate(settings)
+    ids = [record["paper_id"] for record in records]
+    for size in [0, 5]:
+        with pytest.raises(ValueError):
+            cache.require_complete_certified_corpus(corpus_size=size)
+        with pytest.raises(ValueError):
+            cache.get_cached_paper_ids(corpus_size=size)
+        with pytest.raises(ValueError):
+            cache.get_paper_metadata_batch(ids, corpus_size=size)
+        with pytest.raises(ValueError):
+            cache.get_paper_metadata_alias_candidates(ids, corpus_size=size)
+        with pytest.raises(ValueError):
+            cache.get_cached_embeddings(ids, corpus_size=size)
+    assert cache.require_complete_certified_corpus(corpus_size=2)["membership_complete"]
+    assert cache.get_cached_paper_ids(corpus_size=2) == {"paper-1", "paper-2"}

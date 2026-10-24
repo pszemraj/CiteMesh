@@ -161,6 +161,7 @@ class _EmbeddingCacheHost(Protocol):
         *,
         lookup_column: str,
         case_insensitive: bool = False,
+        corpus_view: tuple[str, tuple[int, ...]] | None = None,
     ) -> Iterator[SQLitePaperRow]: ...
 
     def _metadata_tuple(

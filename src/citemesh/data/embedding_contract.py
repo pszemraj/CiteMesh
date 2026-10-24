@@ -228,3 +228,17 @@ def require_namespace_contract(
             )
     elif contract.quantization is not None:
         raise ValueError("Float32 vectors cannot declare int8 quantization")
+
+
+def newest_corpus_order_sql(chronology_column: str, ordinal_column: str) -> str:
+    """Order dated source records newest first, with stable source-order ties.
+
+    :param str chronology_column: Chronology column used by the query.
+    :param str ordinal_column: Source ordinal column used by the query.
+    :return str: SQL ordering expression, without the ``ORDER BY`` keyword.
+    """
+    return (
+        f"({chronology_column} IS NULL), {chronology_column} DESC, "
+        f"CASE WHEN {chronology_column} IS NOT NULL THEN {ordinal_column} END DESC, "
+        f"{ordinal_column} ASC"
+    )

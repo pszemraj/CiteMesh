@@ -102,7 +102,6 @@ class EmbeddingCache(
         source_torch_dtype: str = "float32",
         text_formatter_fingerprint: str = "default",
         progress: ProgressWrapper | None = None,
-        strict: bool = False,
         _initialize: bool = True,
     ) -> None:
         """Create a persistent embedding cache for a model variant.
@@ -118,7 +117,6 @@ class EmbeddingCache(
         :param str text_formatter_fingerprint: Deterministic metadata-to-text formatter
             fingerprint used for cache invalidation boundaries.
         :param progress: Optional ``progress(values, description)`` wrapper for scans.
-        :param strict: Inspect existing files without repairing them.
         :param _initialize: Whether to initialize or inspect files immediately.
         """
         if storage_precision not in _STORAGE_PRECISIONS:
@@ -173,13 +171,13 @@ class EmbeddingCache(
         self.last_search_rescored_embeddings: int | None = None
         self._int8_saturation_warning_emitted = False
         self._progress = progress
-        self._strict_existing = bool(strict)
+        self._strict_existing = False
         self._operation_owner: tuple[int, str] | None = None
 
         if _initialize:
             with self.namespace_lock_only():
                 protected = self._has_corpus_state()
-                if strict or protected:
+                if protected:
                     self._inspect_existing_locked()
                     self._strict_existing = True
                 else:
@@ -267,7 +265,6 @@ class EmbeddingCache(
         binary_prefilter: bool,
         binary_rescore_multiplier: int,
         corpus_size: int | None = None,
-        eligible_rows: NDArray[np.bool_] | None = None,
     ) -> list[CacheSearchResult]:
         """Search cached embeddings and return ranked metadata-rich candidates.
 
@@ -276,7 +273,6 @@ class EmbeddingCache(
         :param bool binary_prefilter: Whether to use binary Hamming prefiltering.
         :param int binary_rescore_multiplier: Candidate oversampling factor for rescoring.
         :param corpus_size: Newest-N active-member view for a managed corpus; ``None`` uses all.
-        :param Optional[NDArray[np.bool_]] eligible_rows: Physical-row boolean mask intersected with active membership.
         :return List[CacheSearchResult]: Ranked search results.
         """
         if top_k < 1:
@@ -316,7 +312,7 @@ class EmbeddingCache(
                 embedding_rows = int(embeddings_dataset.shape[0])
                 self.last_search_physical_embeddings = embedding_rows
                 eligibility = self._eligible_rows_locked(
-                    conn, embedding_rows, corpus_size, eligible_rows
+                    conn, embedding_rows, corpus_size
                 )
                 eligible_count = (
                     embedding_rows if eligibility is None else int(eligibility.sum())
@@ -464,19 +460,25 @@ class EmbeddingCache(
                 f"existing cache files were preserved: {exc}"
             ) from exc
 
-    def get_cached_paper_ids(self) -> set[str]:
-        """Return all cached paper IDs for this namespace.
+    def get_cached_paper_ids(self, *, corpus_size: int | None = None) -> set[str]:
+        """Return cached IDs within the active corpus view.
 
-        :return Set[str]: Cached paper IDs loaded from SQLite metadata rows.
+        :param int | None corpus_size: Optional newest-N view within active membership.
+        :return Set[str]: Eligible cached paper IDs loaded from SQLite metadata rows.
         """
         if not path_exists(self.db_path):
             return set()
 
         paper_ids: set[str] = set()
         with self._cache_lock(), self._connect_db() as conn:
+            view = self._corpus_view_query_locked(conn, corpus_size)
             self._recover_pending_replacements_with_connection_locked(conn)
-            cursor = conn.cursor()
-            cursor.execute("SELECT paper_id FROM papers")
+            query = "SELECT paper_id FROM papers"
+            parameters: tuple[int, ...] = ()
+            if view is not None:
+                member_query, parameters = view
+                query += f" WHERE row_idx IN ({member_query})"
+            cursor = conn.execute(query, parameters)
             while True:
                 rows = cursor.fetchmany(SQLITE_QUERY_BATCH_SIZE)
                 if not rows:
@@ -491,11 +493,12 @@ class EmbeddingCache(
         return paper_ids
 
     def get_paper_metadata_batch(
-        self, paper_ids: Sequence[str]
+        self, paper_ids: Sequence[str], *, corpus_size: int | None = None
     ) -> dict[str, CachedPaperMetadata]:
-        """Return normalized cached metadata for selected paper IDs.
+        """Return normalized metadata within the active corpus view.
 
         :param Sequence[str] paper_ids: Paper IDs to look up.
+        :param int | None corpus_size: Optional newest-N view within active membership.
         :return dict[str, CachedPaperMetadata]: Metadata keyed by each cached paper ID.
         """
         if not paper_ids or not path_exists(self.db_path):
@@ -503,24 +506,26 @@ class EmbeddingCache(
 
         output: dict[str, CachedPaperMetadata] = {}
         with self._locked_connection() as conn:
+            view = self._corpus_view_query_locked(conn, corpus_size)
             self._recover_pending_replacements_with_connection_locked(conn)
             for row in self._query_paper_rows(
-                conn, list(paper_ids), lookup_column="paper_id"
+                conn, list(paper_ids), lookup_column="paper_id", corpus_view=view
             ):
                 decoded = _decode_paper_row(row, parse_json_lists=True)
                 output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
         return output
 
     def get_paper_metadata_alias_candidates(
-        self, identifiers: Sequence[str]
+        self, identifiers: Sequence[str], *, corpus_size: int | None = None
     ) -> dict[str, CachedPaperMetadata]:
-        """Return cached rows matching a primary, arXiv, or DOI identifier.
+        """Return active rows matching a primary, arXiv, or DOI identifier.
 
         Exact primary IDs win. For identifiers without a primary match, this
         deliberately returns every secondary-key row; the strategy layer owns
         ambiguity handling because one DOI can occur on multiple local records.
 
         :param Sequence[str] identifiers: Canonical bibliography identifiers.
+        :param int | None corpus_size: Optional newest-N view within active membership.
         :return dict[str, CachedPaperMetadata]: Candidate metadata keyed by primary ID.
         """
         normalized = {
@@ -539,11 +544,13 @@ class EmbeddingCache(
         lookup_values = sorted(normalized | arxiv_suffixes)
         output: dict[str, CachedPaperMetadata] = {}
         with self._locked_connection() as conn:
+            view = self._corpus_view_query_locked(conn, corpus_size)
             self._recover_pending_replacements_with_connection_locked(conn)
             for row in self._query_paper_rows(
                 conn,
                 lookup_values,
                 lookup_column="paper_id",
+                corpus_view=view,
             ):
                 decoded = _decode_paper_row(row, parse_json_lists=True)
                 output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
@@ -574,6 +581,7 @@ class EmbeddingCache(
                 casefold_primary_values,
                 lookup_column="paper_id",
                 case_insensitive=True,
+                corpus_view=view,
             ):
                 decoded = _decode_paper_row(row, parse_json_lists=True)
                 output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
@@ -588,6 +596,7 @@ class EmbeddingCache(
                     secondary_values,
                     lookup_column=lookup_column,
                     case_insensitive=True,
+                    corpus_view=view,
                 ):
                     decoded = _decode_paper_row(row, parse_json_lists=True)
                     output[decoded["paper_id"]] = _cached_paper_metadata(decoded)

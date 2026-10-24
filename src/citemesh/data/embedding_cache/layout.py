@@ -930,6 +930,7 @@ class _H5LayoutMixin(_EmbeddingCacheHost):
         *,
         lookup_column: str,
         case_insensitive: bool = False,
+        corpus_view: tuple[str, tuple[int, ...]] | None = None,
     ) -> Iterator[SQLitePaperRow]:
         """Yield common paper rows for batched SQLite key lookups.
 
@@ -937,6 +938,7 @@ class _H5LayoutMixin(_EmbeddingCacheHost):
         :param Sequence[str | int] lookup_values: Paper IDs or physical row indices.
         :param str lookup_column: ``papers`` column used for the ``IN`` lookup.
         :param bool case_insensitive: Compare text values with SQLite ``NOCASE``.
+        :param tuple[str, tuple[int, ...]] | None corpus_view: Optional active-row SQL with newest-N bindings.
         :return Iterator[SQLitePaperRow]: Rows in the shared paper-column layout.
         :raises ValueError: If the requested lookup column is not supported.
         """
@@ -953,7 +955,18 @@ class _H5LayoutMixin(_EmbeddingCacheHost):
                 lookup_column=lookup_expression,
                 placeholders=placeholders,
             )
-            for row in conn.execute(query, value_chunk):
+            parameters = tuple(value_chunk)
+            if corpus_view is not None:
+                member_query, member_parameters = corpus_view
+                if member_parameters:
+                    query += f" AND row_idx IN ({member_query})"
+                    parameters += member_parameters
+                else:
+                    query += (
+                        " AND EXISTS (SELECT 1 FROM corpus_membership m "
+                        "WHERE m.paper_id = papers.paper_id)"
+                    )
+            for row in conn.execute(query, parameters):
                 if row[-1] != 1:
                     raise RuntimeError(
                         "Embedding cache integrity error: row_idx coverage mismatch "

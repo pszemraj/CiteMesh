@@ -157,29 +157,6 @@ class SnapshotOrigin(TypedDict):
 CorpusOrigin = SnapshotOrigin | PublicationOrigin
 
 
-class PortableProducerProvenance(TypedDict, total=False):
-    """Known producer and runtime details carried by a portable manifest."""
-
-    source_torch_dtype: str
-    embedding_vector_dtype: str
-    binary_prefilter_used: bool | None
-    active_model: str
-    model_fingerprint: str | None
-    resolved_model_revision: str | None
-    truncate_dim: int | None
-    device: str
-    requested_device: str
-    compute_dtype: str
-    autocast: bool
-    retrieval_representation: str
-    graph_representation: str
-    model_profile: str
-    dataset_revision: str | None
-    cache_namespace: str
-    index_origin: CorpusOrigin | None
-    export_runtime_versions: RuntimeVersions
-
-
 PaperRowValues = tuple[
     str,
     str,
