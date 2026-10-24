@@ -150,14 +150,20 @@ def test_selected_search_never_falls_back(
     assert search._run_search_command(args, build_parser, user_config) == 1
 
 
+@pytest.mark.parametrize("committed_rows", [2, 0])
 @pytest.mark.parametrize("operation", ["auto", "local", "embedding", "hybrid", "embed"])
 def test_interrupted_import_survives_implicit_consumers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     operation: str,
+    committed_rows: int,
 ) -> None:
-    """Refuse implicit consumers without erasing an import's resumable prefix."""
+    """Refuse implicit consumers without erasing an import's resumable prefix.
+
+    Zero committed rows leave a managed pending namespace that holds no papers;
+    it is still an installed corpus, not an empty cache to rebuild or bypass.
+    """
     import pyarrow as pa
 
     from citemesh import cli
@@ -200,9 +206,9 @@ def test_interrupted_import_survives_implicit_consumers(
     producer.contract = _builder_contract(builder)
     snapshot = tmp_path / "snapshot"
     manifest = export_snapshot(producer, snapshot, shard_rows=2)
-    last_shard = snapshot / manifest.shards[-1].path
-    correct_bytes = last_shard.read_bytes()
-    last_shard.write_bytes(b"interrupted shard")
+    broken_shard = snapshot / manifest.shards[0 if committed_rows == 0 else -1].path
+    correct_bytes = broken_shard.read_bytes()
+    broken_shard.write_bytes(b"interrupted shard")
     destination = get_cache_dir("embeddings")
     with pytest.raises(pa.ArrowInvalid):
         import_snapshot(snapshot, destination, batch_rows=2)
@@ -215,7 +221,7 @@ def test_interrupted_import_survives_implicit_consumers(
     assert state["pending"]["kind"] == "import"
     assert not state["membership_complete"]
     assert cache.get_model_fingerprint() is None
-    assert cache.embedding_count() == 2
+    assert cache.embedding_count() == committed_rows
     before = cache.db_path.read_bytes(), cache.h5_path.read_bytes()
 
     def unexpected(*args: object, **kwargs: object) -> None:
@@ -266,11 +272,11 @@ def test_interrupted_import_survives_implicit_consumers(
         assert not any(record.exc_info for record in caplog.records)
     assert "REBUILDING EMBEDDING CACHE" not in caplog.text
     assert cache.corpus_state() == state
-    assert cache.embedding_count() == 2
+    assert cache.embedding_count() == committed_rows
     assert cache.get_model_fingerprint() is None
     assert (cache.db_path.read_bytes(), cache.h5_path.read_bytes()) == before
 
-    last_shard.write_bytes(correct_bytes)
+    broken_shard.write_bytes(correct_bytes)
     resumed = portable.import_snapshot(snapshot, destination, batch_rows=2)
     assert resumed.embedding_count() == 4
     assert resumed.corpus_state()["membership_complete"]

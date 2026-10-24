@@ -673,7 +673,11 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
                         f"active={model_fingerprint})"
                     )
                 )
-            if not has_cached_payload or cached_fingerprint != model_fingerprint:
+            # Managed corpus operations own their fingerprint: an interrupted
+            # import with no committed rows must stay byte-for-byte resumable.
+            if (
+                not has_cached_payload or cached_fingerprint != model_fingerprint
+            ) and not cache.corpus_state():
                 cache.set_model_fingerprint(model_fingerprint)
 
     @staticmethod

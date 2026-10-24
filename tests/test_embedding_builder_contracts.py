@@ -2420,6 +2420,51 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
     assert builder._embedding_cache is None
 
 
+@pytest.mark.parametrize("payload", [None, b"", b"not an HDF5 file"])
+def test_embedding_artifact_probe_counts_paperless_managed_corpus_state(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes | None
+) -> None:
+    """An interrupted install with zero committed papers is still an installed corpus.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
+    :param bytes | None payload: Absent, empty, or non-empty HDF5 payload content.
+    :return None: Verify managed state, not paper rows or file size, drives the probe
+        and that probing creates nothing.
+    """
+    from citemesh.data.embedding_cache import lifecycle
+
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    cache_dir = builder_module.get_cache_dir("embeddings", create=False)
+    cache_dir.mkdir(parents=True)
+
+    def install(namespace: str, state: str) -> None:
+        with sqlite3.connect(cache_dir / f"metadata_{namespace}.db") as connection:
+            connection.execute(
+                "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+                [("schema_version", "4"), (lifecycle.CORPUS_STATE_KEY, state)],
+            )
+            connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+        connection.close()
+        if payload is not None:
+            (cache_dir / f"embeddings_{namespace}.h5").write_bytes(payload)
+
+    install("cccccccccccc", "{}")
+    assert not builder.has_persistent_embedding_artifacts()
+    (cache_dir / "metadata_cccccccccccc.db").unlink()
+    if payload is not None:
+        (cache_dir / "embeddings_cccccccccccc.h5").unlink()
+
+    install("dddddddddddd", json.dumps({"pending": {"kind": "import"}}))
+    before = sorted(path.name for path in cache_dir.iterdir())
+    assert builder.has_persistent_embedding_artifacts()
+    assert sorted(path.name for path in cache_dir.iterdir()) == before
+    assert builder._embedding_cache is None
+
+
 def test_embedding_cache_namespace_partition_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

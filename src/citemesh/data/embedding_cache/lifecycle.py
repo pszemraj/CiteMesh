@@ -285,6 +285,26 @@ def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary:
         raise CorpusRecoveryPendingError(str(exc)) from exc
 
 
+def embedding_namespace_has_corpus_state(db_path: Path) -> bool | None:
+    """Probe whether a namespace records managed corpus state, read-only.
+
+    Unlike :func:`read_installed_corpus_summary` this takes no locks and never
+    recovers a hot journal, so it creates and modifies nothing. An import
+    interrupted before its first batch commits leaves this state with no papers.
+
+    :param Path db_path: Metadata database belonging to one embedding namespace.
+    :return bool | None: ``True`` when corpus state is recorded, ``False`` when
+        the metadata is readable and records none, or ``None`` when inspection fails.
+    """
+    try:
+        with closing(
+            sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as conn:
+            return bool(_read_state(conn))
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        return None
+
+
 class _LifecycleMixin(_EmbeddingCacheHost):
     """Operations that preserve a corpus's fixed contract and certified membership."""
 

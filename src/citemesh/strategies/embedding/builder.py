@@ -55,6 +55,7 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     CacheSearchResult,
 )
+from citemesh.data.embedding_cache.lifecycle import embedding_namespace_has_corpus_state
 from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
@@ -1758,20 +1759,23 @@ class EmbeddingGraphBuilder(
         user has never built an embedding cache. Exact namespace selection still
         occurs before any vector is searched.
 
-        :return bool: Whether at least one non-empty HDF5/metadata pair may
-            contain searchable papers.
+        :return bool: Whether at least one namespace carries managed corpus state
+            or a non-empty HDF5/metadata pair that may contain searchable papers.
         """
         cache_directory = (
             self._embedding_cache.h5_path.parent
             if self._embedding_cache is not None
             else get_cache_dir("embeddings", create=False)
         )
-        for h5_path in cache_directory.glob("embeddings_*.h5"):
+        for db_path in cache_directory.glob("metadata_*.db"):
+            # An import interrupted before its first batch commits holds corpus
+            # state but no papers, and its HDF5 file may be absent or empty. It is
+            # an installed corpus awaiting resume, not an empty cache.
+            if embedding_namespace_has_corpus_state(db_path):
+                return True
+            namespace_id = db_path.name.removeprefix("metadata_").removesuffix(".db")
+            h5_path = cache_directory / f"embeddings_{namespace_id}.h5"
             if not path_exists(h5_path) or h5_path.stat().st_size == 0:
-                continue
-            namespace_id = h5_path.name.removeprefix("embeddings_").removesuffix(".h5")
-            db_path = cache_directory / f"metadata_{namespace_id}.db"
-            if not path_exists(db_path):
                 continue
             has_papers = embedding_namespace_has_papers(db_path)
             if has_papers is False:
