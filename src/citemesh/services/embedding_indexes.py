@@ -322,8 +322,10 @@ def _readme(catalog: IndexCatalog, manifests: dict[str, PortableManifest]) -> st
     lines = [
         "# CiteMesh corpus indexes",
         "",
-        "Portable retrieval-document embeddings with normalized paper metadata. "
-        "No model weights are included. Query and graph encoding still use the selected model.",
+        "Portable retrieval-document embeddings with normalized paper metadata for "
+        "[CiteMesh](https://github.com/pszemraj/CiteMesh). "
+        "See the repository for installation and usage. "
+        "No model weights are included. Query and graph encoding use the selected model.",
         "",
     ]
     for name, manifest in manifests.items():

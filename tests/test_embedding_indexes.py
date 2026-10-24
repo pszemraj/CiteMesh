@@ -298,6 +298,7 @@ def test_publish_preserves_other_config_and_prunes_selected_config_history(
     assert hub.uploads[0]["add"] == ["variants/one/new-snapshot/index.json"]
     assert hub.uploads[1]["add"] == ["catalog.json"]
     readme = (hub.root / "README.md").read_text()
+    assert "[CiteMesh](https://github.com/pszemraj/CiteMesh)" in readme
     assert "independent-source" in readme
     assert not readme.startswith("---")
     assert "--bucket" in readme
