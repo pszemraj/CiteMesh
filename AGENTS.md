@@ -4,7 +4,7 @@ Rules for working on CiteMesh, for humans and coding agents.
 
 ## Scope
 
-- CI is maintained ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): fix it when it breaks, and add no parallel workflows, release automation, or publishing steps unless asked.
+- Maintain [CI](.github/workflows/ci.yml) as one Linux/Python job running Ruff lint/format and Mypy. Do not restore tests or add build validation, benchmarks, model runs, extra workflows, release automation, or publishing steps without explicit scope and cost approval.
 - No compatibility layers, hypothetical platform/user support, or security machinery unless requested or intrinsic to the task; no checksums, verification manifests, or extra reporting artifacts for ordinary work.
 - Keep the validation and error handling real failure modes require; do not invent trust boundaries or defensive frameworks.
 - Ask before expanding the request's or the repo's natural scope. Use sub-agents when sensible.
@@ -37,14 +37,12 @@ project commands with `conda run -n inf --live-stream <command>`. Before
 committing, run:
 
 ```bash
-python -m pytest
+python -m pytest -n 4 --dist worksteal
 ruff check .
 ruff format --check .
 ```
 
-The default suite is network-free and excludes slow tests. Real CUDA checks are
-opt-in with `python -m pytest -m "slow and cuda"` and may download the designated
-embedding model.
+The default suite is network-free and excludes slow tests. The command above uses four pytest-xdist worker processes with work stealing; adjust `-n` to choose another worker count or omit it for a serial run. Each test retains its own cache and temporary paths. Keep real CUDA checks serial: `python -m pytest -m "slow and cuda"`; these opt-in tests may download the designated embedding model.
 
 ## Code conventions
 
