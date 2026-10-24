@@ -73,9 +73,12 @@ membership certification, and pending operation target. See [portable index
 selection](../guides/caching.md#portable-corpus-indexes) for user-facing
 namespace and source-revision behavior.
 
-Strict opening inspects SQLite and HDF5 read-only before initialization or
-layout repair. Missing halves, incompatible contracts, and ambiguous occupied
-storage fail without clearing payload. Consumer readiness additionally requires
+Strict opening holds the namespace lock and opens the existing SQLite file in
+read-write mode so SQLite can roll back a hot journal after a crash. It opens
+HDF5 read-only. Inspection performs no schema migration or layout repair;
+explicit legacy adoption initializes missing native tables after validation.
+Missing halves, incompatible contracts, and ambiguous occupied storage fail
+without clearing payload. Consumer readiness additionally requires
 completed source state and certified membership; refresh can open its own
 pending state. Ordinary namespace selection also protects managed storage
 before repair. Explicit reset is separate from import, which never replaces an

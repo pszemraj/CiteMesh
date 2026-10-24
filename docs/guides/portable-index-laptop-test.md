@@ -1,35 +1,28 @@
 # Test a portable index on a laptop
 
 This checks that a laptop can install the published corpus without encoding it,
-retrieve from it, and build a graph for a genuinely new paper. Run the same
+retrieve from it, and build a graph for a new paper. Run the same
 checks on either or both machines.
 
-## Published input
+## Choose the input
 
-| Item | Value |
-| --- | --- |
-| Private bucket | [pszemraj/citemesh-arxiv-indexes](https://huggingface.co/buckets/pszemraj/citemesh-arxiv-indexes) |
-| Snapshot | `ba59ec2d-cc19-473c-a857-87e63879f936` |
-| Configuration | `embeddinggemma-512-int8` |
-| Installed namespace | `0023623a3303` |
-| Active papers | 3,215,242 |
-| Source revision | `d83cc98f9ceba7b7d21cde0245233d48b63a7dbe` |
-| Model | `unsloth/embeddinggemma-300m`, pinned by the index |
+Use a completed full-coverage portable index with at least eight active papers
+and a [supported embedding model](../reference/embedding-runtime.md#model-selection-and-fallback).
+Get either a local export directory or a readable Storage Bucket from its
+publisher. Check its manifest for the model, dimension, stored dtype, source
+revision, and coverage; allow space for both the portable files and native cache,
+plus model weights.
 
-The portable download is 4.01 GB. The Linux native cache occupies about 8.5 GiB;
-allow roughly 20 GB free for both copies, model weights, and the installation.
-Import needs no GPU or model weights. Search and graph building still need the
-small pinned encoder; their first run may download it. No upstream corpus
-download or corpus encoding should occur.
+Import needs no GPU or model weights. Search and graph building use the index's
+pinned encoder; their first run may download it. No upstream corpus download or
+corpus encoding should occur.
 
-## 1. Install the implementation
+## 1. Install from a checkout
 
-Use the implementation branch, not an older installation from `main`. If the
-branch has not been pushed, copy `citemesh-portable-index-test.bundle` from the
-Linux machine to the laptop, then run these commands beside the bundle:
+Run from a checkout containing portable-index support. To make a fresh checkout:
 
 ```bash
-git clone --branch feat/reuse-index citemesh-portable-index-test.bundle citemesh-index-test
+git clone https://github.com/pszemraj/CiteMesh.git citemesh-index-test
 cd citemesh-index-test
 ```
 
@@ -54,14 +47,8 @@ If the intended accelerator is unavailable, resolve the installation/device
 issue before calling that accelerator test a pass. CPU can be tested separately.
 For a non-NVIDIA Windows GPU, use CPU; CiteMesh has no DirectML backend.
 
-Authenticate as an account with read access to the private bucket:
-
-```bash
-python -c "from huggingface_hub import login; login()"
-python -c "from huggingface_hub import whoami; print(whoami()['name'])"
-```
-
-See the [Hub authentication guide](https://huggingface.co/docs/huggingface_hub/quick-start#authentication).
+For a private bucket, follow the [bucket authentication instructions](caching.md#portable-corpus-indexes).
+A local export needs no bucket credentials.
 
 ## 2. Import into a fresh cache
 
@@ -83,19 +70,23 @@ $env:CITEMESH_CACHE_DIR = Join-Path $env:LOCALAPPDATA "CiteMesh-index-test"
 These remaining commands work in either shell; keep each command on one line:
 
 ```bash
-citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes --config embeddinggemma-512-int8 --snapshot ba59ec2d-cc19-473c-a857-87e63879f936 --log-file index-import.log
+citemesh cache import --bucket OWNER/INDEX --config CONFIG --log-file index-import.log
 citemesh cache scan
 ```
 
-**Pass:** import reports namespace `0023623a3303`; scan shows a complete,
-certified corpus with 3,215,242 active/physical rows and 512-dimensional int8
-storage. Its origin records the publication above. Import performs data transfer
-and local binary-index reconstruction, with no model loading or calibration.
-If the pinned snapshot is unavailable, select a replacement publication and use
-its snapshot ID, namespace, row count, and contract settings consistently for
-the remaining checks.
-See [Portable corpus indexes](caching.md#portable-corpus-indexes) for import
-resume and snapshot-retention behavior.
+Replace `OWNER/INDEX` and `CONFIG` with the publication's values. This selects
+the current snapshot; add `--snapshot SNAPSHOT_ID` to select a retained snapshot.
+For a local export, replace the import command with
+`citemesh cache import --path ./arxiv-index --log-file index-import.log`.
+
+**Pass:** import reports a namespace; scan shows ready, certified membership and
+the manifest's active row count, dimension, dtype, source revision, and origin.
+Import performs data transfer and, for int8, local binary-index reconstruction,
+with no model loading or calibration. Record the namespace and snapshot identity,
+and replace `NAMESPACE` in every example below. Keep the local snapshot or
+completed download available for repeat tests; remote snapshots may be pruned.
+See [Portable corpus indexes](caching.md#portable-corpus-indexes) for resume and
+retention behavior.
 
 ## 3. Search the installed corpus
 
@@ -103,8 +94,8 @@ The examples use `mps`. On Windows substitute `cuda`; for CPU substitute `cpu`.
 The first search can download the pinned model. Keep compilation at its default.
 
 ```bash
-citemesh search "long-context language models and efficient attention" --mode local --cache-namespace 0023623a3303 --device mps --all-corpus --limit 5 --verbose --log-file index-search.log
-citemesh search "long-context language models and efficient attention" --mode local --cache-namespace 0023623a3303 --device mps --corpus-size 8 --limit 5
+citemesh search "long-context language models and efficient attention" --mode local --cache-namespace NAMESPACE --device mps --all-corpus --limit 5 --verbose --log-file index-search.log
+citemesh search "long-context language models and efficient attention" --mode local --cache-namespace NAMESPACE --device mps --corpus-size 8 --limit 5
 ```
 
 **Pass:** both return scored papers, use the requested device and selected
@@ -155,6 +146,7 @@ from citemesh.services import SemanticScholarClient
 from citemesh.visualization import GraphExporter
 
 DEVICE = "mps"  # cuda on NVIDIA Windows; cpu for a CPU test
+NAMESPACE = "REPLACE_WITH_IMPORTED_NAMESPACE"
 
 
 class CorpusOnlyClient(SemanticScholarClient):
@@ -171,10 +163,13 @@ class CorpusOnlyClient(SemanticScholarClient):
 
 
 seed = Paper(**json.loads(Path("out/unseen-paper.json").read_text(encoding="utf-8")))
-selection = select_existing_cache("0023623a3303")
+selection = select_existing_cache(NAMESPACE)
 cache = open_existing_cache(selection)
 assert not cache.get_paper_metadata_batch([seed.paper_id]), "Choose an unseen seed"
 state, count = cache.corpus_state(), cache.embedding_count()
+print(
+    "namespace", selection.namespace_id, "contract", selection.contract, "state", state
+)
 
 for cap in (None, 8):
     builder = EmbeddingGraphBuilder(
@@ -213,7 +208,7 @@ the retrieval corpus and source provenance unchanged; graph vectors occupy a
 separate float32 namespace. Repeating the script should reuse graph vectors.
 Open both dashboard files and confirm titles, abstracts, and navigation work.
 
-The Python example uses the current branch's selection API; it is subject to
+The Python selection API is subject to
 the project's [pre-1.0 API policy](python-api.md).
 
 ## 5. Check normal identifier-based CLI use
@@ -222,7 +217,7 @@ Once Semantic Scholar resolves that paper with the correct title and abstract,
 replace `arxiv:YOUR_REAL_ID` and the device in this command:
 
 ```bash
-citemesh build arxiv:YOUR_REAL_ID --strategy embedding --cache-namespace 0023623a3303 --device mps --all-corpus --max-papers 6 --min-semantic-similarity 0 --export dashboard --export json --output out/unseen-cli --verbose --log-file unseen-cli.log
+citemesh build arxiv:YOUR_REAL_ID --strategy embedding --cache-namespace NAMESPACE --device mps --all-corpus --max-papers 6 --min-semantic-similarity 0 --export dashboard --export json --output out/unseen-cli --verbose --log-file unseen-cli.log
 citemesh cache scan
 ```
 
@@ -234,9 +229,10 @@ Do not refresh/rebuild the corpus just to query a new seed.
 
 ## Record each laptop's result
 
-Record OS, RAM, GPU, Python/torch versions, requested and actual device,
-import time, first/warm search time, and pass/fail for full/capped unseen-paper
-builds. Keep `index-import.log`, `index-search.log`, `unseen-cli.log`, the printed
+Record the checkout commit, namespace, snapshot identity, source revision and
+coverage, model contract, OS, RAM, GPU, Python/torch versions, requested and
+actual device, import time, first/warm search time, and pass/fail for full/capped
+unseen-paper builds. Keep `index-import.log`, `index-search.log`, `unseen-cli.log`, the printed
 runtime metadata, and the generated JSON/dashboard outputs. Note optional
 provider failures separately from index/model failures.
 

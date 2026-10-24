@@ -6,7 +6,7 @@
 - [How CiteMesh builds a graph](guides/how-it-works.md): the pipeline from seed to export
 - [Strategies](guides/strategies.md): choosing a discovery method
 - [Caching and data](guides/caching.md): reuse, hydration, and maintenance
-- [Portable index laptop test](guides/portable-index-laptop-test.md): private-index import and unseen-paper checks on macOS/Windows
+- [Portable index laptop test](guides/portable-index-laptop-test.md): repeatable import and unseen-paper checks across devices
 - [User configuration](guides/configuration.md): persistent defaults and credentials
 - [Python API](guides/python-api.md): builders and exporters for scripts and notebooks
 

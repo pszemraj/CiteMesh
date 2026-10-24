@@ -89,6 +89,10 @@ the manifest separately records the immutable model and upstream dataset
 revisions. The upstream source revision is provenance, not namespace identity.
 Each configuration can have different coverage and freshness.
 
+Private buckets require a Hugging Face token with read access for import and
+write access for publication. Set [`HF_TOKEN`](../reference/environment.md#other-respected-variables)
+or save a token with `hf auth login`; public bucket reads need no token.
+
 Explicit `--cache-namespace` selects existing files and pins model, profile,
 document formatter, dimension, storage precision, dataset, and split from their
 stored contract. Conflicting explicit flags fail. Device, batch size, scoring,
@@ -120,16 +124,20 @@ Unparseable timestamps rank below valid ones, which are compared in UTC. The
 winning record retains its original source position. Equally recent, identical
 records retain the first occurrence.
 
-For a full index, `--corpus-size N` ranks only the newest N active members at
-the completed revision; `--all-corpus` uses every active member. Chronology ties
+For an installed index, `--corpus-size N` ranks only the newest N active members
+at the completed revision; `--all-corpus` uses every installed active member. Chronology ties
 prefer later source rows; undated papers fill remaining places in source
 order. A smaller view changes neither stored coverage nor membership. A capped
 index cannot supply a larger view or claim full coverage. Seed lookup is
 independent of neighbor eligibility, so an older seed can search newer papers.
+The same membership and view rules apply when ordinary model settings resolve
+to a certified namespace. Explicit local-search corpus-view flags require
+certified membership; uncertified caches reject them.
 
 An interrupted import or refresh remains unavailable to consumers. Resume an
-import with the same local snapshot or the exact bucket command printed when
-import starts. Complete bucket downloads remain in the Hugging Face cache, so
+import with the same local snapshot or the same bucket configuration and
+snapshot ID. A conflicting-import error prints the pinned resume command.
+Complete bucket downloads remain in the Hugging Face cache, so
 native import can resume from that copy even after the publisher retires the
 remote snapshot. An unfinished transfer may need to restart from the current
 snapshot if its files have been retired. Resume refresh against its recorded
@@ -163,9 +171,11 @@ python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
 ```
 
 Use `--namespace` for an already certified corpus, or omit both namespace flags
-to create a new configuration. The output directory must be new. The script
-resolves and pins the source, refreshes, exports, and publishes one complete
-configuration. For upload ordering, see
+to create a new configuration. Optional `--config NAME` overrides the published
+configuration name; otherwise export derives `<profile>-<dimension>-<dtype>`
+from the stored contract, such as `embeddinggemma-512-int8`. The output directory
+must be new. The script resolves and pins the source, refreshes, exports, and
+publishes one complete configuration. For upload ordering, see
 [Embedding Cache Internals](../internals/embedding-cache.md#portable-format).
 Use one publisher at a time. The bucket must already exist and be private.
 
