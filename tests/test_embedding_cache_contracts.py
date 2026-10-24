@@ -95,6 +95,30 @@ def _fail_second_connection_commit(
     return fail_final_commit
 
 
+def _fail_next_dataset_write(
+    dataset_name: str, message: str
+) -> Callable[[h5py.Dataset, object, object], None]:
+    """Return a setter that fails once for the named HDF5 dataset.
+
+    :param str dataset_name: Dataset path component whose next write should fail.
+    :param str message: Error message raised for the injected write failure.
+    :return Callable[[h5py.Dataset, object, object], None]: Assignment callback that
+        delegates to the original setter after the injected failure.
+    """
+    original_setitem = h5py.Dataset.__setitem__
+    failed = False
+
+    def fail_dataset_write(dataset: h5py.Dataset, key: object, value: object) -> None:
+        """Fail one matching assignment and delegate all other writes."""
+        nonlocal failed
+        if dataset.name == f"/{dataset_name}" and not failed:
+            failed = True
+            raise OSError(message)
+        original_setitem(dataset, key, value)
+
+    return fail_dataset_write
+
+
 class _FakeInferenceTensor:
     """Small NumPy-backed tensor surface for prefetch proxy unit tests."""
 
@@ -663,31 +687,17 @@ def test_embedding_cache_replacement_journal_recovers_vector_write_failure(
     with h5py.File(cache.h5_path, "r") as h5:
         original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
 
-    original_setitem = h5py.Dataset.__setitem__
-    failed = False
-
-    def fail_replacement_vector_write(
-        dataset: h5py.Dataset, key: object, value: object
-    ) -> None:
-        """Raise once when the replacement writes the primary vector matrix.
-
-        :param h5py.Dataset dataset: HDF5 dataset accepting an assignment.
-        :param object key: Dataset row/slice receiving the assignment.
-        :param object value: Replacement value.
-        :return None: Delegates after the injected failure.
-        """
-        nonlocal failed
-        if dataset.name == f"/{EMBEDDINGS_DATASET_NAME}" and not failed:
-            failed = True
-            raise OSError("forced vector write failure")
-        original_setitem(dataset, key, value)
-
     with monkeypatch.context() as patch:
-        patch.setattr(h5py.Dataset, "__setitem__", fail_replacement_vector_write)
+        patch.setattr(
+            h5py.Dataset,
+            "__setitem__",
+            _fail_next_dataset_write(
+                EMBEDDINGS_DATASET_NAME, "forced vector write failure"
+            ),
+        )
         with pytest.raises(OSError, match="forced vector write failure"):
             cache.get_embeddings(replacement, model, show_progress=False)
 
-    assert failed
     with cache._connect_db() as conn:
         assert (
             conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 1
@@ -727,31 +737,17 @@ def test_embedding_cache_replacement_journal_recovers_binary_write_failure(
         original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
         original_binary = h5[BINARY_INDEX_DATASET_NAME][:].copy()
 
-    original_setitem = h5py.Dataset.__setitem__
-    failed = False
-
-    def fail_replacement_binary_write(
-        dataset: h5py.Dataset, key: object, value: object
-    ) -> None:
-        """Raise once when the replacement writes the packed binary index.
-
-        :param h5py.Dataset dataset: HDF5 dataset accepting an assignment.
-        :param object key: Dataset row/slice receiving the assignment.
-        :param object value: Replacement value.
-        :return None: Delegates after the injected failure.
-        """
-        nonlocal failed
-        if dataset.name == f"/{BINARY_INDEX_DATASET_NAME}" and not failed:
-            failed = True
-            raise OSError("forced binary write failure")
-        original_setitem(dataset, key, value)
-
     with monkeypatch.context() as patch:
-        patch.setattr(h5py.Dataset, "__setitem__", fail_replacement_binary_write)
+        patch.setattr(
+            h5py.Dataset,
+            "__setitem__",
+            _fail_next_dataset_write(
+                BINARY_INDEX_DATASET_NAME, "forced binary write failure"
+            ),
+        )
         with pytest.raises(OSError, match="forced binary write failure"):
             cache.get_embeddings(replacement, model, show_progress=False)
 
-    assert failed
     with h5py.File(cache.h5_path, "a") as h5:
         del h5[BINARY_INDEX_DATASET_NAME]
     with pytest.raises(RuntimeError, match="binary index that is unavailable"):
@@ -1047,12 +1043,15 @@ def test_embedding_cache_replacement_journal_recovers_interruption_on_reopen(
             )
 
 
+@pytest.mark.parametrize("previous_schema", [2, 3])
 def test_embedding_cache_reencodes_legacy_schema_before_reusing_vectors(
     tmp_path: Path,
+    previous_schema: int,
 ) -> None:
-    """A schema-v2 namespace must not be trusted after unsafe replacements existed.
+    """A legacy namespace is cleared before its vectors can be reused.
 
     :param Path tmp_path: Isolated cache directory.
+    :param int previous_schema: Prior cache schema stored in the namespace.
     :return None: Checks the schema boundary clears old vectors before re-encoding.
     """
     cache = EmbeddingCache(
@@ -1067,7 +1066,7 @@ def test_embedding_cache_reencodes_legacy_schema_before_reusing_vectors(
     cache.get_embeddings(original, original_model, show_progress=False)
     with h5py.File(cache.h5_path, "a") as h5:
         h5[EMBEDDINGS_DATASET_NAME][0] = np.asarray([-1.0, 0.0], dtype=np.float32)
-        h5.attrs.modify(SCHEMA_VERSION_KEY, 2)
+        h5.attrs.modify(SCHEMA_VERSION_KEY, previous_schema)
 
     reopened = EmbeddingCache(
         cache_dir=tmp_path,
@@ -3070,35 +3069,6 @@ def test_embedding_cache_chronology_watermark_contract() -> None:
         )
         assert keyless.get_cached_paper_ids() == {"arxiv_1"}
         assert keyless.get_max_chronology_key() is None
-
-
-def test_embedding_cache_schema_bump_rebuilds_chronology_free_namespace(
-    tmp_path: Path,
-) -> None:
-    """A namespace stamped at the previous schema must be rebuilt, not reused.
-
-    :param Path tmp_path: Isolated cache directory.
-    :return None: Checks that schema 3 payload is cleared before re-encoding.
-    """
-    cache = EmbeddingCache(
-        cache_dir=tmp_path,
-        model_name="chronology-schema-bump",
-        storage_precision="float32",
-    )
-    cache.get_embeddings(
-        {"arxiv:2508.01234": {"title": "Seed", "abstract": "Abstract"}},
-        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
-        show_progress=False,
-    )
-    with h5py.File(cache.h5_path, "a") as h5:
-        h5.attrs.modify(SCHEMA_VERSION_KEY, 3)
-
-    reopened = EmbeddingCache(
-        cache_dir=tmp_path,
-        model_name="chronology-schema-bump",
-        storage_precision="float32",
-    )
-    assert reopened.get_cached_paper_ids() == set()
 
 
 def test_embedding_cache_hydration_rowcount_reconciliation_marker_contract() -> None:
