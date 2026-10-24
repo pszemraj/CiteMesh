@@ -245,6 +245,64 @@ def test_pending_import_refuses_search_export_ingest_and_other_identity(tmp_path
         )
 
 
+@pytest.mark.parametrize(
+    ("kind", "origin", "command"),
+    [
+        (
+            "import",
+            {"snapshot_id": "snapshot-one"},
+            "citemesh cache import --path <directory of snapshot snapshot-one>",
+        ),
+        (
+            "import",
+            {
+                "bucket_id": "owner/index",
+                "config_name": "one",
+                "snapshot_id": "snapshot-one",
+            },
+            "citemesh cache import --bucket owner/index --config one "
+            "--snapshot snapshot-one",
+        ),
+        ("refresh", None, "citemesh cache refresh --namespace {namespace}"),
+    ],
+)
+def test_incomplete_operation_names_namespace_and_resume_command(
+    tmp_path, kind, origin, command
+):
+    """Every refusal of a pending namespace must say which command resumes it."""
+    settings = _settings(tmp_path)
+    if kind == "import":
+        operation = import_destination_session(**settings, origin=origin)
+    else:
+        cache, _, _ = _populate(settings)
+        operation = cache.operation_session(
+            kind="refresh",
+            identity={"source": settings["source"].to_dict()},
+            target_source=settings["source"],
+            contract=settings["contract"],
+            namespace_selectors=settings["namespace_selectors"],
+        )
+    with operation as session:
+        cache = session.cache
+        if kind == "import":
+            session.append_stored_embeddings(
+                _records(), np.eye(4, dtype=np.float32), first_row=0
+            )
+    command = command.format(namespace=cache.namespace_id)
+    with pytest.raises(RuntimeError) as refused:
+        cache.get_cached_paper_ids()
+    assert str(refused.value) == (
+        f"Corpus cache {cache.namespace_id} has an incomplete {kind} operation; "
+        f"resume it with `{command}` before using the corpus"
+    )
+    if kind == "import":
+        with pytest.raises(ValueError, match="Conflicting incomplete import") as error:
+            preflight_import_destination(
+                **{**settings, "origin": origin, "identity": {"snapshot_id": "other"}}
+            )
+        assert str(error.value).endswith(f" Resume with: {command}")
+
+
 def test_strict_missing_half_preserves_database_and_never_repairs(tmp_path):
     settings = _settings(tmp_path)
     cache, _, _ = _populate(settings)

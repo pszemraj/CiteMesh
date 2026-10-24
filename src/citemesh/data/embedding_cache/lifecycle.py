@@ -305,6 +305,55 @@ def embedding_namespace_has_corpus_state(db_path: Path) -> bool | None:
         return None
 
 
+def resume_command(namespace_id: str, state: CorpusState) -> str:
+    """Name the command that resumes a namespace's pending operation.
+
+    Pending state records a bucket publication or a snapshot ID but never a local
+    path, so a local import names its snapshot where the path belongs.
+
+    :param str namespace_id: Native namespace carrying the pending operation.
+    :param CorpusState state: Persisted state whose ``pending`` operation is set.
+    :return str: Command line to run, with a placeholder for a local snapshot path.
+    """
+    if state["pending"]["kind"] == "refresh":
+        return shlex.join(["citemesh", "cache", "refresh", "--namespace", namespace_id])
+    origin = state.get("origin")
+    if origin is not None and all(
+        origin.get(key) for key in ("bucket_id", "config_name", "snapshot_id")
+    ):
+        # The truthy publication fields above define the values used in this hint.
+        publication = cast(PublicationOrigin, origin)
+        return shlex.join(
+            [
+                "citemesh",
+                "cache",
+                "import",
+                "--bucket",
+                publication["bucket_id"],
+                "--config",
+                publication["config_name"],
+                "--snapshot",
+                publication["snapshot_id"],
+            ]
+        )
+    snapshot = origin.get("snapshot_id") if origin is not None else None
+    return f"citemesh cache import --path <directory of snapshot {snapshot or '?'}>"
+
+
+def incomplete_operation_message(namespace_id: str, state: CorpusState) -> str:
+    """Refuse use of a namespace whose import or refresh has not finished.
+
+    :param str namespace_id: Native namespace carrying the pending operation.
+    :param CorpusState state: Persisted state whose ``pending`` operation is set.
+    :return str: Message naming the namespace, the operation, and its resume command.
+    """
+    return (
+        f"Corpus cache {namespace_id} has an incomplete {state['pending']['kind']} "
+        f"operation; resume it with `{resume_command(namespace_id, state)}` "
+        "before using the corpus"
+    )
+
+
 class _LifecycleMixin(_EmbeddingCacheHost):
     """Operations that preserve a corpus's fixed contract and certified membership."""
 
@@ -444,10 +493,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         """
         state = _read_state(conn)
         if state.get("pending"):
-            raise RuntimeError(
-                f"Corpus cache has an incomplete {state['pending']['kind']} operation; "
-                "resume that operation before using the corpus"
-            )
+            raise RuntimeError(incomplete_operation_message(self.namespace_id, state))
         if state and not state.get("membership_complete"):
             raise RuntimeError(
                 "Corpus membership is not certified; run explicit refresh"
@@ -1329,31 +1375,11 @@ def _classify_import_locked(
     action: Literal["create", "resume_same_import", "already_complete"]
     if pending:
         if pending.get("kind") != "import" or pending.get("identity") != identity:
-            publication = state.get("origin")
-            resume = ""
-            if publication is not None and all(
-                publication.get(key)
-                for key in ("bucket_id", "config_name", "snapshot_id")
-            ):
-                # The truthy publication fields above define the values used in this hint.
-                publication_values = cast(PublicationOrigin, publication)
-                resume = " Resume with: " + shlex.join(
-                    [
-                        "citemesh",
-                        "cache",
-                        "import",
-                        "--bucket",
-                        publication_values["bucket_id"],
-                        "--config",
-                        publication_values["config_name"],
-                        "--snapshot",
-                        publication_values["snapshot_id"],
-                    ]
-                )
             raise ValueError(
                 "Conflicting incomplete import; resume its pinned identity: "
                 + _json(pending)
-                + resume
+                + " Resume with: "
+                + resume_command(cache.namespace_id, state)
             )
         if pending["target_source"] != asdict(source) or state.get("origin") != origin:
             raise ValueError("Import provenance differs from pending import")

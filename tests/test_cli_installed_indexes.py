@@ -249,11 +249,17 @@ def test_interrupted_import_survives_implicit_consumers(
         "--device",
         "cpu",
     ]
+    refusal = (
+        f"Corpus cache {namespace_id} has an incomplete import operation; resume it "
+        "with `citemesh cache import --path <directory of snapshot "
+        f"{manifest.snapshot_id}>` before using the corpus"
+    )
     if operation == "embed":
-        with pytest.raises(InstalledCorpusError, match="incomplete import"):
+        with pytest.raises(InstalledCorpusError, match="incomplete import") as refused:
             builder.embed_papers(
                 {"paper": Paper(paper_id="paper", title="Paper", year=2024)}
             )
+        assert refusal in str(refused.value)
     else:
         command = (
             ["search", "attention", "--mode", operation]
@@ -268,7 +274,7 @@ def test_interrupted_import_survives_implicit_consumers(
             ]
         )
         assert cli.main([*command, *flags]) == 1
-        assert "incomplete import" in caplog.text
+        assert refusal in caplog.text
         assert not any(record.exc_info for record in caplog.records)
     assert "REBUILDING EMBEDDING CACHE" not in caplog.text
     assert cache.corpus_state() == state

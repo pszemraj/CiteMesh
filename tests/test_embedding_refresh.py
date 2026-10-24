@@ -297,6 +297,14 @@ def test_interrupted_refresh_resumes_recorded_target(
             binary_prefilter=False,
             binary_rescore_multiplier=1,
         )
+    with pytest.raises(
+        ValueError, match="incomplete refresh is pending at two"
+    ) as advance:
+        builder.refresh_corpus("three")
+    assert (
+        f"resume it with `citemesh cache refresh --namespace {cache.namespace_id}`"
+        in str(advance.value)
+    )
     active[0] = "three"
     revisions["two"] = [row("2401.00001", "new"), row("2401.00002")]
     monkeypatch.setattr(cache, "upsert_embeddings", original)

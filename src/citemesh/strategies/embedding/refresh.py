@@ -199,6 +199,8 @@ def refresh_builder_corpus(
     :param revision: Optional dataset revision to reconcile.
     :return: Source identity and either an unchanged marker or refresh counts.
     """
+    from citemesh.data.embedding_cache.lifecycle import resume_command
+
     contract = (
         builder._cache_selection.contract
         if builder._cache_selection
@@ -264,7 +266,10 @@ def refresh_builder_corpus(
                 requested = corpus_source.resolve_source_snapshot(source, revision)
                 if requested.revision != target.revision:
                     raise ValueError(
-                        f"Refresh is pending at {target.revision}; resume that revision before advancing"
+                        f"An incomplete {pending['kind']} is pending at "
+                        f"{target.revision}; resume it with "
+                        f"`{resume_command(cache.namespace_id, state)}` "
+                        "before advancing"
                     )
         else:
             target = (

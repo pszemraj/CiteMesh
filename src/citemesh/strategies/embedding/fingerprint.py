@@ -696,16 +696,16 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
         :raises EmbeddingCacheFingerprintMismatchError: If the namespace carries
             legacy corpus hydration metadata.
         """
+        from citemesh.data.embedding_cache.lifecycle import (
+            incomplete_operation_message,
+        )
+
         state = cache.corpus_state()
         if state:
-            pending = state.get("pending")
-            if pending:
-                kind = pending["kind"]
+            if state.get("pending"):
                 raise InstalledCorpusError(
-                    f"Corpus cache has an incomplete {kind} operation; "
-                    f"resume the original `citemesh cache {kind}` command before "
-                    "using the corpus. "
-                    "The existing namespace was preserved."
+                    incomplete_operation_message(cache.namespace_id, state)
+                    + ". The existing namespace was preserved."
                 )
             raise InstalledCorpusError(
                 "Installed corpus model fingerprint mismatch "
