@@ -639,7 +639,12 @@ def test_existing_cache_entrypoints_recover_a_hot_sqlite_journal(
                 with lock:
                     blocked_rows = cache_ops._scan_embedding_namespaces(tmp_path)
                 assert len(blocked_rows) == 1
-                assert blocked_rows[0].status.startswith("SQLite recovery pending")
+                assert blocked_rows[0].status == (
+                    "SQLite recovery pending (resume cache import or refresh "
+                    "with write access)"
+                    if entrypoint == "scan_readonly"
+                    else "SQLite recovery pending (cache operation active; retry scan)"
+                )
                 assert cache.db_path.with_name(
                     cache.db_path.name + "-journal"
                 ).is_file()

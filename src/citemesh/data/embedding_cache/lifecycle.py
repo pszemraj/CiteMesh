@@ -23,7 +23,7 @@ from typing import (
 import h5py
 import numpy as np
 import numpy.typing as npt
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from citemesh.data.cache import cache_operation_lock, get_cache_dir, path_exists
 from citemesh.data.embedding_contract import (
@@ -279,6 +279,8 @@ def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary:
         if "locked" in str(exc):
             raise CorpusMetadataBusyError(str(exc)) from exc
         raise CorpusRecoveryPendingError(str(exc)) from exc
+    except Timeout:
+        raise
     except OSError as exc:
         raise CorpusRecoveryPendingError(str(exc)) from exc
 
