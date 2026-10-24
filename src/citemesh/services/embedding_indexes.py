@@ -190,11 +190,12 @@ def _hub_errors(bucket_id: str) -> Iterator[None]:
 
 
 def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
-    """Download and finalize each file independently for resumable retries.
+    """Lock each missing target until its download is finalized.
 
     :param str bucket_id: Hugging Face bucket identifier.
     :param Sequence[tuple[str, Path]] files: Remote paths and their local targets.
     """
+    from filelock import FileLock
     from huggingface_hub import HfApi
 
     if not files:
@@ -203,11 +204,14 @@ def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
     for remote, target in files:
         partial = target.with_name(target.name + ".incomplete")
         partial.parent.mkdir(parents=True, exist_ok=True)
-        with _hub_errors(bucket_id):
-            api.download_bucket_files(
-                bucket_id, files=[(remote, partial)], raise_on_missing_files=True
-            )
-        partial.replace(target)
+        with FileLock(str(target) + ".lock"):
+            if target.is_file():
+                continue
+            with _hub_errors(bucket_id):
+                api.download_bucket_files(
+                    bucket_id, files=[(remote, partial)], raise_on_missing_files=True
+                )
+            partial.replace(target)
 
 
 def _catalog(bucket_id: str) -> IndexCatalog:

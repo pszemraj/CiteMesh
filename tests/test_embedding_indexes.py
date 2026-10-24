@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
+from threading import Event, Thread, current_thread
 from types import SimpleNamespace
 
 import pytest
@@ -686,6 +687,114 @@ def test_partial_multifile_download_retains_completed_files(hub, monkeypatch):
     assert (
         publication.manifest_path.parent / "data/second.parquet"
     ).read_bytes() == b"second"
+
+
+@pytest.mark.parametrize(
+    "first_interrupted,second_interrupted",
+    [(False, False), (False, True), (True, False)],
+    ids=["success", "waiting-transfer-interrupted", "active-transfer-interrupted"],
+)
+def test_concurrent_downloads_preserve_completed_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_interrupted: bool,
+    second_interrupted: bool,
+) -> None:
+    """Serialize shared artifacts and let a waiting consumer retry a failed transfer."""
+    from filelock import FileLock
+
+    from citemesh.data.embedding_cache.portable import load_manifest, validate_snapshot
+
+    source = local_export(tmp_path, with_payload=True)
+    selected = load_manifest(source)
+    root = tmp_path / "download"
+    root.mkdir()
+    (root / "index.json").write_bytes((source / "index.json").read_bytes())
+    publication = indexes.ResolvedPublication(
+        "owner/index",
+        selected.config_name,
+        selected.snapshot_id,
+        root / "index.json",
+        selected,
+        f"variants/{selected.config_name}/{selected.snapshot_id}/index.json",
+    )
+    payload = (source / selected.shards[0].path).read_bytes()
+    first_started, second_ready = Event(), Event()
+    release_first, first_finished = Event(), Event()
+    calls: list[str] = []
+    errors: dict[str, Exception] = {}
+
+    class ObservedFileLock(FileLock):
+        """Signal when the second consumer attempts to acquire the artifact lock."""
+
+        def __enter__(self) -> ObservedFileLock:
+            if current_thread().name == "second":
+                second_ready.set()
+            super().__enter__()
+            return self
+
+    def download(
+        bucket_id: str,
+        files: list[tuple[str, Path]],
+        *,
+        raise_on_missing_files: bool,
+    ) -> None:
+        name = current_thread().name
+        calls.append(name)
+        target = files[0][1]
+        interrupted = first_interrupted if name == "first" else second_interrupted
+        target.write_bytes(b"PAR1partial" if interrupted else payload)
+        if name == "first":
+            first_started.set()
+            assert release_first.wait(10)
+        else:
+            second_ready.set()
+            assert first_finished.wait(10)
+        if interrupted:
+            raise ReadTimeout("interrupted transfer")
+
+    def transfer() -> None:
+        name = current_thread().name
+        try:
+            indexes.download_publication(publication)
+        except Exception as exc:
+            errors[name] = exc
+        finally:
+            if name == "first":
+                first_finished.set()
+
+    monkeypatch.setattr("filelock.FileLock", ObservedFileLock)
+    monkeypatch.setattr(
+        "huggingface_hub.HfApi",
+        lambda: SimpleNamespace(download_bucket_files=download),
+    )
+    first = Thread(target=transfer, name="first")
+    second = Thread(target=transfer, name="second")
+    first.start()
+    try:
+        assert first_started.wait(10)
+        second.start()
+        assert second_ready.wait(10)
+    finally:
+        release_first.set()
+        first.join(10)
+        if second.ident is not None:
+            second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    if first_interrupted:
+        assert set(errors) == {"first"}
+        assert isinstance(errors["first"], OSError)
+        assert isinstance(errors["first"].__cause__, ReadTimeout)
+    else:
+        assert not errors
+    assert calls == (["first", "second"] if first_interrupted else ["first"])
+    assert (root / selected.shards[0].path).read_bytes() == payload
+    assert (
+        not (root / selected.shards[0].path).with_suffix(".parquet.incomplete").exists()
+    )
+    assert validate_snapshot(root) == selected
+    assert indexes.download_publication(publication) == root
+    assert len(calls) == (2 if first_interrupted else 1)
 
 
 def test_manual_publisher_existing_namespace_uses_stored_refresh_scope(
