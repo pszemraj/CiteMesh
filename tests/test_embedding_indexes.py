@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from httpx2 import ConnectError, ReadTimeout, Request, Response
+from huggingface_hub.errors import BucketBatchError, EntryNotFoundError
 
 from citemesh.data.embedding_contract import serialize_embedding_namespace
 from citemesh.services import embedding_indexes as indexes
@@ -33,7 +35,7 @@ def manifest(config="one", snapshot="snapshot-one", *, shard=None, source="sourc
         "producer_version": "0.1.0",
         "contract": {
             "model_id": "unsloth/embeddinggemma-300m",
-            "model_revision": "model-pin",
+            "model_revision": "a" * 40,
             "model_artifact_identity": "artifact",
             "profile_key": "embeddinggemma",
             "profile_schema": "v1",
@@ -118,10 +120,10 @@ def hub(tmp_path, monkeypatch):
             for remote, local in files:
                 source = self.root / remote
                 if not source.is_file():
-                    raise FileNotFoundError(remote)
+                    raise EntryNotFoundError(remote)
                 Path(local).write_bytes(source.read_bytes())
                 if self.download_failure:
-                    raise ConnectionError("interrupted download")
+                    raise ConnectError("interrupted download")
 
         def batch_bucket_files(self, bucket_id, *, add=None, delete=None):
             self.uploads.append(
@@ -129,14 +131,32 @@ def hub(tmp_path, monkeypatch):
             )
             for source, remote in add or []:
                 if self.fail_path and remote.endswith(self.fail_path):
-                    raise ConnectionError("upload failed")
+                    raise BucketBatchError(
+                        "upload failed",
+                        response=Response(
+                            200,
+                            request=Request(
+                                "POST",
+                                "https://huggingface.co/api/buckets/owner/index/batch",
+                            ),
+                        ),
+                    )
                 target = self.root / remote
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(
                     source if isinstance(source, bytes) else Path(source).read_bytes()
                 )
             if delete and self.fail_delete:
-                raise ConnectionError("delete failed")
+                raise BucketBatchError(
+                    "delete failed",
+                    response=Response(
+                        200,
+                        request=Request(
+                            "POST",
+                            "https://huggingface.co/api/buckets/owner/index/batch",
+                        ),
+                    ),
+                )
             for remote in delete or []:
                 (self.root / remote).unlink()
 
@@ -288,7 +308,7 @@ def test_publish_failure_preserves_prior_catalog(hub, tmp_path, failure):
     install(hub)
     before = (hub.root / "catalog.json").read_bytes()
     hub.fail_path = failure
-    with pytest.raises(ConnectionError):
+    with pytest.raises(OSError):
         indexes.publish_snapshot("owner/index", local_export(tmp_path))
     assert (hub.root / "catalog.json").read_bytes() == before
     assert (hub.root / "variants/one/snapshot-one/index.json").is_file()
@@ -331,7 +351,7 @@ def test_changed_contract_requires_distinct_configuration(hub, tmp_path):
     install(hub)
     export = local_export(tmp_path)
     value = json.loads((export / "index.json").read_text())
-    value["contract"]["model_revision"] = "different-pin"
+    value["contract"]["model_revision"] = "b" * 40
     write_json(export / "index.json", value)
     with pytest.raises(ValueError, match="new configuration"):
         indexes.publish_snapshot("owner/index", export)
@@ -374,7 +394,7 @@ def test_uncached_retired_snapshot_fails_without_native_state(hub):
 def test_failed_download_is_not_reused_as_completed(hub):
     install(hub)
     hub.download_failure = True
-    with pytest.raises(ConnectionError):
+    with pytest.raises(OSError):
         indexes.resolve_publication("owner/index", "one", "snapshot-one")
     hub.download_failure = False
     publication = indexes.resolve_publication("owner/index", "one", "snapshot-one")
@@ -523,7 +543,7 @@ def test_first_publication_upload_failure_can_resume_same_export(
 ):
     export = local_export(tmp_path, with_payload=True)
     hub.fail_path = failure
-    with pytest.raises(ConnectionError, match="upload failed"):
+    with pytest.raises(OSError, match="upload failed"):
         indexes.publish_snapshot("owner/index", export)
     assert not (hub.root / "catalog.json").exists()
     hub.fail_path = None
@@ -545,7 +565,7 @@ def test_failed_pruning_can_retry_without_reuploading_payload(hub, tmp_path):
     install(hub)
     export = local_export(tmp_path, with_payload=True)
     hub.fail_delete = True
-    with pytest.raises(ConnectionError, match="delete failed"):
+    with pytest.raises(OSError, match="delete failed"):
         indexes.publish_snapshot("owner/index", export)
     assert indexes.resolve_publication("owner/index").snapshot_id == "new-snapshot"
     assert (hub.root / "variants/one/snapshot-one/index.json").is_file()
@@ -586,3 +606,109 @@ def test_pending_import_reports_bucket_snapshot_resume_command(hub, tmp_path):
         indexes.preflight_publication_destination(first, settings["cache_dir"])
         == "resume_same_import"
     )
+
+
+@pytest.mark.parametrize("error_type", [ConnectError, ReadTimeout])
+def test_download_transport_errors_are_filesystem_errors(hub, monkeypatch, error_type):
+    def fail(*args, **kwargs):
+        raise error_type("offline")
+
+    monkeypatch.setattr(hub, "download_bucket_files", fail)
+    with pytest.raises(OSError, match="owner/index.*offline") as error:
+        indexes.resolve_publication("owner/index")
+    assert isinstance(error.value.__cause__, error_type)
+
+
+def test_partial_multifile_download_retains_completed_files(hub, monkeypatch):
+    install(hub, selected_shard="data/first.parquet")
+    value = json.loads((hub.root / "variants/one/snapshot-one/index.json").read_text())
+    value["row_count"] = value["source_records_examined"] = 2
+    value["shards"].append(
+        {"path": "data/second.parquet", "first_row": 1, "row_count": 1}
+    )
+    write_json(hub.root / "variants/one/snapshot-one/index.json", value)
+    remote_root = hub.root / "variants/one/snapshot-one/data"
+    remote_root.mkdir()
+    (remote_root / "first.parquet").write_bytes(b"first")
+    (remote_root / "second.parquet").write_bytes(b"second")
+    publication = indexes.resolve_publication("owner/index")
+    download = hub.download_bucket_files
+
+    def interrupted(bucket, files, raise_on_missing_files):
+        if files[0][0].endswith("second.parquet"):
+            hub.downloads.append(files[0][0])
+            Path(files[0][1]).write_bytes(b"partial")
+            raise ReadTimeout("second shard interrupted")
+        download(bucket, files, raise_on_missing_files)
+
+    monkeypatch.setattr(hub, "download_bucket_files", interrupted)
+    with pytest.raises(OSError, match="second shard interrupted"):
+        indexes.download_publication(publication)
+    assert (
+        publication.manifest_path.parent / "data/first.parquet"
+    ).read_bytes() == b"first"
+    assert not (publication.manifest_path.parent / "data/second.parquet").exists()
+    monkeypatch.setattr(hub, "download_bucket_files", download)
+    indexes.download_publication(publication)
+    assert hub.downloads.count("variants/one/snapshot-one/data/first.parquet") == 1
+    assert hub.downloads.count("variants/one/snapshot-one/data/second.parquet") == 2
+    assert (
+        publication.manifest_path.parent / "data/second.parquet"
+    ).read_bytes() == b"second"
+
+
+def test_manual_publisher_existing_namespace_uses_stored_refresh_scope(
+    publisher, monkeypatch, tmp_path
+):
+    from citemesh.data.embedding_cache import lifecycle, portable
+    from citemesh.strategies.embedding import refresh
+
+    selection = object()
+    cache = object()
+    calls = []
+    monkeypatch.setattr(
+        lifecycle, "select_existing_cache", lambda namespace, require_ready: selection
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "open_existing_cache",
+        lambda supplied: cache if supplied is selection else None,
+    )
+    monkeypatch.setattr(
+        refresh,
+        "refresh_cache_selection",
+        lambda supplied, **options: calls.append((supplied, options)),
+    )
+    monkeypatch.setattr(
+        portable,
+        "export_snapshot",
+        lambda supplied, output, **options: calls.append((supplied, options)),
+    )
+    monkeypatch.setattr(indexes, "publish_snapshot", lambda bucket, output: "snapshot")
+    assert (
+        publisher.publish_arxiv_index(
+            "owner/index",
+            tmp_path / "out",
+            namespace="0123456789ab",
+            dataset_revision="revision",
+            device="cpu",
+        )
+        == "snapshot"
+    )
+    assert calls == [
+        (selection, {"revision": "revision", "device": "cpu"}),
+        (cache, {"config_name": None}),
+    ]
+
+
+def test_manual_publisher_rejects_existing_output_before_refresh(
+    publisher, monkeypatch, tmp_path
+):
+    from citemesh.strategies import embedding
+
+    def unexpected_builder(**options):
+        pytest.fail("refused output must not initialize or refresh a builder")
+
+    monkeypatch.setattr(embedding, "EmbeddingGraphBuilder", unexpected_builder)
+    with pytest.raises(FileExistsError, match="already exists"):
+        publisher.publish_arxiv_index("owner/index", tmp_path)

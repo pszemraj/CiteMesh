@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from copy import deepcopy
@@ -182,6 +183,10 @@ class PortableManifest:
         """
         if "format_version" not in value or "row_order" not in value:
             raise ValueError("Portable manifest requires format and row-order versions")
+        if value["format_version"] != FORMAT_VERSION:
+            raise ValueError("Unsupported portable format version")
+        if value["row_order"] != "native-relative":
+            raise ValueError("Unsupported portable row-order convention")
         try:
             contract_data = value["contract"]
             source_data = value["source"]
@@ -192,8 +197,6 @@ class PortableManifest:
                 or not isinstance(shard_data, Iterable)
             ):
                 raise TypeError("Portable manifest fields have invalid mapping shapes")
-            # Type the decoded wire mappings for the existing model constructors;
-            # their current construction and validation path remains unchanged.
             contract_values = cast(EmbeddingContractData, contract_data)
             source_values = cast(CorpusSourceData, source_data)
             shard_values: Iterable[object] = shard_data
@@ -212,10 +215,6 @@ class PortableManifest:
             manifest = cls(**cast(_PortableManifestConstructor, manifest_data))
         except (KeyError, TypeError) as exc:
             raise ValueError(f"Invalid portable manifest: {exc}") from exc
-        if manifest.format_version != FORMAT_VERSION:
-            raise ValueError("Unsupported portable format version")
-        if manifest.row_order != "native-relative":
-            raise ValueError("Unsupported portable row-order convention")
         if not all(
             isinstance(item, str) and item.strip()
             for item in (
@@ -284,7 +283,9 @@ def _validate_manifest_semantics(manifest: PortableManifest) -> None:
     ):
         if not str(getattr(contract, name) or "").strip():
             raise ValueError(f"Portable embedding contract requires {name}")
-    if contract.model_revision in {"main", "master", "latest"}:
+    if not isinstance(contract.model_revision, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{40}", contract.model_revision
+    ):
         raise ValueError("Portable model revision must be resolved and immutable")
     if (
         contract.representation != "retrieval-document-v1"
@@ -463,7 +464,7 @@ def export_snapshot(
     cache: EmbeddingCache,
     output_dir: Path | str,
     *,
-    config_name: str = "embeddinggemma-512-int8",
+    config_name: str | None = None,
     shard_rows: int = 65_536,
     batch_rows: int = 8_192,
 ) -> PortableManifest:
@@ -471,7 +472,7 @@ def export_snapshot(
 
     :param EmbeddingCache cache: Native cache to export under its snapshot lock.
     :param Path | str output_dir: New directory that receives the manifest and shards.
-    :param str config_name: Published configuration name recorded in the manifest.
+    :param str | None config_name: Published name; defaults to the stored profile, dimension, and dtype.
     :param int shard_rows: Maximum data rows per Parquet shard.
     :param int batch_rows: Native rows read and converted per batch.
     :return PortableManifest: Manifest describing the completed export.
@@ -481,8 +482,6 @@ def export_snapshot(
     if shard_rows < 1 or batch_rows < 1:
         raise ValueError("Shard and batch row counts must be positive")
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=False)
-    (output_dir / "data").mkdir()
     writer = None
     shards: list[PortableShard] = []
     next_row = 0
@@ -491,6 +490,10 @@ def export_snapshot(
     shard_path = ""
     try:
         with cache.export_snapshot_view() as view:
+            output_dir.mkdir(parents=True, exist_ok=False)
+            (output_dir / "data").mkdir()
+            if config_name is None:
+                config_name = f"{view.contract.profile_key}-{view.contract.dimension}-{view.contract.stored_dtype}"
             for records, vectors in view.iter_active_rows(batch_size=batch_rows):
                 _validate_vectors(vectors, view.contract, len(records))
                 offset = 0

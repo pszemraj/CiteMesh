@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 if TYPE_CHECKING:
-    from huggingface_hub import BucketFile, HfApi
+    from huggingface_hub import HfApi
 
     from citemesh.data.embedding_cache.models import PublicationOrigin
     from citemesh.data.embedding_cache.portable import PortableManifest
@@ -118,7 +119,6 @@ class ResolvedPublication:
     manifest_path: Path
     manifest: PortableManifest
     manifest_bucket_path: str
-    cache_dir: Path | None = None
 
     @property
     def origin(self) -> PublicationOrigin:
@@ -170,8 +170,27 @@ def _cache_root(bucket_id: str, cache_dir: Path | None) -> Path:
     return Path(cache_dir) / "citemesh-indexes" / bucket_id
 
 
+@contextmanager
+def _hub_errors(bucket_id: str) -> Iterator[None]:
+    """Translate expected Hub transfer failures into filesystem-style errors.
+
+    :param str bucket_id: Bucket identity included in transfer errors.
+    Yields:
+        A scope that raises OSError or FileNotFoundError for Hub failures.
+    """
+    from httpx2 import HTTPError
+    from huggingface_hub.errors import EntryNotFoundError
+
+    try:
+        yield
+    except EntryNotFoundError as exc:
+        raise FileNotFoundError(f"Bucket {bucket_id}: {exc}") from exc
+    except HTTPError as exc:
+        raise OSError(f"Bucket {bucket_id}: {exc}") from exc
+
+
 def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
-    """Download bucket files through temporary paths before replacing targets.
+    """Download and finalize each file independently for resumable retries.
 
     :param str bucket_id: Hugging Face bucket identifier.
     :param Sequence[tuple[str, Path]] files: Remote paths and their local targets.
@@ -180,18 +199,14 @@ def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
 
     if not files:
         return
-    partials = [
-        (remote, local.with_name(local.name + ".incomplete")) for remote, local in files
-    ]
-    for _, path in partials:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    api_files: list[tuple[str | BucketFile, str | Path]] = [
-        (remote, partial) for remote, partial in partials
-    ]
-    HfApi().download_bucket_files(
-        bucket_id, files=api_files, raise_on_missing_files=True
-    )
-    for (_, partial), (_, target) in zip(partials, files):
+    api = HfApi()
+    for remote, target in files:
+        partial = target.with_name(target.name + ".incomplete")
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        with _hub_errors(bucket_id):
+            api.download_bucket_files(
+                bucket_id, files=[(remote, partial)], raise_on_missing_files=True
+            )
         partial.replace(target)
 
 
@@ -252,7 +267,6 @@ def resolve_publication(
         manifest_path,
         manifest,
         remote_path,
-        cache_dir,
     )
 
 
@@ -391,90 +405,101 @@ def publish_snapshot(
 
     manifest = validate_snapshot(snapshot_dir)
     selected_path = _manifest_bucket_path(manifest.config_name, manifest.snapshot_id)
-    api = HfApi()
-    if not api.bucket_info(bucket_id).private:
-        raise ValueError("Publishing is authorized only to private buckets")
-    bucket_paths = {
-        item.path
-        for item in api.list_bucket_tree(bucket_id, recursive=True)
-        if item.type == "file"
-    }
-    if "catalog.json" in bucket_paths:
-        previous = _catalog(bucket_id)
-    elif any(
-        path.startswith("variants/")
-        and not path.startswith(f"variants/{manifest.config_name}/")
-        for path in bucket_paths
-    ):
-        raise ValueError("Missing catalog in an established index bucket")
-    else:
-        previous = IndexCatalog({})
-    manifests = {}
-    for name, path in previous.configs.items():
-        local = _cache_root(bucket_id, cache_dir) / path
-        if not local.is_file():
-            _download_files(bucket_id, [(path, local)])
-        old = load_manifest(local)
-        if old.config_name != name or old.snapshot_id != PurePosixPath(path).parts[2]:
-            raise ValueError("Published manifest disagrees with its catalog snapshot")
-        if name == manifest.config_name:
-            if old.contract != manifest.contract:
+    with _hub_errors(bucket_id):
+        api = HfApi()
+        if not api.bucket_info(bucket_id).private:
+            raise ValueError("Publishing is authorized only to private buckets")
+        bucket_paths = {
+            item.path
+            for item in api.list_bucket_tree(bucket_id, recursive=True)
+            if item.type == "file"
+        }
+        if "catalog.json" in bucket_paths:
+            previous = _catalog(bucket_id)
+        elif any(
+            path.startswith("variants/")
+            and not path.startswith(f"variants/{manifest.config_name}/")
+            for path in bucket_paths
+        ):
+            raise ValueError("Missing catalog in an established index bucket")
+        else:
+            previous = IndexCatalog({})
+        manifests = {}
+        for name, path in previous.configs.items():
+            local = _cache_root(bucket_id, cache_dir) / path
+            if not local.is_file():
+                _download_files(bucket_id, [(path, local)])
+            old = load_manifest(local)
+            if (
+                old.config_name != name
+                or old.snapshot_id != PurePosixPath(path).parts[2]
+            ):
                 raise ValueError(
-                    "A changed embedding contract requires a new configuration name"
+                    "Published manifest disagrees with its catalog snapshot"
                 )
-            if old.calibration_ranges is not None:
-                import numpy as np
-
-                assert manifest.calibration_ranges is not None
-                old_ranges = local.parent / old.calibration_ranges
-                if not old_ranges.is_file():
-                    _download_files(
-                        bucket_id,
-                        [
-                            (
-                                str(
-                                    PurePosixPath(path).parent / old.calibration_ranges
-                                ),
-                                old_ranges,
-                            )
-                        ],
-                    )
-                if not np.array_equal(
-                    np.load(old_ranges, allow_pickle=False),
-                    np.load(
-                        snapshot_dir / manifest.calibration_ranges, allow_pickle=False
-                    ),
-                ):
+            if name == manifest.config_name:
+                if old.contract != manifest.contract:
                     raise ValueError(
-                        "Changed calibration ranges require a new configuration name"
+                        "A changed embedding contract requires a new configuration name"
                     )
-        manifests[name] = old
-    if selected_path in bucket_paths:
-        remote = _cache_root(bucket_id, cache_dir) / selected_path
-        if not remote.is_file():
-            _download_files(bucket_id, [(selected_path, remote)])
-        if load_manifest(remote) != manifest:
-            raise ValueError("A different snapshot must use a new snapshot ID")
-    configs = {**previous.configs, manifest.config_name: selected_path}
-    catalog = IndexCatalog(configs, previous.default_config or manifest.config_name)
-    manifests[manifest.config_name] = manifest
-    directory = PurePosixPath(selected_path).parent
-    payloads: list[tuple[str | Path | bytes, str]] = [
-        (snapshot_dir / name, str(directory / name)) for name in manifest.artifact_paths
-    ]
-    if selected_path not in bucket_paths:
-        if payloads:
-            api.batch_bucket_files(bucket_id, add=payloads)
+                if old.calibration_ranges is not None:
+                    import numpy as np
+
+                    assert manifest.calibration_ranges is not None
+                    old_ranges = local.parent / old.calibration_ranges
+                    if not old_ranges.is_file():
+                        _download_files(
+                            bucket_id,
+                            [
+                                (
+                                    str(
+                                        PurePosixPath(path).parent
+                                        / old.calibration_ranges
+                                    ),
+                                    old_ranges,
+                                )
+                            ],
+                        )
+                    if not np.array_equal(
+                        np.load(old_ranges, allow_pickle=False),
+                        np.load(
+                            snapshot_dir / manifest.calibration_ranges,
+                            allow_pickle=False,
+                        ),
+                    ):
+                        raise ValueError(
+                            "Changed calibration ranges require a new configuration name"
+                        )
+            manifests[name] = old
+        if selected_path in bucket_paths:
+            remote = _cache_root(bucket_id, cache_dir) / selected_path
+            if not remote.is_file():
+                _download_files(bucket_id, [(selected_path, remote)])
+            if load_manifest(remote) != manifest:
+                raise ValueError("A different snapshot must use a new snapshot ID")
+        configs = {**previous.configs, manifest.config_name: selected_path}
+        catalog = IndexCatalog(configs, previous.default_config or manifest.config_name)
+        manifests[manifest.config_name] = manifest
+        directory = PurePosixPath(selected_path).parent
+        payloads: list[tuple[str | Path | bytes, str]] = [
+            (snapshot_dir / name, str(directory / name))
+            for name in manifest.artifact_paths
+        ]
+        if selected_path not in bucket_paths:
+            if payloads:
+                api.batch_bucket_files(bucket_id, add=payloads)
+            api.batch_bucket_files(
+                bucket_id, add=[(snapshot_dir / "index.json", selected_path)]
+            )
+        if previous.configs.get(manifest.config_name) != selected_path:
+            api.batch_bucket_files(
+                bucket_id,
+                add=[
+                    (json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")
+                ],
+            )
+        _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
         api.batch_bucket_files(
-            bucket_id, add=[(snapshot_dir / "index.json", selected_path)]
+            bucket_id, add=[(_readme(catalog, manifests).encode(), "README.md")]
         )
-    if previous.configs.get(manifest.config_name) != selected_path:
-        api.batch_bucket_files(
-            bucket_id,
-            add=[(json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")],
-        )
-    _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
-    api.batch_bucket_files(
-        bucket_id, add=[(_readme(catalog, manifests).encode(), "README.md")]
-    )
-    return manifest.snapshot_id
+        return manifest.snapshot_id

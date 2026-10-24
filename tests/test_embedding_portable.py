@@ -467,3 +467,45 @@ def test_manifest_rejects_unknown_quantization(tmp_path):
     serialized["contract"]["quantization"] = "other-int8-codec"
     with pytest.raises(ValueError, match="quantization"):
         PortableManifest.from_dict(serialized)
+
+
+@pytest.mark.parametrize("dtype,dimension", [("int8", 512), ("float32", 256)])
+def test_export_infers_configuration_from_stored_contract(dtype, dimension, tmp_path):
+    manifest = export_snapshot(
+        ExportFixture(dtype, dimension, count=0), tmp_path / "snapshot"
+    )
+    assert manifest.config_name == f"embeddinggemma-{dimension}-{dtype}"
+
+
+def test_uncertified_export_does_not_allocate_output_directory(tmp_path):
+    class Cache:
+        @contextmanager
+        def export_snapshot_view(self):
+            raise ValueError("Corpus must be complete and certified")
+            yield
+
+    output = tmp_path / "snapshot"
+    with pytest.raises(ValueError, match="certified"):
+        export_snapshot(Cache(), output)
+    assert not output.exists()
+    export_snapshot(ExportFixture(count=0), output)
+    assert (output / "index.json").is_file()
+
+
+def test_future_format_is_rejected_before_decoding_fields(tmp_path):
+    manifest = export_snapshot(ExportFixture(count=0), tmp_path / "snapshot")
+    value = manifest.to_dict()
+    value["format_version"] = 2
+    value["future_field"] = {"new": "schema"}
+    del value["contract"]
+    with pytest.raises(ValueError, match="Unsupported portable format version"):
+        PortableManifest.from_dict(value)
+
+
+@pytest.mark.parametrize("revision", ["main", "release-v1", "a" * 39, "g" * 40, 123])
+def test_manifest_requires_immutable_model_commit(revision, tmp_path):
+    manifest = export_snapshot(ExportFixture(count=0), tmp_path / "snapshot")
+    value = manifest.to_dict()
+    value["contract"]["model_revision"] = revision
+    with pytest.raises(ValueError, match="model revision.*immutable"):
+        PortableManifest.from_dict(value)

@@ -31,8 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="embeddinggemma-512-int8",
-        help="published configuration name",
+        help="published configuration name; inferred from the stored contract when omitted",
     )
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument(
@@ -76,7 +75,7 @@ def publish_arxiv_index(
     bucket_id: str,
     output: Path,
     *,
-    config_name: str,
+    config_name: str | None = None,
     namespace: str | None = None,
     adopt_namespace: str | None = None,
     dataset_revision: str | None = None,
@@ -89,7 +88,7 @@ def publish_arxiv_index(
 
     :param str bucket_id: Existing private Hugging Face bucket identifier.
     :param Path output: Directory for the portable snapshot.
-    :param str config_name: Published snapshot configuration name.
+    :param str | None config_name: Published name; inferred from the stored contract when omitted.
     :param Optional[str] namespace: Existing native cache namespace to refresh.
     :param Optional[str] adopt_namespace: Legacy namespace to certify first.
     :param Optional[str] dataset_revision: Source revision for refresh or adoption.
@@ -103,17 +102,18 @@ def publish_arxiv_index(
     from citemesh.services.embedding_indexes import publish_snapshot
     from citemesh.strategies.embedding import EmbeddingGraphBuilder
 
+    if output.exists():
+        raise FileExistsError(f"Export output already exists: {output}")
     if namespace is not None:
         from citemesh.data.embedding_cache.lifecycle import (
             open_existing_cache,
             select_existing_cache,
         )
+        from citemesh.strategies.embedding.refresh import refresh_cache_selection
 
         selection = select_existing_cache(namespace, require_ready=False)
-        builder = EmbeddingGraphBuilder(
-            semantic_source="arxiv-corpus", device=device, cache_selection=selection
-        )
-        builder.embedding_cache = open_existing_cache(selection, require_ready=False)
+        refresh_cache_selection(selection, revision=dataset_revision, device=device)
+        cache = open_existing_cache(selection)
     else:
         builder = EmbeddingGraphBuilder(
             semantic_source="arxiv-corpus",
@@ -122,13 +122,14 @@ def publish_arxiv_index(
             truncate_dim=dimension,
             storage_precision=storage_precision,
         )
-    if adopt_namespace is not None:
-        from citemesh.strategies.embedding.refresh import adopt_legacy_cache
+        if adopt_namespace is not None:
+            from citemesh.strategies.embedding.refresh import adopt_legacy_cache
 
-        adopt_legacy_cache(builder, adopt_namespace, revision=dataset_revision)
-    else:
-        builder.refresh_corpus(revision=dataset_revision)
-    export_snapshot(builder.embedding_cache, output, config_name=config_name)
+            adopt_legacy_cache(builder, adopt_namespace, revision=dataset_revision)
+        else:
+            builder.refresh_corpus(revision=dataset_revision)
+        cache = builder.embedding_cache
+    export_snapshot(cache, output, config_name=config_name)
     return publish_snapshot(bucket_id, output)
 
 
@@ -145,11 +146,6 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s: %(message)s",
     )
     try:
-        from huggingface_hub.utils import HfHubHTTPError
-    except ImportError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    try:
         snapshot_id = publish_arxiv_index(
             args.bucket,
             args.output,
@@ -164,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except KeyboardInterrupt:
         return 130
-    except (OSError, ValueError, ImportError, RuntimeError, HfHubHTTPError) as exc:
+    except (OSError, ValueError, ImportError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(snapshot_id)
