@@ -217,6 +217,14 @@ class InstalledCorpusSummary:
     active_rows: int
 
 
+class CorpusMetadataBusyError(RuntimeError):
+    """Report SQLite contention while inspecting installed corpus metadata."""
+
+
+class CorpusRecoveryPendingError(RuntimeError):
+    """Report a hot journal that could not be rolled back."""
+
+
 def _read_installed_corpus_summary(conn: sqlite3.Connection) -> InstalledCorpusSummary:
     """Read schema and corpus counts from one SQLite snapshot.
 
@@ -243,8 +251,10 @@ def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary:
     :param Path db_path: Native metadata database to inspect.
     :return InstalledCorpusSummary: Schema, corpus state and counts; ordinary caches
         have empty state and zero corpus counts.
-    :raises sqlite3.Error: If metadata is unreadable or SQLite is busy.
-    :raises OSError: If journal recovery needs unavailable write access.
+    :raises CorpusMetadataBusyError: If SQLite is locked by another connection.
+    :raises CorpusRecoveryPendingError: If hot-journal recovery cannot complete.
+    :raises sqlite3.Error: If metadata is otherwise unreadable.
+    :raises OSError: If read-only metadata access fails.
     :raises filelock.Timeout: If recovery conflicts with an active cache operation.
     """
     try:
@@ -255,13 +265,22 @@ def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary:
         ) as conn:
             return _read_installed_corpus_summary(conn)
     except sqlite3.OperationalError as exc:
+        if "locked" in str(exc):
+            raise CorpusMetadataBusyError(str(exc)) from exc
         if "readonly" not in str(exc):
             raise
     namespace_id = db_path.stem.removeprefix("metadata_")
-    with _existing_namespace_connection(
-        namespace_id, db_path.parent, blocking=False
-    ) as conn:
-        return _read_installed_corpus_summary(conn)
+    try:
+        with _existing_namespace_connection(
+            namespace_id, db_path.parent, blocking=False
+        ) as conn:
+            return _read_installed_corpus_summary(conn)
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc):
+            raise CorpusMetadataBusyError(str(exc)) from exc
+        raise CorpusRecoveryPendingError(str(exc)) from exc
+    except OSError as exc:
+        raise CorpusRecoveryPendingError(str(exc)) from exc
 
 
 class _LifecycleMixin(_EmbeddingCacheHost):
@@ -462,6 +481,8 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         :param sqlite3.Connection conn: Open cache database connection.
         :param int | None corpus_size: Optional newest-N limit within installed coverage.
         :return CorpusState: Ready persisted state, or an unmanaged cache's empty state.
+        :raises RuntimeError: If corpus membership is pending or uncertified.
+        :raises ValueError: If the view is nonpositive or exceeds installed coverage.
         """
         state = self._require_ready_locked(conn)
         if corpus_size is not None:
@@ -475,7 +496,10 @@ class _LifecycleMixin(_EmbeddingCacheHost):
             if source["selection"] == "newest" and corpus_size > cast(
                 int, source["limit"]
             ):
-                raise ValueError("Requested corpus view exceeds installed coverage")
+                raise ValueError(
+                    f"Requested corpus view {corpus_size} exceeds installed coverage "
+                    f"{source['limit']}"
+                )
         return state
 
     def _corpus_view_query_locked(

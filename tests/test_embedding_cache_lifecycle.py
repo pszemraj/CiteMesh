@@ -8,8 +8,10 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -832,6 +834,73 @@ def test_namespace_scan_reports_busy_sqlite_without_waiting(tmp_path):
     assert rows[0].status == "Metadata busy (scan again after active operation)"
 
 
+@pytest.mark.parametrize(
+    "failure,status",
+    [
+        (
+            sqlite3.OperationalError("unable to open database file"),
+            "SQLite recovery pending",
+        ),
+        (sqlite3.OperationalError("disk I/O error"), "SQLite recovery pending"),
+        (
+            sqlite3.OperationalError("attempt to write a readonly database"),
+            "SQLite recovery pending",
+        ),
+        (PermissionError("write access denied"), "SQLite recovery pending"),
+        (sqlite3.OperationalError("database is locked"), "Metadata busy"),
+    ],
+)
+@pytest.mark.parametrize("failure_stage", ["connect", "read"])
+def test_namespace_scan_classifies_hot_journal_recovery_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: sqlite3.OperationalError | PermissionError,
+    status: str,
+    failure_stage: str,
+) -> None:
+    """Recovery failures retain their cause even without sqlite_errorcode."""
+    assert not hasattr(failure, "sqlite_errorcode")
+    cache, _, _ = _populate(_settings(tmp_path))
+    read_summary = lifecycle._read_installed_corpus_summary
+    recovering = False
+
+    def read(connection: sqlite3.Connection) -> lifecycle.InstalledCorpusSummary:
+        if not recovering:
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        if failure_stage == "read":
+            raise failure
+        return read_summary(connection)
+
+    @contextmanager
+    def recover(
+        namespace_id: str, cache_dir: Path | None = None, *, blocking: bool = True
+    ) -> Iterator[sqlite3.Connection]:
+        nonlocal recovering
+        recovering = True
+        assert namespace_id == cache.namespace_id
+        assert cache_dir == tmp_path
+        assert not blocking
+        if failure_stage == "connect":
+            raise failure
+        with cache._connect_db() as connection:
+            yield connection
+
+    monkeypatch.setattr(lifecycle, "_read_installed_corpus_summary", read)
+    monkeypatch.setattr(lifecycle, "_existing_namespace_connection", recover)
+    rows = cache_ops._scan_embedding_namespaces(tmp_path)
+    assert len(rows) == 1
+    assert rows[0].status.startswith(status)
+    recovering = False
+    error_type = (
+        lifecycle.CorpusMetadataBusyError
+        if status == "Metadata busy"
+        else lifecycle.CorpusRecoveryPendingError
+    )
+    with pytest.raises(error_type) as error:
+        lifecycle.read_installed_corpus_summary(cache.db_path)
+    assert error.value.__cause__ is failure
+
+
 def test_namespace_scan_counts_share_one_committed_sqlite_snapshot(
     tmp_path, monkeypatch
 ):
@@ -893,16 +962,19 @@ def test_nonsearch_readers_enforce_installed_coverage(tmp_path):
     settings["source"] = replace(settings["source"], selection="newest", limit=4)
     cache, records, _ = _populate(settings)
     ids = [record["paper_id"] for record in records]
-    for size in [0, 5]:
-        with pytest.raises(ValueError):
+    for size, message in [
+        (0, "corpus_size must be positive"),
+        (5, "Requested corpus view 5 exceeds installed coverage 4"),
+    ]:
+        with pytest.raises(ValueError, match=message):
             cache.require_complete_certified_corpus(corpus_size=size)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             cache.get_cached_paper_ids(corpus_size=size)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             cache.get_paper_metadata_batch(ids, corpus_size=size)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             cache.get_paper_metadata_alias_candidates(ids, corpus_size=size)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             cache.get_cached_embeddings(ids, corpus_size=size)
     assert cache.require_complete_certified_corpus(corpus_size=2)["membership_complete"]
     assert cache.get_cached_paper_ids(corpus_size=2) == {"paper-1", "paper-2"}

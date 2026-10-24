@@ -335,23 +335,23 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
         return "Orphaned artifact (metadata database missing)"
 
     from citemesh.data.embedding_cache.constants import EMBEDDING_CACHE_SCHEMA_VERSION
-    from citemesh.data.embedding_cache.lifecycle import read_installed_corpus_summary
+    from citemesh.data.embedding_cache.lifecycle import (
+        CorpusMetadataBusyError,
+        CorpusRecoveryPendingError,
+        read_installed_corpus_summary,
+    )
 
     try:
         summary = read_installed_corpus_summary(db_path)
-    except sqlite3.OperationalError as exc:
-        if "locked" in str(exc):
-            return "Metadata busy (scan again after active operation)"
-        if "readonly" in str(exc):
-            return "SQLite recovery pending (resume cache import or refresh with write access)"
-        return "Metadata unavailable (inspect before removing)"
+    except CorpusMetadataBusyError:
+        return "Metadata busy (scan again after active operation)"
     except Timeout:
         return "SQLite recovery pending (cache operation active; retry scan)"
-    except OSError:
+    except CorpusRecoveryPendingError:
         return (
             "SQLite recovery pending (resume cache import or refresh with write access)"
         )
-    except (sqlite3.Error, ValueError):
+    except (sqlite3.Error, OSError, ValueError):
         return "Metadata unavailable (inspect before removing)"
     schema_version = summary.schema_version
     if schema_version is None:
