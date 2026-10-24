@@ -79,14 +79,7 @@ the current snapshot; add `--snapshot SNAPSHOT_ID` to select a retained snapshot
 For a local export, replace the import command with
 `citemesh cache import --path ./arxiv-index --log-file index-import.log`.
 
-**Pass:** import reports a namespace; scan shows ready, certified membership and
-the manifest's active row count, dimension, dtype, source revision, and origin.
-Import performs data transfer and, for int8, local binary-index reconstruction,
-with no model loading or calibration. Record the namespace and snapshot identity,
-and replace `NAMESPACE` in every example below. Keep the local snapshot or
-completed download available for repeat tests; remote snapshots may be pruned.
-See [Portable corpus indexes](caching.md#resume-and-adoption) for resume and
-retention behavior.
+**Pass:** import reports a namespace; scan shows ready, certified membership and the manifest's active row count, dimension, dtype, source revision, and origin. Import performs data transfer and, for int8, local binary-index reconstruction, with no model loading or calibration. Record the namespace and snapshot identity, and replace `NAMESPACE` in every example below. Keep the local snapshot or completed download available for repeat tests; remote snapshots may be pruned. See [Resume and adoption](caching.md#resume-and-adoption) for resume behavior and [Publishing](caching.md#publishing) for snapshot retention.
 
 ## 3. Search the installed corpus
 

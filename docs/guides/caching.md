@@ -252,7 +252,16 @@ citemesh cache scan
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-`cache scan` reports section totals and then each standard embedding namespace's ID, files, bytes, and schema status. `cache clear` deletes every entry under the cache root except `config.toml`, its lock, and `.locks/`. It fails without deleting anything while a cache operation is live, and it cannot interrupt a pending config write. To drop a single namespace instead, delete the matching `.db` and `.h5` in `embeddings/`.
+`cache scan` reports section totals and then each standard embedding namespace's ID, files, bytes, and status, reading SQLite metadata without loading a model. An installed corpus's status lists its dimension and stored dtype, active and physical row counts, source revision, coverage, and origin when recorded, ending in its state:
+
+- `ready`: the import or refresh finished and membership is certified, so search, builds, and export accept it.
+- `pending import` or `pending refresh`: an interrupted operation that blocks search, builds, and export until you [resume it](#resume-and-adoption).
+- `membership uncertified`: source membership is not yet certified, so an explicit `cache refresh` (or [adoption](#resume-and-adoption) for a legacy cache) must finish before the corpus can be searched, viewed, or exported.
+- `Current schema`: a namespace with no installed-corpus state; this reports schema reachability, not vector health. Older layouts show as `Legacy dtype-keyed namespace` or `Legacy schema vN`.
+- `Metadata busy` or `SQLite recovery pending`: another operation holds the namespace or an interrupted one needs write access to recover, so scan again or resume the import or refresh.
+- `Metadata unavailable`, `Corpus metadata unavailable`, or `Orphaned artifact (metadata database missing)`: inspect the files before removing them.
+
+`cache clear` deletes every entry under the cache root except `config.toml`, its lock, and `.locks/`. It fails without deleting anything while a cache operation is live, and it cannot interrupt a pending config write. To drop a single namespace instead, delete the matching `.db` and `.h5` in `embeddings/`.
 
 > [!CAUTION]
 > `cache clear` and `--force-rebuild-cache` are irreversible. A forced rebuild clears both namespaces for the resolved model contract and re-encodes from scratch, which on a hydrated corpus means hours of GPU time. Both prompt interactively on a TTY and refuse outright without one, so `--yes` and `--overwrite-cache` are how a script approves them; `--cache-overwrite-reason "<text>"` records a rationale that otherwise logs as `reason=unspecified`.

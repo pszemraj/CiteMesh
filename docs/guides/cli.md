@@ -44,10 +44,9 @@ Search modes:
 
 - `local` encodes the query and ranks it against cached retrieval-document vectors, returning cosine scores and full paper IDs. It fetches no paper metadata and fails if the selected cache is empty.
 - `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
-- `auto` tries local search first and falls back to S2 when the cache is empty or local dependencies or model loading are unavailable, logging the reason.
+- `auto` tries local search first and falls back to S2 when the cache is empty or local dependencies or model loading are unavailable, logging the reason. An installed corpus that is unusable exits with status 1 instead of falling back: a pending import or refresh, uncertified membership, a requested view larger than the installed coverage, a source or runtime mismatch, or a model-fingerprint mismatch. Resume the pending operation or select matching settings before retrying.
 
-For installed-index selection, fixed settings, corpus views, and recovery, see
-[Portable corpus indexes](caching.md#portable-corpus-indexes).
+Select an installed portable index directly with `--cache-namespace NAMESPACE`. Its fixed model and source settings override unrelated saved defaults, and explicit conflicts are usage errors (exit 2). This selection never falls back to S2, including under `--mode auto`. For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 

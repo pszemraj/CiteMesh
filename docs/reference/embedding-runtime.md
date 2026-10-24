@@ -68,7 +68,7 @@ EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support i
 
 ## Dependency floor
 
-The [`embeddings` extra](../../pyproject.toml) declares the dependency floor. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
+The [`embeddings` extra](../../pyproject.toml) declares the dependency floor: torch 2.9.0 (2.13.0 on macOS, matching the MPS bf16 floor above), sentence-transformers 5.7.0, transformers 5.2.0, huggingface_hub 2.3.0, datasets 2.14.0, and pyarrow 18.0.0. Install a PyTorch wheel for your hardware that meets the torch floor before installing CiteMesh: a wheel below it is upgraded from the configured index when the extra installs, which can replace a hardware-specific build. The embedding strategy also rejects torch below 2.9 at runtime. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
 
 The default suite covers prompt routing, cache separation, and complete vector sets. Real-model checks are opt-in with `python -m pytest -m "slow and cuda"`.
 
