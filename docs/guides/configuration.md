@@ -29,7 +29,7 @@ Config defaults, including ignored corpus-only settings, are logged at DEBUG wit
 
 ## Supported keys
 
-Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size` maps to `--batch-size`; `search_mode` maps to `search --mode`. [Local search](cli.md#find-a-seed-paper) also uses applicable saved embedding settings.
+Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size` maps to `--batch-size`; `search_mode` maps to `search --mode`.
 
 | Group | Keys |
 | --- | --- |
@@ -48,7 +48,7 @@ For the CLI, `S2_API_KEY` takes precedence over `[api].s2_api_key`, including an
 citemesh config set api.s2_api_key YOUR_KEY
 ```
 
-Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). [Direct Python builders](python-api.md#before-you-build-on-this) do not apply saved CLI configuration.
+Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). Direct-builder behavior is in the [Python API](python-api.md#before-you-build-on-this).
 
 ```toml
 [defaults]

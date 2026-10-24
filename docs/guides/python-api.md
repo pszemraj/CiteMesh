@@ -20,7 +20,7 @@ collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 
 ## Exporting
 
-`GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories before publishing the artifact by atomic replacement. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Format contents are in [Output Artifacts](../reference/output-artifacts.md).
+`GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Formats and artifact publication behavior are in [Output Artifacts](../reference/output-artifacts.md).
 
 Graphs supplied by callers must follow the [graph-input contract](../reference/output-artifacts.md#graph-input) and the writer's requirements for [JSON](../reference/output-artifacts.md#graph-json-strategyjson), [CSV](../reference/output-artifacts.md#csv-strategycsv), or [BibTeX](../reference/output-artifacts.md#bibtex-strategybib).
 

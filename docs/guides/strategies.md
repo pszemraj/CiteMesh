@@ -25,6 +25,6 @@ Embedding is the only strategy that accepts [free-text seeds](how-it-works.md#1-
 
 Hybrid combines citation and semantic candidates, with adaptive reranking and edge scoring. See [ranking](how-it-works.md#5-ranking-and-selection) and [edge scoring](how-it-works.md#6-edge-scoring) for how each source affects selection and connections.
 
-A heavily cited seed can fill the graph before semantic-only papers qualify. Lower the citation budget or use corpus sourcing when semantic recall matters. Disabling semantic enrichment uses citation scoring while retaining hybrid's edge cap. When enrichment is enabled, inference failures stop the build; unavailable citation endpoints can still leave recommendations or the local corpus usable.
+A heavily cited seed can fill the graph before semantic-only papers qualify. Lower the citation budget or use corpus sourcing when semantic recall matters.
 
 The [hybrid tuning study](../reference/defaults-tuning-study.md#hybrid-defaults-february-2026) explains the discovery tradeoff behind its defaults. For overrides, see the [CLI controls](cli.md#option-reference).

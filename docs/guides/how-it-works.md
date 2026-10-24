@@ -102,6 +102,6 @@ Implementation: [render.py](../../src/citemesh/visualization/render.py); node an
 
 Exports enrich nodes with external links, provenance, seed relation, and personalized PageRank (`alpha=0.85`, weighted). PageRank measures relevance within the final graph; it is separate from the candidate-ranking score.
 
-The dashboard embeds graph data and rebuilds its figure in the browser, so selection, filtering, and imports work offline. The [Python/JavaScript boundary](../internals/architecture.md#python--javascript-duplication) explains how both implementations are tested. [Output Artifacts](../reference/output-artifacts.md) describes formats, schemas, naming, and collection updates.
+The dashboard embeds graph data and rebuilds its figure in the browser. The [Python/JavaScript boundary](../internals/architecture.md#python--javascript-duplication) explains how both implementations are tested; [Output Artifacts](../reference/output-artifacts.md#dashboard-html) describes dashboard behavior.
 
 Implementation: [export](../../src/citemesh/visualization/export/) and [dashboard](../../src/citemesh/visualization/dashboard/).

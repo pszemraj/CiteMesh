@@ -34,9 +34,8 @@ The roles keep independent cache namespaces, fingerprints, and storage contracts
 An explicitly selected installed index loads its recorded immutable model
 revision, validates the active artifact against its stored contract, and keeps
 its original native address, including when created with requested revision
-`main`. Imported producer dtype is creation provenance; consumers resolve their
-own device and compute dtype. For the import, search, and graph-build workflow,
-see [Portable corpus indexes](../guides/caching.md#portable-corpus-indexes).
+`main`. For the import, search, and graph-build workflow, see [portable index
+selection](../guides/caching.md#import-and-selection).
 
 Inputs exceeding the token window, including prompts and special tokens, are truncated and counted in a warning. The ordinary path reports before encoding; CUDA prefetch reports the completed batch counts after encoding and resets partial counts on a compile retry. Reused cached vectors do not repeat the warning.
 

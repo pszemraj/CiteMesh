@@ -18,7 +18,7 @@ class EmbeddingCache(
 - `recovery.py` (`_RecoveryMixin`) - locking (`_cache_lock`, `_cache_operation_lock`, `hydration_operation_lock`), the SQLite connection context, the replacement journal and its replay, trailing-row truncation (`_recover_trailing_rows`), and the durability barrier `_flush_h5_file`.
 - `search.py` (`_SearchMixin`) - query-time scoring: the calibration gate, the Hamming prefilter, the chunked scoring kernels (`_score_int8_rows`, `_score_float_rows`, `_select_top_k`), the finiteness guard, and the row-to-metadata join.
 
-Supporting modules: `constants.py` (metadata keys, schema version, chunk sizes, lock timeout), `sql.py` (DDL and upserts), `models.py` (result dataclasses), `quantization.py` (int8 and binary packing). `data/embedding_contract.py` owns the pure namespace serializer and fixed embedding/source selection types; it does not load models. `lifecycle.py` owns managed corpus state, strict opening, membership, and import/refresh sessions. `portable.py` streams the interchange format through lazy Arrow imports.
+Supporting modules: `constants.py` (metadata keys, schema version, chunk sizes, lock timeout), `sql.py` (DDL and upserts), `models.py` (result dataclasses), `quantization.py` (int8 and binary packing). `data/embedding_contract.py` owns the pure namespace serializer and fixed embedding/source selection types; it does not load models. `portable.py` streams the interchange format through lazy Arrow imports.
 
 ## Physical layout
 
@@ -70,7 +70,7 @@ operation certifies it. Physical rows can outlive source membership.
 Structured cache metadata records the vector contract, original namespace
 serialization, imported publication origin, completed source descriptor,
 membership certification, and pending operation target. See [portable index
-selection](../guides/caching.md#portable-corpus-indexes) for user-facing
+selection](../guides/caching.md#import-and-selection) for user-facing
 namespace and source-revision behavior.
 
 Strict opening holds the namespace lock and opens the existing SQLite file in
@@ -92,16 +92,12 @@ prefix from native mappings. Binary reconstruction runs once at finalization;
 it never rewrites primary int8 bytes. Completion promotes source, membership,
 and readiness in one SQLite transaction after flushing HDF5.
 
-Refresh rescans one pinned source after interruption, reuses the existing
-formatted-text hit/miss comparison and replacement journal, and acquires an
-encoder only for misses. Metadata hits update their complete normalized
-record. Membership reflects the selected revision at clean EOF; removed
-papers' stored rows remain inactive. Failure after replacement leaves the
-operation incomplete, since the old source no longer exists intact.
+Refresh reuses the formatted-text hit/miss comparison and replacement journal. Failure
+after replacement leaves the operation incomplete because the prior source is no longer intact.
 
 Full and newest-N refreshes share a temporary SQLite staging pass, resolving
 canonical IDs across the entire pinned split before calibration or encoding.
-Duplicate IDs follow the [source precedence rules](../guides/caching.md#portable-corpus-indexes). Staging
+Duplicate IDs follow the [source precedence rules](../guides/caching.md#refresh). Staging
 bounds memory by the record batch and uses temporary disk space proportional to
 source metadata.
 Refresh retries rebuild membership from these winners while preserving native
@@ -116,7 +112,7 @@ Native search intersects every requested view with certified membership before
 Hamming candidate selection or int8/float32 scoring. Eligibility is indexed by
 physical row; absolute native positions remain the cutoff tie key, and excluded
 rows consume no candidate slots. Newest-N views use the
-[active membership ordering](../guides/caching.md#portable-corpus-indexes).
+[active membership ordering](../guides/caching.md#import-and-selection).
 
 ## Portable format
 
@@ -152,11 +148,9 @@ exactly its declared artifacts. Snapshots live at
 `variants/<config>/<snapshot>/index.json`, with payloads beside the manifest.
 Each configuration owns its source descriptor. Import origin records
 `bucket_id`, `config_name`, and `snapshot_id`, independently of the upstream
-source revision. Complete downloads stay in the Hugging Face cache for native
-import retries; see the [portable index guide](../guides/caching.md#portable-corpus-indexes)
-for resume behavior.
+source revision.
 
 The publisher uploads payloads, then the manifest, updates the catalog's current
 pointer, and prunes older files for that configuration. The
-[portable index guide](../guides/caching.md#portable-corpus-indexes) describes
+[portable index guide](../guides/caching.md#publishing) describes
 the publisher command and retention policy.

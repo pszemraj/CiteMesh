@@ -4,7 +4,7 @@
 
 | Variable | Default | Accepted values | Runtime effect |
 | --- | --- | --- | --- |
-| `S2_API_KEY` | unset | string | CiteMesh paces authenticated requests at 1 request/second and anonymous requests at 0.5. Credential selection follows [API-key precedence](../guides/configuration.md#api-key). |
+| `S2_API_KEY` | unset | string | Semantic Scholar credentials; see [API-key precedence](../guides/configuration.md#api-key) and [request policy](../guides/cli.md#appendix-b-troubleshooting). |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path (`~` expanded) | Overrides the root for paper, reference, and embedding caches and `config.toml`. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 
@@ -32,5 +32,5 @@ A non-empty `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` suppresses the legacy macOS
 | `CUDA_VISIBLE_DEVICES` | Honored by torch for CUDA device visibility/selection. |
 | `PYTORCH_ENABLE_MPS_FALLBACK` | Honored by torch: falls back to CPU for individual ops missing MPS kernels. |
 | `NO_COLOR` | Honored by Rich: disables ANSI color in console and help output; non-color emphasis such as bold may remain. |
-| `HF_TOKEN` | Honored by huggingface_hub for authenticated model/dataset downloads and bucket access (read for imports, write for publishing). Required for the license-gated `google/embeddinggemma-300m` fallback checkpoint. |
+| `HF_TOKEN` | Honored by huggingface_hub for authenticated model/dataset downloads and bucket access (read for imports, write for publishing); see [model access](embedding-runtime.md#model-selection-and-fallback). |
 | `HF_HOME` | Honored by huggingface_hub: relocates the Hugging Face cache holding downloaded model checkpoints and corpus datasets (separate from the CiteMesh cache root). |

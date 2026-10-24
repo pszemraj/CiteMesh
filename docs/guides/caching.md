@@ -59,6 +59,8 @@ Crash safety, the replacement journal, flush ordering, and locking are in [Embed
 
 ## Portable corpus indexes
 
+### Import and selection
+
 A portable index installs precomputed retrieval-document embeddings into the
 native cache. Install the `embeddings` extra first. Import and export copy the
 stored int8 or float32 values without loading an encoder; query encoding and
@@ -94,10 +96,22 @@ write access for publication. Set [`HF_TOKEN`](../reference/environment.md#other
 or save a token with `hf auth login`; public bucket reads need no token.
 
 Explicit `--cache-namespace` selects existing files and pins model, profile,
-document formatter, dimension, storage precision, dataset, and split from their
-stored contract. Conflicting explicit flags fail. Device, batch size, scoring,
-and result limits remain configurable. Search failures stay errors even in
-`--mode auto`. Import does not change saved defaults.
+formatter, dimension, storage precision, dataset, and split. Conflicting flags
+fail; device, batch size, scoring, and result limits remain configurable. In
+`--mode auto`, installed-index readiness/compatibility errors stay errors under
+explicit or ordinary namespace selection. Import does not change saved defaults.
+
+For an installed index, `--corpus-size N` ranks only the newest N active members
+at the completed revision; `--all-corpus` uses every installed active member. Chronology ties
+prefer later source rows; undated papers fill remaining places in source
+order. A smaller view changes neither stored coverage nor membership. A capped
+index cannot supply a larger view or claim full coverage. Seed lookup is
+independent of neighbor eligibility, so an older seed can search newer papers.
+The same membership and view rules apply when ordinary model settings resolve
+to a certified namespace. Explicit local-search corpus-view flags require
+certified membership; uncertified caches reject them.
+
+### Refresh
 
 Installed indexes are manually refreshed. Build and search use their completed
 source revision without checking or scanning the upstream dataset:
@@ -124,15 +138,7 @@ Unparseable timestamps rank below valid ones, which are compared in UTC. The
 winning record retains its original source position. Equally recent, identical
 records retain the first occurrence.
 
-For an installed index, `--corpus-size N` ranks only the newest N active members
-at the completed revision; `--all-corpus` uses every installed active member. Chronology ties
-prefer later source rows; undated papers fill remaining places in source
-order. A smaller view changes neither stored coverage nor membership. A capped
-index cannot supply a larger view or claim full coverage. Seed lookup is
-independent of neighbor eligibility, so an older seed can search newer papers.
-The same membership and view rules apply when ordinary model settings resolve
-to a certified namespace. Explicit local-search corpus-view flags require
-certified membership; uncertified caches reject them.
+### Resume and adoption
 
 An interrupted import or refresh remains unavailable to consumers. Resume an
 import with the same local snapshot or the same bucket configuration and
@@ -160,6 +166,8 @@ citemesh cache refresh --namespace NAMESPACE --adopt \
 Adoption checks the supplied historical selectors and stored model fingerprint;
 it never labels old vectors with the current moving model revision. A namespace
 whose original settings cannot be established is preserved and refused.
+
+### Publishing
 
 The manual publisher uses these same refresh and export operations. Create a
 private Storage Bucket first, then run from a source checkout:

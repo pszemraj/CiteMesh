@@ -26,10 +26,10 @@ git clone https://github.com/pszemraj/CiteMesh.git citemesh-index-test
 cd citemesh-index-test
 ```
 
-Use your usual Python environment, preferably Python 3.12 or 3.13. Install the
-appropriate PyTorch wheel first using the [official installation selector](https://pytorch.org/get-started/locally/):
-macOS for an Apple Silicon MacBook Air, or Windows with the appropriate CUDA
-build for an NVIDIA laptop. CiteMesh requires torch 2.13+ on macOS. Then install:
+Use your usual Python environment and install a PyTorch wheel for your hardware
+with the [official selector](https://pytorch.org/get-started/locally/). Supported
+versions are listed in [Embedding Runtime](../reference/embedding-runtime.md#dependency-floor).
+Then install:
 
 ```bash
 python -m pip install -e ".[recommended]"
@@ -47,7 +47,7 @@ If the intended accelerator is unavailable, resolve the installation/device
 issue before calling that accelerator test a pass. CPU can be tested separately.
 For a non-NVIDIA Windows GPU, use CPU; CiteMesh has no DirectML backend.
 
-For a private bucket, follow the [bucket authentication instructions](caching.md#portable-corpus-indexes).
+For a private bucket, follow the [bucket authentication instructions](caching.md#import-and-selection).
 A local export needs no bucket credentials.
 
 ## 2. Import into a fresh cache
@@ -85,13 +85,12 @@ Import performs data transfer and, for int8, local binary-index reconstruction,
 with no model loading or calibration. Record the namespace and snapshot identity,
 and replace `NAMESPACE` in every example below. Keep the local snapshot or
 completed download available for repeat tests; remote snapshots may be pruned.
-See [Portable corpus indexes](caching.md#portable-corpus-indexes) for resume and
+See [Portable corpus indexes](caching.md#resume-and-adoption) for resume and
 retention behavior.
 
 ## 3. Search the installed corpus
 
 The examples use `mps`. On Windows substitute `cuda`; for CPU substitute `cpu`.
-The first search can download the pinned model. Keep compilation at its default.
 
 ```bash
 citemesh search "long-context language models and efficient attention" --mode local --cache-namespace NAMESPACE --device mps --all-corpus --limit 5 --verbose --log-file index-search.log

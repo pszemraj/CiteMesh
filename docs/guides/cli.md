@@ -44,19 +44,14 @@ Search modes:
 
 - `local` encodes the query and ranks it against cached retrieval-document vectors, returning cosine scores and full paper IDs. It fetches no paper metadata and fails if the selected cache is empty.
 - `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
-- `auto` tries local search first and falls back to S2 when the cache is empty or local dependencies or model loading are unavailable, logging the reason. An installed corpus that is incomplete, uncertified, or incompatible with the requested settings exits with an error; resume its pending import or refresh, or select matching settings before retrying.
+- `auto` tries local search first and falls back to S2 when the cache is empty or local dependencies or model loading are unavailable, logging the reason.
 
-Select an installed portable index directly with `--cache-namespace NAMESPACE`.
-Its fixed model and source settings override unrelated saved defaults; explicit
-conflicts are usage errors. This selection never falls back to S2, including
-under `--mode auto`. `--dataset-split`, `--corpus-size N`, and `--all-corpus`
-also apply to local search. For installed indexes a smaller cap is an exact
-view over completed active membership and performs no source refresh. Copyable
-build commands retain that view.
+For installed-index selection, fixed settings, corpus views, and recovery, see
+[Portable corpus indexes](caching.md#portable-corpus-indexes).
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
-Match the [namespace used by the build](caching.md#embedding-namespaces). `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; the command is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
+`--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. It is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard
 
@@ -80,28 +75,8 @@ See [User Configuration](configuration.md) for saved defaults and [cache mainten
 
 ### Install, export, and refresh a corpus index
 
-```bash
-citemesh cache import --path ./arxiv-index
-citemesh cache import --bucket OWNER/INDEX --config embeddinggemma-512-int8 \
-  --snapshot SNAPSHOT_ID
-citemesh cache export --namespace NAMESPACE --output ./arxiv-index
-citemesh cache refresh --namespace NAMESPACE --dataset-revision SOURCE_COMMIT
-```
-
-`cache import` requires exactly one of `--path` and `--bucket`. The bucket's
-catalog supplies its default configuration when `--config` is omitted.
-`--snapshot` selects a published snapshot and requires `--config`; omit it to
-use the selected configuration's current snapshot.
-`cache refresh --dataset-revision` selects the upstream source. Omitting it
-resolves latest once for a new refresh and resumes the recorded target for an
-interrupted one.
-
-Import prints the installed namespace and a search command. `cache scan`
-reports contract, origin, source revision, active and physical counts, coverage,
-and pending operations without loading a model. Incomplete operations block
-search, builds, and export until resumed; occupied incompatible import targets
-are preserved. See [portable indexes](caching.md#portable-corpus-indexes) for
-selection, recovery, and calibration semantics.
+See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the
+commands and their import, export, refresh, selection, and recovery behavior.
 
 ### Missing Semantic Scholar references
 
@@ -140,7 +115,7 @@ _`--theme light` with a paper selected._
 
 ## Appendix B: Troubleshooting
 
-Semantic Scholar calls retry with exponential full jitter: up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and recovery waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
+CiteMesh paces authenticated Semantic Scholar requests at 1 request/second and anonymous requests at 0.5. Calls retry with exponential full jitter: up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and recovery waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.

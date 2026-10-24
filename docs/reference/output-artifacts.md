@@ -67,7 +67,7 @@ The graph payload requires its `seed_id` to identify a node present in the graph
 Each node carries:
 
 - core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
-- analysis fields `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), `seed_relevance` (personalized PageRank over the final graph - a topology metric computed at export time, not the candidate-selection score used in hybrid reranking)
+- analysis fields `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), and [`seed_relevance`](../guides/how-it-works.md#8-exports-and-the-dashboard-collection)
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
@@ -127,9 +127,9 @@ The sidecar records `schema_version`, `build`, `outputs` (resolved artifact path
 
 - run metadata `paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`
 - `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence
-- `candidate_source_status` - per attempted Semantic Scholar source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure). Partial results stay usable and preserve the unavailable source; if every source is unavailable the build fails and writes no artifacts.
+- `candidate_source_status` - per attempted Semantic Scholar source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); see [source-failure handling](../guides/cli.md#appendix-b-troubleshooting).
 - embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
-- selected corpus provenance when available - `cache_namespace`, completed upstream `dataset_revision`, `installed_corpus_selection` (`all` or `newest`), `installed_corpus_limit` for a capped index, and `index_origin` identifying the imported `bucket_id`, `config_name`, and `snapshot_id`. The installed selection describes the index coverage independently of the requested `corpus_size` or `all_corpus` view; `all_corpus: true` includes every installed member even when the index is capped. The upstream revision can advance through explicit [refresh](../guides/caching.md#portable-corpus-indexes) while the original imported origin stays recorded.
+- selected corpus provenance when available - `cache_namespace`, completed upstream `dataset_revision`, `installed_corpus_selection` (`all` or `newest`), `installed_corpus_limit` for a capped index, and `index_origin` identifying the imported `bucket_id`, `config_name`, and `snapshot_id`. Coverage and requested views follow the [installed-index selection rules](../guides/caching.md#portable-corpus-indexes). Explicit refresh advances the dataset revision while preserving the original import origin.
 
 ## Graph input
 
