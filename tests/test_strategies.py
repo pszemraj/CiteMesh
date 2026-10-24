@@ -3230,24 +3230,17 @@ def test_deterministic_sort_key_is_total_for_secondary_and_stable_fields() -> No
 
 @pytest.mark.parametrize(
     ("paper1_year", "paper2_year", "expected"),
-    [(2020, 2020, 1.0), (2010, 2020, 0.1)],
+    [(2020, 2020, 1.0), (2010, 2020, 0.1), (None, 2020, 0.5)],
 )
 def test_temporal_similarity_extremes(
-    paper1_year: int,
+    paper1_year: int | None,
     paper2_year: int,
     expected: float,
 ) -> None:
-    """Temporal similarity should be stable for known year deltas."""
+    """Temporal scoring handles known year deltas and missing-year fallback."""
     paper1 = Paper(paper_id="p1", title="Test 1", year=paper1_year)
     paper2 = Paper(paper_id="p2", title="Test 2", year=paper2_year)
     assert GraphBuilderStrategy.temporal_similarity(paper1, paper2) == expected
-
-
-def test_temporal_similarity_unknown_year_defaults() -> None:
-    """Unknown years should return neutral fallback for temporal similarity."""
-    paper1 = Paper(paper_id="p1", title="Test 1", year=None)
-    paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
-    assert GraphBuilderStrategy.temporal_similarity(paper1, paper2) == 0.5
 
 
 def test_citation_similarity_branches() -> None:
