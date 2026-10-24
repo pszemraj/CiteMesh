@@ -7,7 +7,7 @@ import shlex
 import sqlite3
 import threading
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import (
@@ -141,17 +141,22 @@ def _write_state(conn: sqlite3.Connection, state: CorpusState) -> None:
 
 
 @contextmanager
-def _existing_database(db_path: Path) -> Iterator[sqlite3.Connection]:
+def _existing_database(
+    db_path: Path, *, timeout: float = 5.0
+) -> Iterator[sqlite3.Connection]:
     """Open existing SQLite state, permitting journal recovery.
 
     :param Path db_path: Existing native metadata database.
+    :param float timeout: Maximum SQLite lock wait in seconds.
     Yields:
         The connection, closed on context exit.
     """
     if not db_path.is_file():
         namespace_id = db_path.stem.removeprefix("metadata_")
         raise ValueError(f"Namespace {namespace_id} is not installed; see cache scan")
-    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=rw", uri=True)
+    conn = sqlite3.connect(
+        db_path.resolve().as_uri() + "?mode=rw", uri=True, timeout=timeout
+    )
     try:
         yield conn
     finally:
@@ -160,13 +165,13 @@ def _existing_database(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 @contextmanager
 def _existing_namespace_connection(
-    namespace_id: str, cache_dir: Path | None = None, *, acquire_hydration: bool = True
+    namespace_id: str, cache_dir: Path | None = None, *, blocking: bool = True
 ) -> Iterator[sqlite3.Connection]:
     """Hold native cache locks while reading existing SQLite state.
 
     :param str namespace_id: Twelve-character native namespace ID.
     :param Path | None cache_dir: Optional embedding cache directory.
-    :param bool acquire_hydration: Wait for whole-corpus operations before inspection.
+    :param bool blocking: Wait for native locks and SQLite transactions when occupied.
     Yields:
         The existing database connection, with hot-journal recovery enabled.
     """
@@ -184,49 +189,79 @@ def _existing_namespace_connection(
     managed_root = EmbeddingCache._resolve_managed_cache_root(
         directory, configured_root
     )
-    operation_lock = (
-        cache_operation_lock(managed_root) if managed_root else nullcontext()
-    )
     timeout = constants._resolve_cache_lock_timeout_seconds()
-    hydration_lock = (
-        FileLock(str(directory / f"hydration_{namespace_id}.lock"), timeout=timeout)
-        if acquire_hydration
+    operation_lock = (
+        cache_operation_lock(managed_root, timeout=timeout, blocking=blocking)
+        if managed_root
         else nullcontext()
     )
     with (
         operation_lock,
-        hydration_lock,
-        FileLock(str(directory / f"cache_{namespace_id}.lock"), timeout=timeout),
-        _existing_database(db_path) as conn,
+        FileLock(
+            str(directory / f"cache_{namespace_id}.lock"),
+            timeout=timeout,
+            blocking=blocking,
+        ),
+        _existing_database(db_path, timeout=5.0 if blocking else 0.0) as conn,
     ):
         yield conn
 
 
 @dataclass(frozen=True)
 class InstalledCorpusSummary:
-    """Persisted corpus state and row counts used by namespace inspection."""
+    """Schema, persisted corpus state and row counts used by namespace inspection."""
 
+    schema_version: str | None
     state: CorpusState
     physical_rows: int
     active_rows: int
 
 
-def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary | None:
-    """Read installed corpus state and row counts under native namespace locks.
+def _read_installed_corpus_summary(conn: sqlite3.Connection) -> InstalledCorpusSummary:
+    """Read schema and corpus counts from one SQLite snapshot.
 
-    :param Path db_path: Native metadata database to inspect.
-    :return InstalledCorpusSummary | None: Corpus state and counts, or no installed corpus.
+    :param sqlite3.Connection conn: Fresh connection used for the read transaction.
+    :return InstalledCorpusSummary: Schema, corpus state and matching row counts.
     """
-    namespace_id = db_path.stem.removeprefix("metadata_")
-    with _existing_namespace_connection(
-        namespace_id, db_path.parent, acquire_hydration=False
-    ) as conn:
-        state = _read_state(conn)
-        if state == {}:
-            return None
+    conn.execute("BEGIN")
+    row = conn.execute(
+        "SELECT value FROM cache_metadata WHERE key = ?",
+        (constants.SCHEMA_VERSION_KEY,),
+    ).fetchone()
+    schema_version = (str(row[0]).strip() or None) if row else None
+    state = _read_state(conn)
+    physical = active = 0
+    if state != {}:
         physical = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
         active = conn.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0]
-        return InstalledCorpusSummary(state, physical, active)
+    return InstalledCorpusSummary(schema_version, state, physical, active)
+
+
+def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary:
+    """Inspect a read-only snapshot, recovering a hot journal under native locks.
+
+    :param Path db_path: Native metadata database to inspect.
+    :return InstalledCorpusSummary: Schema, corpus state and counts; ordinary caches
+        have empty state and zero corpus counts.
+    :raises sqlite3.Error: If metadata is unreadable or SQLite is busy.
+    :raises OSError: If journal recovery needs unavailable write access.
+    :raises filelock.Timeout: If recovery conflicts with an active cache operation.
+    """
+    try:
+        with closing(
+            sqlite3.connect(
+                db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0
+            )
+        ) as conn:
+            return _read_installed_corpus_summary(conn)
+    except sqlite3.OperationalError as exc:
+        if "readonly" not in str(exc):
+            raise
+    namespace_id = db_path.stem.removeprefix("metadata_")
+    with _existing_namespace_connection(
+        namespace_id, db_path.parent, blocking=False
+    ) as conn:
+        return _read_installed_corpus_summary(conn)
 
 
 class _LifecycleMixin(_EmbeddingCacheHost):

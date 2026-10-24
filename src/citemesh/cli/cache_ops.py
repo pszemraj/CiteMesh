@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from filelock import Timeout
 from rich.text import Text
@@ -24,7 +25,6 @@ from citemesh.data.cache import (
     cache_operation_lock,
     legacy_macos_cache_root,
     path_exists,
-    read_embedding_namespace_schema,
 )
 from citemesh.data.user_config import (
     USER_CONFIG_FILENAME,
@@ -36,6 +36,9 @@ from . import console
 from .build_options import _normalized_cache_reason
 from .console import logger
 from .parser import _output_table
+
+if TYPE_CHECKING:
+    from citemesh.data.embedding_cache.lifecycle import InstalledCorpusSummary
 
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 
@@ -332,14 +335,31 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
         return "Orphaned artifact (metadata database missing)"
 
     from citemesh.data.embedding_cache.constants import EMBEDDING_CACHE_SCHEMA_VERSION
+    from citemesh.data.embedding_cache.lifecycle import read_installed_corpus_summary
 
-    schema_version = read_embedding_namespace_schema(db_path)
+    try:
+        summary = read_installed_corpus_summary(db_path)
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc):
+            return "Metadata busy (scan again after active operation)"
+        if "readonly" in str(exc):
+            return "SQLite recovery pending (resume cache import or refresh with write access)"
+        return "Metadata unavailable (inspect before removing)"
+    except Timeout:
+        return "SQLite recovery pending (cache operation active; retry scan)"
+    except OSError:
+        return (
+            "SQLite recovery pending (resume cache import or refresh with write access)"
+        )
+    except (sqlite3.Error, ValueError):
+        return "Metadata unavailable (inspect before removing)"
+    schema_version = summary.schema_version
     if schema_version is None:
         return "Metadata unavailable (inspect before removing)"
 
     current_schema = str(EMBEDDING_CACHE_SCHEMA_VERSION)
     if schema_version == current_schema:
-        corpus_status = _installed_corpus_status(db_path)
+        corpus_status = _installed_corpus_status(summary)
         if corpus_status is not None:
             return corpus_status
         # This table reports schema reachability, not vector health or readiness;
@@ -350,19 +370,16 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
     return f"Legacy schema v{schema_version} (rebuilt on next access)"
 
 
-def _installed_corpus_status(db_path: Path) -> str | None:
+def _installed_corpus_status(summary: InstalledCorpusSummary) -> str | None:
     """Summarize installed corpus state from SQLite metadata.
 
-    :param Path db_path: Cache metadata database to inspect.
+    :param InstalledCorpusSummary summary: Snapshot of persisted corpus metadata.
     :return Optional[str]: Status summary, or ``None`` when no corpus is installed.
     """
-    from citemesh.data.embedding_cache.lifecycle import read_installed_corpus_summary
-
     try:
-        summary = read_installed_corpus_summary(db_path)
-        if summary is None:
-            return None
         state = summary.state
+        if state == {}:
+            return None
         physical, active = summary.physical_rows, summary.active_rows
         contract = state.get("contract")
         source = state.get("source")

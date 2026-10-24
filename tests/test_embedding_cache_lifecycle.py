@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
 import sqlite3
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 
 import h5py
 import numpy as np
 import pytest
+from filelock import FileLock
 
+from citemesh.cli import cache_ops
+from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import EmbeddingCache, constants, lifecycle
 from citemesh.data.embedding_cache.lifecycle import (
     import_destination_session,
@@ -542,13 +547,25 @@ def test_strict_selection_preserves_existing_lzf_compression(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "entrypoint", ["constructor", "selection", "metadata", "import"]
+    "entrypoint",
+    [
+        "constructor",
+        "selection",
+        "metadata",
+        "import",
+        "scan",
+        "scan_namespace_locked",
+        "scan_root_locked",
+        "scan_readonly",
+    ],
 )
 @pytest.mark.parametrize("kind", ["import", "refresh"])
 def test_existing_cache_entrypoints_recover_a_hot_sqlite_journal(
-    tmp_path, entrypoint, kind
+    tmp_path, entrypoint, kind, monkeypatch
 ):
     """Abrupt SQLite writes must recover before import or refresh resumes."""
+    if entrypoint == "scan_root_locked":
+        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path))
     settings = _settings(tmp_path)
     with import_destination_session(**settings) as session:
         session.append_stored_embeddings(
@@ -604,6 +621,35 @@ def test_existing_cache_entrypoints_recover_a_hot_sqlite_journal(
         assert select_existing_cache(cache.namespace_id, tmp_path, require_ready=False)
     elif entrypoint == "metadata":
         assert lifecycle.read_existing_cache_metadata(cache.namespace_id, tmp_path)
+    elif entrypoint.startswith("scan"):
+        if entrypoint != "scan":
+            if entrypoint == "scan_namespace_locked":
+                lock = FileLock(str(cache.lock_path))
+            elif entrypoint == "scan_root_locked":
+                lock = cache_operation_lock(tmp_path, exclusive=True)
+            else:
+                payloads = list(tmp_path.iterdir())
+                for path in payloads:
+                    path.chmod(0o444)
+                tmp_path.chmod(0o555)
+                lock = nullcontext()
+            try:
+                with lock:
+                    blocked_rows = cache_ops._scan_embedding_namespaces(tmp_path)
+                assert len(blocked_rows) == 1
+                assert blocked_rows[0].status.startswith("SQLite recovery pending")
+                assert cache.db_path.with_name(
+                    cache.db_path.name + "-journal"
+                ).is_file()
+            finally:
+                if entrypoint == "scan_readonly":
+                    tmp_path.chmod(0o755)
+                    for path in payloads:
+                        path.chmod(0o644)
+        rows = cache_ops._scan_embedding_namespaces(tmp_path)
+        assert len(rows) == 1
+        assert f"pending {kind}" in rows[0].status
+        assert f"active {4 if kind == 'import' else 0} / physical 4" in rows[0].status
     elif kind == "import":
         assert preflight_import_destination(**settings) == "resume_same_import"
     else:
@@ -691,9 +737,125 @@ def test_installed_corpus_summary_can_inspect_an_active_import(tmp_path, monkeyp
     monkeypatch.setattr(constants, "_resolve_cache_lock_timeout_seconds", lambda: 0.05)
     with import_destination_session(**_settings(tmp_path)) as session:
         summary = lifecycle.read_installed_corpus_summary(session.cache.db_path)
-        assert summary is not None
+        assert summary.schema_version == str(constants.EMBEDDING_CACHE_SCHEMA_VERSION)
         assert summary.state["pending"]["kind"] == "import"
         assert summary.physical_rows == summary.active_rows == 0
+
+
+@pytest.mark.parametrize("kind", ["import", "refresh"])
+@pytest.mark.parametrize("reader", ["selection", "metadata"])
+def test_namespace_inspection_does_not_wait_for_active_corpus_operation(
+    tmp_path, monkeypatch, kind, reader
+):
+    """Metadata inspection must expose pending state without waiting for hydration."""
+    monkeypatch.setattr(constants, "_resolve_cache_lock_timeout_seconds", lambda: 0.01)
+    settings = _settings(tmp_path)
+    if kind == "import":
+        operation = import_destination_session(**settings)
+    else:
+        cache, _, _ = _populate(settings)
+        operation = cache.operation_session(
+            kind="refresh",
+            identity={"source": settings["source"].to_dict()},
+            target_source=settings["source"],
+            contract=settings["contract"],
+            namespace_selectors=settings["namespace_selectors"],
+        )
+    with operation as session:
+        if kind == "import":
+            session.append_stored_embeddings(
+                _records(), np.eye(4, dtype=np.float32), first_row=0
+            )
+        if reader == "selection":
+            with pytest.raises(RuntimeError, match=f"incomplete {kind} operation"):
+                select_existing_cache(session.cache.namespace_id, tmp_path)
+        else:
+            metadata = lifecycle.read_existing_cache_metadata(
+                session.cache.namespace_id, tmp_path
+            )
+            assert (
+                json.loads(metadata[lifecycle.CORPUS_STATE_KEY])["pending"]["kind"]
+                == kind
+            )
+
+
+def test_namespace_scan_reads_committed_state_while_native_locks_are_held(
+    tmp_path, monkeypatch
+):
+    """Inventory must remain available while another operation owns namespace locks."""
+    monkeypatch.setattr(constants, "_resolve_cache_lock_timeout_seconds", lambda: 0.01)
+    cache, _, _ = _populate(_settings(tmp_path))
+    with FileLock(str(cache.lock_path)), FileLock(str(cache.hydration_lock_path)):
+        rows = cache_ops._scan_embedding_namespaces(tmp_path)
+    assert len(rows) == 1
+    assert rows[0].status.endswith("ready")
+
+
+def test_namespace_scan_reads_a_readonly_managed_cache_without_creating_locks(
+    tmp_path, monkeypatch
+):
+    """A readable cache tree needs no write access or coordination files to scan."""
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path))
+    directory = tmp_path / "embeddings"
+    cache, _, _ = _populate(_settings(directory))
+    shutil.rmtree(tmp_path / ".locks")
+    cache.lock_path.unlink()
+    cache.hydration_lock_path.unlink()
+    payloads = list(directory.iterdir())
+    for path in payloads:
+        path.chmod(0o444)
+    directory.chmod(0o555)
+    tmp_path.chmod(0o555)
+    try:
+        rows = cache_ops._scan_embedding_namespaces(directory)
+        assert len(rows) == 1
+        assert rows[0].status.endswith("ready")
+        assert not (tmp_path / ".locks").exists()
+        assert set(directory.iterdir()) == set(payloads)
+    finally:
+        tmp_path.chmod(0o755)
+        directory.chmod(0o755)
+        for path in payloads:
+            path.chmod(0o644)
+
+
+def test_namespace_scan_reports_busy_sqlite_without_waiting(tmp_path):
+    """An exclusive SQLite transaction must yield a busy row without recovery."""
+    cache, _, _ = _populate(_settings(tmp_path))
+    connection = sqlite3.connect(cache.db_path)
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        rows = cache_ops._scan_embedding_namespaces(tmp_path)
+    finally:
+        connection.close()
+    assert len(rows) == 1
+    assert rows[0].status == "Metadata busy (scan again after active operation)"
+
+
+def test_namespace_scan_counts_share_one_committed_sqlite_snapshot(
+    tmp_path, monkeypatch
+):
+    """Counts must describe one commit even when membership changes during a scan."""
+    cache, _, _ = _populate(_settings(tmp_path))
+    writer = sqlite3.connect(cache.db_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    read_state = lifecycle._read_state
+
+    def replace_membership_after_state(connection):
+        state = read_state(connection)
+        writer.execute("DELETE FROM corpus_membership")
+        writer.commit()
+        return state
+
+    monkeypatch.setattr(lifecycle, "_read_state", replace_membership_after_state)
+    try:
+        summary = lifecycle.read_installed_corpus_summary(cache.db_path)
+        assert summary.active_rows == summary.physical_rows == 4
+        assert (
+            writer.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0] == 0
+        )
+    finally:
+        writer.close()
 
 
 def test_metadata_alias_lookup_ignores_removed_primary_before_secondary_matching(
