@@ -44,7 +44,7 @@ Search modes:
 
 - `local` encodes the query and ranks it against cached retrieval-document vectors, returning cosine scores and full paper IDs. It fetches no paper metadata and fails if the selected cache is empty.
 - `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
-- `auto` tries local search first and falls back to S2 when the cache is empty or unavailable, logging the reason.
+- `auto` tries local search first and falls back to S2 when the cache is empty or local dependencies or model loading are unavailable, logging the reason. An installed corpus that is incomplete, uncertified, or incompatible with the requested settings exits with an error; resume its pending import or refresh, or select matching settings before retrying.
 
 Select an installed portable index directly with `--cache-namespace NAMESPACE`.
 Its fixed model and source settings override unrelated saved defaults; explicit

@@ -3,7 +3,8 @@
 Owns everything that answers "are the cached vectors still valid for this
 model?": the formatter fingerprint, the resolved model fingerprint (including
 local HuggingFace snapshot resolution), the inference-artifact digest walk, and
-the cache fingerprint check that forces a rebuild when any of them changes.
+the cache fingerprint check that rebuilds ordinary caches and preserves managed
+corpora when their model identity changes.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from citemesh.data import format_bytes
+from citemesh.data.embedding_contract import InstalledCorpusError
 
 from . import deps
 from .runtime import (
@@ -608,6 +610,7 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
 
         :param str representation: Retrieval-document or graph-similarity role.
         :return None: Validates and records model identity on the selected cache.
+        :raises InstalledCorpusError: If rebuilding would erase managed corpus state.
         :raises EmbeddingCacheFingerprintMismatchError: If a corpus-scale payload
             was built with a different model and no rebuild was authorized.
         """
@@ -680,14 +683,32 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
         cached_fingerprint: str | None,
         model_fingerprint: str,
     ) -> None:
-        """Raise when a model mismatch targets a corpus-hydrated namespace.
+        """Refuse automatic deletion of managed or legacy hydrated corpora.
 
         :param cache: Namespace whose payload the mismatch targets.
         :param cached_fingerprint: Fingerprint recorded on the payload.
         :param model_fingerprint: Fingerprint of the runtime-active model.
+        :raises InstalledCorpusError: If the namespace carries managed corpus state.
         :raises EmbeddingCacheFingerprintMismatchError: If the namespace carries
-            corpus hydration metadata.
+            legacy corpus hydration metadata.
         """
+        state = cache.corpus_state()
+        if state:
+            pending = state.get("pending")
+            if pending:
+                kind = pending["kind"]
+                raise InstalledCorpusError(
+                    f"Corpus cache has an incomplete {kind} operation; "
+                    f"resume the original `citemesh cache {kind}` command before "
+                    "using the corpus. "
+                    "The existing namespace was preserved."
+                )
+            raise InstalledCorpusError(
+                "Installed corpus model fingerprint mismatch "
+                f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint}); "
+                "automatic deletion was refused. Use its matching model settings "
+                "or explicitly remove it with `citemesh cache clear`."
+            )
         stats = cache.payload_stats()
         if not stats.hydration_dataset_source:
             return

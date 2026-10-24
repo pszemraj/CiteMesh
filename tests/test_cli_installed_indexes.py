@@ -150,6 +150,132 @@ def test_selected_search_never_falls_back(
     assert search._run_search_command(args, build_parser, user_config) == 1
 
 
+@pytest.mark.parametrize("operation", ["auto", "local", "embedding", "hybrid", "embed"])
+def test_interrupted_import_survives_implicit_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    operation: str,
+) -> None:
+    """Refuse implicit consumers without erasing an import's resumable prefix."""
+    import pyarrow as pa
+
+    from citemesh import cli
+    from citemesh.core import Paper
+    from citemesh.data import get_cache_dir
+    from citemesh.data.embedding_cache import portable
+    from citemesh.data.embedding_cache.lifecycle import (
+        open_existing_cache,
+        select_existing_cache,
+    )
+    from citemesh.data.embedding_cache.portable import export_snapshot, import_snapshot
+    from citemesh.data.embedding_contract import InstalledCorpusError
+    from citemesh.strategies.embedding import builder as builder_module
+    from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
+    from citemesh.strategies.embedding.refresh import _builder_contract
+    from tests._helpers import disable_embedding_dep_checks
+    from tests.test_embedding_portable import ExportFixture
+
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setattr(builder_module, "resolve_embedding_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
+    )
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", lambda _: None)
+    fingerprint = "hf::org/example::" + "a" * 40
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_model_fingerprint", lambda _: fingerprint
+    )
+    builder = EmbeddingGraphBuilder(
+        model_name="org/example",
+        model_profile="default",
+        model_revision="main",
+        truncate_dim=4,
+        storage_precision="float32",
+        semantic_source="arxiv-corpus",
+        dataset_source="test/source",
+        device="cpu",
+    )
+    producer = ExportFixture(dtype="float32", dimension=4, count=4)
+    producer.contract = _builder_contract(builder)
+    snapshot = tmp_path / "snapshot"
+    manifest = export_snapshot(producer, snapshot, shard_rows=2)
+    last_shard = snapshot / manifest.shards[-1].path
+    correct_bytes = last_shard.read_bytes()
+    last_shard.write_bytes(b"interrupted shard")
+    destination = get_cache_dir("embeddings")
+    with pytest.raises(pa.ArrowInvalid):
+        import_snapshot(snapshot, destination, batch_rows=2)
+    namespace_id = next(destination.glob("metadata_*.db")).stem.removeprefix(
+        "metadata_"
+    )
+    selection = select_existing_cache(namespace_id, destination, require_ready=False)
+    cache = open_existing_cache(selection, destination, require_ready=False)
+    state = cache.corpus_state()
+    assert state["pending"]["kind"] == "import"
+    assert not state["membership_complete"]
+    assert cache.get_model_fingerprint() is None
+    assert cache.embedding_count() == 2
+    before = cache.db_path.read_bytes(), cache.h5_path.read_bytes()
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("incomplete import started provider work or cache rebuild")
+
+    monkeypatch.setattr(search, "_run_s2_search", unexpected)
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_ensure_cache_hydrated", unexpected)
+    monkeypatch.setattr(cli, "_configure_logging", lambda **kwargs: None)
+    caplog.set_level(logging.INFO)
+    flags = [
+        "--model",
+        "org/example",
+        "--model-profile",
+        "default",
+        "--model-revision",
+        "main",
+        "--truncate-dim",
+        "4",
+        "--storage-precision",
+        "float32",
+        "--semantic-source",
+        "arxiv-corpus",
+        "--dataset-source",
+        "test/source",
+        "--device",
+        "cpu",
+    ]
+    if operation == "embed":
+        with pytest.raises(InstalledCorpusError, match="incomplete import"):
+            builder.embed_papers(
+                {"paper": Paper(paper_id="paper", title="Paper", year=2024)}
+            )
+    else:
+        command = (
+            ["search", "attention", "--mode", operation]
+            if operation in {"auto", "local"}
+            else [
+                "build",
+                "arxiv:2401.00000",
+                "--strategy",
+                operation,
+                "--output",
+                str(tmp_path / "output"),
+            ]
+        )
+        assert cli.main([*command, *flags]) == 1
+        assert "incomplete import" in caplog.text
+        assert not any(record.exc_info for record in caplog.records)
+    assert "REBUILDING EMBEDDING CACHE" not in caplog.text
+    assert cache.corpus_state() == state
+    assert cache.embedding_count() == 2
+    assert cache.get_model_fingerprint() is None
+    assert (cache.db_path.read_bytes(), cache.h5_path.read_bytes()) == before
+
+    last_shard.write_bytes(correct_bytes)
+    resumed = portable.import_snapshot(snapshot, destination, batch_rows=2)
+    assert resumed.embedding_count() == 4
+    assert resumed.corpus_state()["membership_complete"]
+
+
 def test_search_corpus_view_options_flow_into_overrides() -> None:
     parser, _, _, _ = _create_parser()
     args = parser.parse_args(
@@ -583,27 +709,48 @@ def test_namespace_failures_return_operation_errors(
     assert bool(failures[0].exc_info) is verbose
 
 
-def test_refresh_reports_offline_source_resolution(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("failure_stage", ["resolve", "load", "iterate"])
+def test_refresh_reports_offline_source_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
 ) -> None:
-    """Report transport failures from source resolution as refresh operation errors."""
-    from httpx2 import ConnectError
+    """Report source resolution and scan transport failures without a traceback."""
+    from collections.abc import Iterator
+
     from huggingface_hub import HfApi
+    from huggingface_hub.utils import httpx
 
     from citemesh.data.embedding_cache import lifecycle
     from citemesh.data.embedding_contract import CorpusSource
-    from citemesh.strategies.embedding import refresh
-    from citemesh.strategies.embedding.corpus_source import resolve_source_snapshot
+    from citemesh.strategies.embedding import corpus_source, deps, refresh
+    from citemesh.strategies.embedding.records import DatasetRecord
 
     source = CorpusSource("test/source", None, "train", "main", "all", None)
 
     def offline(*args: object, **kwargs: object) -> None:
-        raise ConnectError("offline")
+        raise httpx.RemoteProtocolError("offline")
+
+    def interrupted() -> Iterator[DatasetRecord]:
+        yield {"id": "2401.00001", "title": "Paper", "abstract": "Body"}
+        raise httpx.ReadError("offline")
 
     def refresh_source(*args: object, **kwargs: object) -> None:
-        resolve_source_snapshot(source)
+        if failure_stage == "resolve":
+            corpus_source.resolve_source_snapshot(source)
+        else:
+            list(corpus_source.iter_source_records(source))
 
     monkeypatch.setattr(HfApi, "dataset_info", offline)
+    monkeypatch.setattr(
+        deps,
+        "_import_datasets_module",
+        lambda: SimpleNamespace(
+            load_dataset=offline
+            if failure_stage == "load"
+            else lambda *a, **kw: interrupted()
+        ),
+    )
     monkeypatch.setattr(
         lifecycle, "select_existing_cache", lambda *args, **kwargs: None
     )
@@ -611,7 +758,8 @@ def test_refresh_reports_offline_source_resolution(
     parser, _, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "refresh", "--namespace", "0123456789ab"])
     assert run_cache_command(args, cache_parser) == 1
-    assert "Cannot resolve dataset test/source@main: offline" in caplog.text
+    action = "resolve" if failure_stage == "resolve" else "read"
+    assert f"Cannot {action} dataset test/source@main: offline" in caplog.text
     assert not any(record.exc_info for record in caplog.records)
 
 

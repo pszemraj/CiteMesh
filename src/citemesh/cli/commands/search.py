@@ -462,8 +462,10 @@ def _run_search_command(
     """Dispatch `citemesh search` across local and S2 modes.
 
     Mode ``auto`` prefers the local embedding cache when it has vectors and
-    falls back to the Semantic Scholar API otherwise, logging which one ran.
-    Explicitly requested local mode treats an empty cache as an error.
+    falls back to the Semantic Scholar API when the cache is empty or local
+    dependencies or model loading are unavailable. An unusable installed corpus
+    requires operator action and fails in either mode. Explicitly requested
+    local mode treats an empty cache as an error.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
