@@ -26,7 +26,7 @@ Output directories, standalone files, and collection updates follow the [output-
 
 ### Accepted identifiers
 
-- DOI, bare or with a `doi:` prefix or `https://doi.org/` URL, canonicalized to lowercase (DOI names are case-insensitive)
+- DOI, bare or with a `doi:` prefix or `doi.org` URL; prefixed and URL forms normalize to lowercase, while a bare DOI keeps its input case
 - arXiv ID or URL (`arxiv:1706.03762`, `https://arxiv.org/abs/1706.03762`, `.../pdf/1706.03762.pdf`), `vN` suffixes normalized away; bare `1706.03762` works when S2 resolves it
 - Semantic Scholar paper ID
 - Free-form text under `--strategy embedding`, when S2 says the input is not a known paper (outages stay errors)
@@ -44,11 +44,13 @@ Search modes:
 
 - `local` encodes the query and ranks it against cached retrieval-document vectors, returning cosine scores and full paper IDs. It fetches no paper metadata and fails if the selected cache is empty.
 - `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
-- `auto` tries local search first and falls back to S2 when the cache is empty or unavailable, logging the reason.
+- `auto` tries local search first and falls back to S2 when the selected cache is empty or local dependencies or model loading are unavailable, logging the reason. An installed corpus that is unusable exits with status 1 instead of falling back: a pending import or refresh, uncertified membership, a requested view larger than the installed coverage, a source or runtime mismatch, or a model-fingerprint mismatch. Resume the pending operation or select matching settings before retrying.
+
+Select an installed portable index directly with `--cache-namespace NAMESPACE`. Its fixed model and source settings override unrelated saved defaults, and explicit conflicts are usage errors (exit 2). This selection never falls back to S2, including under `--mode auto`. Without it, search reads the namespace derived from the current model settings, which reaches an installed index only when those settings match its fixed ones; the default candidates source never does. When that namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command. For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
-Match the [namespace used by the build](caching.md#embedding-namespaces). `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; the command is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
+`--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. It is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard
 
@@ -69,6 +71,11 @@ citemesh cache scan
 ```
 
 See [User Configuration](configuration.md) for saved defaults and [cache maintenance](caching.md#inspecting-and-clearing) for scan and reset behavior.
+
+### Install, export, and refresh a corpus index
+
+See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the
+commands and their import, export, refresh, selection, and recovery behavior.
 
 ### Missing Semantic Scholar references
 
@@ -105,9 +112,9 @@ Formats, dashboard collection and standalone behavior, package schemas, sidecars
 
 _`--theme light` with a paper selected._
 
-## Appendix B: Troubleshooting
+## Troubleshooting
 
-Semantic Scholar calls retry with exponential full jitter: up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and recovery waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
+CiteMesh paces authenticated Semantic Scholar requests at 1 request/second and anonymous requests at 0.5. Calls retry with exponential full jitter: up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and recovery waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.

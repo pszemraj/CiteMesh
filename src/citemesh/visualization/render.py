@@ -10,18 +10,22 @@ from __future__ import annotations
 import logging
 import math
 import textwrap
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import matplotlib
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+from matplotlib.backend_bases import RendererBase
+from matplotlib.figure import Figure, SubFigure
+from matplotlib.transforms import Bbox
+from numpy.typing import NDArray
 
 from citemesh.core import VIZ_CONFIG
-from citemesh.core.values import coerce_citation_count, coerce_float
+from citemesh.core.values import coerce_citation_count, coerce_float, parse_float
 from citemesh.data.cache import atomic_output_path
 
 from .node_data import effective_node_metadata, validate_canonical_node_ids
@@ -37,6 +41,9 @@ from .paths import _seed_suffix as _seed_suffix
 from .paths import generate_output_path as generate_output_path
 from .themes import Theme, get_theme
 from .years import coerce_publication_year, publication_year_bounds
+
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
 
 logger = logging.getLogger(__name__)
 KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
@@ -62,29 +69,30 @@ STATIC_VIEWPORT_MARGIN_RATIO = 0.08
 STATIC_VIEWPORT_MIN_MARGIN = 0.1
 
 
-def _figure_renderer(figure: plt.Figure) -> Any:
+def _figure_renderer(figure: Figure | SubFigure) -> RendererBase:
     """Return a renderer without depending on Matplotlib private APIs.
 
     Interactive and vector canvases do not consistently expose
     ``get_renderer``. In that case a temporary Agg canvas supplies public text
     measurement while the caller's original canvas is restored for export.
 
-    :param plt.Figure figure: Figure whose artists need measurement.
-    :return Any: Matplotlib renderer compatible with artist extent methods.
+    :param Figure | SubFigure figure: Figure whose artists need measurement.
+    :return RendererBase: Renderer used for artist extent calculations.
     """
-    original_canvas = figure.canvas
+    canvas_owner = figure if isinstance(figure, Figure) else figure.figure
+    original_canvas = canvas_owner.canvas
     get_renderer = getattr(original_canvas, "get_renderer", None)
     if callable(get_renderer):
         return get_renderer()
 
     from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-    agg_canvas = FigureCanvasAgg(figure)
+    agg_canvas = FigureCanvasAgg(canvas_owner)
     try:
         agg_canvas.draw()
         return agg_canvas.get_renderer()
     finally:
-        figure.set_canvas(original_canvas)
+        canvas_owner.set_canvas(original_canvas)
 
 
 def _similarity_to_layout_distance(raw_similarity: object) -> float:
@@ -102,10 +110,10 @@ def _similarity_to_layout_distance(raw_similarity: object) -> float:
     return 1.0 / (KK_LAYOUT_DISTANCE_EPSILON + similarity)
 
 
-def _detect_communities(graph: nx.Graph) -> list[list[Hashable]]:
+def _detect_communities(graph: PaperGraph) -> list[list[Hashable]]:
     """Detect deterministic communities for layout clustering.
 
-    :param nx.Graph graph: Canonicalized graph used for layout.
+    :param PaperGraph graph: Canonicalized graph used for layout.
     :return List[List[Hashable]]: Community memberships sorted deterministically.
     """
     if graph.number_of_nodes() == 0:
@@ -144,23 +152,23 @@ def _community_index(communities: list[list[Hashable]]) -> dict[Hashable, int]:
 
 
 def _spread_layout_by_communities(
-    pos: dict[Hashable, np.ndarray],
-    graph: nx.Graph,
+    pos: dict[Hashable, NDArray[np.float64]],
+    graph: PaperGraph,
     communities: list[list[Hashable]],
     layout_seed: int | None,
-) -> dict[Hashable, np.ndarray]:
+) -> dict[Hashable, NDArray[np.float64]]:
     """Shift community centers toward deterministic anchor positions.
 
-    :param Dict[Hashable, np.ndarray] pos: Base node positions.
-    :param nx.Graph graph: Canonicalized graph.
+    :param dict[Hashable, NDArray[np.float64]] pos: Base node positions.
+    :param PaperGraph graph: Canonicalized graph.
     :param List[List[Hashable]] communities: Ordered communities.
     :param Optional[int] layout_seed: Optional deterministic seed.
-    :return Dict[Hashable, np.ndarray]: Updated node positions.
+    :return dict[Hashable, NDArray[np.float64]]: Updated node positions.
     """
     if len(communities) < 2:
         return pos
 
-    community_graph = nx.Graph()
+    community_graph: nx.Graph[int, dict[str, object], dict[str, object]] = nx.Graph()
     for idx in range(len(communities)):
         community_graph.add_node(idx)
 
@@ -170,7 +178,7 @@ def _spread_layout_by_communities(
         right_idx = by_node[right]
         if left_idx == right_idx:
             continue
-        weight = max(float(attrs.get("weight", 0.0)), KK_LAYOUT_DISTANCE_EPSILON)
+        weight = max(parse_float(attrs.get("weight", 0.0)), KK_LAYOUT_DISTANCE_EPSILON)
         if community_graph.has_edge(left_idx, right_idx):
             community_graph[left_idx][right_idx]["weight"] += weight
         else:
@@ -241,12 +249,12 @@ def _spread_layout_by_communities(
 
 
 def _choose_metadata_anchor(
-    pos: dict[Hashable, np.ndarray],
+    pos: Mapping[Hashable, NDArray[np.float64]],
 ) -> tuple[float, float, str, str]:
     """
     Choose which corner to place the metadata box in based on node density.
 
-    :param Dict[Hashable, np.ndarray] pos: Mapping of node -> position array
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :return Tuple[float, float, str, str]: Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
     """
     if not pos:
@@ -282,19 +290,20 @@ def _choose_metadata_anchor(
         avg_distance = np.mean(dist_x + dist_y)
         scores[name] = crowded + (1.0 - avg_distance)
 
-    best = min(scores, key=scores.get)
+    best = min(scores, key=lambda name: scores[name])
     (x, y), ha, va = corners[best]
     return x, y, ha, va
 
 
 def normalize_layout_positions(
-    pos: dict[Hashable, np.ndarray], padding_ratio: float = LAYOUT_PADDING_RATIO
-) -> dict[Hashable, np.ndarray]:
+    pos: Mapping[Hashable, Iterable[float]],
+    padding_ratio: float = LAYOUT_PADDING_RATIO,
+) -> dict[Hashable, NDArray[np.float64]]:
     """Normalize layout positions to a centered square viewport.
 
-    :param Dict[Hashable, np.ndarray] pos: Raw layout map from NetworkX.
+    :param Mapping[Hashable, Iterable[float]] pos: Raw layout positions.
     :param float padding_ratio: Fractional interior padding around graph extents.
-    :return Dict[Hashable, np.ndarray]: Centered and scaled layout in approximately [-1, 1].
+    :return dict[Hashable, NDArray[np.float64]]: Centered and scaled coordinates.
     """
     if not pos:
         return {}
@@ -326,41 +335,42 @@ def normalize_layout_positions(
 
 
 def _orient_layout_horizontally(
-    pos: dict[Hashable, np.ndarray],
-) -> dict[Hashable, np.ndarray]:
+    pos: Mapping[Hashable, Iterable[float]],
+) -> dict[Hashable, NDArray[np.float64]]:
     """Rotate a portrait-oriented layout to use the landscape export viewport.
 
-    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
-    :return Dict[Hashable, np.ndarray]: Copied positions with the longer axis horizontal.
+    :param Mapping[Hashable, Iterable[float]] pos: Raw layout positions.
+    :return dict[Hashable, NDArray[np.float64]]: Positions with the longer axis horizontal.
     """
     if not pos:
         return {}
 
-    coords = np.array(list(pos.values()), dtype=float)
+    positions = {node: tuple(position) for node, position in pos.items()}
+    coords = np.array(list(positions.values()), dtype=float)
     if coords.ndim != 2 or coords.shape[1] != 2:
         return {
             node: np.asarray(position, dtype=float).copy()
-            for node, position in pos.items()
+            for node, position in positions.items()
         }
 
     span_x, span_y = np.ptp(coords, axis=0)
     if float(span_y) <= float(span_x):
         return {
             node: np.asarray(position, dtype=float).copy()
-            for node, position in pos.items()
+            for node, position in positions.items()
         }
     return {
         node: np.array([float(position[1]), -float(position[0])])
-        for node, position in pos.items()
+        for node, position in positions.items()
     }
 
 
 def _layout_viewport_limits(
-    pos: dict[Hashable, np.ndarray], viewport_aspect: float
+    pos: Mapping[Hashable, NDArray[np.float64]], viewport_aspect: float
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     """Fit equal-scale plot limits to the graph and export viewport.
 
-    :param Dict[Hashable, np.ndarray] pos: Normalized node positions.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Normalized node positions.
     :param float viewport_aspect: Physical width-to-height ratio of the axes.
     :return Tuple[Tuple[float, float], Tuple[float, float]]: X and Y axis limits.
     """
@@ -397,13 +407,13 @@ def _layout_viewport_limits(
 
 
 def _pack_disconnected_components(
-    pos: dict[Hashable, np.ndarray], graph: nx.Graph
-) -> dict[Hashable, np.ndarray]:
+    pos: Mapping[Hashable, NDArray[np.float64]], graph: PaperGraph
+) -> dict[Hashable, NDArray[np.float64]]:
     """Pack disconnected components into deterministic size-aware rows.
 
-    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
-    :param nx.Graph graph: Graph defining connected-component membership.
-    :return Dict[Hashable, np.ndarray]: Size-aware packed component positions.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Raw layout positions.
+    :param PaperGraph graph: Graph defining connected-component membership.
+    :return dict[Hashable, NDArray[np.float64]]: Size-aware packed positions.
     """
     if not pos or graph.number_of_nodes() == 0:
         return {}
@@ -421,7 +431,7 @@ def _pack_disconnected_components(
     largest_size = max(len(component) for component in components)
     component_layouts: list[
         tuple[
-            dict[Hashable, np.ndarray],
+            dict[Hashable, NDArray[np.float64]],
             tuple[float, float],
             tuple[float, float],
         ]
@@ -469,7 +479,7 @@ def _pack_disconnected_components(
         math.sqrt(padded_area * DISCONNECTED_COMPONENT_TARGET_ASPECT),
     )
 
-    packed: dict[Hashable, np.ndarray] = {}
+    packed: dict[Hashable, NDArray[np.float64]] = {}
     cursor_x = 0.0
     cursor_y = 0.0
     row_height = 0.0
@@ -500,16 +510,16 @@ def _pack_disconnected_components(
 
 def add_metadata_box(
     ax: plt.Axes,
-    metadata: dict[str, Any],
-    pos: dict[Hashable, np.ndarray],
+    metadata: Mapping[str, object],
+    pos: Mapping[Hashable, NDArray[np.float64]],
     theme: Theme,
 ) -> None:
     """
     Render a small metadata block in the plot corner.
 
     :param plt.Axes ax: Matplotlib axes
-    :param Dict[str, Any] metadata: Dictionary of metadata key/value pairs
-    :param Dict[Hashable, np.ndarray] pos: Node position map.
+    :param Mapping[str, object] metadata: Metadata values shown in the plot.
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param Theme theme: Active theme (used for text colors).
     :return None: Draws metadata box directly to axes.
     """
@@ -557,11 +567,11 @@ def add_metadata_box(
     )
 
 
-def compute_node_sizes(graph: nx.Graph) -> list[float]:
+def compute_node_sizes(graph: PaperGraph) -> list[float]:
     """
     Compute node sizes with extreme variation matching CiteMesh style.
 
-    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param PaperGraph graph: NetworkX graph with paper nodes
     :return List[float]: List of marker areas (in square points) for each node.
     """
     nodes = ordered_nodes(graph)
@@ -623,12 +633,12 @@ def compute_node_sizes(graph: nx.Graph) -> list[float]:
 
 
 def compute_node_colors(
-    graph: nx.Graph, seed_id: str, theme: Theme
+    graph: PaperGraph, seed_id: str, theme: Theme
 ) -> tuple[list[tuple[float, float, float]], int, int]:
     """
     Compute smooth color gradient by publication year.
 
-    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param PaperGraph graph: NetworkX graph with paper nodes
     :param str seed_id: ID of the seed paper (gets special color)
     :param Theme theme: Theme palette used for interpolation.
     :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
@@ -657,17 +667,17 @@ def compute_node_colors(
 
 
 def compute_layout(
-    graph: nx.Graph,
+    graph: PaperGraph,
     iterations: int = VIZ_CONFIG.spring_iterations,
     layout_seed: int | None = None,
-) -> dict[Hashable, np.ndarray]:
+) -> dict[Hashable, NDArray[np.float64]]:
     """
     Compute force-directed layout with organic clustering.
 
-    :param nx.Graph graph: NetworkX graph
+    :param PaperGraph graph: NetworkX graph
     :param int iterations: Number of iterations for spring layout
     :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
-    :return Dict[Hashable, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
+    :return dict[Hashable, NDArray[np.float64]]: Node IDs mapped to (x, y) positions.
     """
     canonical_graph = canonicalize_graph_for_layout(graph)
     # Keep layout dependency-free and deterministic in offline exports:
@@ -727,19 +737,22 @@ def compute_layout(
 
 
 def draw_edges(
-    ax: plt.Axes, graph: nx.Graph, pos: dict[Hashable, np.ndarray], theme: Theme
+    ax: plt.Axes,
+    graph: PaperGraph,
+    pos: Mapping[Hashable, NDArray[np.float64]],
+    theme: Theme,
 ) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
 
     :param plt.Axes ax: Matplotlib axes
-    :param nx.Graph graph: NetworkX graph
-    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param PaperGraph graph: NetworkX graph
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param Theme theme: Theme palette for edge colors.
     :return None: Draws all edges onto the axes.
     """
     for edge_index, (n1, n2, data) in enumerate(ordered_edges_with_data(graph)):
-        weight = data.get("weight", 0.1)
+        weight = parse_float(data.get("weight", 0.1))
         p1 = pos[n1]
         p2 = pos[n2]
 
@@ -764,8 +777,8 @@ def draw_edges(
 
 def draw_nodes(
     ax: plt.Axes,
-    graph: nx.Graph,
-    pos: dict[Hashable, np.ndarray],
+    graph: PaperGraph,
+    pos: Mapping[Hashable, NDArray[np.float64]],
     sizes: list[float],
     colors: list[tuple[float, float, float]],
     theme: Theme,
@@ -774,8 +787,8 @@ def draw_nodes(
     Draw nodes with computed sizes and colors.
 
     :param plt.Axes ax: Matplotlib axes
-    :param nx.Graph graph: NetworkX graph
-    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param PaperGraph graph: NetworkX graph
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param List[float] sizes: List of node sizes
     :param List[Tuple[float, float, float]] colors: List of node colors (RGB tuples)
     :param Theme theme: Theme palette for edge outlines.
@@ -799,8 +812,8 @@ def draw_nodes(
 
 def draw_labels(
     ax: plt.Axes,
-    graph: nx.Graph,
-    pos: dict[Hashable, np.ndarray],
+    graph: PaperGraph,
+    pos: Mapping[Hashable, NDArray[np.float64]],
     seed_id: str,
     theme: Theme,
     sizes: list[float] | None = None,
@@ -809,8 +822,8 @@ def draw_labels(
     Draw paper labels in "Author, Year" format.
 
     :param plt.Axes ax: Matplotlib axes
-    :param nx.Graph graph: NetworkX graph
-    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param PaperGraph graph: NetworkX graph
+    :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
     :param str seed_id: ID of seed paper (gets bold label)
     :param Theme theme: Theme palette for text color.
     :param Optional[List[float]] sizes: Optional node-size list aligned with ``ordered_nodes(graph)``.
@@ -843,8 +856,8 @@ def draw_labels(
         ),
     )
 
-    placed: list[np.ndarray] = []
-    label_bounds: list[Any] = []
+    placed: list[NDArray[np.float64]] = []
+    label_bounds: list[Bbox] = []
     non_seed_label_count = 0
     ax.figure.canvas.draw()
     renderer = _figure_renderer(ax.figure)
@@ -856,7 +869,7 @@ def draw_labels(
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
         if is_seed:
-            title = graph.nodes[node].get("title", "Seed paper")
+            title = str(graph.nodes[node].get("title") or "")
             label = _wrap_title(title)
             fontsize = 9
             xytext = (0, node_radius + 8)
@@ -870,7 +883,11 @@ def draw_labels(
         else:
             # Extract author surname
             authors = graph.nodes[node].get("authors", [])
-            author_parts = str(authors[0]).strip().split() if authors else []
+            author_parts = (
+                str(authors[0]).strip().split()
+                if isinstance(authors, Sequence) and authors
+                else []
+            )
             last_name = author_parts[-1] if author_parts else "Unknown"
 
             year = graph.nodes[node].get("year")
@@ -907,7 +924,7 @@ def draw_labels(
 
         annotation = ax.annotate(
             label,
-            xy=p,
+            xy=(float(p[0]), float(p[1])),
             xytext=xytext,
             textcoords="offset points",
             ha="center",
@@ -928,27 +945,27 @@ def draw_labels(
 
 
 def visualize_graph(
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
     output_path: Path,
     iterations: int = VIZ_CONFIG.spring_iterations,
-    dpi: int = None,
-    metadata: dict[str, Any] | None = None,
+    dpi: int | None = None,
+    metadata: Mapping[str, object] | None = None,
     theme_name: str = "dark",
-    layout: dict[Hashable, np.ndarray] | None = None,
+    layout: Mapping[Hashable, Iterable[float]] | None = None,
     layout_seed: int | None = None,
 ) -> None:
     """
     Create CiteMesh visualization.
 
-    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param PaperGraph graph: NetworkX graph with paper nodes
     :param str seed_id: ID of the seed paper
     :param Path output_path: Path for output PNG file
     :param int iterations: Iterations used only if spring fallback layout is triggered.
-    :param int dpi: Output resolution (defaults to config value).
-    :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned).
+    :param int | None dpi: Output resolution (defaults to config value).
+    :param Optional[Mapping[str, object]] metadata: Optional info to annotate on the figure.
     :param str theme_name: Name of theme to render.
-    :param Optional[Dict[Hashable, np.ndarray]] layout: Optional precomputed layout to
+    :param Optional[Mapping[Hashable, Iterable[float]]] layout: Optional precomputed layout to
         reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.
@@ -958,7 +975,7 @@ def visualize_graph(
     validate_canonical_node_ids(ordered_nodes(graph))
     for left, right, attrs in ordered_edges_with_data(graph):
         weight = attrs.get("weight", 0.0)
-        if weight is None or not math.isfinite(float(weight)):
+        if weight is None or not math.isfinite(parse_float(weight)):
             raise ValueError(
                 f"Cannot export null or non-finite edge weight for {left!r} -> {right!r}."
             )
@@ -1017,9 +1034,9 @@ def visualize_graph(
 
     # Add title
     seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-    title = seed_attrs.get("title", "Unknown")
+    title = " ".join(str(seed_attrs.get("title") or "").split()) or "Seed paper"
     wrapped_title = textwrap.fill(
-        " ".join(str(title).split()),
+        title,
         width=72,
         break_long_words=False,
     )

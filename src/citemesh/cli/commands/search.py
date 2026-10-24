@@ -7,10 +7,13 @@ import logging
 import shlex
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
+from typing import TypedDict, cast
 
 from rich.text import Text
 
 from citemesh.data.embedding_cache import EmbeddingCache, _corpus_size_from_token
+from citemesh.data.embedding_cache.lifecycle import installed_corpus_namespaces
+from citemesh.data.embedding_contract import InstalledCorpusError
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.embedding import (
@@ -31,6 +34,7 @@ from ..build_options import (
     _resolve_user_config_api_key,
     _shared_embedding_builder_kwargs,
 )
+from ..cache_selection import _apply_cache_selection
 from ..console import logger
 from ..parser import _output_table, _pop_tracked_option_dests
 
@@ -48,45 +52,62 @@ _NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
         "truncate_dim",
         "storage_precision",
         "calibration_sample_size",
+        "cache_namespace",
+        "dataset_split",
+        "corpus_size",
+        "all_corpus",
     }
 )
 
 
-def _namespace_overrides(args: argparse.Namespace) -> dict[str, object]:
+class _NamespaceOverrides(TypedDict, total=False):
+    """Namespace selectors explicitly supplied to the search command."""
+
+    model: str
+    model_profile: str
+    model_revision: str
+    device: str
+    semantic_source: str
+    dataset_source: str
+    truncate_dim: int
+    storage_precision: str
+    calibration_sample_size: int
+    cache_namespace: str
+    dataset_split: str
+    corpus_size: int
+    all_corpus: bool
+
+
+def _namespace_overrides(args: argparse.Namespace) -> _NamespaceOverrides:
     """Return cache-selection values supplied directly to ``search``.
 
     Every search selector defaults to ``None``, including integer selectors, so
     this single presence test stays aligned with the parser contracts.
 
     :param argparse.Namespace args: Parsed search command arguments.
-    :return dict[str, object]: Supplied selector destinations and their values.
+    :return _NamespaceOverrides: Supplied selector destinations and their values.
     """
-    return {
-        dest: value
-        for dest in _NAMESPACE_OVERRIDE_DESTS
-        if (value := getattr(args, dest, None)) is not None
-    }
+    return cast(
+        _NamespaceOverrides,
+        {
+            dest: value
+            for dest in _NAMESPACE_OVERRIDE_DESTS
+            if (value := getattr(args, dest, None)) is not None
+        },
+    )
 
 
-def _namespace_override_labels(overrides: dict[str, object]) -> list[str]:
+def _namespace_override_labels(overrides: _NamespaceOverrides) -> list[str]:
     """Return stable CLI labels for supplied search namespace selectors.
 
-    :param dict[str, object] overrides: Supplied selector destinations and values.
+    :param _NamespaceOverrides overrides: Supplied selector destinations and values.
     :return list[str]: Sorted long-option labels.
     """
     return sorted(f"--{dest.replace('_', '-')}" for dest in overrides)
 
 
 class _LocalSearchOptionError(ValueError):
-    """A namespace-flag combination on this command line the contract refuses.
-
-    Distinguished from every other local-search failure because it is a usage
-    error, not an unavailable cache: ``auto`` mode must report the bad flags
-    rather than treat them as a reason to quietly search Semantic Scholar. A
-    contract failure this invocation did not cause — a device in config.toml
-    that does not resolve, say — stays an availability failure and keeps the
-    fallback it has always had.
-    """
+    """Invalid local-search selectors that must fail without an API fallback."""
 
 
 def _empty_cache_alternative_guidance(defaults: argparse.Namespace) -> str:
@@ -105,6 +126,44 @@ def _empty_cache_alternative_guidance(defaults: argparse.Namespace) -> str:
         "--semantic-source arxiv-corpus (plus --dataset-source when it is not "
         "the default). Use --mode s2 for keyword search."
     )
+
+
+def _installed_corpus_guidance(
+    builder: EmbeddingGraphBuilder, args: argparse.Namespace
+) -> str | None:
+    """Name installed corpora the current search settings did not select.
+
+    An installed corpus is reached by ``--cache-namespace`` or by settings that
+    match its fixed ones, so an empty namespace for the current settings can
+    coexist with a usable installed index. The scan is read-only.
+
+    :param EmbeddingGraphBuilder builder: Builder whose cache directory is scanned.
+    :param argparse.Namespace args: Parsed search command arguments.
+    :return str | None: A sentence naming the corpora and the command that selects
+        one, or ``None`` when the directory holds no unselected installed corpus.
+    """
+    selected = (
+        builder._cache_selection.namespace_id
+        if builder._cache_selection is not None
+        else None
+    )
+    namespaces = [
+        namespace_id
+        for namespace_id in installed_corpus_namespaces(
+            builder.embedding_cache_directory()
+        )
+        if namespace_id != selected
+    ]
+    if not namespaces:
+        return None
+    example = shlex.join(
+        ["citemesh", "search", args.query, "--cache-namespace", namespaces[0]]
+    )
+    if len(namespaces) == 1:
+        subject = f"Installed corpus {namespaces[0]} is"
+    else:
+        subject = f"Installed corpora {', '.join(namespaces)} are"
+    return f"{subject} selected with --cache-namespace (for example: {example})."
 
 
 def _resolve_search_mode(
@@ -133,14 +192,7 @@ def _prepare_local_search_builder(
     build_parser: argparse.ArgumentParser,
     user_config: UserConfig,
 ) -> tuple[EmbeddingGraphBuilder, argparse.Namespace]:
-    """Construct the embedding builder local search runs against.
-
-    Mirrors a flagless build's defaults pipeline (config.toml defaults plus
-    candidate-mode storage normalization) so the search targets the same cache
-    namespace a default build writes to; ``--model``, ``--model-profile``,
-    ``--model-revision``, ``--device``, ``--semantic-source``,
-    ``--dataset-source``, ``--truncate-dim``, ``--storage-precision``, and
-    ``--calibration-sample-size`` override.
+    """Construct a local-search builder from build defaults and supplied selectors.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -162,20 +214,14 @@ def _prepare_local_search_builder(
     for dest, value in overrides.items():
         setattr(defaults, dest, value)
         config_default_dests.discard(dest)
-    # The overrides must land before contract validation: it coerces int8
-    # storage to float32 outside arxiv-corpus mode, and storage precision is
-    # part of the cache namespace, so a late override would compute a
-    # float32 namespace that no corpus build ever wrote.
-    #
-    # The destinations this invocation actually supplied go with them, so the
-    # build contract applies its own rules to them instead of search restating
-    # a subset: --dataset-source alone implies arxiv-corpus, and pairing it with
-    # --semantic-source candidates is the contradiction the contract rejects.
-    # Passed an empty set, the contract can only see the resolved values, and a
-    # contradiction reads as a plain candidates search that silently discards
-    # the dataset the user named.
+    # Validate the supplied selectors together so source inference, conflicts,
+    # and storage normalization match the build command.
     provided_dests = set(overrides)
     try:
+        stored_dests = _apply_cache_selection(
+            defaults, provided_dests, _ValueErrorParserErrorSink()
+        )
+        config_default_dests.difference_update(stored_dests)
         _validate_build_cli_contract(
             defaults,
             _ValueErrorParserErrorSink(),
@@ -184,10 +230,10 @@ def _prepare_local_search_builder(
             config_path=user_config.path,
         )
     except _BuildContractValueError as exc:
-        if not provided_dests.intersection(exc.related_dests):
-            # This command line did not produce the failing value, so it stays
-            # what it has always been: a config-sourced reason local search is
-            # unavailable, which auto mode may answer from Semantic Scholar.
+        if not getattr(
+            args, "cache_namespace", None
+        ) and not provided_dests.intersection(exc.related_dests):
+            # Config-only failures may fall back to Semantic Scholar in auto mode.
             raise
         raise _LocalSearchOptionError(str(exc)) from exc
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
@@ -197,23 +243,17 @@ def _prepare_local_search_builder(
 def _apply_active_model_identity(
     defaults: argparse.Namespace, builder: EmbeddingGraphBuilder
 ) -> None:
-    """Record the checkpoint that local search actually opened.
-
-    Model loading may replace the requested default checkpoint with its configured
-    fallback. The active model name must then drive result labels and the generated
-    build command because cache fingerprinting already binds the namespace to that
-    fallback. The remaining selectors stay as validated: an explicit revision
-    disables fallback, while the profile token, truncation, storage precision, and
-    calibration size reproduce the active builder contract without changing its
-    compute or storage policy.
+    """Record the resolved checkpoint and certified namespace for result commands.
 
     :param argparse.Namespace defaults: Effective build-equivalent namespace.
     :param EmbeddingGraphBuilder builder: Prepared builder with an active model.
-    :return None: Updates the namespace model selector in place when resolved.
+    :return None: Updates resolved selectors in place.
     """
     active_model_name = str(getattr(builder, "_active_model_name", "") or "").strip()
     if active_model_name:
         defaults.model = active_model_name
+    if builder._cache_selection is not None:
+        defaults.cache_namespace = builder._cache_selection.namespace_id
 
 
 def _local_result_build_command(
@@ -241,6 +281,21 @@ def _local_result_build_command(
         "--storage-precision",
         str(defaults.storage_precision),
     ]
+    if getattr(defaults, "cache_namespace", None):
+        command = [
+            "citemesh",
+            "build",
+            "<ID>",
+            "--strategy",
+            "embedding",
+            "--cache-namespace",
+            defaults.cache_namespace,
+        ]
+        if defaults.all_corpus or defaults.corpus_size is None:
+            command.append("--all-corpus")
+        else:
+            command.extend(["--corpus-size", str(defaults.corpus_size)])
+        return shlex.join(command)
     if defaults.model_revision is not None:
         command.extend(["--model-revision", str(defaults.model_revision)])
     if defaults.truncate_dim is not None:
@@ -266,7 +321,7 @@ def _local_result_build_command(
 
 def _print_search_results(
     title: str,
-    rows: Iterable[tuple[str, str, Sequence[str], object, str]],
+    rows: Iterable[tuple[str, str, Sequence[str], int | str | None, str]],
     *,
     metric: str,
     metric_width: int | None = None,
@@ -446,8 +501,11 @@ def _run_search_command(
     """Dispatch `citemesh search` across local and S2 modes.
 
     Mode ``auto`` prefers the local embedding cache when it has vectors and
-    falls back to the Semantic Scholar API otherwise, logging which one ran.
-    Explicitly requested local mode treats an empty cache as an error.
+    falls back to the Semantic Scholar API when the cache is empty or local
+    dependencies or model loading are unavailable. An unusable installed corpus
+    requires operator action and fails in either mode. Explicitly requested
+    local mode treats an empty cache as an error. Both name installed corpora
+    that the current settings did not select.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -456,7 +514,11 @@ def _run_search_command(
     :return int: Process-style exit code.
     """
     mode, origin = _resolve_search_mode(args, user_config)
+    selected_namespace = bool(getattr(args, "cache_namespace", None))
     overrides = _namespace_overrides(args)
+    requested_view = bool(
+        overrides.keys() & {"dataset_split", "corpus_size", "all_corpus"}
+    )
     override_labels = _namespace_override_labels(overrides)
     if overrides:
         if args.mode == "s2":
@@ -466,6 +528,8 @@ def _run_search_command(
                 ", ".join(override_labels),
             )
             return 2
+        if selected_namespace:
+            mode, origin = "local", "namespace-flag"
         # An already-local default retains its mode provenance; selectors still
         # choose which namespace that local search reads.
         if origin != "flag" and mode != "local":
@@ -495,7 +559,7 @@ def _run_search_command(
                 args, build_parser, user_config
             )
         except ImportError as exc:
-            if mode == "auto":
+            if mode == "auto" and not requested_view:
                 logger.info(
                     "Local semantic search dependencies are unavailable; "
                     "searching the Semantic Scholar API instead."
@@ -511,15 +575,20 @@ def _run_search_command(
             cached_count = builder.embedding_cache.embedding_count()
         else:
             cached_count = 0
+        if requested_view and builder._cache_selection is None:
+            raise _LocalSearchOptionError(
+                "--dataset-split, --corpus-size, and --all-corpus require a "
+                "certified corpus namespace; refresh/adopt the cache first."
+            )
     except _LocalSearchOptionError as exc:
         # A usage error, so it is reported in every mode: falling back to S2
         # would answer a question the flags say was not asked.
         logger.error("%s", exc)
         return 2
-    except EmbeddingCacheFingerprintMismatchError as exc:
+    except (EmbeddingCacheFingerprintMismatchError, InstalledCorpusError) as exc:
         # This refusal preserves a costly hydrated corpus. Returning keyword
         # results would hide the operator action needed to resolve it.
-        logger.error("%s", exc)
+        logger.error("%s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
         return 1
     except Exception as exc:
         runtime_selectors = ""
@@ -527,7 +596,7 @@ def _run_search_command(
             runtime_selectors = (
                 f" (device={builder.device} compute_dtype={builder.compute_dtype})"
             )
-        if mode == "auto":
+        if mode == "auto" and not requested_view:
             logger.warning(
                 "Local semantic search unavailable; searching the Semantic Scholar "
                 "API instead."
@@ -557,9 +626,18 @@ def _run_search_command(
             )
             # Query failures stay visible once local results were selected.
             return _render_local_search(args, builder, defaults)
-        logger.info(
-            "No local embeddings available; searching the Semantic Scholar API instead."
-        )
+        installed_guidance = _installed_corpus_guidance(builder, args)
+        if installed_guidance is None:
+            logger.info(
+                "No local embeddings available; searching the Semantic Scholar API "
+                "instead."
+            )
+        else:
+            logger.warning(
+                "No local embeddings match the current model settings. %s "
+                "Searching the Semantic Scholar API instead.",
+                installed_guidance,
+            )
         logger.debug(
             "Empty local embedding namespace: model=%s, semantic_source=%s, "
             "dataset_source=%s. Namespace keys include model, revision, profile, "
@@ -583,6 +661,15 @@ def _run_search_command(
             )
         else:
             requested_via = f"defaults.search_mode in {user_config.path}"
+        alternatives = " ".join(
+            filter(
+                None,
+                [
+                    _installed_corpus_guidance(builder, args),
+                    _empty_cache_alternative_guidance(defaults),
+                ],
+            )
+        )
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
             "has no vectors for model=%s semantic-source=%s dataset-source=%s. "
@@ -595,7 +682,7 @@ def _run_search_command(
             defaults.model,
             defaults.semantic_source,
             defaults.dataset_source,
-            _empty_cache_alternative_guidance(defaults),
+            alternatives,
         )
         return 1
     # Local vectors are available and the search source is now selected.

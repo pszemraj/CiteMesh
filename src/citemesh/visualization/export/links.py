@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from collections.abc import Mapping
 from urllib.parse import quote
 
 from citemesh.core.paper_ids import (
@@ -46,7 +46,7 @@ def _safe_script_content(raw: str) -> str:
     return raw.replace("</", "<\\/")
 
 
-def _script_safe_json(payload: Any) -> str:
+def _script_safe_json(payload: object) -> str:
     """Serialize a payload as JSON that is inert inside an HTML ``<script>``.
 
     ``json.dumps`` leaves ``<`` unescaped, so upstream text such as
@@ -55,7 +55,7 @@ def _script_safe_json(payload: Any) -> str:
     document. ``<`` can only occur inside JSON string literals, so the
     global ``\\u003c`` rewrite is loss-free for ``JSON.parse``.
 
-    :param Any payload: JSON-serializable payload.
+    :param object payload: JSON-serializable payload.
     :return str: Compact deterministic JSON with every ``<`` escaped.
     """
     return json.dumps(
@@ -66,7 +66,7 @@ def _script_safe_json(payload: Any) -> str:
 def _derive_doi_value(
     node_id: str,
     *,
-    node_payload: dict[str, Any] | None = None,
+    node_payload: Mapping[str, object] | None = None,
 ) -> str:
     """Resolve the raw DOI of a node from metadata or its canonical ID.
 
@@ -74,7 +74,7 @@ def _derive_doi_value(
     other identifier consumers need this unencoded form.
 
     :param str node_id: Canonical graph node identifier.
-    :param Optional[Dict[str, Any]] node_payload: Optional node payload carrying
+    :param Optional[Mapping[str, object]] node_payload: Optional node payload carrying
         an explicit ``doi`` value.
     :return str: Raw DOI without prefix or encoding, empty when unknown.
     """
@@ -92,12 +92,12 @@ def _derive_doi_value(
 def _derive_links(
     node_id: str,
     *,
-    node_payload: dict[str, Any] | None = None,
+    node_payload: Mapping[str, object] | None = None,
 ) -> dict[str, str | None]:
     """Derive external links from canonical node IDs.
 
     :param str node_id: Canonical graph node identifier.
-    :param Optional[Dict[str, Any]] node_payload: Optional node payload carrying
+    :param Optional[Mapping[str, object]] node_payload: Optional node payload carrying
         explicit ``arxiv_id``/``doi`` values.
     :return Dict[str, Optional[str]]: External links dictionary.
     """

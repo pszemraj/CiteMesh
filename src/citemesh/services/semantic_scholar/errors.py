@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 
@@ -26,6 +27,12 @@ class _CandidateOperationState:
     recovery_seconds: float = 0.0
     reference_cache_hits: int = 0
     last_recovery_error: Exception | None = None
+
+
+class _CandidateOperationLocal(threading.local):
+    """Thread-local holder for state created by an outer candidate operation."""
+
+    state: _CandidateOperationState
 
 
 @dataclass(frozen=True)

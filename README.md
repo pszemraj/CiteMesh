@@ -27,7 +27,24 @@ Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly expor
 
 Python >= 3.10. For embedding dependencies and device requirements, see [Embedding Runtime](docs/reference/embedding-runtime.md#dependency-floor).
 
-For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#appendix-b-troubleshooting). When Semantic Scholar omits a seed's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
+For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#troubleshooting). When Semantic Scholar omits a seed's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
+
+### Reuse the public arXiv index
+
+Skip encoding the corpus yourself: the [public precomputed index](https://huggingface.co/buckets/pszemraj/citemesh-arxiv-indexes) contains **3.2 million arXiv papers** with 512-dimensional int8 EmbeddingGemma vectors. Download its vectors and paper metadata without a Hugging Face login:
+
+```bash
+citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes --config embeddinggemma-512-int8
+```
+
+Replace `NAMESPACE` below with the namespace printed by import, then search or build from the installed corpus:
+
+```bash
+citemesh search "long-context language models and efficient attention" --mode local --cache-namespace NAMESPACE --all-corpus --limit 5
+citemesh build "arxiv:2610.26830" --strategy embedding --cache-namespace NAMESPACE --all-corpus
+```
+
+Import needs no GPU or model weights. Queries and graph similarity still use the index's pinned embedding model locally. See [portable corpus indexes](docs/guides/caching.md#portable-corpus-indexes) for storage, selection, and resume details.
 
 ### Run one graph
 
@@ -44,7 +61,7 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all
 citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
 ```
 
-The first semantic build downloads the [embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback) and fills its cache. Later runs [reuse the stored vectors](docs/guides/caching.md). Output naming and collection behavior are described in [Output Artifacts](docs/reference/output-artifacts.md#output-location).
+The first semantic build downloads the [embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback); later runs [reuse stored vectors](docs/guides/caching.md). See [Output Artifacts](docs/reference/output-artifacts.md#output-location) for output naming and collections.
 
 ## How it works
 

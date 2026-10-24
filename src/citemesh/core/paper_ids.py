@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlsplit
 
 
 def strip_arxiv_version(identifier: str) -> str:
@@ -27,15 +26,14 @@ _ARXIV_IDENTIFIER_PATTERN = re.compile(
 _LEGACY_POSITIONAL_CORPUS_ID = re.compile(r"arxiv_\d+")
 
 
-def is_local_corpus_paper_id(paper_id: Any) -> bool:
+def is_local_corpus_paper_id(paper_id: str) -> bool:
     """Return whether an identifier uses a local-only corpus ID form.
 
-    ``content:`` hashes identify anonymous bibliographic records. Older caches
-    used positional ``arxiv_<number>`` identifiers before content hashing. S2
-    cannot resolve either spelling. The exact positional pattern still permits
-    other raw source identifiers that happen to begin with ``arxiv_``.
+    ``content:`` hashes identify anonymous bibliographic records, while
+    ``arxiv_<number>`` is a positional corpus identifier. Semantic Scholar
+    cannot resolve either form.
 
-    :param Any paper_id: Candidate paper identifier.
+    :param str paper_id: Candidate paper identifier.
     :return bool: Whether the ID must be resolved from a local corpus cache.
     """
     return isinstance(paper_id, str) and (
@@ -45,7 +43,7 @@ def is_local_corpus_paper_id(paper_id: Any) -> bool:
 
 
 def recognize_arxiv_identifier(
-    identifier: Any, *, allow_bare: bool = False
+    identifier: str, *, allow_bare: bool = False
 ) -> str | None:
     """Recognize and canonicalize an arXiv identifier candidate.
 
@@ -53,7 +51,7 @@ def recognize_arxiv_identifier(
     unchanged. Internal identity matching can opt into ``allow_bare`` so that
     dataset IDs such as ``2508.12345v2`` still match API ``arxiv:`` IDs.
 
-    :param Any identifier: Raw identifier candidate.
+    :param str identifier: Raw identifier candidate.
     :param bool allow_bare: Whether to accept identifiers without ``arxiv:``.
     :return Optional[str]: Canonical ``arxiv:<suffix>`` token, or ``None``.
     """
@@ -87,15 +85,13 @@ _CHRONOLOGY_YEAR_SCALE = 10_000_000
 _CHRONOLOGY_MONTH_SCALE = 100_000
 
 
-def arxiv_id_chronology_key(raw_id: Any) -> tuple[int, int, int] | None:
+def arxiv_id_chronology_key(raw_id: object) -> tuple[int, int, int] | None:
     """Return a sortable submission-chronology key for an arXiv identifier.
 
-    Both identifier styles encode the submission year/month: new-style
-    ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN``. Snapshot row order and
-    ``update_date`` do not track submission time (revisions bump old papers),
-    so this key is the only reliable "newest papers" ordering.
+    New-style ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN`` identifiers both
+    encode the submission year and month.
 
-    :param Any raw_id: Raw identifier value from a dataset record.
+    :param object raw_id: Raw identifier value from a dataset record.
     :return Optional[Tuple[int, int, int]]: ``(year, month, sequence)`` or
         ``None`` when the identifier is not a parseable arXiv ID.
     """
@@ -114,14 +110,14 @@ def arxiv_id_chronology_key(raw_id: Any) -> tuple[int, int, int] | None:
     return (year, month, sequence)
 
 
-def encode_arxiv_id_chronology_key(raw_id: Any) -> int | None:
+def encode_arxiv_id_chronology_key(raw_id: object) -> int | None:
     """Return the chronology key of an arXiv identifier as one sortable integer.
 
     The packed form is order-isomorphic to :func:`arxiv_id_chronology_key`, so a
     stored column of these values can be compared and aggregated in SQL. Values
     exceed 2e10 and therefore require 64-bit integer storage.
 
-    :param Any raw_id: Raw identifier value, with or without an ``arxiv:`` prefix.
+    :param object raw_id: Identifier, with or without an ``arxiv:`` prefix.
     :return Optional[int]: Packed ``(year, month, sequence)`` key, or ``None``
         when the identifier is not a parseable arXiv ID.
     """
@@ -133,7 +129,7 @@ def encode_arxiv_id_chronology_key(raw_id: Any) -> int | None:
 
 
 def paper_identifier_aliases(
-    *, paper_id: Any = "", arxiv_id: Any = "", doi: Any = ""
+    *, paper_id: str = "", arxiv_id: str = "", doi: str = ""
 ) -> list[str]:
     """Build stable identifier aliases for one paper payload.
 
@@ -141,9 +137,9 @@ def paper_identifier_aliases(
     primary paper ID. It intentionally recognizes bare arXiv IDs here without
     changing the stricter public ``normalize_paper_id`` contract.
 
-    :param Any paper_id: Primary Semantic Scholar, DOI, arXiv, or URL ID.
-    :param Any arxiv_id: Optional arXiv suffix field.
-    :param Any doi: Optional DOI suffix field.
+    :param str paper_id: Primary Semantic Scholar, DOI, arXiv, or URL ID.
+    :param str arxiv_id: Optional arXiv suffix field.
+    :param str doi: Optional DOI suffix field.
     :return List[str]: Sorted normalized and raw identifier aliases.
     """
     aliases: set[str] = set()
@@ -252,7 +248,7 @@ def _normalize_hosted_identifier(candidate: str) -> str | None:
     :param str candidate: URL-like identifier candidate.
     :return Optional[str]: Canonical ID when the host/path matches a known source.
     """
-    parsed = urlparse(candidate)
+    parsed = urlsplit(candidate)
     host = (parsed.hostname or "").lower()
     path = unquote(parsed.path)
 
@@ -314,15 +310,10 @@ def normalize_paper_id(paper_id: str) -> str:
     return normalized
 
 
-def canonicalize_or_none(paper_id: Any) -> str | None:
-    """Best-effort canonicalization that reports failure instead of raising.
+def canonicalize_or_none(paper_id: str) -> str | None:
+    """Return a canonical identifier, or ``None`` when it is invalid.
 
-    :func:`normalize_paper_id` raises for anything it cannot canonicalize. Every
-    caller that treats an unrecognizable identifier as "leave it alone" rather
-    than an error wraps it in the same ``try``/``except ValueError``; this is
-    that wrapper, so the fallback each caller wants stays at the call site.
-
-    :param Any paper_id: Raw identifier or URL.
+    :param str paper_id: Raw identifier or URL.
     :return Optional[str]: Canonical identifier, or ``None`` when unrecognizable.
     """
     try:

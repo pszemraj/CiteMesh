@@ -4,5 +4,5 @@
 
 ## Checklist
 
-- [ ] `python -m pytest`, `ruff check .`, and `ruff format --check .` pass
+- [ ] [Contributor checks](../AGENTS.md#environment-and-commands) pass
 - [ ] Tests added/updated for changed behavior

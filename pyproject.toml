@@ -55,7 +55,8 @@ dependencies = [
 viz = ["plotly>=5.18.0", "pyvis>=0.3.2"]
 embeddings = [
     "datasets>=2.14.0",
-    "huggingface_hub>=0.24.0",
+    "huggingface_hub>=2.3.0",
+    "pyarrow>=18.0.0",
     "sentence-transformers>=5.7.0",
     "torch>=2.9.0; sys_platform != 'darwin'",
     "torch>=2.13.0; sys_platform == 'darwin'",
@@ -65,9 +66,15 @@ recommended = ["citemesh[embeddings,viz]"]
 dev = [
     "citemesh[embeddings]",
     "httpx>=0.27.0",
+    "mypy>=2.4.0",
+    "plotly-stubs>=0.0.6",
+    "pyarrow-stubs>=20.0.0.20260819",
     "pytest>=8.0.0",
     "pytest-mock>=3.14.0",
+    "pytest-xdist[psutil]>=3.8.0",
     "ruff>=0.9.0",
+    "scikit-learn-stubs>=0.0.3",
+    "types-networkx>=3.6.1.20261021",
 ]
 all = ["citemesh[dev,embeddings,viz]"]
 
@@ -100,7 +107,7 @@ local_scheme = "no-local-version"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --tb=short -m \"not slow\""
-# Dump every thread's stack when a test exceeds this, so a hang self-diagnoses in CI.
+# Dump every thread's stack when a test exceeds this timeout.
 faulthandler_timeout = 300
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -122,3 +129,16 @@ known-first-party = ["citemesh"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.mypy]
+files = ["src", "scripts"]
+check_untyped_defs = true
+disallow_any_explicit = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# PyVis has no stubs; h5py's available stubs omit used File/Dataset APIs.
+module = ["h5py.*", "pyvis.*"]
+ignore_missing_imports = true

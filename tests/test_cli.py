@@ -6,23 +6,25 @@ import argparse
 import io
 import json
 import logging
+import os
 import re
 import runpy
 import shlex
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext, redirect_stderr
+from contextlib import closing, contextmanager, nullcontext, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import networkx as nx
-import numpy as np
 import pytest
 
 from citemesh import cli as cli_module
@@ -73,13 +75,39 @@ from citemesh.visualization import GraphExporter as ProductionGraphExporter
 from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
+    BlockingEncodeModel,
     PausedFirstWrite,
     build_seed_graph,
+    fail_stat_for,
     get_paper_id_normalization_cases,
     run_captured_cli,
 )
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
+
+@pytest.mark.parametrize(
+    ("module_name", "heavy_dependency"),
+    [
+        ("citemesh.strategies.citation", "h5py"),
+        ("citemesh.cli.parser", "matplotlib"),
+    ],
+)
+def test_metadata_annotations_do_not_load_heavy_dependencies(
+    module_name: str, heavy_dependency: str
+) -> None:
+    """Keep type-only metadata imports out of lightweight runtime paths."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import importlib, sys; importlib.import_module({module_name!r}); "
+            f"assert {heavy_dependency!r} not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def run_cli_command(args: list[str]) -> SimpleNamespace:
@@ -321,7 +349,7 @@ def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 @pytest.mark.parametrize(
-    ("arguments", "html_path", "browser_name"),
+    ("arguments", "html_path", "requested_browser"),
     [
         ([], "out/dashboard.html", None),
         (["collection dir"], "collection dir/dashboard.html", None),
@@ -337,7 +365,7 @@ def test_view_opens_saved_html(
     monkeypatch: pytest.MonkeyPatch,
     arguments: list[str],
     html_path: str,
-    browser_name: str | None,
+    requested_browser: str | None,
 ) -> None:
     """View resolves saved results and sends a file URI to the chosen browser.
 
@@ -345,7 +373,7 @@ def test_view_opens_saved_html(
     :param pytest.MonkeyPatch monkeypatch: Isolated browser and working directory.
     :param list[str] arguments: Optional view arguments.
     :param str html_path: Saved HTML path relative to the working directory.
-    :param str | None browser_name: Explicit browser override, if any.
+    :param str | None requested_browser: Explicit browser override, if any.
     :return None: Checks browser dispatch without loading build configuration.
     """
     monkeypatch.chdir(tmp_path)
@@ -364,8 +392,8 @@ def test_view_opens_saved_html(
     result = run_cli_command(["view", *arguments])
 
     assert result.returncode == 0, result.stderr
-    if browser_name:
-        get_browser.assert_called_once_with(browser_name)
+    if requested_browser:
+        get_browser.assert_called_once_with(requested_browser)
         controller.open_new_tab.assert_called_once_with(saved_html.as_uri())
         open_default.assert_not_called()
     else:
@@ -404,15 +432,15 @@ def test_view_rejects_missing_or_non_html_results(
     open_default.assert_not_called()
 
 
-@pytest.mark.parametrize("browser_name", [None, "unavailable-browser"])
+@pytest.mark.parametrize("requested_browser", [None, "unavailable-browser"])
 def test_view_reports_browser_launch_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, browser_name: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requested_browser: str | None
 ) -> None:
     """View should report browser failures with the file available to open manually.
 
     :param Path tmp_path: Directory containing saved HTML.
     :param pytest.MonkeyPatch monkeypatch: Isolated browser launch behavior.
-    :param str | None browser_name: Unavailable named browser or default launch failure.
+    :param str | None requested_browser: Unavailable named browser or default launch failure.
     :return None: Checks the failure exit status and actionable browser error.
     """
     saved_html = tmp_path / "dashboard.html"
@@ -424,8 +452,8 @@ def test_view_reports_browser_launch_failure(
         MagicMock(side_effect=webbrowser.Error("browser unavailable")),
     )
     arguments = ["view", str(saved_html)]
-    if browser_name:
-        arguments.extend(["--browser", browser_name])
+    if requested_browser:
+        arguments.extend(["--browser", requested_browser])
 
     result = run_cli_command(arguments)
 
@@ -464,7 +492,7 @@ def test_cache_commands_contracts(
 
     legacy_namespace = "0123456789ab"
     legacy_metadata = cache_root / "embeddings" / f"metadata_{legacy_namespace}.db"
-    with sqlite3.connect(legacy_metadata) as connection:
+    with closing(sqlite3.connect(legacy_metadata)) as connection:
         connection.execute(
             "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
@@ -472,6 +500,7 @@ def test_cache_commands_contracts(
             "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
             ("schema_version", "3"),
         )
+        connection.commit()
     (cache_root / "embeddings" / f"embeddings_{legacy_namespace}.h5").write_bytes(
         b"legacy embeddings"
     )
@@ -519,23 +548,8 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
     encode_started = threading.Event()
     release_encode = threading.Event()
 
-    class _BlockingEncodeModel:
-        """Hold an embedding operation between its cache lookup and commit."""
-
-        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
-            """Wait until the test permits the cache commit.
-
-            :param list[str] texts: Text payload to embed.
-            :param object kwargs: Unused encoder keyword arguments.
-            :return np.ndarray: One deterministic FP32 vector per requested text.
-            """
-            del kwargs
-            encode_started.set()
-            assert release_encode.wait(timeout=5), "encode was never released"
-            return np.ones((len(texts), 2), dtype=np.float32)
-
     cache = EmbeddingCache(model_name="clear-race", storage_precision="float32")
-    model = _BlockingEncodeModel()
+    model = BlockingEncodeModel(encode_started, release_encode, 2)
     with ThreadPoolExecutor(max_workers=1) as executor:
         write = executor.submit(
             cache.get_embeddings,
@@ -1150,6 +1164,7 @@ def _fake_local_search_builder(
     fake_builder.device = "cpu"
     fake_builder.compute_dtype = "float32"
     fake_builder._active_model_name = None
+    fake_builder._cache_selection = None
     fake_builder.search_local.return_value = list(results or [])
     fake_builder.has_persistent_embedding_artifacts.return_value = cached_count > 0
     fake_builder.embedding_cache = SimpleNamespace(
@@ -1444,6 +1459,7 @@ def test_search_local_build_footer_preserves_effective_namespace_and_scope(
         "--calibration-sample-size",
         "100",
     ]
+    cli_module.set_config_value("defaults.corpus_size", "3")
 
     result = run_cli_command(search_args)
 
@@ -1945,7 +1961,7 @@ def test_search_auto_falls_back_on_config_contract_error(
     )
     diagnostics = str(debug.call_args_list)
     assert "defaults.device" in diagnostics
-    assert str(config.path) in diagnostics
+    assert repr(str(config.path))[1:-1] in diagnostics
 
 
 def test_search_local_reports_config_contract_error_without_build_usage(
@@ -1975,7 +1991,7 @@ def test_search_local_reports_config_contract_error_without_build_usage(
     message = str(error.call_args)
     assert "Local search unavailable" in message
     assert "defaults.device" in message
-    assert str(config.path) in message
+    assert repr(str(config.path))[1:-1] in message
 
 
 def test_search_device_flag_overrides_config_before_local_validation(
@@ -2126,6 +2142,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         )
     ]
     monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
+    monkeypatch.setattr(cli_module.logger, "handlers", [caplog.handler])
     with caplog.at_level(logging.DEBUG, logger=cli_module.logger.name):
         result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
@@ -2253,20 +2270,34 @@ def test_search_auto_treats_missing_embedding_dependencies_as_expected(
     s2_search.assert_called_once_with(args)
 
 
-def test_search_auto_refuses_corpus_fingerprint_mismatch(
+@pytest.mark.parametrize(
+    "failure", ["fingerprint", "pending", "uncertified", "contract", "coverage"]
+)
+def test_search_auto_refuses_unusable_installed_corpus(
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
-    """Auto search must surface a protected corpus fingerprint mismatch.
+    """Surface corpus refusals without replacing local retrieval with keyword search."""
+    from citemesh.data.embedding_contract import InstalledCorpusError
 
-    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and S2 path.
-    :return None: Asserts the mismatch exits non-zero without a keyword fallback.
-    """
     fake_builder = _fake_local_search_builder(cached_count=1)
-    fake_builder.prepare_embedding_cache.side_effect = EmbeddingCacheFingerprintMismatchError(
-        "protected corpus cache; run `citemesh build <paper-id> --strategy embedding "
-        "--semantic-source arxiv-corpus --force-rebuild-cache --overwrite-cache` "
-        "with the same model and corpus options"
+    messages = {
+        "fingerprint": (
+            "protected corpus cache; run `citemesh build <paper-id> --strategy embedding "
+            "--semantic-source arxiv-corpus --force-rebuild-cache --overwrite-cache` "
+            "with the same model and corpus options"
+        ),
+        "pending": "Corpus cache has an incomplete refresh operation; resume that operation before using the corpus",
+        "uncertified": "Corpus membership is not certified; run explicit refresh",
+        "contract": "Installed cache runtime mismatch",
+        "coverage": "Requested corpus view exceeds installed coverage",
+    }
+    error_type = (
+        EmbeddingCacheFingerprintMismatchError
+        if failure == "fingerprint"
+        else InstalledCorpusError
     )
+    fake_builder.prepare_embedding_cache.side_effect = error_type(messages[failure])
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
@@ -2283,10 +2314,7 @@ def test_search_auto_refuses_corpus_fingerprint_mismatch(
 
     assert result == 1
     message = str(error_mock.call_args)
-    assert "protected corpus cache" in message
-    assert "citemesh build <paper-id>" in message
-    assert "--strategy embedding" in message
-    assert "--force-rebuild-cache --overwrite-cache" in message
+    assert messages[failure] in message
     s2_search.assert_not_called()
 
 
@@ -3244,10 +3272,11 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         run_dir = generate_output_path(
             graph, "seed", output_dir=output, strategy="recommendation"
         ).parent
-        assert {path.name for path in output.iterdir()} == {
+        assert {path.name for path in output.iterdir()} - {
+            f".{DASHBOARD_PACKAGE_FILENAME}.lock"
+        } == {
             "dashboard.html",
             DASHBOARD_PACKAGE_FILENAME,
-            f".{DASHBOARD_PACKAGE_FILENAME}.lock",
             run_dir.name,
         }
         package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
@@ -3359,10 +3388,11 @@ def test_dashboard_default_collection_retains_seed_directory(
     run_dir = generate_output_path(
         graph, "seed", output_dir=output_root, strategy="recommendation"
     ).parent
-    assert {path.name for path in output_root.iterdir()} == {
+    assert {path.name for path in output_root.iterdir()} - {
+        f".{DASHBOARD_PACKAGE_FILENAME}.lock"
+    } == {
         "dashboard.html",
         DASHBOARD_PACKAGE_FILENAME,
-        f".{DASHBOARD_PACKAGE_FILENAME}.lock",
         run_dir.name,
     }
     assert {path.name for path in run_dir.iterdir()} == {
@@ -3831,7 +3861,8 @@ def test_dashboard_commit_failure_restores_promoted_and_removed_files(
     staged_new = tmp_path / "staged.config.json"
     package_path.write_bytes(b"old package")
     existing_path.write_bytes(b"old graph")
-    existing_path.chmod(0o000)
+    if os.name == "posix":
+        existing_path.chmod(0o000)
     obsolete_path.write_bytes(b"old csv")
     staged_existing.write_bytes(b"new graph")
     staged_new.write_bytes(b"new config")
@@ -3883,8 +3914,9 @@ def test_dashboard_commit_failure_restores_promoted_and_removed_files(
         )
 
     assert package_path.read_bytes() == b"old package"
-    assert existing_path.stat().st_mode & 0o7777 == 0o000
-    existing_path.chmod(0o600)
+    if os.name == "posix":
+        assert existing_path.stat().st_mode & 0o7777 == 0o000
+        existing_path.chmod(0o600)
     assert existing_path.read_bytes() == b"old graph"
     assert not new_path.exists()
     assert obsolete_path.read_bytes() == b"old csv"
@@ -4165,22 +4197,15 @@ def test_dashboard_package_existing_errors_fail_closed(
     package_path.write_bytes(existing_bytes)
     graph = build_seed_graph("seed")
 
-    original_stat, original_exists = Path.stat, Path.exists
-
-    def fail_stat(path: Path, **kwargs: Any) -> Any:
-        """Fail one package inspection while leaving other paths usable.
-
-        :param Path path: Inspected path.
-        :param Any kwargs: Remaining stat options.
-        :return Any: Statistics for unaffected paths.
-        """
-        if path == package_path:
-            raise OSError("package stat unavailable")
-        return original_stat(path, **kwargs)
+    original_exists = Path.exists
 
     with monkeypatch.context() as fault:
         if stat_error:
-            fault.setattr(Path, "stat", fail_stat)
+            fault.setattr(
+                Path,
+                "stat",
+                fail_stat_for(package_path, OSError("package stat unavailable")),
+            )
             fault.setattr(
                 Path,
                 "exists",
@@ -5904,6 +5929,44 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
     )
     assert selector_metadata["effective_model_revision"] == resolved_revision
     assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
+
+    for selection, limit, flags in [
+        ("all", None, ["--all-corpus"]),
+        ("newest", 5, ["--all-corpus"]),
+        ("newest", 5, ["--corpus-size", "2"]),
+    ]:
+        corpus_namespace = build_parser.parse_args(
+            [
+                "seed",
+                "--strategy",
+                "embedding",
+                "--semantic-source",
+                "arxiv-corpus",
+                *flags,
+            ]
+        )
+        corpus_metadata = build_options_module._embedding_export_metadata(
+            corpus_namespace,
+            runtime_metadata={
+                "installed_corpus_selection": selection,
+                "installed_corpus_limit": limit,
+            },
+        )
+        corpus_sidecar = graph_config_module._build_graph_config_payload(
+            cli_args=corpus_namespace,
+            seed_id="seed",
+            metadata={"strategy": "embedding", "embedding": corpus_metadata},
+            selected_formats=["json"],
+            output_paths={"json": Path("out/embedding.json")},
+            s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        )
+        replay = corpus_sidecar["build"]["embedding"]
+        assert corpus_metadata["installed_corpus_selection"] == selection
+        assert corpus_metadata["installed_corpus_limit"] == limit
+        assert replay["installed_corpus_selection"] == selection
+        assert replay.get("installed_corpus_limit") == limit
+        assert replay["all_corpus"] == (flags == ["--all-corpus"])
+        assert replay.get("corpus_size") == (2 if "--corpus-size" in flags else None)
 
 
 def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:

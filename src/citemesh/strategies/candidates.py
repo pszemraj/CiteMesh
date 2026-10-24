@@ -18,7 +18,10 @@ from enum import Enum
 from functools import wraps
 from typing import (
     TYPE_CHECKING,
-    Any,
+    Concatenate,
+    ParamSpec,
+    Protocol,
+    TypeVar,
 )
 
 from citemesh.core import Paper
@@ -33,6 +36,7 @@ from citemesh.core.paper_ids import (
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
+    from citemesh.data.embedding_cache.models import PaperMetadata
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
@@ -42,6 +46,16 @@ QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
 ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+_BuilderT = TypeVar("_BuilderT", bound="_CandidateCollectionOwner")
+
+
+class _CandidateCollectionOwner(Protocol):
+    """Builder interface required by the collection-scope decorator."""
+
+    @property
+    def client(self) -> SemanticScholarClient: ...
 
 
 class CandidateAcquisitionError(RuntimeError):
@@ -58,32 +72,32 @@ class CandidateSourceState(str, Enum):
 
 @dataclass(frozen=True)
 class CandidateSourceResult:
-    """Papers and availability state returned by one candidate source."""
+    """Papers, availability state, and optional failure detail for a source."""
 
     source: str
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
-    error: str = ""
+    error: str | None = ""
 
 
 def scope_candidate_collection(
-    collector: Callable[..., Any],
-) -> Callable[..., Any]:
+    collector: Callable[Concatenate[_BuilderT, _P], _R],
+) -> Callable[Concatenate[_BuilderT, _P], _R]:
     """Scope a strategy collection to capability-specific outage budgets.
 
-    :param Callable[..., Any] collector: Strategy collection method to wrap.
-    :return Callable[..., Any]: Collector that shares a client scope with nested
-        strategy and candidate-pool calls.
+    :param Callable collector: Strategy collection method to wrap.
+    :return Callable: Collector that shares a client scope with nested strategy
+        and candidate-pool calls.
     """
 
     @wraps(collector)
-    def wrapped(builder: Any, *args: Any, **kwargs: Any) -> Any:
+    def wrapped(builder: _BuilderT, *args: _P.args, **kwargs: _P.kwargs) -> _R:
         """Run the collector within its client's discovery-operation scope.
 
-        :param Any builder: Strategy instance with a Semantic Scholar client.
-        :param Any args: Positional arguments for ``collector``.
-        :param Any kwargs: Keyword arguments for ``collector``.
-        :return Any: Result returned by ``collector``.
+        :param builder: Strategy instance with a Semantic Scholar client.
+        :param args: Positional arguments for ``collector``.
+        :param kwargs: Keyword arguments for ``collector``.
+        :return: Result returned by ``collector``.
         """
         with builder.client.candidate_operation_scope():
             return collector(builder, *args, **kwargs)
@@ -528,26 +542,26 @@ def fetch_seed_references(
             resolver.bind_entries(batch)
         attempted.update(ids)
         for entry in batch:
-            paper = resolver.resolve(entry)
+            resolved_paper = resolver.resolve(entry)
             if (
-                paper is None
-                or paper.paper_id == seed.paper_id
-                or candidate_records_match(seed, paper)
+                resolved_paper is None
+                or resolved_paper.paper_id == seed.paper_id
+                or candidate_records_match(seed, resolved_paper)
             ):
                 continue
             existing = next(
                 (
                     item
                     for item in recovered
-                    if item.paper_id == paper.paper_id
-                    or candidate_records_match(item, paper)
+                    if item.paper_id == resolved_paper.paper_id
+                    or candidate_records_match(item, resolved_paper)
                 ),
                 None,
             )
             if existing is not None:
-                merge_paper_metadata(existing, paper)
+                merge_paper_metadata(existing, resolved_paper)
             else:
-                recovered.append(paper)
+                recovered.append(resolved_paper)
     identifiable_entries = len({frozenset(entry) for entry in entries if entry})
     materialized_count = len(recovered)
     _enrich_local_reference_records(client, recovered)
@@ -746,11 +760,11 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     return preferred
 
 
-def paper_embedding_metadata(paper: Paper) -> dict[str, object]:
+def paper_embedding_metadata(paper: Paper) -> PaperMetadata:
     """Build embedding-cache metadata payload for a paper.
 
     :param Paper paper: Paper to normalize.
-    :return Dict[str, object]: Metadata payload accepted by embedding cache.
+    :return PaperMetadata: Metadata payload accepted by embedding cache.
     """
     return {
         "title": paper.title or "",

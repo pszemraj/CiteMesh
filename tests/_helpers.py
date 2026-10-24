@@ -1,17 +1,45 @@
-"""Shared helpers for consolidated CiteMesh tests."""
+"""Shared helpers for CiteMesh tests."""
 
 from __future__ import annotations
 
 import io
+import os
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import networkx as nx
 import numpy as np
 import pytest
+from numpy.typing import NDArray
+
+
+def fail_stat_for(
+    target_path: Path, error: OSError
+) -> Callable[[Path], os.stat_result]:
+    """Return a ``Path.stat`` wrapper that fails for one path only.
+
+    :param Path target_path: Path whose metadata lookup should fail.
+    :param OSError error: Exception raised for the selected path.
+    :return Callable[[Path], os.stat_result]: Wrapper preserving other stat calls.
+    """
+    original_stat = Path.stat
+
+    def fail_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        """Fail for the selected path and forward other stat requests.
+
+        :param Path path: Path whose metadata is requested.
+        :param bool follow_symlinks: Whether metadata follows symbolic links.
+        :return os.stat_result: Metadata for paths outside the fault scope.
+        """
+        if path == target_path:
+            raise error
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    return fail_stat
 
 
 def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
@@ -53,6 +81,55 @@ class ConstantEncodeModel:
         if not texts:
             return np.empty((0, int(self.vector.shape[0])), dtype=np.float32)
         return np.repeat(self.vector[np.newaxis, :], len(texts), axis=0)
+
+
+class LengthRecordingEncodeModel:
+    """Record batches and encode text length and batch-local index."""
+
+    def __init__(self) -> None:
+        """Initialize an empty batch log."""
+        self.calls: list[list[str]] = []
+
+    def encode(self, texts: Sequence[str], **kwargs: object) -> NDArray[np.float32]:
+        """Log texts and return two-column FP32 rows; ignore encoding options."""
+        del kwargs
+        self.calls.append(list(texts))
+        return np.asarray(
+            [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
+            dtype=np.float32,
+        )
+
+
+class BlockingEncodeModel:
+    """Pause an encode call before returning fixed-width FP32 vectors."""
+
+    def __init__(
+        self,
+        entered: threading.Event,
+        release: threading.Event,
+        dimension: int,
+    ) -> None:
+        """Store the synchronization events and output dimension.
+
+        :param threading.Event entered: Event set when encoding begins.
+        :param threading.Event release: Event that releases the paused encode.
+        :param int dimension: Width of each returned embedding vector.
+        """
+        self.entered = entered
+        self.release = release
+        self.dimension = dimension
+
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        """Signal entry, wait for release, and return deterministic vectors.
+
+        :param list[str] texts: Input texts.
+        :param Any kwargs: Ignored encoder keyword arguments.
+        :return np.ndarray: One all-ones FP32 vector per text.
+        """
+        del kwargs
+        self.entered.set()
+        assert self.release.wait(timeout=5), "encode was never released"
+        return np.ones((len(texts), self.dimension), dtype=np.float32)
 
 
 class SeededRandomEncodeModel:
@@ -120,6 +197,16 @@ def get_paper_id_normalization_cases() -> list[tuple[str, str]]:
             "10.1007/978-3-642-11745-9_11",
         ),
         ("DOI:10.18653/V1/N18-3011", "10.18653/v1/n18-3011"),
+        ("https://doi.org/10.1002/example;2-A", "10.1002/example;2-a"),
+        ("doi.org/10.1002/example;2-A", "10.1002/example;2-a"),
+        ("https://doi.org/10.1002/example%3B2-A", "10.1002/example;2-a"),
+        ("https://doi.org/10.1002/example/", "10.1002/example"),
+        ("dx.doi.org/10.1002/example/", "10.1002/example"),
+        ("https://doi.org/10.1002/example%2F", "10.1002/example"),
+        (
+            "https://doi.org/10.48550/arXiv.1706.03762/",
+            "10.48550/arxiv.1706.03762",
+        ),
     ]
 
 

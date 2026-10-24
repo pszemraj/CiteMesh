@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -15,6 +13,7 @@ import pytest
 import requests
 
 from citemesh.core import API_CONFIG, Author, Paper
+from citemesh.data.cache import JSONValue
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
@@ -196,6 +195,28 @@ def test_payload_conversion_preserves_metadata_quirks() -> None:
     assert paper.references == ["r1", "r2"]
 
 
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"title": 123},
+        {"year": "2024"},
+        {"citationCount": "3"},
+        {"abstract": 456},
+        {"authors": [{"name": "Ada", "authorId": 123}]},
+    ],
+)
+def test_payload_conversion_rejects_invalid_scalar_types(
+    invalid_fields: dict[str, object],
+) -> None:
+    """Malformed API fields follow the existing conversion failure path.
+
+    :param invalid_fields: Raw fields that violate the paper model's types.
+    """
+    payload = {**_paper_payload(), **invalid_fields}
+    assert s2.payloads._convert_recommendation(payload) is None
+    assert s2.payloads._convert_api_paper(payload) is None
+
+
 def test_cache_writes_one_canonical_record_and_alias_stubs() -> None:
     """Paper metadata is stored once while DOI/arXiv/request aliases stay small.
 
@@ -238,6 +259,54 @@ def test_alias_reads_follow_canonical_refresh_and_return_fresh_instances() -> No
     assert left is not None and right is not None
     assert left.title == right.title == "New"
     assert left is not right
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"year": "2024"},
+        {"citation_count": None},
+        {"abstract": []},
+        {"categories": [1]},
+        {"references": "other"},
+        {"authors": [{"name": 1}]},
+    ],
+)
+def test_paper_cache_misses_on_invalid_typed_fields(
+    invalid_fields: dict[str, JSONValue],
+) -> None:
+    """Reject cached fields that cannot form typed paper metadata.
+
+    :param dict[str, JSONValue] invalid_fields: Malformed cached paper fields.
+    :return None: Checks that invalid metadata produces a cache miss.
+    """
+    paper: dict[str, JSONValue] = {
+        "paper_id": "canonical",
+        "title": "Cached",
+        "year": 2024,
+        **invalid_fields,
+    }
+    s2.disk_cache._paper_cache_path("canonical").write_text(
+        json.dumps({"version": 2, "paper": paper}), encoding="utf-8"
+    )
+    assert s2.disk_cache._load_cached_paper("canonical") is None
+
+
+def test_paper_cache_accepts_omitted_optional_fields() -> None:
+    """Load minimal cached paper data with the dataclass defaults."""
+    s2.disk_cache._paper_cache_path("canonical").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "paper": {"paper_id": "canonical", "title": "Cached", "year": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cached = s2.disk_cache._load_cached_paper("canonical")
+    assert cached is not None
+    assert cached.title == "Cached" and cached.year is None
+    assert cached.authors == [] and cached.citation_count == 0
 
 
 def test_legacy_full_alias_uses_canonical_and_misses_without_it() -> None:
@@ -1064,56 +1133,6 @@ def test_oversized_retry_after_stops_only_request_without_spending_wait(
             assert client._candidate_operation.state.recovery_seconds == 1.0
             assert client.get_paper("healthy", raise_on_unavailable=True) is not None
         assert client._session.get.call_count == 2
-
-
-def test_rate_limit_serializes_concurrent_slots(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The client allocates distinct paced slots to concurrent callers.
-
-    :param pytest.MonkeyPatch monkeypatch: Wraps the real sleep function.
-    :return None: Verifies serialized pacing.
-    """
-    real_sleep = s2.client.time.sleep
-    guard = threading.Lock()
-    active = 0
-    maximum = 0
-
-    def tracked_sleep(seconds: float) -> None:
-        """Track simultaneous pacing sleeps.
-
-        :param float seconds: Requested wait.
-        :return None: Sleeps and records concurrency.
-        """
-        nonlocal active, maximum
-        with guard:
-            active += 1
-            maximum = max(maximum, active)
-        try:
-            real_sleep(seconds)
-        finally:
-            with guard:
-                active -= 1
-
-    monkeypatch.setattr(s2.client.time, "sleep", tracked_sleep)
-    barrier = threading.Barrier(2)
-    with SemanticScholarClient(api_key="") as client:
-        client.requests_per_second = 100.0
-        client._next_request_time = s2.client.monotonic() + 0.02
-
-        def reserve() -> float:
-            """Reserve one paced slot.
-
-            :return float: Slot release time.
-            """
-            barrier.wait()
-            client._rate_limit()
-            return s2.client.monotonic()
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            times = sorted(executor.map(lambda _index: reserve(), range(2)))
-    assert maximum == 1
-    assert times[1] - times[0] >= 0.005
 
 
 def test_singleton_credentials_lifecycle_and_retry_defaults(

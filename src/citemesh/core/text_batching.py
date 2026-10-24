@@ -9,25 +9,71 @@ Nothing here performs I/O or touches an optional dependency.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Literal, Protocol
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 
-def warn_on_truncated_inputs(model: Any, texts: Sequence[str]) -> None:
+class _TextEncoder(Protocol):
+    """Encoder interface used by the bounded text helpers."""
+
+    def encode(
+        self,
+        inputs: list[str],
+        /,
+        *,
+        batch_size: int,
+        convert_to_tensor: Literal[False],
+        normalize_embeddings: Literal[True],
+        show_progress_bar: bool,
+    ) -> ArrayLike: ...
+
+
+class _PrefetchBatchEncoder(Protocol):
+    """Batch encoder available on the prefetching precision wrapper."""
+
+    def __call__(self, texts: Sequence[str], *, batch_size: int) -> ArrayLike: ...
+
+
+class _TokenizationLengths(Protocol):
+    """Tokenizer result exposing the requested token-length field."""
+
+    def __getitem__(self, key: Literal["length"]) -> Sequence[int]: ...
+
+
+class _LengthTokenizer(Protocol):
+    """Tokenizer call that returns each input's untruncated token length."""
+
+    def __call__(
+        self,
+        texts: list[str],
+        *,
+        truncation: bool,
+        padding: bool,
+        return_length: bool,
+        verbose: bool,
+    ) -> _TokenizationLengths: ...
+
+
+def warn_on_truncated_inputs(model: _TextEncoder, texts: Sequence[str]) -> None:
     """Report texts that exceed the encoder window, including its default prompt.
 
-    :param Any model: SentenceTransformer encoder or its precision proxy.
+    :param _TextEncoder model: Encoder or precision wrapper.
     :param Sequence[str] texts: Formatted texts about to be encoded.
-    :return None: Logs a warning when tokenization will discard input tokens.
     """
-    max_length = getattr(model, "max_seq_length", None)
+    max_length: int | None = getattr(model, "max_seq_length", None)
     if not texts or max_length is None:
         return
-    prompt_name = getattr(model, "default_prompt_name", None)
-    prompt = model.prompts.get(prompt_name, "") if prompt_name else ""
-    lengths = model.tokenizer(
+    prompt_name: str | None = getattr(model, "default_prompt_name", None)
+    if prompt_name:
+        prompts: Mapping[str, str] = getattr(model, "prompts")
+        prompt = prompts.get(prompt_name, "")
+    else:
+        prompt = ""
+    tokenizer: _LengthTokenizer = getattr(model, "tokenizer")
+    lengths = tokenizer(
         [prompt + text for text in texts],
         truncation=False,
         padding=False,
@@ -49,7 +95,6 @@ def warn_on_truncated_count(
     :param int truncated_count: Number of inputs exceeding the token window.
     :param int total: Total number of inputs.
     :param int max_length: Encoder token window, including prompts and special tokens.
-    :return None: Logs only when at least one input is truncated.
     """
     if truncated_count:
         logger.warning(
@@ -77,11 +122,11 @@ def estimate_text_length_bucket(text: str) -> int:
     return max(whitespace_tokens, char_tokens)
 
 
-def l2_normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
+def l2_normalize_embeddings(embeddings: ArrayLike) -> NDArray[np.float32]:
     """Return float32 embeddings normalized to unit length.
 
-    :param np.ndarray embeddings: Vector or matrix payload to normalize.
-    :return np.ndarray: Float32 array with L2-normalized rows.
+    :param ArrayLike embeddings: Vector or matrix payload to normalize.
+    :return NDArray[np.float32]: Float32 array with L2-normalized rows.
     """
     normalized = np.asarray(embeddings, dtype=np.float32)
     if normalized.ndim == 1:
@@ -126,15 +171,15 @@ def encode_texts_in_length_buckets(
     *,
     batch_size: int,
     show_progress_bar: bool,
-    encode_batch: Callable[[list[str], bool], np.ndarray],
-) -> np.ndarray:
+    encode_batch: Callable[[list[str], bool], ArrayLike],
+) -> NDArray[np.float32]:
     """Encode texts in length-similar batches while restoring original order.
 
     :param Sequence[str] texts: Text payloads to encode.
     :param int batch_size: Maximum rows per encode batch.
     :param bool show_progress_bar: Whether the encoder may show progress.
-    :param Callable[[list[str], bool], np.ndarray] encode_batch: Batch encoder callback.
-    :return np.ndarray: Float32 embeddings in original input order.
+    :param Callable[[list[str], bool], ArrayLike] encode_batch: Batch encoder callback.
+    :return NDArray[np.float32]: Float32 embeddings in original input order.
     """
     if not texts:
         return np.empty((0, 0), dtype=np.float32)
@@ -145,7 +190,7 @@ def encode_texts_in_length_buckets(
             encode_batch(list(texts), show_progress_bar), dtype=np.float32
         )
 
-    ordered_embeddings: dict[int, np.ndarray] = {}
+    ordered_embeddings: dict[int, NDArray[np.float32]] = {}
     for batch_indices in batches:
         batch_embeddings = np.asarray(
             encode_batch([texts[idx] for idx in batch_indices], False),
@@ -163,28 +208,25 @@ def encode_texts_in_length_buckets(
 
 
 def encode_texts(
-    model: Any,
+    model: _TextEncoder,
     texts: Sequence[str],
     *,
     batch_size: int,
     show_progress_bar: bool = False,
-) -> np.ndarray:
+) -> NDArray[np.float32]:
     """Encode text through the model's preferred batching path.
 
-    :param Any model: Encoder or precision proxy exposing ``encode``.
+    :param _TextEncoder model: Encoder or precision wrapper exposing ``encode``.
     :param Sequence[str] texts: Text payloads to encode.
     :param int batch_size: Maximum rows per encode batch.
     :param bool show_progress_bar: Whether the encoder may show progress.
-    :return np.ndarray: Float32 embeddings in original input order.
+    :return NDArray[np.float32]: Float32 embeddings in original input order.
     """
-    if (
-        getattr(model, "prefetch_batches", False) is True
-        and len(texts) > batch_size
-        and not show_progress_bar
-    ):
+    prefetch_batches: bool = getattr(model, "prefetch_batches", False)
+    if prefetch_batches is True and len(texts) > batch_size and not show_progress_bar:
+        encode_prefetched: _PrefetchBatchEncoder = getattr(model, "encode_prefetched")
         return np.asarray(
-            model.encode_prefetched(texts, batch_size=batch_size),
-            dtype=np.float32,
+            encode_prefetched(texts, batch_size=batch_size), dtype=np.float32
         )
 
     warn_on_truncated_inputs(model, texts)

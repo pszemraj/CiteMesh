@@ -23,7 +23,7 @@ Both evaluations use `unsloth/embeddinggemma-300m`, the shipped graph-similarity
 
 The higher threshold favors precision: combined false edges drop from five to one, at the cost of one additional missed related pair. Validation F1 slightly decreases; 0.74 is a development-selected precision tradeoff, not a universal optimum. In validation, RetinaNet/YOLO (0.7392) becomes a false negative and Faster R-CNN/FCN (0.7445) remains a false positive under these labels. Transformer/BERT (0.7146) remains below the gate. Lowering the threshold to 0.71 recovers it but admits additional unrelated edges. Shared references can still qualify pairs independently in hybrid graphs.
 
-These small, manually labeled fixtures are regressions rather than a representative benchmark of scientific relevance. They do not calibrate other checkpoints or dimensions. Set `--min-semantic-similarity` or `defaults.min_semantic_similarity` after evaluating the intended representation and discovery tradeoff.
+These small, manually labeled fixtures are regressions rather than a representative benchmark of scientific relevance. They do not calibrate other checkpoints or dimensions. Set `--min-semantic-similarity` or [`defaults.min_semantic_similarity`](../guides/configuration.md#supported-keys) after evaluating the intended representation and discovery tradeoff.
 
 With the designated model cached locally:
 
@@ -192,9 +192,9 @@ Per-run elapsed time has heavy-tail behavior driven by network-bound citation-co
 
 ### Default decision
 
-The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. The active values are listed in [CLI Usage](../guides/cli.md).
+The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. Run `citemesh build --help` for [current defaults](../guides/cli.md#option-reference).
 
 Why:
 
 - The broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
-- The updated defaults improve practical triage for "recent follow-up + foundational prior work" without forcing users to set branch-specific knobs each run.
+- The selected defaults support practical triage for "recent follow-up + foundational prior work" without per-run tuning.

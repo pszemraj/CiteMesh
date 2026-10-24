@@ -16,13 +16,16 @@ import re
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Any,
+    Literal,
+    TypedDict,
+    TypeVar,
 )
 
-import networkx as nx
 import numpy as np
+from numpy.typing import NDArray
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core import (
@@ -53,10 +56,25 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     CacheSearchResult,
 )
+from citemesh.data.embedding_cache.lifecycle import embedding_namespace_has_corpus_state
+from citemesh.data.embedding_cache.models import (
+    CachedPaperMetadata,
+    CacheInputMetadata,
+    CorpusOrigin,
+    EmbeddingInputMetadata,
+)
+from citemesh.data.embedding_contract import (
+    CorpusSource,
+    ExistingCacheSelection,
+    InstalledCorpusError,
+    NamespaceSelectors,
+)
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    GraphCollectionOptions,
+    _CitationSpecificOptions,
     build_capped_undirected_graph,
     deterministic_sort_key,
     validate_embedding_vectors,
@@ -72,6 +90,7 @@ from citemesh.strategies.candidates import (
     scope_candidate_collection,
     select_recovered_references_by_score,
 )
+from citemesh.strategies.similarity import cosine_similarity_to_query
 
 from . import deps
 from .config import (
@@ -93,21 +112,100 @@ from .text import (
 )
 
 if TYPE_CHECKING:
+    import torch
+    from sentence_transformers import SentenceTransformer
+    from typing_extensions import Unpack
+
+    from citemesh.core.models import PaperGraph
+    from citemesh.core.text_batching import _TextEncoder
     from citemesh.services.semantic_scholar import SemanticScholarClient
+
+    from .refresh import RefreshResult
+
+
+class EmbeddingRuntimeOptions(TypedDict, total=False):
+    """Optional constructor arguments shared by embedding build and refresh."""
+
+    model_name: str
+    model_profile: str
+    model_revision: str | None
+    dataset_split: str
+    truncate_dim: int | None
+    use_streaming: bool
+    force_rebuild_cache: bool
+    force_rebuild_reason: str | None
+    storage_precision: Literal["int8", "float32"]
+    binary_prefilter: bool | None
+    binary_rescore_multiplier: int | None
+    calibration_sample_size: int
+    cache_compression: str
+    cache_compression_level: int
+    encode_batch_size: int
+    enable_torch_compile: bool
+    device: str | None
+    semantic_source: str
+    candidate_pool_size: int
+    client: SemanticScholarClient | None
+    min_semantic_similarity: float
+    dataset_source: str
+
+
+class EmbeddingBuilderRuntimeOptions(EmbeddingRuntimeOptions, total=False):
+    """Optional constructor arguments accepted by a selected-cache refresh."""
+
+    max_papers: int
+    top_k: int
+
+
+class _RequiredEmbeddingRuntimeMetadata(TypedDict):
+    """Runtime producer fields present for every embedding build."""
+
+    binary_prefilter_used: bool | None
+    active_model: str
+    model_fingerprint: str | None
+    resolved_model_revision: str | None
+    truncate_dim: int | None
+    device: str
+    requested_device: str
+    compute_dtype: str
+    autocast: bool
+    retrieval_representation: str
+    graph_representation: str
+    model_profile: str
+
+
+class EmbeddingRuntimeMetadata(_RequiredEmbeddingRuntimeMetadata, total=False):
+    """Embedding runtime fields added when a managed corpus is selected."""
+
+    dataset_revision: str | None
+    cache_namespace: str
+    index_origin: CorpusOrigin | None
+    installed_corpus_selection: Literal["all", "newest"]
+    installed_corpus_limit: int | None
+
+
+class _EmbeddingCacheConstructionOptions(TypedDict, total=False):
+    """Optional flags for constructing an uninitialized cache namespace."""
+
+    _initialize: bool
+
+
+_T = TypeVar("_T")
+
 
 logger = logging.getLogger(__name__)
 
 
-def _cache_scan_progress(values: Sequence[Any], description: str) -> Iterable[Any]:
+def _cache_scan_progress(values: Sequence[_T], description: str) -> Iterable[_T]:
     """Render a progress bar over an embedding-cache scan.
 
     Injected into :class:`EmbeddingCache` so the storage layer stays free of UI
     imports: the TTY gate and the bar's presentation options live here, with the
     rest of this module's progress handling.
 
-    :param Sequence[Any] values: Items the cache is about to iterate.
+    :param Sequence[_T] values: Items the cache is about to iterate.
     :param str description: Label shown ahead of the bar.
-    :return Iterable[Any]: Items from ``values``, unchanged.
+    :return Iterable[_T]: Items from ``values``, unchanged.
     """
     return progress_iterator(
         values,
@@ -132,6 +230,8 @@ class EmbeddingGraphBuilder(
     - Combines semantic with temporal/category/author factors
     """
 
+    max_papers: int
+    storage_precision: Literal["int8", "float32"]
     strategy_name = "embedding"
 
     def __init__(
@@ -161,7 +261,8 @@ class EmbeddingGraphBuilder(
         client: SemanticScholarClient | None = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
-    ):
+        cache_selection: ExistingCacheSelection | None = None,
+    ) -> None:
         """
         Initialize embedding graph builder.
 
@@ -178,8 +279,8 @@ class EmbeddingGraphBuilder(
         :param int top_k: Number of most similar neighbors per node
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
-        :param Optional[str] force_rebuild_reason: Optional operator rationale logged
-            when ``force_rebuild_cache`` clears the embedding namespace.
+        :param force_rebuild_reason: Optional message recorded when
+            ``force_rebuild_cache`` clears the embedding namespace.
         :param str storage_precision: Persistent cache precision (``int8`` or ``float32``).
         :param Optional[bool] binary_prefilter: Whether cache search uses binary
             Hamming prefiltering. When ``None``, defaults to enabled only for
@@ -204,13 +305,36 @@ class EmbeddingGraphBuilder(
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         :param str dataset_source: HuggingFace dataset repository with arXiv metadata fields.
+        :param cache_selection: Existing cache contract and source selected for this build.
         """
+        self._cache_selection = cache_selection
+        self._selected_cache_handle: EmbeddingCache | None = None
+        if cache_selection is not None:
+            contract = cache_selection.contract
+            model_name = contract.model_id
+            model_revision = contract.model_revision
+            model_profile = contract.profile_key
+            truncate_dim = contract.dimension
+            storage_precision = contract.stored_dtype
+            calibration_sample_size = (
+                contract.calibration_sample_size
+                or EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+            )
+            dataset_source = cache_selection.source_repo_id
+            dataset_split = cache_selection.source_split
+            semantic_source = "arxiv-corpus"
+            if force_rebuild_cache:
+                raise ValueError(
+                    "An installed cache cannot be selected with force_rebuild_cache"
+                )
         normalized_semantic_source = str(semantic_source).strip().lower()
         if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
             formatted = ", ".join(SEMANTIC_SOURCE_CHOICES)
             raise ValueError(f"semantic_source must be one of: {formatted}")
         deps._check_embedding_deps(
-            require_corpus=normalized_semantic_source == "arxiv-corpus"
+            require_corpus=(
+                normalized_semantic_source == "arxiv-corpus" and cache_selection is None
+            )
         )
         if candidate_pool_size < 1:
             raise ValueError("candidate_pool_size must be at least 1")
@@ -235,7 +359,7 @@ class EmbeddingGraphBuilder(
             dataset_source, "dataset_source"
         )
         corpus_size = self._normalized_corpus_size(corpus_size)
-        self._validate_scalar_options(
+        storage_precision = self._validate_scalar_options(
             storage_precision=storage_precision,
             top_k=top_k,
             binary_rescore_multiplier=binary_rescore_multiplier,
@@ -257,7 +381,7 @@ class EmbeddingGraphBuilder(
         self.dataset_source = normalized_dataset_source
         self.dataset_split = normalized_dataset_split
         self.corpus_size = corpus_size
-        self.storage_precision = str(storage_precision)
+        self.storage_precision = storage_precision
         self._bind_binary_search_options(
             storage_precision=storage_precision,
             binary_prefilter=binary_prefilter,
@@ -272,9 +396,9 @@ class EmbeddingGraphBuilder(
         self._bind_requested_model_contract(device=device, truncate_dim=truncate_dim)
 
         self.top_k = top_k
-        self.model = None
-        self.retrieval_embeddings: dict[str, np.ndarray] = {}
-        self.embeddings: dict[str, np.ndarray] = {}
+        self.model: SentenceTransformer | None = None
+        self.retrieval_embeddings: dict[str, NDArray[np.float32]] = {}
+        self.embeddings: dict[str, NDArray[np.float32]] = {}
         self.candidate_source_status: dict[str, str] = {}
         self._client = client
         self._active_model_name: str | None = None
@@ -286,6 +410,8 @@ class EmbeddingGraphBuilder(
         self.use_streaming = use_streaming
         self._validate_streaming_contract()
         self._reset_model_runtime_state()
+        self._completed_corpus_source: CorpusSource | None = None
+        self._index_origin: CorpusOrigin | None = None
 
     @staticmethod
     def _required_text(value: object, field: str) -> str:
@@ -333,7 +459,7 @@ class EmbeddingGraphBuilder(
         calibration_sample_size: int,
         encode_batch_size: int,
         cache_compression: str,
-    ) -> None:
+    ) -> Literal["int8", "float32"]:
         """Reject out-of-range scalar options before any state is bound.
 
         :param str storage_precision: Requested persistent cache precision.
@@ -342,10 +468,15 @@ class EmbeddingGraphBuilder(
         :param int calibration_sample_size: Requested int8 calibration sample size.
         :param int encode_batch_size: Requested encode batch size.
         :param str cache_compression: Requested HDF5 compression filter.
-        :return None: Raises on the first violated constraint.
+        :return Literal["int8", "float32"]: Validated persistent cache precision.
         :raises ValueError: If any option is outside its supported range.
         """
-        if str(storage_precision) not in {"int8", "float32"}:
+        normalized_precision = str(storage_precision)
+        if normalized_precision == "int8":
+            validated_precision: Literal["int8", "float32"] = "int8"
+        elif normalized_precision == "float32":
+            validated_precision = "float32"
+        else:
             raise ValueError("storage_precision must be one of {'float32', 'int8'}")
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
@@ -356,6 +487,7 @@ class EmbeddingGraphBuilder(
         if encode_batch_size < 1:
             raise ValueError("encode_batch_size must be at least 1")
         validate_compression_filter(cache_compression)
+        return validated_precision
 
     def _bind_binary_search_options(
         self,
@@ -461,14 +593,11 @@ class EmbeddingGraphBuilder(
     def _deferred_force_rebuild_reason(
         force_rebuild_cache: bool, force_rebuild_reason: str | None
     ) -> str | None:
-        """Compose the rebuild rationale logged once the namespace is known.
+        """Return the cache-clear message when a rebuild was requested.
 
-        The clear itself is deferred: the namespace depends on the model that
-        actually loads, so the reason is recorded here and consumed later.
-
-        :param bool force_rebuild_cache: Whether an explicit rebuild was requested.
-        :param Optional[str] force_rebuild_reason: Optional operator rationale.
-        :return Optional[str]: Reason string, or ``None`` when no rebuild is pending.
+        :param force_rebuild_cache: Whether an explicit rebuild was requested.
+        :param force_rebuild_reason: Optional message for the clear.
+        :return: Cache-clear message, or ``None`` when no rebuild is pending.
         """
         if not force_rebuild_cache:
             return None
@@ -510,12 +639,12 @@ class EmbeddingGraphBuilder(
         """
         self._profile_logged = False
         self._dim_logged = False
-        self._autocast_dtype: Any | None = None
+        self._autocast_dtype: torch.dtype | None = None
         self._autocast_device_type: str | None = None
         self._autocast_enabled = False
-        self._encode_model: Any | None = None
+        self._encode_model: _TextEncoder | None = None
         self._inner_model_compiled = False
-        self._eager_inner_transformer: Any | None = None
+        self._eager_inner_transformer: torch.nn.Module | None = None
         self._compile_status_reason: str | None = None
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
@@ -561,11 +690,20 @@ class EmbeddingGraphBuilder(
 
         :return EmbeddingCache: Current persistent cache namespace.
         """
-        if self._embedding_cache is None:
-            self._embedding_cache = self._create_embedding_cache(
-                self._embedding_cache_namespace()
-            )
-        return self._embedding_cache
+        cache = self._embedding_cache
+        if cache is None:
+            if self._cache_selection is not None:
+                from citemesh.data.embedding_cache import open_existing_cache
+
+                if self._selected_cache_handle is None:
+                    self._selected_cache_handle = open_existing_cache(
+                        self._cache_selection
+                    )
+                cache = self._selected_cache_handle
+            else:
+                cache = self._create_embedding_cache(self._embedding_cache_namespace())
+            self._embedding_cache = cache
+        return cache
 
     @embedding_cache.setter
     def embedding_cache(self, cache: EmbeddingCache) -> None:
@@ -575,6 +713,8 @@ class EmbeddingGraphBuilder(
         :return None: Replaces the current cache reference.
         """
         self._embedding_cache = cache
+        if getattr(self, "_cache_selection", None) is not None:
+            self._selected_cache_handle = cache
 
     @property
     def graph_embedding_cache(self) -> EmbeddingCache:
@@ -617,6 +757,9 @@ class EmbeddingGraphBuilder(
             if binary_prefilter is None
             else bool(binary_prefilter)
         )
+        options: _EmbeddingCacheConstructionOptions = {}
+        if self._pending_force_rebuild_reason is not None:
+            options["_initialize"] = False
         return EmbeddingCache(
             model_name=namespace,
             progress=_cache_scan_progress,
@@ -629,6 +772,7 @@ class EmbeddingGraphBuilder(
             text_formatter_fingerprint=(
                 formatter_identity or self._document_formatter_fingerprint
             ),
+            **options,
         )
 
     def _graph_embedding_cache_namespace(self) -> str:
@@ -664,6 +808,18 @@ class EmbeddingGraphBuilder(
         :return None: Replaces a provisional requested-model cache when fallback
             selected another checkpoint and applies a deferred explicit clear once.
         """
+        if self._cache_selection is not None:
+            if self._resolved_model_fingerprint is None:
+                return
+            self._require_selected_runtime_match()
+            self.embedding_cache
+            if self._graph_embedding_cache is not None:
+                graph_namespace = self._graph_embedding_cache_namespace()
+                if self._graph_embedding_cache.model_name != graph_namespace:
+                    self._graph_embedding_cache = self._create_graph_embedding_cache(
+                        graph_namespace
+                    )
+            return
         if self._resolved_model_fingerprint is None:
             # A pre-load cache object is only a cheap discovery handle. Never
             # retain it after model fallback has selected the active checkpoint.
@@ -706,19 +862,44 @@ class EmbeddingGraphBuilder(
                 )
                 self._pending_force_rebuild_reason = None
 
-    def _clear_embedding_cache(self, reason: str) -> None:
-        """Clear embedding namespace payload with explicit reason logging.
+    def _require_selected_runtime_match(self) -> None:
+        """Require the active runtime to match the installed corpus vector contract."""
+        from .refresh import _builder_contract
 
-        :param str reason: Human-readable reason for cache reset.
-        :return None: Mutates cache files/metadata in-place.
+        selection = self._cache_selection
+        assert selection is not None
+        contract = selection.contract
+        if self.model_revision != contract.model_revision:
+            raise InstalledCorpusError(
+                "Installed cache runtime mismatch for model_revision: "
+                f"stored={contract.model_revision!r}, active={self.model_revision!r}"
+            )
+        try:
+            actual = _builder_contract(
+                self, fingerprint=self._resolved_model_fingerprint
+            )
+        except ValueError as exc:
+            raise InstalledCorpusError(
+                f"Installed cache runtime mismatch: {exc}"
+            ) from exc
+        if actual != contract:
+            raise InstalledCorpusError(
+                "Installed cache runtime mismatch: "
+                f"stored={contract!r}, active={actual!r}"
+            )
+
+    def _clear_embedding_cache(self, reason: str) -> None:
+        """Clear this cache and record the supplied reason.
+
+        :param reason: Message recorded with the cache reset.
         """
         normalized_reason = str(reason).strip() or "unspecified"
         self.embedding_cache.clear(reason=normalized_reason)
 
-    def _embedding_runtime_metadata(self) -> dict[str, object]:
+    def _embedding_runtime_metadata(self) -> EmbeddingRuntimeMetadata:
         """Return runtime metadata describing effective embedding retrieval behavior.
 
-        :return Dict[str, object]: Runtime metadata payload for downstream export.
+        :return EmbeddingRuntimeMetadata: Effective model and corpus producer metadata.
         """
         active_model = self._cache_model_identity()
         model_fingerprint = self._resolved_model_fingerprint
@@ -729,7 +910,7 @@ class EmbeddingGraphBuilder(
             if re.fullmatch(r"[0-9a-f]{40}", revision, flags=re.IGNORECASE):
                 resolved_model_revision = revision.lower()
 
-        return {
+        metadata: EmbeddingRuntimeMetadata = {
             "binary_prefilter_used": self._last_search_used_binary_prefilter,
             "active_model": active_model,
             "model_fingerprint": model_fingerprint,
@@ -746,6 +927,16 @@ class EmbeddingGraphBuilder(
             "graph_representation": EmbeddingTask.GRAPH_SIMILARITY.value,
             "model_profile": self.model_profile.schema_token,
         }
+        selection = self._cache_selection
+        if selection is not None:
+            source = self._completed_corpus_source
+            metadata["dataset_revision"] = source.revision if source else None
+            metadata["cache_namespace"] = selection.namespace_id
+            metadata["index_origin"] = self._index_origin
+            if source is not None:
+                metadata["installed_corpus_selection"] = source.selection
+                metadata["installed_corpus_limit"] = source.limit
+        return metadata
 
     def _cache_model_identity(self) -> str:
         """Return model identity used for cache fingerprinting.
@@ -799,38 +990,46 @@ class EmbeddingGraphBuilder(
         :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return str: Namespace key used for embedding cache partitioning.
         """
-        resolved_storage = storage_precision or self.storage_precision
-        resolved_formatter = formatter_identity or self._document_formatter_fingerprint
-        parts = [
-            f"model={self._cache_model_identity()}",
-            f"revision={self._requested_hf_revision_token()}",
-            f"artifact={artifact_identity or 'unresolved'}",
-            f"profile={self.model_profile.schema_token}",
-            f"representation={representation}",
-            "normalization=l2-v1",
-        ]
-        if self.truncate_dim is not None:
-            parts.append(f"truncate_dim={self.truncate_dim}")
-        parts.append(f"storage_precision={resolved_storage}")
-        # Keep the historical default token so existing default caches remain
-        # reachable; the auxiliary index setting does not identify vector rows.
-        parts.append(f"binary_prefilter={int(resolved_storage == 'int8')}")
-        if resolved_storage == "int8":
-            parts.append(f"calibration_sample_size={self.calibration_sample_size}")
-        # Compute dtype is provenance, not identity. It is auto-resolved from the
-        # active device, and the contract already ignores the other execution
-        # choices that shift numerics (attention backend, TF32, torch.compile);
-        # binding it forked one corpus into a per-hardware cache for no gain.
-        parts.append(f"formatter={resolved_formatter}")
-        # Candidate mode gets its own namespace so incremental candidate rows
-        # never mix with (and never distort row counts of) corpus hydrations.
-        # The corpus namespace stays token-free for legacy cache compatibility.
-        if (
-            representation == _RETRIEVAL_DOCUMENT_REPRESENTATION
-            and self.semantic_source != "arxiv-corpus"
-        ):
-            parts.append(f"mode={self.semantic_source}")
-        return "::".join(parts)
+        from citemesh.data.embedding_contract import serialize_embedding_namespace
+
+        return serialize_embedding_namespace(
+            **self._namespace_selectors(
+                representation=representation,
+                artifact_identity=artifact_identity,
+                storage_precision=storage_precision,
+                formatter_identity=formatter_identity,
+            )
+        )
+
+    def _namespace_selectors(
+        self,
+        *,
+        representation: str = _RETRIEVAL_DOCUMENT_REPRESENTATION,
+        artifact_identity: str | None = None,
+        storage_precision: str | None = None,
+        formatter_identity: str | None = None,
+    ) -> NamespaceSelectors:
+        """Return the inputs that reproduce this namespace address.
+
+        :param representation: Vector role and schema identifier.
+        :param artifact_identity: Resolved identity of the model artifact.
+        :param storage_precision: Stored vector precision override.
+        :param formatter_identity: Formatter fingerprint override.
+        :return: Selectors used to serialize the embedding namespace.
+        """
+        return {
+            "model_identity": self._cache_model_identity(),
+            "requested_revision": self._requested_hf_revision_token(),
+            "artifact_identity": artifact_identity or "unresolved",
+            "profile_schema": self.model_profile.schema_token,
+            "representation": representation,
+            "dimension": self.truncate_dim,
+            "stored_dtype": storage_precision or self.storage_precision,
+            "calibration_sample_size": self.calibration_sample_size,
+            "formatter_identity": formatter_identity
+            or self._document_formatter_fingerprint,
+            "semantic_source": self.semantic_source,
+        }
 
     def _corpus_operation_lock(self) -> AbstractContextManager[None]:
         """Return the complete-operation lock for corpus consumers.
@@ -853,7 +1052,7 @@ class EmbeddingGraphBuilder(
         *,
         seed_paper: Paper | None = None,
         _corpus_prepared: bool = False,
-        **kwargs: Any,
+        **kwargs: Unpack[_CitationSpecificOptions],
     ) -> dict[str, Paper]:
         """Collect papers while excluding corpus replacement between stages.
 
@@ -861,7 +1060,7 @@ class EmbeddingGraphBuilder(
         :param Optional[Paper] seed_paper: Optional pre-fetched seed metadata.
         :param bool _corpus_prepared: Whether a parent prepared the corpus while
             retaining this same reentrant operation lock.
-        :param Any kwargs: Strategy-specific options forwarded to collection.
+        :param kwargs: Extra options are forwarded to collection.
         :return Dict[str, Paper]: Dictionary of paper ID to paper metadata.
         """
         with self._corpus_operation_lock():
@@ -878,7 +1077,7 @@ class EmbeddingGraphBuilder(
         *,
         seed_paper: Paper | None = None,
         _corpus_prepared: bool = False,
-        **kwargs: Any,
+        **kwargs: Unpack[_CitationSpecificOptions],
     ) -> dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
@@ -888,7 +1087,7 @@ class EmbeddingGraphBuilder(
             reuse instead of fetching the seed from Semantic Scholar again.
         :param bool _corpus_prepared: Whether a hybrid parent prepared this corpus
             under the operation lock that remains held by the caller.
-        :param Any kwargs: Strategy-specific options (currently unused).
+        :param kwargs: Extra options are ignored.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers: dict[str, Paper] = {}
@@ -977,6 +1176,8 @@ class EmbeddingGraphBuilder(
         :return None: Makes the artifact-bound corpus current for this operation.
         """
         self.prepare_embedding_cache()
+        if self._ready_manual_corpus():
+            return
         self._ensure_cache_hydrated(use_streaming=self.use_streaming)
 
     def enrich_cached_corpus_seed(self, seed: Paper) -> None:
@@ -1101,11 +1302,11 @@ class EmbeddingGraphBuilder(
                 f"--dataset-source {self.dataset_source!r} first."
             )
 
-    def _encode_seed_embedding(self, seed_paper: Paper) -> np.ndarray:
+    def _encode_seed_embedding(self, seed_paper: Paper) -> NDArray[np.float32]:
         """Encode the seed in the model's query prompt space and record it.
 
         :param Paper seed_paper: Resolved seed paper.
-        :return np.ndarray: Normalized seed embedding, also stored for graph export.
+        :return NDArray[np.float32]: Normalized seed embedding stored for graph export.
         """
         logger.debug("Computing seed embedding...")
         formatted_seed_text = format_paper_for_embedding(
@@ -1122,7 +1323,7 @@ class EmbeddingGraphBuilder(
     def _collect_candidate_pool_papers(
         self,
         papers: dict[str, Paper],
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         seed_paper: Paper,
         *,
         seed_identifier: str | None = None,
@@ -1130,7 +1331,7 @@ class EmbeddingGraphBuilder(
         """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Resolved seed paper used to fetch the pool.
         :param str | None seed_identifier: Original arXiv input including version.
         :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
@@ -1150,7 +1351,7 @@ class EmbeddingGraphBuilder(
     def _collect_corpus_cache_papers(
         self,
         papers: dict[str, Paper],
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         seed_paper: Paper,
         *,
         corpus_prepared: bool,
@@ -1158,7 +1359,7 @@ class EmbeddingGraphBuilder(
         """Search the hydrated corpus cache and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
         :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
         :return None: Extends ``papers`` in place and backfills citation counts.
@@ -1195,11 +1396,13 @@ class EmbeddingGraphBuilder(
         self._update_citation_counts(papers)
 
     @staticmethod
-    def _paper_from_cached_metadata(paper_id: str, metadata: dict) -> Paper:
+    def _paper_from_cached_metadata(
+        paper_id: str, metadata: CachedPaperMetadata
+    ) -> Paper:
         """Build a Paper from one cached corpus metadata row.
 
         :param str paper_id: Canonical cached paper identifier.
-        :param Dict metadata: Normalized metadata row persisted alongside vectors.
+        :param CachedPaperMetadata metadata: Normalized row persisted alongside vectors.
         :return Paper: Paper carrying the cached bibliographic fields.
         """
         return Paper(
@@ -1223,11 +1426,16 @@ class EmbeddingGraphBuilder(
         :param list[str] identifiers: Canonical bibliography identifiers.
         :return dict[str, Paper]: Unambiguous local papers keyed by requested alias.
         """
+        metadata = (
+            self.embedding_cache.get_paper_metadata_alias_candidates(
+                identifiers, corpus_size=self.corpus_size
+            )
+            if self._cache_selection is not None
+            else self.embedding_cache.get_paper_metadata_alias_candidates(identifiers)
+        )
         candidates = {
-            paper_id: self._paper_from_cached_metadata(paper_id, metadata)
-            for paper_id, metadata in self.embedding_cache.get_paper_metadata_alias_candidates(
-                identifiers
-            ).items()
+            paper_id: self._paper_from_cached_metadata(paper_id, record)
+            for paper_id, record in metadata.items()
         }
         requested_aliases = {
             normalize_paper_id(identifier).lower() for identifier in identifiers
@@ -1294,31 +1502,22 @@ class EmbeddingGraphBuilder(
         return select_recovered_references_by_score(
             recovered,
             limit,
-            lambda paper: float(
-                np.clip(
-                    np.dot(
-                        query,
-                        l2_normalize_embeddings(embeddings[paper.paper_id]),
-                    ),
-                    -1.0,
-                    1.0,
-                )
-            ),
+            lambda paper: cosine_similarity_to_query(query, embeddings[paper.paper_id]),
         )
 
     def _select_candidates_from_pool(
         self,
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         seed_paper: Paper,
         *,
         seed_identifier: str | None = None,
-    ) -> list[tuple[str, Paper, np.ndarray]]:
+    ) -> list[tuple[str, Paper, NDArray[np.float32]]]:
         """Rank S2 candidate-pool papers by cosine similarity to the seed.
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :param NDArray[np.float32] seed_embedding: Normalized seed vector.
         :param Paper seed_paper: Resolved seed paper (S2-backed or query seed).
         :param str | None seed_identifier: Original arXiv input including version.
-        :return List[Tuple[str, Paper, np.ndarray]]: Ranked candidate tuples.
+        :return List[Tuple[str, Paper, NDArray[np.float32]]]: Ranked candidates.
         """
         max_references, max_citations, max_recommendations = (
             self._candidate_pool_budgets()
@@ -1342,7 +1541,7 @@ class EmbeddingGraphBuilder(
 
         embeddings = self.embed_papers(pool.papers)
         query = np.asarray(seed_embedding, dtype=np.float32)
-        scored: list[tuple[float, str, Paper, np.ndarray, int]] = []
+        scored: list[tuple[float, str, Paper, NDArray[np.float32], int]] = []
         for idx, (paper_id, paper) in enumerate(pool.papers.items()):
             embedding = embeddings.get(paper_id)
             if embedding is None:
@@ -1362,23 +1561,49 @@ class EmbeddingGraphBuilder(
         )
         return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
 
-    def embed_papers(self, papers: dict[str, Paper]) -> dict[str, np.ndarray]:
+    def embed_papers(self, papers: dict[str, Paper]) -> dict[str, NDArray[np.float32]]:
         """Embed retrieval documents through cache, encoding only missing ones.
 
         :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
-        :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
+        :return Dict[str, NDArray[np.float32]]: Float32 vectors keyed by paper ID.
         """
         if not papers:
             return {}
         self._load_model()
         self._ensure_cache_model_fingerprint()
-        metadata_map = {
+        metadata_map: dict[str, EmbeddingInputMetadata] = {
             paper_id: {
                 **paper_embedding_metadata(paper),
                 "paper_id": paper_id,
             }
             for paper_id, paper in papers.items()
         }
+        if self._ready_manual_corpus():
+            cached_metadata = self.embedding_cache.get_paper_metadata_batch(
+                list(metadata_map)
+            )
+            reusable = [
+                paper_id
+                for paper_id, metadata in metadata_map.items()
+                if paper_id in cached_metadata
+                and self._format_retrieval_document_metadata(metadata)
+                == self._format_retrieval_document_metadata(cached_metadata[paper_id])
+            ]
+            embeddings = self.embedding_cache.get_cached_embeddings(reusable)
+            missing = [
+                paper_id for paper_id in metadata_map if paper_id not in embeddings
+            ]
+            if missing:
+                vectors = self._encode_texts(
+                    [
+                        self._format_retrieval_document_metadata(metadata_map[paper_id])
+                        for paper_id in missing
+                    ],
+                    batch_size=self.encode_batch_size,
+                )
+                embeddings.update(zip(missing, vectors, strict=True))
+            self.retrieval_embeddings.update(embeddings)
+            return embeddings
         embeddings = self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
@@ -1389,39 +1614,41 @@ class EmbeddingGraphBuilder(
         self.retrieval_embeddings.update(embeddings)
         return embeddings
 
-    def _format_retrieval_document_metadata(self, metadata: dict[str, object]) -> str:
+    def _format_retrieval_document_metadata(
+        self, metadata: CacheInputMetadata | CachedPaperMetadata
+    ) -> str:
         """Format cached metadata for retrieval-document encoding.
 
-        :param Dict[str, object] metadata: Cache metadata including paper identity.
+        :param metadata: Cache metadata, with an optional paper ID.
         :return str: Profile-formatted retrieval-document input.
         """
         return format_embedding_metadata(
             profile=self.model_profile,
             metadata=metadata,
-            paper_id=metadata.get("paper_id", ""),
             task=EmbeddingTask.RETRIEVAL_DOCUMENT,
         )
 
-    def _format_graph_similarity_metadata(self, metadata: dict[str, object]) -> str:
+    def _format_graph_similarity_metadata(
+        self, metadata: CacheInputMetadata | CachedPaperMetadata
+    ) -> str:
         """Format cached paper metadata for symmetric graph similarity.
 
-        :param Dict[str, object] metadata: Cache metadata including paper identity.
+        :param metadata: Cache metadata, with an optional paper ID.
         :return str: Profile-formatted symmetric similarity input.
         """
         return format_embedding_metadata(
             profile=self.model_profile,
             metadata=metadata,
-            paper_id=metadata.get("paper_id", ""),
             task=EmbeddingTask.GRAPH_SIMILARITY,
         )
 
     def materialize_graph_embeddings(
         self, papers: dict[str, Paper]
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, NDArray[np.float32]]:
         """Materialize selected papers in a symmetric graph-similarity space.
 
         :param Dict[str, Paper] papers: Final graph papers by canonical ID.
-        :return Dict[str, np.ndarray]: Validated graph-similarity vectors.
+        :return Dict[str, NDArray[np.float32]]: Validated graph-similarity vectors.
         """
         if not papers:
             self.embeddings = {}
@@ -1430,10 +1657,12 @@ class EmbeddingGraphBuilder(
         self._ensure_cache_model_fingerprint(
             representation=_GRAPH_SIMILARITY_REPRESENTATION
         )
-        metadata_map = {}
+        metadata_map: dict[str, EmbeddingInputMetadata] = {}
         for paper_id, paper in papers.items():
-            metadata = paper_embedding_metadata(paper)
-            metadata["paper_id"] = paper_id
+            metadata: EmbeddingInputMetadata = {
+                **paper_embedding_metadata(paper),
+                "paper_id": paper_id,
+            }
             metadata_map[paper_id] = metadata
         embeddings = self.graph_embedding_cache.get_embeddings(
             metadata_map,
@@ -1458,18 +1687,18 @@ class EmbeddingGraphBuilder(
         self.materialize_graph_embeddings(papers)
 
     def search_local(self, query: str, top_k: int) -> list[CacheSearchResult]:
-        """Semantically search this builder's persistent embedding cache.
+        """Rank local cached vectors against a free-text query.
 
-        Encodes the free-text query in the model's query prompt space and
-        ranks it against every embedding already persisted in the cache
-        namespace (candidate-mode vectors accumulated across builds, or a
-        hydrated corpus). Purely local except for the one-time model download.
+        Managed corpora use active membership and the requested newest-N view;
+        candidate caches use all accumulated vectors. Model weights may download
+        on first use.
 
         :param str query: Free-text search query.
         :param int top_k: Number of results to return.
         :return List[CacheSearchResult]: Ranked results with cached metadata.
-        :raises ValueError: If the query is empty or ``top_k`` is below 1.
-        :raises RuntimeError: If the corpus cache records another dataset source.
+        :raises ValueError: If the query is empty or ``top_k`` is invalid.
+        :raises InstalledCorpusError: If installed state, coverage, source or
+            vector contract prevents reuse.
         """
         normalized_query = str(query).strip()
         if not normalized_query:
@@ -1486,25 +1715,55 @@ class EmbeddingGraphBuilder(
         )
         with operation_lock:
             if self.semantic_source == "arxiv-corpus":
-                # Split and cap describe the rows a build contributed. Searching
-                # every cached row keeps sliced builds reachable with default
-                # query settings; only dataset provenance must agree here.
                 self._validate_cached_corpus_source(cache)
+                self._ready_manual_corpus()
             return cache.search(
                 query_embedding=np.asarray(query_embedding, dtype=np.float32),
                 top_k=int(top_k),
                 binary_prefilter=self.binary_prefilter,
                 binary_rescore_multiplier=self.binary_rescore_multiplier,
+                corpus_size=(
+                    self.corpus_size if self._cache_selection is not None else None
+                ),
             )
 
     def prepare_embedding_cache(self) -> EmbeddingCache:
         """Resolve the runtime-active model and its exact persistent namespace.
 
         :return EmbeddingCache: Artifact-bound cache ready for safe access.
+        :raises InstalledCorpusError: If installed state, coverage, source or
+            vector contract prevents reuse.
         """
+        if self._cache_selection is not None:
+            with self.embedding_cache.hydration_operation_lock():
+                self._ready_manual_corpus()
         self._load_model()
         self._ensure_cache_model_fingerprint()
+        if self.semantic_source == "arxiv-corpus":
+            self._ready_manual_corpus()
         return self.embedding_cache
+
+    def refresh_corpus(self, revision: str | None = None) -> RefreshResult:
+        """Reconcile the corpus against one pinned upstream revision.
+
+        :param revision: Optional dataset revision to refresh.
+        :return: Refresh outcome with source identity and changed-row counts.
+        """
+        from .refresh import refresh_builder_corpus
+
+        return refresh_builder_corpus(self, revision)
+
+    def embedding_cache_directory(self) -> Path:
+        """Return the directory holding this builder's embedding namespaces.
+
+        Nothing is created: a builder that has not opened a cache reports the
+        configured default directory, which may not exist yet.
+
+        :return Path: Directory of the open cache, else the configured default.
+        """
+        if self._embedding_cache is not None:
+            return self._embedding_cache.h5_path.parent
+        return get_cache_dir("embeddings", create=False)
 
     def has_persistent_embedding_artifacts(self) -> bool:
         """Return whether a potentially searchable vector cache exists.
@@ -1513,20 +1772,27 @@ class EmbeddingGraphBuilder(
         user has never built an embedding cache. Exact namespace selection still
         occurs before any vector is searched.
 
-        :return bool: Whether at least one non-empty HDF5/metadata pair may
+        Managed corpora are always ``arxiv-corpus`` namespaces, so outside that
+        source they are never searchable here and are skipped.
+
+        :return bool: Whether at least one namespace carries managed corpus state
+            (``arxiv-corpus`` only) or a non-empty HDF5/metadata pair that may
             contain searchable papers.
         """
-        cache_directory = (
-            self._embedding_cache.h5_path.parent
-            if self._embedding_cache is not None
-            else get_cache_dir("embeddings", create=False)
-        )
-        for h5_path in cache_directory.glob("embeddings_*.h5"):
+        cache_directory = self.embedding_cache_directory()
+        for db_path in cache_directory.glob("metadata_*.db"):
+            if embedding_namespace_has_corpus_state(db_path):
+                # The namespace contract rejects non-corpus sources for managed
+                # state, so a candidates builder can never address this namespace.
+                if self.semantic_source != "arxiv-corpus":
+                    continue
+                # An import interrupted before its first batch commits holds corpus
+                # state but no papers, and its HDF5 file may be absent or empty. It
+                # is an installed corpus awaiting resume, not an empty cache.
+                return True
+            namespace_id = db_path.name.removeprefix("metadata_").removesuffix(".db")
+            h5_path = cache_directory / f"embeddings_{namespace_id}.h5"
             if not path_exists(h5_path) or h5_path.stat().st_size == 0:
-                continue
-            namespace_id = h5_path.name.removeprefix("embeddings_").removesuffix(".h5")
-            db_path = cache_directory / f"metadata_{namespace_id}.db"
-            if not path_exists(db_path):
                 continue
             has_papers = embedding_namespace_has_papers(db_path)
             if has_papers is False:
@@ -1541,19 +1807,19 @@ class EmbeddingGraphBuilder(
 
     def _select_candidates(
         self,
-        seed_embedding: np.ndarray,
+        seed_embedding: NDArray[np.float32],
         use_streaming: bool,
         *,
         corpus_prepared: bool = False,
-    ) -> list[tuple[str, dict, np.ndarray]]:
+    ) -> list[tuple[str, CachedPaperMetadata, NDArray[np.float32]]]:
         """Select candidates from a cache current for this collection operation.
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
         :param bool use_streaming: Whether hydration should stream the dataset.
         :param bool corpus_prepared: Whether the caller completed lifecycle work before
             encoding the seed while retaining the operation lock. The default preserves
             safe standalone helper behavior.
-        :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
+        :return List[Tuple[str, CachedPaperMetadata, NDArray[np.float32]]]: Candidates by similarity.
         """
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():
@@ -1661,13 +1927,15 @@ class EmbeddingGraphBuilder(
         # The build_graph method will filter to top-k
         return similarity > 0.1
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
+    def build_graph(
+        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+    ) -> tuple[PaperGraph, str]:
         """
         Build graph with top-k edge selection.
 
         :param str seed_id: Seed paper identifier
-        :param Any kwargs: Strategy-specific options (currently unused).
-        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
+        :param kwargs: Embedding collection options passed to collection.
+        :return Tuple[PaperGraph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)

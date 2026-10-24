@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Mapping
-from typing import Any
 
 from citemesh.core import Paper
+
+from .dashboard.contracts import EffectiveNodeMetadata
 
 
 def validate_canonical_node_ids(node_ids: Iterable[Hashable]) -> None:
@@ -34,8 +35,8 @@ def validate_canonical_node_ids(node_ids: Iterable[Hashable]) -> None:
 
 
 def effective_node_metadata(
-    node_id: Hashable, attrs: Mapping[str, Any]
-) -> dict[str, Any]:
+    node_id: Hashable, attrs: Mapping[str, object]
+) -> EffectiveNodeMetadata:
     """Return the metadata every renderer and exporter should expose for a node.
 
     An attached :class:`~citemesh.core.models.Paper` owns bibliographic metadata.
@@ -43,8 +44,8 @@ def effective_node_metadata(
     role belongs to one graph build rather than to the reusable paper record.
 
     :param Hashable node_id: Graph node identifier.
-    :param Mapping[str, Any] attrs: Raw graph node attributes.
-    :return Dict[str, Any]: Effective node metadata without mutating ``attrs``.
+    :param Mapping[str, object] attrs: Raw graph node attributes.
+    :return EffectiveNodeMetadata: Selected metadata without mutating ``attrs``.
     """
     paper = attrs.get("paper")
     if isinstance(paper, Paper):

@@ -561,6 +561,14 @@
       });
       layout.hoverlabel = deepClone(HOVER_LABEL);
       layout.shapes = edgeShapes;
+      const horizontalLabelAnchor = (x) => {
+        // Keep title fallbacks near either edge extending into the graph.
+        if (xMax > xMin) {
+          if (x < xMin + (xMax - xMin) / 3) return "left";
+          if (x > xMin + 2 * (xMax - xMin) / 3) return "right";
+        }
+        return "center";
+      };
       layout.annotations = nodeTexts.flatMap((text, idx) => text ? [{
         x: xPairs[idx],
         y: yPairs[idx],
@@ -569,7 +577,7 @@
         text,
         font: nodeTrace.textfont,
         showarrow: false,
-        xanchor: "center",
+        xanchor: horizontalLabelAnchor(xPairs[idx]),
         yanchor: "bottom",
         borderpad: 0,
         yshift: Math.max(
@@ -791,13 +799,7 @@
     }
 
     function clearDashboardStatus() {
-      runtimeStatusMessage = "";
-      runtimeStatusTone = "warning";
-      if (!controls.statusBanner) {
-        return;
-      }
-      controls.statusBanner.textContent = "";
-      controls.statusBanner.classList.remove("visible", "warning", "info");
+      setDashboardStatus("", "warning");
     }
 
     function setDashboardStatus(message, tone) {
@@ -1050,17 +1052,20 @@
       return Promise.resolve();
     }
 
-    function compactNodeLabel(nodeId) {
-      const node = nodeById.get(nodeId);
+    function compactNodeLabel(nodeId, nodesById = nodeById) {
+      const node = nodesById.get(nodeId);
       if (!node) {
         return String(nodeId);
       }
-      if (Array.isArray(node.authors) && node.authors.length) {
-        const surname = String(node.authors[0]).split(" ").filter(Boolean).slice(-1)[0] || "Unknown";
-        const year = hasYear(node) ? String(node.year) : "n.d.";
-        return `${surname}, ${year}`;
+      const title = String(node.title || node.id || nodeId).trim() || String(nodeId);
+      const firstAuthor = Array.isArray(node.authors)
+        ? node.authors.map((author) => String(author).trim()).find(Boolean)
+        : "";
+      const surname = firstAuthor ? firstAuthor.split(/\s+/).slice(-1)[0] : "";
+      if (hasYear(node)) {
+        return surname ? `${surname}, ${node.year}` : `${title} (${node.year})`;
       }
-      return String(node.title || node.id || nodeId);
+      return title;
     }
 
     function portableGraphPayload(nextPayload) {
@@ -1070,18 +1075,6 @@
       const nextNodeById = new Map(
         nextNodes.map((node) => [String(node.id || ""), node])
       );
-      const portableNodeLabel = (nodeId) => {
-        const node = nextNodeById.get(String(nodeId || ""));
-        if (!node) {
-          return String(nodeId || "");
-        }
-        if (Array.isArray(node.authors) && node.authors.length) {
-          const surname = String(node.authors[0]).split(" ").filter(Boolean).slice(-1)[0] || "Unknown";
-          const year = hasYear(node) ? String(node.year) : "n.d.";
-          return `${surname}, ${year}`;
-        }
-        return String(node.title || node.id || nodeId);
-      };
       const summary = {
         nodes: nextNodes.length,
         edges: nextEdges.length,
@@ -1099,8 +1092,8 @@
           target: targetId,
           source_title: sourceNode ? String(sourceNode.title || sourceId) : sourceId,
           target_title: targetNode ? String(targetNode.title || targetId) : targetId,
-          source_label: portableNodeLabel(sourceId),
-          target_label: portableNodeLabel(targetId),
+          source_label: compactNodeLabel(sourceId, nextNodeById),
+          target_label: compactNodeLabel(targetId, nextNodeById),
           weight: Number(edge.weight || 0),
         };
       });

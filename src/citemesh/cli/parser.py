@@ -11,8 +11,9 @@ import argparse
 import math
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from rich import box
 from rich.console import Group
@@ -157,6 +158,54 @@ def _output_table(title: str) -> Table:
     )
 
 
+class _TrackedActionMixin(argparse.Action):
+    """Action wrapper that records explicit option usage on the namespace."""
+
+    _citemesh_tracks_presence = True
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        """Record options and retain parent options across subparser namespaces.
+
+        :param argparse.ArgumentParser parser: Parser invoking this action.
+        :param argparse.Namespace namespace: Destination namespace.
+        :param object values: Parsed action values.
+        :param str | None option_string: Explicit option spelling, if any.
+        :return None: Apply the action and merge presence tracking.
+        """
+        parent_provided: set[str] = set(
+            getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set())
+        )
+        if self.option_strings:
+            provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, None)
+            if not isinstance(provided, set):
+                provided = set()
+                setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
+            provided.add(self.dest)
+        action_call = cast(
+            Callable[
+                [argparse.ArgumentParser, argparse.Namespace, object, str | None], None
+            ],
+            super().__call__,
+        )
+        action_call(parser, namespace, values, option_string)
+        if isinstance(self, argparse._SubParsersAction):
+            # argparse copies a fresh child namespace over its parent.
+            child_provided: set[str] = getattr(
+                namespace, _TRACKED_OPTION_DESTS_ATTR, set()
+            )
+            setattr(
+                namespace,
+                _TRACKED_OPTION_DESTS_ATTR,
+                parent_provided | child_provided,
+            )
+
+
 def _tracking_action_class(
     action_cls: type[argparse.Action],
 ) -> type[argparse.Action]:
@@ -169,46 +218,11 @@ def _tracking_action_class(
     if cached is not None:
         return cached
 
-    class _TrackedAction(action_cls):
-        """Action wrapper that records explicit option usage on the namespace."""
-
-        _citemesh_tracks_presence = True
-
-        def __call__(
-            self,
-            parser: argparse.ArgumentParser,
-            namespace: argparse.Namespace,
-            values: object,
-            option_string: str | None = None,
-        ) -> None:
-            """Record options and retain parent options across subparser namespaces.
-
-            :param argparse.ArgumentParser parser: Parser invoking this action.
-            :param argparse.Namespace namespace: Destination namespace.
-            :param object values: Parsed action values.
-            :param str | None option_string: Explicit option spelling, if any.
-            :return None: Apply the action and merge presence tracking.
-            """
-            parent_provided = set(getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set()))
-            if self.option_strings:
-                provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, None)
-                if not isinstance(provided, set):
-                    provided = set()
-                    setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
-                provided.add(self.dest)
-            super().__call__(parser, namespace, values, option_string)
-            if isinstance(self, argparse._SubParsersAction):
-                # argparse copies a fresh child namespace over its parent.
-                child_provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set())
-                setattr(
-                    namespace,
-                    _TRACKED_OPTION_DESTS_ATTR,
-                    parent_provided | child_provided,
-                )
-
-    _TrackedAction.__name__ = f"CiteMeshTracked{action_cls.__name__}"
-    _TRACKED_ACTION_CACHE[action_cls] = _TrackedAction
-    return _TrackedAction
+    tracked_action = type(
+        f"CiteMeshTracked{action_cls.__name__}", (_TrackedActionMixin, action_cls), {}
+    )
+    _TRACKED_ACTION_CACHE[action_cls] = tracked_action
+    return tracked_action
 
 
 def _instrument_parser_actions(parser: argparse.ArgumentParser) -> None:
@@ -340,9 +354,9 @@ def _add_logging_arguments(
     :param bool suppress_defaults: Whether logging defaults should be suppressed.
     :return None: Mutates parser in-place.
     """
-    default_log_level: object = "info"
-    default_log_width: object = DEFAULT_LOG_WIDTH
-    default_log_file: object = None
+    default_log_level: str = "info"
+    default_log_width: int | str = DEFAULT_LOG_WIDTH
+    default_log_file: str | None = None
     if suppress_defaults:
         default_log_level = argparse.SUPPRESS
         default_log_width = argparse.SUPPRESS
@@ -381,35 +395,41 @@ def _add_logging_arguments(
     )
 
 
-def _create_root_parser() -> tuple[_ArgumentParser, argparse._SubParsersAction]:
+def _create_root_parser() -> tuple[
+    _ArgumentParser, argparse._SubParsersAction[_ArgumentParser]
+]:
     """Build the root ``citemesh`` parser and its command subparser action.
 
-    :return tuple[_ArgumentParser, argparse._SubParsersAction]: Root parser and
+    :return tuple[_ArgumentParser, argparse._SubParsersAction[_ArgumentParser]]: Root parser and
         the subparser action every command attaches itself to.
     """
     parser = _ArgumentParser(
         prog="citemesh",
         description="CiteMesh — discover related research and build paper graphs.",
-        epilog=Group(
-            _help_examples(
-                (
-                    "Build a graph from a known paper",
-                    'citemesh build "arxiv:1706.03762" --strategy hybrid',
+        # RichHelpFormatter accepts renderables through argparse's string-typed epilog.
+        epilog=cast(
+            str,
+            Group(
+                _help_examples(
+                    (
+                        "Build a graph from a known paper",
+                        'citemesh build "arxiv:1706.03762" --strategy hybrid',
+                    ),
+                    ("Find a seed paper", 'citemesh search "attention mechanisms"'),
+                    ("Open saved results", "citemesh view"),
+                    ("Inspect local storage", "citemesh cache scan"),
                 ),
-                ("Find a seed paper", 'citemesh search "attention mechanisms"'),
-                ("Open saved results", "citemesh view"),
-                ("Inspect local storage", "citemesh cache scan"),
+                Text(
+                    "\nUse citemesh COMMAND --help for command-specific options.",
+                    style="dim",
+                ),
+                Text("\nEnvironment", style="bold"),
+                Text(
+                    "  S2_API_KEY          Semantic Scholar API key (higher rate limits)\n"
+                    "  CITEMESH_CACHE_DIR  Override the cache directory"
+                ),
+                Text("\nPersonal defaults: citemesh config --help", style="dim"),
             ),
-            Text(
-                "\nUse citemesh COMMAND --help for command-specific options.",
-                style="dim",
-            ),
-            Text("\nEnvironment", style="bold"),
-            Text(
-                "  S2_API_KEY          Semantic Scholar API key (higher rate limits)\n"
-                "  CITEMESH_CACHE_DIR  Override the cache directory"
-            ),
-            Text("\nPersonal defaults: citemesh config --help", style="dim"),
         ),
     )
 
@@ -603,6 +623,12 @@ def _add_build_corpus_arguments(
     :return None: Mutates the parser and groups in place.
     """
     # Embedding strategy arguments
+    embedding_group.add_argument(
+        "--cache-namespace",
+        type=_non_empty_str,
+        default=None,
+        help="Use an installed corpus namespace reported by cache scan",
+    )
     embedding_group.add_argument(
         "--model",
         "-m",
@@ -916,7 +942,7 @@ def _add_build_hybrid_arguments(
 
 
 def _add_build_arguments(
-    subparsers: argparse._SubParsersAction,
+    subparsers: argparse._SubParsersAction[_ArgumentParser],
 ) -> argparse.ArgumentParser:
     """Add the ``build`` subcommand and every option it accepts.
 
@@ -925,7 +951,7 @@ def _add_build_arguments(
     added; the per-section helpers below therefore run in argv-documentation
     order rather than group order.
 
-    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :param argparse._SubParsersAction[_ArgumentParser] subparsers: Root command subparser action.
     :return argparse.ArgumentParser: The ``build`` subcommand parser.
     """
     # Build command
@@ -933,14 +959,17 @@ def _add_build_arguments(
         "build",
         help="Build a graph from a paper or topic",
         description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
-        epilog=_help_examples(
-            (
-                "Create or extend the dashboard collection in out/",
-                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
-            ),
-            (
-                "Search 10,000 recent papers by topic",
-                'citemesh build "long-context models" -s embedding --corpus-size 10000',
+        epilog=cast(
+            str,
+            _help_examples(
+                (
+                    "Create or extend the dashboard collection in out/",
+                    'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
+                ),
+                (
+                    "Search 10,000 recent papers by topic",
+                    'citemesh build "long-context models" -s embedding --corpus-size 10000',
+                ),
             ),
         ),
     )
@@ -994,21 +1023,24 @@ def _add_build_arguments(
 
 
 def _add_view_arguments(
-    subparsers: argparse._SubParsersAction,
+    subparsers: argparse._SubParsersAction[_ArgumentParser],
 ) -> argparse.ArgumentParser:
     """Add the ``view`` subcommand.
 
-    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :param argparse._SubParsersAction[_ArgumentParser] subparsers: Root command subparser action.
     :return argparse.ArgumentParser: The ``view`` subcommand parser.
     """
     view_parser = subparsers.add_parser(
         "view",
         help="Open saved results in a browser",
         description="Open an existing HTML export or a collection directory's dashboard.html in a browser.",
-        epilog=_help_examples(
-            ("Open the default saved dashboard", "citemesh view"),
-            ("Open another collection", "citemesh view out/my-collection"),
-            ("Choose Chrome on Linux", "citemesh view --browser google-chrome"),
+        epilog=cast(
+            str,
+            _help_examples(
+                ("Open the default saved dashboard", "citemesh view"),
+                ("Open another collection", "citemesh view out/my-collection"),
+                ("Choose Chrome on Linux", "citemesh view --browser google-chrome"),
+            ),
         ),
     )
     view_parser.add_argument(
@@ -1029,11 +1061,11 @@ def _add_view_arguments(
 
 
 def _add_search_arguments(
-    subparsers: argparse._SubParsersAction,
+    subparsers: argparse._SubParsersAction[_ArgumentParser],
 ) -> argparse.ArgumentParser:
     """Add the ``search`` subcommand.
 
-    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :param argparse._SubParsersAction[_ArgumentParser] subparsers: Root command subparser action.
     :return argparse.ArgumentParser: The ``search`` subcommand parser.
     """
     search_parser = subparsers.add_parser(
@@ -1044,23 +1076,26 @@ def _add_search_arguments(
             "embeddings when available, otherwise Semantic Scholar. Local mode "
             "uses the same model and cache settings as your configured builds."
         ),
-        epilog=_help_examples(
-            (
-                "Search available sources automatically",
-                'citemesh search "long-context language models" -n 10',
-            ),
-            (
-                "Search cached embeddings",
-                'citemesh search "long-context language models" --mode local',
-            ),
-            (
-                "Search an arXiv-corpus build",
-                'citemesh search "long-context attention" '
-                "--semantic-source arxiv-corpus",
-            ),
-            (
-                "Search Semantic Scholar by keyword",
-                'citemesh search "Megalodon" --mode s2',
+        epilog=cast(
+            str,
+            _help_examples(
+                (
+                    "Search available sources automatically",
+                    'citemesh search "long-context language models" -n 10',
+                ),
+                (
+                    "Search cached embeddings",
+                    'citemesh search "long-context language models" --mode local',
+                ),
+                (
+                    "Search an arXiv-corpus build",
+                    'citemesh search "long-context attention" '
+                    "--semantic-source arxiv-corpus",
+                ),
+                (
+                    "Search Semantic Scholar by keyword",
+                    'citemesh search "Megalodon" --mode s2',
+                ),
             ),
         ),
     )
@@ -1109,6 +1144,32 @@ def _add_search_arguments(
             "match the model used at build time (default: config.toml "
             "default or built-in default)"
         ),
+    )
+    search_parser.add_argument(
+        "--cache-namespace",
+        type=_non_empty_str,
+        default=None,
+        help="Search an installed corpus namespace (never falls back to S2)",
+    )
+    search_parser.add_argument(
+        "--dataset-split",
+        type=_non_empty_str,
+        default=None,
+        help="Dataset split used by the corpus cache",
+    )
+    corpus_view = search_parser.add_mutually_exclusive_group()
+    corpus_view.add_argument(
+        "--corpus-size",
+        type=_positive_int,
+        metavar="N",
+        default=None,
+        help="Search only the N newest members of the installed corpus",
+    )
+    corpus_view.add_argument(
+        "--all-corpus",
+        action="store_true",
+        default=None,
+        help="Search the full certified corpus, overriding a configured cap",
     )
     search_parser.add_argument(
         "--model-profile",
@@ -1188,11 +1249,11 @@ def _add_search_arguments(
 
 
 def _add_cache_arguments(
-    subparsers: argparse._SubParsersAction,
+    subparsers: argparse._SubParsersAction[_ArgumentParser],
 ) -> tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
     """Add the ``cache`` subcommand and its ``clear``/``scan`` operations.
 
-    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :param argparse._SubParsersAction[_ArgumentParser] subparsers: Root command subparser action.
     :return tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
         The ``cache`` parser and the usage synopses it owns, in help order.
     """
@@ -1200,9 +1261,12 @@ def _add_cache_arguments(
         "cache",
         help="Inspect or clear local caches",
         description="Inspect local cache usage or delete cached data. Clearing preserves your config.toml settings.",
-        epilog=_help_examples(
-            ("Show storage by cache section", "citemesh cache scan"),
-            ("Clear cached data after confirmation", "citemesh cache clear"),
+        epilog=cast(
+            str,
+            _help_examples(
+                ("Show storage by cache section", "citemesh cache scan"),
+                ("Clear cached data after confirmation", "citemesh cache clear"),
+            ),
         ),
     )
     cache_subparsers = cache_parser.add_subparsers(
@@ -1233,19 +1297,87 @@ def _add_cache_arguments(
         description="Show the cache root, usage by section, and total disk space.",
     )
 
+    export_parser = cache_subparsers.add_parser(
+        "export", help="Export a certified corpus without loading its model"
+    )
+    export_parser.add_argument(
+        "--namespace",
+        type=_non_empty_str,
+        required=True,
+        help="Certified native namespace reported by cache scan",
+    )
+    export_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="New directory for the portable manifest and Parquet shards",
+    )
+    import_parser = cache_subparsers.add_parser(
+        "import", help="Install a portable corpus from local files or Hugging Face"
+    )
+    source = import_parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--path", type=Path, help="Local portable snapshot directory")
+    source.add_argument(
+        "--bucket", type=_non_empty_str, help="Hugging Face bucket (owner/name)"
+    )
+    import_parser.add_argument(
+        "--config",
+        type=_non_empty_str,
+        help="Published index variant (default: catalog's declared default)",
+    )
+    import_parser.add_argument(
+        "--snapshot",
+        type=_non_empty_str,
+        help="Published snapshot ID (default: configuration's current snapshot)",
+    )
+    refresh_parser = cache_subparsers.add_parser(
+        "refresh", help="Reconcile an installed corpus with a pinned source revision"
+    )
+    refresh_parser.add_argument(
+        "--namespace",
+        type=_non_empty_str,
+        required=True,
+        help="Installed native namespace reported by cache scan",
+    )
+    refresh_parser.add_argument(
+        "--dataset-revision",
+        type=_non_empty_str,
+        help="Upstream source revision (default: latest; interrupted work resumes its pin)",
+    )
+    refresh_parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help="Explicitly certify a legacy corpus after proving its model and namespace",
+    )
+    adoption = refresh_parser.add_argument_group("Legacy adoption selectors (--adopt)")
+    for option in ("model", "model-revision", "dataset-source", "dataset-split"):
+        adoption.add_argument(f"--{option}", type=_non_empty_str, default=None)
+    adoption.add_argument(
+        "--model-profile", choices=list(MODEL_PROFILE_CHOICES), default=None
+    )
+    adoption.add_argument(
+        "--storage-precision", choices=list(STORAGE_PRECISION_CHOICES), default=None
+    )
+    for option in ("truncate-dim", "calibration-sample-size", "corpus-size"):
+        adoption.add_argument(f"--{option}", type=_positive_int, default=None)
+    adoption.add_argument("--all-corpus", action="store_true", default=None)
+
     return cache_parser, [
         (cache_parser, "COMMAND [options]"),
         (cache_clear_parser, "[options]"),
         (cache_scan_parser, "[options]"),
+        (export_parser, "[options]"),
+        (import_parser, "[options]"),
+        (refresh_parser, "[options]"),
     ]
 
 
 def _add_config_arguments(
-    subparsers: argparse._SubParsersAction,
+    subparsers: argparse._SubParsersAction[_ArgumentParser],
 ) -> tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
     """Add the ``config`` subcommand and its list/get/set/unset/path operations.
 
-    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :param argparse._SubParsersAction[_ArgumentParser] subparsers: Root command subparser action.
     :return tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
         The ``config`` parser and the usage synopses it owns, in help order.
     """
@@ -1257,15 +1389,18 @@ def _add_config_arguments(
             "the cache root. Precedence: explicit CLI flag > environment "
             "variable > config.toml > built-in default."
         ),
-        epilog=_help_examples(
-            ("Show saved settings", "citemesh config list"),
-            (
-                "Use the local corpus by default",
-                "citemesh config set defaults.semantic_source arxiv-corpus",
-            ),
-            (
-                "Reset one setting to its default",
-                "citemesh config unset defaults.semantic_source",
+        epilog=cast(
+            str,
+            _help_examples(
+                ("Show saved settings", "citemesh config list"),
+                (
+                    "Use the local corpus by default",
+                    "citemesh config set defaults.semantic_source arxiv-corpus",
+                ),
+                (
+                    "Reset one setting to its default",
+                    "citemesh config unset defaults.semantic_source",
+                ),
             ),
         ),
     )
@@ -1354,6 +1489,12 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
                 "model_revision": "REV",
                 "dataset_source": "DATASET",
                 "dataset_split": "SPLIT",
+                "namespace": "NAMESPACE",
+                "cache_namespace": "NAMESPACE",
+                "dataset_revision": "REV",
+                "snapshot": "ID",
+                "bucket": "BUCKET",
+                "config": "NAME",
                 "browser": "NAME",
             }.get(action.dest, "TEXT")
 
@@ -1375,7 +1516,7 @@ def _finalize_command_parser(
     command_parser._optionals.title = "Options"
     _add_logging_arguments(command_parser, suppress_defaults=not is_root)
     command_parser._action_groups.sort(
-        key=lambda group: {"Options": 1, "Logging": 2}.get(group.title, 0)
+        key=lambda group: {"Options": 1, "Logging": 2}.get(group.title or "", 0)
     )
     _normalize_action_metavars(command_parser)
 

@@ -15,10 +15,12 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 from filelock import FileLock, Timeout
+from numpy.typing import NDArray
 
 from ..cache import (
     CACHE_COORDINATION_DIRNAME,
@@ -31,12 +33,17 @@ from .constants import (
     HYDRATION_COMPLETE_KEY,
     _resolve_cache_lock_timeout_seconds,
 )
-from .models import _EmbeddingCacheLayoutError
+from .models import StoredEmbedding, _EmbeddingCacheLayoutError
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
 
-class _RecoveryMixin:
+
+class _RecoveryMixin(_EmbeddingCacheHost):
     """Locking, connection, and crash-recovery behaviour for the cache."""
 
     @contextmanager
@@ -71,14 +78,31 @@ class _RecoveryMixin:
 
         :return Iterator[None]: Context manager yielding once lock is acquired.
         """
+        with self.namespace_lock_only():
+            if getattr(self, "_strict_existing", False) and not path_exists(
+                self.h5_path
+            ):
+                raise RuntimeError(
+                    "Selected embedding cache HDF5 file is missing; files preserved"
+                )
+            if not path_exists(self.db_path):
+                if getattr(self, "_strict_existing", False):
+                    raise RuntimeError("Selected embedding cache database is missing")
+                self._init_db()
+            yield
+
+    @contextmanager
+    def namespace_lock_only(self) -> Iterator[None]:
+        """Acquire the namespace lock without initializing payloads.
+
+        :return: Context manager holding the namespace lock.
+        """
         timeout_seconds = _resolve_cache_lock_timeout_seconds()
         with self._cache_operation_lock():
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             lock = FileLock(str(self.lock_path), timeout=timeout_seconds)
             try:
                 with lock:
-                    if not path_exists(self.db_path):
-                        self._init_db()
                     yield
             except Timeout as exc:
                 raise TimeoutError(
@@ -154,12 +178,12 @@ class _RecoveryMixin:
     def _persist_replacement_journal(
         self,
         conn: sqlite3.Connection,
-        replacements: Sequence[tuple[int, np.ndarray, np.ndarray | None]],
+        replacements: Sequence[tuple[int, StoredEmbedding, NDArray[np.uint8] | None]],
     ) -> None:
         """Commit prior replacement rows before mutating HDF5 storage.
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
-        :param Sequence[Tuple[int, np.ndarray, Optional[np.ndarray]]] replacements:
+        :param Sequence[Tuple[int, StoredEmbedding, Optional[NDArray[np.uint8]]]] replacements:
             ``(row_idx, embedding, binary_embedding)`` rows to preserve.
         :return None: Inserts and commits durable undo records.
         """

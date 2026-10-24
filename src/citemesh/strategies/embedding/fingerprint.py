@@ -3,7 +3,8 @@
 Owns everything that answers "are the cached vectors still valid for this
 model?": the formatter fingerprint, the resolved model fingerprint (including
 local HuggingFace snapshot resolution), the inference-artifact digest walk, and
-the cache fingerprint check that forces a rebuild when any of them changes.
+the cache fingerprint check that rebuilds ordinary caches and preserves managed
+corpora when their model identity changes.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import os
 import re
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from citemesh.data import format_bytes
+from citemesh.data.embedding_contract import InstalledCorpusError
 
 from . import deps
 from .runtime import (
@@ -34,19 +35,23 @@ from .text import (
 
 if TYPE_CHECKING:
     from citemesh.data import EmbeddingCache
+    from citemesh.data.embedding_cache.models import EmbeddingInputMetadata
+    from citemesh.data.model_profiles import DocumentFormatter, SimilarityFormatter
+
+    from ._host import _EmbeddingBuilderHost
+
+    _EmbeddingBuilderHostBase = _EmbeddingBuilderHost
+else:
+    _EmbeddingBuilderHostBase = object
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingCacheFingerprintMismatchError(RuntimeError):
-    """A corpus-scale namespace outlived the model its vectors were built with.
-
-    Raised instead of deleting the payload, so rehydrating hours of GPU time is
-    an explicit operator decision rather than a background heuristic.
-    """
+    """Raised when a hydrated corpus cache belongs to a different model."""
 
 
-class _FingerprintMixin:
+class _FingerprintMixin(_EmbeddingBuilderHostBase):
     """Model- and formatter-identity fingerprints for embedding cache validity.
 
     Mixed into :class:`~citemesh.strategies.embedding.builder.EmbeddingGraphBuilder`.
@@ -58,20 +63,23 @@ class _FingerprintMixin:
     ``storage_precision``, ``embedding_cache`` and ``_clear_embedding_cache``.
     """
 
+    _resolved_model_fingerprint: str | None
+
     def _resolve_formatter_fingerprint(
         self,
         *,
-        formatter: Callable[..., str],
-        probe_renderer: Callable[[dict[str, str]], str],
+        formatter: DocumentFormatter | SimilarityFormatter,
+        probe_renderer: Callable[[EmbeddingInputMetadata], str],
     ) -> str:
         """Resolve a deterministic cache fingerprint for one formatter role.
 
-        :param Callable[..., str] formatter: Underlying formatter identity.
-        :param Callable[[Dict[str, str]], str] probe_renderer: Probe rendering callback.
+        :param DocumentFormatter | SimilarityFormatter formatter: Profile formatter identity.
+        :param Callable[[EmbeddingInputMetadata], str] probe_renderer: Probe rendering callback.
         :return str: SHA-256 digest of profile formatter probes.
         """
         outputs = [
-            probe_renderer(dict(metadata)) for metadata in _FORMATTER_FINGERPRINT_PROBES
+            probe_renderer(metadata.copy())
+            for metadata in _FORMATTER_FINGERPRINT_PROBES
         ]
         payload = "||".join(
             (
@@ -253,23 +261,23 @@ class _FingerprintMixin:
         validates the logical path before following the file rather than rejecting
         legitimate cache symlink targets.
 
-        :param Path root: Artifact root directory.
+        :param Path root: Resolved artifact root directory.
         :param Path source: Manifest file containing the reference.
         :param object raw_path: Referenced relative path.
         :return Path: Validated logical path below ``root``.
-        :raises RuntimeError: If the reference is absolute or escapes the root.
+        :raises RuntimeError: If the reference is empty or escapes the root.
         """
         reference = str(raw_path or "").strip()
         if not reference:
             raise RuntimeError(f"Empty artifact reference in {source}.")
-        candidate = source.parent / reference
-        root_absolute = os.path.abspath(root)
-        candidate_absolute = os.path.abspath(candidate)
-        if os.path.commonpath([root_absolute, candidate_absolute]) != root_absolute:
+        candidate = source.parent.absolute()
+        for part in Path(reference).parts:
+            candidate = candidate.parent if part == ".." else candidate / part
+        if not candidate.is_relative_to(root):
             raise RuntimeError(
                 f"Artifact reference {reference!r} in {source} escapes {root}."
             )
-        return Path(candidate_absolute)
+        return candidate
 
     @staticmethod
     def _referenced_python_artifact_paths(
@@ -602,6 +610,7 @@ class _FingerprintMixin:
 
         :param str representation: Retrieval-document or graph-similarity role.
         :return None: Validates and records model identity on the selected cache.
+        :raises InstalledCorpusError: If rebuilding would erase managed corpus state.
         :raises EmbeddingCacheFingerprintMismatchError: If a corpus-scale payload
             was built with a different model and no rebuild was authorized.
         """
@@ -616,6 +625,16 @@ class _FingerprintMixin:
 
         self._resolved_model_fingerprint = model_fingerprint
         self._bind_embedding_cache_to_active_model()
+        if (
+            getattr(self, "_cache_selection", None) is not None
+            and representation == _RETRIEVAL_DOCUMENT_REPRESENTATION
+        ):
+            self._require_selected_runtime_match()
+            if self.embedding_cache.get_model_fingerprint() != model_fingerprint:
+                raise EmbeddingCacheFingerprintMismatchError(
+                    "Installed cache model fingerprint does not match its pinned runtime"
+                )
+            return
         if representation == _RETRIEVAL_DOCUMENT_REPRESENTATION:
             cache = self.embedding_cache
         elif representation == _GRAPH_SIMILARITY_REPRESENTATION:
@@ -654,7 +673,11 @@ class _FingerprintMixin:
                         f"active={model_fingerprint})"
                     )
                 )
-            if not has_cached_payload or cached_fingerprint != model_fingerprint:
+            # Managed corpus operations own their fingerprint: an interrupted
+            # import with no committed rows must stay byte-for-byte resumable.
+            if (
+                not has_cached_payload or cached_fingerprint != model_fingerprint
+            ) and not cache.corpus_state():
                 cache.set_model_fingerprint(model_fingerprint)
 
     @staticmethod
@@ -664,22 +687,32 @@ class _FingerprintMixin:
         cached_fingerprint: str | None,
         model_fingerprint: str,
     ) -> None:
-        """Abort before a fingerprint mismatch deletes a hydrated corpus.
+        """Refuse automatic deletion of managed or legacy hydrated corpora.
 
-        A candidate-pool namespace is bounded by ``--candidate-pool-size`` and
-        re-encodes in seconds, so it keeps the silent-rebuild path. A corpus
-        namespace costs GPU-hours, so its deletion must be an operator decision.
-        Any recorded hydration source marks the namespace as corpus-scale --
-        including an interrupted hydration, which is just as costly to redo --
-        and only the corpus paths ever write that metadata.
-
-        :param EmbeddingCache cache: Namespace whose payload the mismatch targets.
-        :param Optional[str] cached_fingerprint: Fingerprint recorded on the payload.
-        :param str model_fingerprint: Fingerprint of the runtime-active model.
-        :return None: Returns when the namespace is cheap enough to auto-rebuild.
+        :param cache: Namespace whose payload the mismatch targets.
+        :param cached_fingerprint: Fingerprint recorded on the payload.
+        :param model_fingerprint: Fingerprint of the runtime-active model.
+        :raises InstalledCorpusError: If the namespace carries managed corpus state.
         :raises EmbeddingCacheFingerprintMismatchError: If the namespace carries
-            corpus hydration metadata.
+            legacy corpus hydration metadata.
         """
+        from citemesh.data.embedding_cache.lifecycle import (
+            incomplete_operation_message,
+        )
+
+        state = cache.corpus_state()
+        if state:
+            if state.get("pending"):
+                raise InstalledCorpusError(
+                    incomplete_operation_message(cache.namespace_id, state)
+                    + ". The existing namespace was preserved."
+                )
+            raise InstalledCorpusError(
+                "Installed corpus model fingerprint mismatch "
+                f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint}); "
+                "automatic deletion was refused. Use its matching model settings "
+                "or explicitly remove it with `citemesh cache clear`."
+            )
         stats = cache.payload_stats()
         if not stats.hydration_dataset_source:
             return

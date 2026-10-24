@@ -13,12 +13,11 @@ import importlib.util
 import logging
 import re
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from importlib import metadata as importlib_metadata
-from typing import (
-    Any,
-)
+from types import ModuleType
+from typing import Literal
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core.choices import DEVICE_CHOICES as EMBEDDING_DEVICE_CHOICES
@@ -39,12 +38,10 @@ _FA2_FORWARD_DTYPE_WARNING = (
 )
 
 _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
-# bf16-on-MPS is only enabled on torch releases verified on Apple Silicon; this is
-# a policy floor, not a hard technical cliff — lower it once older wheels are vetted.
+# Minimum torch version currently supported for MPS bf16 autocast.
 _MPS_MIN_TORCH_VERSION = (2, 13)
 _COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps", "cpu"})
-# Legacy release-branch workaround window where Inductor conflicted with the
-# fp32_precision TF32 API; later torch releases use the modern API directly.
+# Torch 2.9 and 2.10 require the TF32 compile bridge for Inductor compatibility.
 _TF32_COMPILE_BRIDGE_TORCH_VERSIONS = frozenset({(2, 9), (2, 10)})
 _INFERENCE_ARTIFACT_FILENAMES = frozenset(
     {
@@ -169,13 +166,15 @@ def _parse_major_minor(
     return int(version_match.group(1)), int(version_match.group(2))
 
 
-def _installed_transformers_major_minor(transformers: Any) -> tuple[int, int] | None:
+def _installed_transformers_major_minor(
+    transformers: ModuleType,
+) -> tuple[int, int] | None:
     """Resolve the installed Transformers version from module or distribution data.
 
     Editable and development builds sometimes expose a nonstandard module
     ``__version__`` even though their installed distribution metadata is valid.
 
-    :param Any transformers: Imported Transformers module.
+    :param ModuleType transformers: Imported Transformers module.
     :return Optional[tuple[int, int]]: Verified major/minor pair when discoverable.
     """
     module_version = _parse_major_minor(getattr(transformers, "__version__", ""))
@@ -222,11 +221,11 @@ def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
         )
 
 
-def _accelerator_available(torch: Any, backend: str) -> bool:
+def _accelerator_available(torch: ModuleType, backend: Literal["cuda", "mps"]) -> bool:
     """Return whether a torch accelerator backend is usable.
 
-    :param Any torch: Imported ``torch`` module object.
-    :param str backend: Accelerator token (``cuda`` or ``mps``).
+    :param ModuleType torch: Imported ``torch`` module.
+    :param Literal["cuda", "mps"] backend: Accelerator token.
     :return bool: ``True`` when the backend reports as available.
     """
     if backend == "mps":
@@ -244,10 +243,10 @@ def _accelerator_available(torch: Any, backend: str) -> bool:
         return False
 
 
-def _mps_capabilities(torch: Any) -> tuple[bool, bool]:
+def _mps_capabilities(torch: ModuleType) -> tuple[bool, bool]:
     """Return whether the torch MPS backend is built and currently available.
 
-    :param Any torch: Imported torch module object.
+    :param ModuleType torch: Imported ``torch`` module.
     :return tuple[bool, bool]: ``(is_built, is_available)`` capability flags.
     """
     backends = getattr(torch, "backends", None)
@@ -280,13 +279,15 @@ def _mps_capabilities(torch: Any) -> tuple[bool, bool]:
 
 
 def _native_bf16_supported(
-    torch: Any, backend: str, probe: Callable[[Any], bool]
+    torch: ModuleType,
+    backend: Literal["cuda", "cpu"],
+    probe: Callable[[object | None], bool],
 ) -> bool:
     """Run one backend's bf16 capability probe, failing closed on any error.
 
-    :param Any torch: Imported torch module object.
-    :param str backend: Torch submodule attribute holding the probe (``cuda``/``cpu``).
-    :param Callable[[Any], bool] probe: Capability probe for that submodule.
+    :param ModuleType torch: Imported ``torch`` module.
+    :param Literal["cuda", "cpu"] backend: Torch submodule holding the probe.
+    :param Callable[[Optional[object]], bool] probe: Backend capability probe.
     :return bool: Probe result, or ``False`` when the backend cannot answer.
     """
     backend_module = getattr(torch, backend, None)
@@ -296,10 +297,10 @@ def _native_bf16_supported(
         return False
 
 
-def _cuda_bf16_probe(cuda_module: Any) -> bool:
+def _cuda_bf16_probe(cuda_module: object | None) -> bool:
     """Ask a live CUDA backend for native (non-emulated) bf16 support.
 
-    :param Any cuda_module: ``torch.cuda`` module object, or ``None``.
+    :param Optional[object] cuda_module: ``torch.cuda`` module object, or ``None``.
     :return bool: Whether CUDA reports native bf16 support.
     """
     is_supported = getattr(cuda_module, "is_bf16_supported", None)
@@ -320,15 +321,17 @@ def _cuda_bf16_probe(cuda_module: Any) -> bool:
         )
 
 
-def _cpu_bf16_probe(cpu_module: Any) -> bool:
+def _cpu_bf16_probe(cpu_module: object | None) -> bool:
     """Check native CPU BF16 instructions using available torch capability APIs.
 
-    :param Any cpu_module: ``torch.cpu`` module object, or ``None``.
+    :param Optional[object] cpu_module: ``torch.cpu`` module object, or ``None``.
     :return bool: Whether x86 or ARM BF16 support can be established.
     """
     capabilities = getattr(cpu_module, "get_capabilities", None)
     if callable(capabilities):
         supported = capabilities()
+        if not isinstance(supported, Mapping):
+            return False
         return any(
             supported.get(name, False)
             for name in ("avx512_bf16", "amx_bf16", "bf16", "sve_bf16")
@@ -338,19 +341,19 @@ def _cpu_bf16_probe(cpu_module: Any) -> bool:
     return bool(probe()) if callable(probe) else False
 
 
-def _cuda_native_bf16_supported(torch: Any) -> bool:
+def _cuda_native_bf16_supported(torch: ModuleType) -> bool:
     """Return whether CUDA provides native rather than emulated bfloat16.
 
-    :param Any torch: Imported torch module object.
+    :param ModuleType torch: Imported ``torch`` module.
     :return bool: ``True`` only for a live CUDA backend with native bf16 support.
     """
     return _native_bf16_supported(torch, "cuda", _cuda_bf16_probe)
 
 
-def _cpu_native_bf16_supported(torch: Any) -> bool:
+def _cpu_native_bf16_supported(torch: ModuleType) -> bool:
     """Return whether the CPU exposes native bfloat16 instructions.
 
-    :param Any torch: Imported torch module object.
+    :param ModuleType torch: Imported ``torch`` module.
     :return bool: Whether x86 or ARM BF16 support can be established.
     """
     return _native_bf16_supported(torch, "cpu", _cpu_bf16_probe)

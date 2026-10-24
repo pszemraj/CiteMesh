@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 import stat
-from collections.abc import Iterator, Sequence
-from typing import Any
+from collections.abc import Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, TypedDict
 
 import h5py
 import numpy as np
@@ -53,15 +53,26 @@ from .constants import (
     STORAGE_PRECISION_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
 )
-from .models import CacheNamespacePayloadStats, _EmbeddingCacheLayoutError
+from .models import (
+    CacheMetadataValues,
+    CacheNamespacePayloadStats,
+    NormalizedMetadataFields,
+    PaperRowValues,
+    _EmbeddingCacheLayoutError,
+)
 from .quantization import (
     _quantize_ubinary_embeddings,
     _storage_dtype_for_precision,
 )
 from .sql import (
+    CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL,
+    CORPUS_MEMBERSHIP_TABLE_CREATE_SQL,
     PAPER_ROW_QUERY_SQL_TEMPLATE,
     PAPERS_TABLE_CREATE_SQL,
     REPLACEMENT_JOURNAL_TABLE_CREATE_SQL,
+    PaperMetadataRefreshValues,
+    SerializedPaperMetadata,
+    SQLitePaperRow,
     _chunked,
     _decode_paper_row,
     _metadata_table_create_sql,
@@ -71,8 +82,20 @@ from .sql import (
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ._host import _EmbeddingCacheHost
+else:
+    _EmbeddingCacheHost = object
 
-class _H5LayoutMixin:
+
+class DatasetCompressionKwargs(TypedDict, total=False):
+    """Supported keyword arguments for creating compressed HDF5 datasets."""
+
+    compression: str
+    compression_opts: int
+
+
+class _H5LayoutMixin(_EmbeddingCacheHost):
     """SQLite schema and HDF5 layout management for :class:`EmbeddingCache`."""
 
     def _init_db(self) -> None:
@@ -123,6 +146,8 @@ class _H5LayoutMixin:
             )
             conn.execute(_metadata_table_create_sql())
             conn.execute(REPLACEMENT_JOURNAL_TABLE_CREATE_SQL)
+            conn.execute(CORPUS_MEMBERSHIP_TABLE_CREATE_SQL)
+            conn.execute(CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL)
 
             # Contract values are seeded, never re-stamped, here: overwriting them
             # would make _assert_runtime_cache_consistency compare the runtime
@@ -229,16 +254,15 @@ class _H5LayoutMixin:
     @staticmethod
     def _set_cache_metadata(
         conn: sqlite3.Connection,
-        values: dict[str, object],
+        values: Mapping[str, str | int],
         *,
         preserve_existing: bool = False,
     ) -> None:
         """Write a group of cache metadata values with one conflict policy.
 
         :param sqlite3.Connection conn: Open SQLite connection.
-        :param Dict[str, object] values: Metadata values keyed by cache field name.
+        :param Mapping[str, str | int] values: Metadata values keyed by cache field name.
         :param bool preserve_existing: Insert only missing keys when ``True``.
-        :return None: This method mutates DB state in-place.
         """
         if not values:
             return
@@ -267,10 +291,10 @@ class _H5LayoutMixin:
         return {str(key): str(value) for key, value in rows}
 
     @staticmethod
-    def _metadata_value_from_h5_attr(value: Any) -> str:
+    def _metadata_value_from_h5_attr(value: object) -> str:
         """Normalize HDF5 attribute values to comparable metadata strings.
 
-        :param Any value: Raw HDF5 attribute payload.
+        :param object value: Raw HDF5 attribute payload.
         :return str: Normalized string representation.
         """
         if value is None:
@@ -284,10 +308,10 @@ class _H5LayoutMixin:
             value = value.item()
         return str(value)
 
-    def _runtime_contract_values(self) -> dict[str, object]:
+    def _runtime_contract_values(self) -> dict[str, str | int]:
         """Return the canonical values shared by SQLite and HDF5 metadata.
 
-        :return Dict[str, object]: Runtime cache-contract values keyed by field name.
+        :return dict[str, str | int]: Runtime cache-contract values keyed by field name.
         """
         return {
             SCHEMA_VERSION_KEY: EMBEDDING_CACHE_SCHEMA_VERSION,
@@ -318,7 +342,6 @@ class _H5LayoutMixin:
         :param Optional[h5py.Dataset] embeddings_dataset: Matrix dataset, or None before the first write.
         :param str fail_mode: ``"runtime"`` to fail-closed, ``"repair"`` to rebuild incompatible layouts.
         :param bool check_row_mapping: Whether to validate SQLite/HDF5 row coverage.
-        :return None: Raises when metadata and payload state diverge.
         :raises RuntimeError: If row mappings are inconsistent or runtime checks fail.
         :raises ValueError: If a layout mismatch is found in repair mode.
         """
@@ -349,7 +372,6 @@ class _H5LayoutMixin:
 
             :param str message: Observed inconsistency.
             :param bool layout_mismatch: Whether the persisted layout needs rebuilding.
-            :return None: Always raises the mode-appropriate exception.
             """
             detail = f"Embedding cache integrity error: {message}."
             if fail_mode == "runtime" or not layout_mismatch:
@@ -442,15 +464,12 @@ class _H5LayoutMixin:
             )
 
     def _reset_effective_compression(self) -> None:
-        """Reset physical-layout settings to the originally requested codec.
-
-        :return None: Updates effective compression state in-place.
-        """
+        """Reset physical-layout settings to the originally requested codec."""
         self._effective_compression = self.compression
         self._effective_compression_level = self.compression_level
 
     @classmethod
-    def _keeps_recorded_source_dtype(cls, stored_value: Any) -> bool:
+    def _keeps_recorded_source_dtype(cls, stored_value: object) -> bool:
         """Return whether an already-recorded source dtype must be left alone.
 
         The source compute dtype is provenance rather than identity, so it is
@@ -462,7 +481,7 @@ class _H5LayoutMixin:
         runtime, in both the SQLite and HDF5 witnesses; the paths that discard
         the vectors clear it so the rebuilding runtime records its own.
 
-        :param Any stored_value: Value already recorded in metadata or HDF5 attrs.
+        :param object stored_value: Value already recorded in metadata or HDF5 attrs.
         :return bool: ``True`` when the stored value must not be overwritten.
         """
         return bool(cls._metadata_value_from_h5_attr(stored_value).strip())
@@ -475,7 +494,6 @@ class _H5LayoutMixin:
         write any is recorded as the creator instead of a discarded build.
 
         :param sqlite3.Connection conn: Open SQLite connection.
-        :return None: Blanks the recorded source dtype in-place.
         """
         _H5LayoutMixin._set_cache_metadata(conn, {SOURCE_TORCH_DTYPE_KEY: ""})
 
@@ -488,7 +506,6 @@ class _H5LayoutMixin:
         exception and is preserved per :meth:`_keeps_recorded_source_dtype`.
 
         :param sqlite3.Connection conn: Open SQLite connection.
-        :return None: Updates runtime contract metadata in-place.
         """
         values = self._runtime_contract_values()
         metadata = self._load_cache_metadata(conn)
@@ -503,7 +520,6 @@ class _H5LayoutMixin:
         codec therefore applies only when a matrix is first created or rebuilt.
 
         :param h5py.Dataset dataset: Existing embeddings matrix.
-        :return None: Updates effective compression state in-place.
         :raises ValueError: If the persisted physical layout is unsupported.
         """
         compression = str(dataset.compression or "").strip().lower()
@@ -545,10 +561,7 @@ class _H5LayoutMixin:
         self._effective_compression_level = compression_level
 
     def _ensure_h5_layout(self) -> None:
-        """Recover interrupted appends and rebuild proven incompatible layouts.
-
-        :return None: Preserves valid payloads and propagates IO/open failures.
-        """
+        """Recover interrupted appends and rebuild proven incompatible layouts."""
         if not path_exists(self.h5_path):
             with self._connect_db() as conn:
                 pending_replacement = conn.execute(
@@ -703,7 +716,6 @@ class _H5LayoutMixin:
         """Drop row mappings left behind by a namespace holding no vectors.
 
         :param sqlite3.Connection conn: Open SQLite connection for the namespace.
-        :return None: Deletes unusable mappings and marks hydration incomplete.
         """
         paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
         if paper_rows == 0:
@@ -721,8 +733,12 @@ class _H5LayoutMixin:
         """Reset hydration metadata keys to an incomplete state.
 
         :param sqlite3.Connection conn: Open SQLite connection.
-        :return None: Mutates metadata table in-place.
         """
+        conn.execute("DELETE FROM cache_metadata WHERE key = 'corpus_state'")
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'corpus_membership'"
+        ).fetchone():
+            conn.execute("DELETE FROM corpus_membership")
         _H5LayoutMixin._set_cache_metadata(
             conn,
             {
@@ -739,23 +755,30 @@ class _H5LayoutMixin:
     @staticmethod
     def _metadata_tuple(
         paper_id: str,
-        metadata: dict[str, object],
+        metadata: CacheMetadataValues,
         text_hash: str,
         embedding_dim: int,
         row_idx: int,
-    ) -> tuple[Any, ...]:
+    ) -> PaperRowValues:
         """Build metadata row tuple for SQLite upsert.
 
         :param str paper_id: Paper identifier.
-        :param Dict[str, object] metadata: Paper metadata payload.
+        :param CacheMetadataValues metadata: Paper metadata payload.
         :param str text_hash: Deterministic hash for encoded text.
         :param int embedding_dim: Embedding vector width.
         :param int row_idx: Row index inside matrix dataset.
-        :return Tuple[Any, ...]: SQLite upsert tuple matching ``papers`` columns.
+        :return PaperRowValues: SQLite upsert values in ``papers`` column order.
         """
-        title, abstract, year, *remaining = _H5LayoutMixin._normalized_metadata_fields(
-            metadata
-        )
+        (
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+        ) = _H5LayoutMixin._normalized_metadata_fields(metadata)
         return (
             paper_id,
             title,
@@ -764,7 +787,11 @@ class _H5LayoutMixin:
             text_hash,
             embedding_dim,
             row_idx,
-            *remaining,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
             # Derived from the primary key rather than the arxiv_id column, which
             # is empty for rows whose paper_id is still a parseable arXiv ID.
             encode_arxiv_id_chronology_key(paper_id),
@@ -772,12 +799,12 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _normalized_metadata_fields(
-        metadata: dict[str, object],
-    ) -> tuple[str, str, int | None, str, str, str, str, str]:
+        metadata: CacheMetadataValues,
+    ) -> NormalizedMetadataFields:
         """Normalize metadata fields to stable cache representations.
 
-        :param Dict[str, object] metadata: Paper metadata payload.
-        :return Tuple[str, str, Optional[int], str, str, str, str, str]:
+        :param CacheMetadataValues metadata: Paper metadata payload.
+        :return NormalizedMetadataFields:
             Normalized title/abstract/year/authors/categories and venue/arXiv/DOI fields.
         """
         title = str(metadata.get("title", "") or "")
@@ -808,22 +835,19 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _metadata_fields_changed(
-        existing_row: dict[str, Any], metadata: dict[str, object]
+        existing_row: SerializedPaperMetadata, metadata: CacheMetadataValues
     ) -> bool:
         """Return whether cached non-vector metadata differs from incoming payload.
 
-        :param Dict[str, Any] existing_row: Existing cached metadata row.
-        :param Dict[str, object] metadata: Incoming metadata payload.
+        :param SerializedPaperMetadata existing_row: Existing cached metadata row.
+        :param CacheMetadataValues metadata: Incoming metadata payload.
         :return bool: ``True`` when a metadata-only refresh is required.
         """
+        existing_year = existing_row.get("year")
         current = (
             str(existing_row.get("title", "") or ""),
             str(existing_row.get("abstract", "") or ""),
-            (
-                int(existing_row["year"])
-                if existing_row.get("year") is not None
-                else None
-            ),
+            (int(existing_year) if existing_year is not None else None),
             _safe_json_list(_parse_json_list(existing_row.get("authors_json"))),
             _safe_json_list(_parse_json_list(existing_row.get("categories_json"))),
             str(existing_row.get("venue", "") or "").strip(),
@@ -835,13 +859,13 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _metadata_refresh_tuple(
-        paper_id: str, metadata: dict[str, object]
-    ) -> tuple[Any, ...]:
+        paper_id: str, metadata: CacheMetadataValues
+    ) -> PaperMetadataRefreshValues:
         """Build SQL update tuple for metadata-only refresh paths.
 
         :param str paper_id: Paper identifier.
-        :param Dict[str, object] metadata: Incoming metadata payload.
-        :return Tuple[Any, ...]: Tuple for metadata UPDATE query.
+        :param CacheMetadataValues metadata: Incoming metadata payload.
+        :return PaperMetadataRefreshValues: Values for the metadata UPDATE query.
         """
         # The chronology key rides along so both write paths agree on it; it is
         # keyed off the immutable primary key, so rewriting it is idempotent.
@@ -855,7 +879,6 @@ class _H5LayoutMixin:
         """Write schema/layout metadata attrs to an open HDF5 file.
 
         :param h5py.File h5_file: Open cache file handle.
-        :return None: Mutates HDF5 attrs in-place.
         """
         for key, value in self._runtime_contract_values().items():
             if key not in h5_file.attrs:
@@ -874,36 +897,49 @@ class _H5LayoutMixin:
         self,
         conn: sqlite3.Connection,
         paper_ids: Sequence[str],
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, SerializedPaperMetadata]:
         """Fetch existing metadata rows for target paper IDs.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :param Sequence[str] paper_ids: Paper IDs to look up.
-        :return Dict[str, Dict[str, Any]]: Mapping of paper ID to cached metadata payload.
+        :return dict[str, SerializedPaperMetadata]: Cached rows keyed by paper ID.
         """
-        existing_rows: dict[str, dict[str, Any]] = {}
+        existing_rows: dict[str, SerializedPaperMetadata] = {}
         for row in self._query_paper_rows(conn, paper_ids, lookup_column="paper_id"):
             decoded = _decode_paper_row(row, parse_json_lists=False)
-            paper_id = decoded.pop("paper_id")
-            existing_rows[str(paper_id)] = decoded
+            paper_id = decoded["paper_id"]
+            existing_rows[paper_id] = {
+                "text_hash": decoded["text_hash"],
+                "row_idx": decoded["row_idx"],
+                "title": decoded["title"],
+                "abstract": decoded["abstract"],
+                "year": decoded["year"],
+                "authors_json": decoded["authors_json"],
+                "categories_json": decoded["categories_json"],
+                "venue": decoded["venue"],
+                "arxiv_id": decoded["arxiv_id"],
+                "doi": decoded["doi"],
+            }
 
         return existing_rows
 
     @staticmethod
     def _query_paper_rows(
         conn: sqlite3.Connection,
-        lookup_values: Sequence[Any],
+        lookup_values: Sequence[str | int],
         *,
         lookup_column: str,
         case_insensitive: bool = False,
-    ) -> Iterator[tuple[Any, ...]]:
+        corpus_view: tuple[str, tuple[int, ...]] | None = None,
+    ) -> Iterator[SQLitePaperRow]:
         """Yield common paper rows for batched SQLite key lookups.
 
         :param sqlite3.Connection conn: Open SQLite connection.
-        :param Sequence[Any] lookup_values: Values for the selected lookup column.
+        :param Sequence[str | int] lookup_values: Paper IDs or physical row indices.
         :param str lookup_column: ``papers`` column used for the ``IN`` lookup.
         :param bool case_insensitive: Compare text values with SQLite ``NOCASE``.
-        :return Iterator[Tuple[Any, ...]]: Rows in the shared paper-column layout.
+        :param tuple[str, tuple[int, ...]] | None corpus_view: Optional active-row SQL with newest-N bindings.
+        :return Iterator[SQLitePaperRow]: Rows in the shared paper-column layout.
         :raises ValueError: If the requested lookup column is not supported.
         """
         if lookup_column not in _PAPER_ROW_LOOKUP_COLUMNS:
@@ -919,7 +955,18 @@ class _H5LayoutMixin:
                 lookup_column=lookup_expression,
                 placeholders=placeholders,
             )
-            for row in conn.execute(query, value_chunk):
+            parameters = tuple(value_chunk)
+            if corpus_view is not None:
+                member_query, member_parameters = corpus_view
+                if member_parameters:
+                    query += f" AND row_idx IN ({member_query})"
+                    parameters += member_parameters
+                else:
+                    query += (
+                        " AND EXISTS (SELECT 1 FROM corpus_membership m "
+                        "WHERE m.paper_id = papers.paper_id)"
+                    )
+            for row in conn.execute(query, parameters):
                 if row[-1] != 1:
                     raise RuntimeError(
                         "Embedding cache integrity error: row_idx coverage mismatch "
@@ -996,7 +1043,7 @@ class _H5LayoutMixin:
             != BINARY_INDEX_ENCODING
         ):
             if embedding_rows:
-                logger.warning(
+                logger.debug(
                     "Rebuilding binary index in %s from %d persisted embedding row(s).",
                     self.h5_path,
                     embedding_rows,
@@ -1026,7 +1073,6 @@ class _H5LayoutMixin:
         :param h5py.File h5_file: Open HDF5 cache handle.
         :param h5py.Dataset embeddings_dataset: Persisted int8 embedding matrix.
         :param h5py.Dataset binary_dataset: Resizable uint8 binary-index matrix.
-        :return None: Replaces all binary-index rows in-place.
         """
         if self.storage_precision != "int8":
             raise RuntimeError("Binary prefilter indexes require int8 storage.")
@@ -1049,7 +1095,7 @@ class _H5LayoutMixin:
         *,
         name: str,
         width: int,
-        dtype: np.dtype,
+        dtype: np.dtype[np.float32] | np.dtype[np.int8] | type[np.uint8],
         enabled: bool = True,
     ) -> h5py.Dataset | None:
         """Create or validate an enabled resizable two-dimensional HDF5 matrix.
@@ -1057,7 +1103,7 @@ class _H5LayoutMixin:
         :param h5py.File h5_file: Open HDF5 file handle.
         :param str name: Dataset name.
         :param int width: Required number of matrix columns.
-        :param np.dtype dtype: Required matrix dtype.
+        :param np.dtype[np.float32] | np.dtype[np.int8] | type[np.uint8] dtype: Required matrix dtype.
         :param bool enabled: Whether the optional matrix is enabled.
         :return Optional[h5py.Dataset]: Valid matrix dataset, or ``None`` when disabled.
         """
@@ -1118,19 +1164,19 @@ class _H5LayoutMixin:
             return False
         return True
 
-    def _dataset_compression_kwargs(self) -> dict[str, Any]:
+    def _dataset_compression_kwargs(self) -> DatasetCompressionKwargs:
         """Build HDF5 dataset compression kwargs for active cache configuration.
 
         ``lzf`` does not accept ``compression_opts``. Other configured codecs keep
         the numeric level behavior used by existing cache settings.
 
-        :return Dict[str, Any]: Keyword args passed into ``create_dataset``.
+        :return DatasetCompressionKwargs: Keyword args passed into ``create_dataset``.
         """
         compression = str(self._effective_compression or "").strip()
         if not compression:
             return {}
 
-        kwargs: dict[str, Any] = {"compression": compression}
+        kwargs: DatasetCompressionKwargs = {"compression": compression}
         if compression.lower() != "lzf":
             kwargs["compression_opts"] = int(self._effective_compression_level)
         return kwargs

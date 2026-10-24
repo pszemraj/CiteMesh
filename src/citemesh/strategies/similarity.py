@@ -1,15 +1,33 @@
-"""Text similarity helpers for paper ranking."""
+"""Similarity helpers for paper ranking."""
 
 from __future__ import annotations
 
+import numpy as np
+from numpy.typing import NDArray
+
 from citemesh.core import Paper
+from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data.model_profiles import compose_title_abstract_text
+
+
+def cosine_similarity_to_query(
+    normalized_query: NDArray[np.float32], embedding: NDArray[np.float32]
+) -> float:
+    """Score an embedding against an already L2-normalized query.
+
+    :param normalized_query: Query vector with unit L2 norm.
+    :param embedding: Candidate embedding to normalize and score.
+    :return: Cosine similarity clipped to ``[-1, 1]``.
+    """
+    return float(
+        np.clip(np.dot(normalized_query, l2_normalize_embeddings(embedding)), -1.0, 1.0)
+    )
 
 
 class AbstractSimilarityIndex:
     """Simple TF-IDF cosine similarity index over paper abstracts."""
 
-    def __init__(self, max_features: int = 5000):
+    def __init__(self, max_features: int = 5000) -> None:
         """Create a simple TF-IDF cosine similarity index.
 
         :param int max_features: Maximum number of TF-IDF features.

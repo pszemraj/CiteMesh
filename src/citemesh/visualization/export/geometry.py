@@ -5,15 +5,17 @@ from __future__ import annotations
 import html
 import math
 import re
-from collections.abc import Hashable, Iterable
+from collections.abc import Hashable, Iterable, Mapping
 from pathlib import Path
-
-import networkx as nx
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from citemesh.core.values import coerce_citation_count
 
 from ..themes import Theme
 from ..years import coerce_publication_year
+
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
 
 DASHBOARD_AXIS_MIN_PADDING = 0.14
 DASHBOARD_AXIS_X_PADDING = 0.18
@@ -24,6 +26,24 @@ DASHBOARD_MAX_NODE_DIAMETER = 58.0
 DASHBOARD_SELECTION_HALO_SCALE = 2.2
 
 DARKREADER_LOCK_META = '<meta name="darkreader-lock" />'
+
+
+class PlotlyHoverFont(TypedDict):
+    """Font fields used by the shared Plotly hover label."""
+
+    color: str
+    family: str
+    size: int
+
+
+class PlotlyHoverLabel(TypedDict):
+    """The themed Plotly hover label shared by graph traces and the viewer."""
+
+    align: Literal["left"]
+    bgcolor: str
+    bordercolor: str
+    font: PlotlyHoverFont
+
 
 # Head rewriting patterns. Kept deliberately narrow: they run over the raw
 # ``<head>`` text of a library-generated export, which may already carry large
@@ -81,7 +101,7 @@ def _theme_color_scheme(theme_obj: Theme) -> str:
     return "dark" if theme_obj.name in {"dark", "solarized"} else "light"
 
 
-def theme_hover_label(theme_obj: Theme) -> dict[str, object]:
+def theme_hover_label(theme_obj: Theme) -> PlotlyHoverLabel:
     """Build the Plotly ``hoverlabel`` spec shared by every hoverable trace.
 
     Tooltips are page chrome, not data, so they take the dashboard panel
@@ -90,7 +110,7 @@ def theme_hover_label(theme_obj: Theme) -> dict[str, object]:
     values, injected as ``__HOVER_LABEL_JSON__``, so the two cannot drift.
 
     :param Theme theme_obj: Active visualization theme.
-    :return Dict[str, object]: Plotly hoverlabel specification.
+    :return PlotlyHoverLabel: The themed Plotly hoverlabel specification.
     """
     palette = _UI_PALETTES[_theme_color_scheme(theme_obj)]
     return {
@@ -166,15 +186,15 @@ def _stable_curve_direction(left_id: object, right_id: object) -> float:
 
 
 def _select_dashboard_label_nodes(
-    graph: nx.Graph,
+    graph: PaperGraph,
     node_ids: list[Hashable],
-    pos: dict[Hashable, Iterable[float]],
+    pos: Mapping[Hashable, Iterable[float]],
 ) -> set[Hashable]:
     """Select prominent dashboard labels without crowding one graph region.
 
-    :param nx.Graph graph: Graph containing node ranking attributes.
+    :param PaperGraph graph: Graph containing node ranking attributes.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
-    :param Dict[Hashable, Iterable[float]] pos: Normalized node positions.
+    :param Mapping[Hashable, Iterable[float]] pos: Normalized node positions.
     :return set[Hashable]: Node identifiers whose labels should remain visible.
     """
 
@@ -209,7 +229,7 @@ def _select_dashboard_label_nodes(
     return set(selected)
 
 
-def _rgb_tuple_to_hex(color: tuple) -> str:
+def _rgb_tuple_to_hex(color: tuple[float, float, float]) -> str:
     """Convert RGB tuple (0-1) to hex string.
 
     :param tuple color: RGB triple in [0, 1] space.
@@ -249,10 +269,13 @@ def _rgb_tuple_to_rgba(color: object, alpha: float) -> str:
             else:
                 r, g, b = 255, 255, 255
     else:
-        try:
-            values = list(color)  # type: ignore[arg-type]
-        except TypeError:
+        if not isinstance(color, Iterable):
             values = [1.0, 1.0, 1.0]
+        else:
+            try:
+                values = list(color)
+            except TypeError:
+                values = [1.0, 1.0, 1.0]
         if len(values) < 3:
             values = [1.0, 1.0, 1.0]
         raw_r = float(values[0])
@@ -279,22 +302,11 @@ def _inject_darkreader_lock(
     style: str | None = None,
     strip_remote_assets: bool = False,
 ) -> None:
-    """Finalize the ``<head>`` of a library-written HTML export.
+    """Add theme metadata and optional page chrome to an HTML document head.
 
-    CiteMesh HTML exports ship their own tuned themes; auto-darkening
-    re-theming breaks them outright (Dark Reader paints Plotly's transparent
-    overlay SVGs with an opaque background, hiding the entire graph). Two
-    signals are always injected: the Dark Reader-specific ``darkreader-lock``
-    opt-out meta, and the standards-based ``color-scheme`` meta that Chrome's
-    Auto Dark Mode and well-behaved extensions consult before repainting a page.
-
-    Pyvis and Plotly both emit a bare page with no title and unstyled body
-    chrome, so the same pass optionally sets the browser tab title, prepends
-    page CSS, and drops the generator's leftover remote ``<link>``/``<script
-    src>`` tags that would otherwise make a "self-contained" export depend on a
-    CDN. Rewrites are confined to the head so inlined runtime bundles in the
-    body are never touched, and the whole pass is idempotent: a file that
-    already carries the lock is left alone.
+    The pass is idempotent and leaves the file unchanged when it is unreadable,
+    has no ``<head>``, or already contains the Dark Reader lock. All edits stay
+    in the head; optional asset removal strips remote stylesheets and scripts.
 
     :param Path | str path: HTML file to rewrite in place (no-op when it has no
         ``<head>`` tag or already carries the lock).

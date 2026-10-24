@@ -1,10 +1,9 @@
 """
 Persistent user configuration (``config.toml``) for CiteMesh.
 
-The config file lives at ``<cache_root>/config.toml`` (HuggingFace-style,
-``~/.cache/citemesh/config.toml`` by default) and stores durable personal
-defaults for build flags plus optional API credentials. Effective precedence
-is: explicit CLI flag > environment variable > config.toml > built-in default.
+The file at ``<cache_root>/config.toml`` stores validated CLI defaults and an
+optional Semantic Scholar API key. CLI code applies loaded values to parsed
+commands.
 
 Option vocabularies come from dependency-free core constants, so loading
 configuration never imports strategy or visualization modules.
@@ -13,16 +12,18 @@ configuration never imports strategy or visualization modules.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+import sys
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import TypeAlias, TypeVar
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
-    import tomli as tomllib  # type: ignore[no-redef]
+else:  # pragma: no cover - Python < 3.11 fallback
+    import tomli as tomllib
 
 import tomli_w
 from filelock import FileLock, Timeout
@@ -46,6 +47,12 @@ from citemesh.data.cache import atomic_write_text, get_cache_dir
 
 logger = logging.getLogger(__name__)
 
+ConfigValue: TypeAlias = str | int | float | bool | list[str]
+TOMLValue: TypeAlias = (
+    ConfigValue | date | datetime | time | list["TOMLValue"] | dict[str, "TOMLValue"]
+)
+_ConfigValueT = TypeVar("_ConfigValueT", bound=ConfigValue)
+
 USER_CONFIG_FILENAME = "config.toml"
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULTS_TABLE = "defaults"
@@ -67,10 +74,10 @@ class ConfigFileError(RuntimeError):
     """Raised when the config file cannot be read or rewritten safely."""
 
 
-def _cast_str(value: Any) -> str:
+def _cast_str(value: object) -> str:
     """Validate a non-empty string value.
 
-    :param Any value: Raw TOML or CLI-provided value.
+    :param object value: Raw TOML or CLI-provided value.
     :return str: Stripped string value.
     """
     if not isinstance(value, str) or not value.strip():
@@ -78,10 +85,10 @@ def _cast_str(value: Any) -> str:
     return value.strip()
 
 
-def _cast_bool(value: Any) -> bool:
+def _cast_bool(value: object) -> bool:
     """Validate a boolean value, accepting common CLI string spellings.
 
-    :param Any value: Raw TOML or CLI-provided value.
+    :param object value: Raw TOML or CLI-provided value.
     :return bool: Parsed boolean.
     """
     if isinstance(value, bool):
@@ -95,17 +102,17 @@ def _cast_bool(value: Any) -> bool:
     raise ConfigValueError("expected a boolean (true/false)")
 
 
-def _int_caster(minimum: int) -> Callable[[Any], int]:
+def _int_caster(minimum: int) -> Callable[[object], int]:
     """Build a bounded integer caster.
 
     :param int minimum: Minimum accepted value (inclusive).
-    :return Callable[[Any], int]: Caster enforcing type and lower bound.
+    :return Callable[[object], int]: Caster enforcing type and lower bound.
     """
 
-    def _cast(value: Any) -> int:
+    def _cast(value: object) -> int:
         """Cast a raw configuration value to a lower-bounded integer.
 
-        :param Any value: Raw TOML or CLI-provided value.
+        :param object value: Raw TOML or CLI-provided value.
         :return int: Parsed integer greater than or equal to ``minimum``.
         """
         try:
@@ -116,17 +123,17 @@ def _int_caster(minimum: int) -> Callable[[Any], int]:
     return _cast
 
 
-def _choice_caster(choices: tuple[str, ...]) -> Callable[[Any], str]:
+def _choice_caster(choices: tuple[str, ...]) -> Callable[[object], str]:
     """Build a caster validating membership in a fixed choice tuple.
 
     :param Tuple[str, ...] choices: Accepted string values.
-    :return Callable[[Any], str]: Caster enforcing choice membership.
+    :return Callable[[object], str]: Caster enforcing choice membership.
     """
 
-    def _cast(value: Any) -> str:
+    def _cast(value: object) -> str:
         """Cast a raw configuration value to an allowed string choice.
 
-        :param Any value: Raw TOML or CLI-provided value.
+        :param object value: Raw TOML or CLI-provided value.
         :return str: Stripped string present in ``choices``.
         """
         text = _cast_str(value)
@@ -137,10 +144,10 @@ def _choice_caster(choices: tuple[str, ...]) -> Callable[[Any], str]:
     return _cast
 
 
-def _cast_similarity(value: Any) -> float:
+def _cast_similarity(value: object) -> float:
     """Parse a finite cosine threshold in the supported range.
 
-    :param Any value: Raw TOML or CLI-provided value.
+    :param object value: Raw TOML or CLI-provided value.
     :return float: Threshold between zero and one, inclusive.
     """
     try:
@@ -153,10 +160,10 @@ def _cast_similarity(value: Any) -> float:
         raise ConfigValueError(str(exc)) from exc
 
 
-def _cast_export(value: Any) -> list[str]:
+def _cast_export(value: object) -> list[str]:
     """Validate an export format list (TOML array or comma-separated string).
 
-    :param Any value: Raw TOML or CLI-provided value.
+    :param object value: Raw TOML or CLI-provided value.
     :return list[str]: Deduplicated export format list.
     """
     if isinstance(value, str):
@@ -182,7 +189,7 @@ def _cast_export(value: Any) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-ConfigCaster = Callable[[Any], Any]
+ConfigCaster = Callable[[object], ConfigValue]
 
 
 CONFIG_DEFAULT_KEY_SPECS: dict[str, ConfigCaster] = {
@@ -215,11 +222,11 @@ CONFIG_DEFAULT_KEY_SPECS: dict[str, ConfigCaster] = {
     "search_mode": _choice_caster(SEARCH_MODE_CHOICES),
 }
 
-CONFIG_API_KEY_SPECS: dict[str, ConfigCaster] = {
+CONFIG_API_KEY_SPECS: dict[str, Callable[[object], str]] = {
     "s2_api_key": _cast_str,
 }
 
-_TABLE_SPECS: dict[str, dict[str, ConfigCaster]] = {
+_TABLE_SPECS: dict[str, Mapping[str, ConfigCaster]] = {
     DEFAULTS_TABLE: CONFIG_DEFAULT_KEY_SPECS,
     API_TABLE: CONFIG_API_KEY_SPECS,
 }
@@ -230,7 +237,7 @@ class UserConfig:
     """Validated snapshot of persisted user configuration."""
 
     path: Path
-    defaults: dict[str, Any] = field(default_factory=dict)
+    defaults: dict[str, ConfigValue] = field(default_factory=dict)
     s2_api_key: str | None = None
 
 
@@ -269,18 +276,18 @@ def parse_config_key(dotted_key: str) -> tuple[str, str, ConfigCaster]:
 
 
 def _validated_table(
-    document: dict[str, Any],
+    document: Mapping[str, TOMLValue],
     table: str,
-    specs: dict[str, ConfigCaster],
+    specs: Mapping[str, Callable[[object], _ConfigValueT]],
     config_path: Path,
-) -> dict[str, Any]:
+) -> dict[str, _ConfigValueT]:
     """Extract and validate one config table, warning on invalid entries.
 
-    :param Dict[str, Any] document: Parsed TOML document.
+    :param document: Parsed TOML document.
     :param str table: Table name to validate.
-    :param Dict[str, ConfigCaster] specs: Whitelisted key casters for the table.
+    :param specs: Whitelisted key casters for the table.
     :param Path config_path: Source file path used in warning messages.
-    :return Dict[str, Any]: Validated key/value pairs (invalid entries dropped).
+    :return: Validated key/value pairs; invalid entries are dropped.
     """
     raw_table = document.get(table)
     if raw_table is None:
@@ -293,7 +300,7 @@ def _validated_table(
             type(raw_table).__name__,
         )
         return {}
-    validated: dict[str, Any] = {}
+    validated: dict[str, _ConfigValueT] = {}
     for key, raw_value in raw_table.items():
         caster = specs.get(key)
         if caster is None:
@@ -349,14 +356,14 @@ def load_user_config(path: Path | None = None) -> UserConfig:
     )
 
 
-def _read_raw_document(config_path: Path) -> dict[str, Any]:
+def _read_raw_document(config_path: Path) -> dict[str, TOMLValue]:
     """Read the raw TOML document for read-modify-write operations.
 
     Unlike :func:`load_user_config`, corrupt files fail loudly here so a
     ``config set`` never silently discards unreadable user content.
 
     :param Path config_path: Config file path.
-    :return Dict[str, Any]: Parsed document (empty when the file is missing).
+    :return: Parsed TOML document, or an empty mapping if the file is missing.
     """
     try:
         with config_path.open("rb") as handle:
@@ -385,11 +392,11 @@ def _prepare_config_parent(config_path: Path) -> None:
         ) from exc
 
 
-def _write_document(config_path: Path, document: dict[str, Any]) -> None:
+def _write_document(config_path: Path, document: Mapping[str, TOMLValue]) -> None:
     """Atomically persist a TOML document (temp file + rename).
 
     :param Path config_path: Target config file path.
-    :param Dict[str, Any] document: TOML-serializable document.
+    :param document: TOML document to persist.
     :return None: Writes the config file in place.
     """
     _prepare_config_parent(config_path)
@@ -450,17 +457,17 @@ def config_lock(config_path: Path) -> Iterator[Path]:
 
 
 def set_config_value(
-    dotted_key: str, raw_value: Any, *, path: Path | None = None
-) -> Any:
+    dotted_key: str, raw_value: object, *, path: Path | None = None
+) -> ConfigValue:
     """Validate and persist one config value.
 
     Unknown keys already present in the file are preserved on rewrite;
     comments are not (TOML round-trip is value-level).
 
     :param str dotted_key: Dotted key such as ``defaults.semantic_source``.
-    :param Any raw_value: Raw value (CLI string or TOML-native type).
+    :param object raw_value: Raw value (CLI string or TOML-native type).
     :param Optional[Path] path: Optional explicit config file path override.
-    :return Any: The validated, persisted value.
+    :return ConfigValue: The validated, persisted value.
     """
     table, key, caster = parse_config_key(dotted_key)
     try:
@@ -501,10 +508,10 @@ def unset_config_value(dotted_key: str, *, path: Path | None = None) -> bool:
     return True
 
 
-def format_config_value(value: Any) -> str:
+def format_config_value(value: ConfigValue) -> str:
     """Render a config value in the same form ``config set`` accepts.
 
-    :param Any value: Validated config value.
+    :param ConfigValue value: Validated config value.
     :return str: CLI-friendly string form.
     """
     if isinstance(value, bool):

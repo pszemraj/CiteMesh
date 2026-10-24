@@ -7,11 +7,10 @@ config-sourced defaults), side-effect logging, and dispatch of validated argumen
 from __future__ import annotations
 
 import argparse
+from collections.abc import Set
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, Protocol
-
-import networkx as nx
+from typing import TYPE_CHECKING, NoReturn, Protocol
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import get_cache_dir, validate_compression_filter
@@ -33,6 +32,9 @@ from .build_options import (
 from .cache_ops import _embedding_cache_directory_stats
 from .console import logger
 
+if TYPE_CHECKING:
+    from citemesh.core.models import PaperGraph
+
 
 class _ParserErrorSink(Protocol):
     """Protocol for argparse-compatible validation error sinks."""
@@ -49,9 +51,7 @@ class _ParserErrorSink(Protocol):
 class _BuildContractValueError(ValueError):
     """Catchable build-contract failure with its contributing destinations."""
 
-    def __init__(
-        self, message: str, *, related_dests: set[str] | frozenset[str] = frozenset()
-    ) -> None:
+    def __init__(self, message: str, *, related_dests: Set[str] = frozenset()) -> None:
         """Record the option destinations associated with one validation error.
 
         :param str message: User-facing validation failure message.
@@ -75,7 +75,7 @@ class _ValueErrorParserErrorSink:
         raise _BuildContractValueError(message)
 
     @staticmethod
-    def error_for_dests(message: str, related_dests: set[str]) -> NoReturn:
+    def error_for_dests(message: str, related_dests: Set[str]) -> NoReturn:
         """Raise a validation error retaining its contributing destinations.
 
         :param str message: Validation failure message.
@@ -88,8 +88,8 @@ class _ValueErrorParserErrorSink:
 
 def _config_error_context(
     *,
-    related_dests: set[str],
-    config_defaults: set[str],
+    related_dests: Set[str],
+    config_defaults: Set[str],
     config_path: Path | None,
 ) -> str:
     """Describe config values that contributed to a contract failure.
@@ -114,7 +114,7 @@ def _build_contract_error(
     message: str,
     *,
     related_dests: set[str] | frozenset[str] = frozenset(),
-    config_defaults: set[str] = frozenset(),
+    config_defaults: Set[str] = frozenset(),
     config_path: Path | None = None,
 ) -> NoReturn:
     """Route a build-contract failure through the active error sink.
@@ -263,13 +263,10 @@ def _resolve_implied_semantic_source(
 
 
 def _drop_ignored_corpus_config_defaults(context: _BuildContractContext) -> None:
-    """Reset corpus-only config defaults a candidates run announced it ignores.
-
-    "Ignored" must mean ignored: the values are reset so the builder never
-    receives corpus settings the run said it would not apply.
+    """Reset corpus-only config defaults when candidates mode is effective.
 
     :param _BuildContractContext context: Shared validation inputs.
-    :return None: Mutates the namespace in place.
+    :return None: Resets ignored corpus options to their built-in values.
     """
     ignored_config_corpus_dests = sorted(
         set(context.config_defaults) & _CORPUS_ONLY_OPTION_DESTS
@@ -489,7 +486,7 @@ def _validate_build_cli_contract(
     args: argparse.Namespace,
     build_parser: _ParserErrorSink,
     provided: set[str],
-    config_defaults: set[str] = frozenset(),
+    config_defaults: Set[str] = frozenset(),
     config_path: Path | None = None,
 ) -> None:
     """Validate strategy-scoped and dependent build options before execution.
@@ -510,6 +507,8 @@ def _validate_build_cli_contract(
     """
     _apply_hybrid_default_overrides(args, provided | set(config_defaults))
     contract_provided = set(provided)
+    if getattr(args, "_cache_selection", None) is not None:
+        contract_provided.add("semantic_source")
     context = _BuildContractContext(
         args=args,
         error_sink=build_parser,
@@ -595,12 +594,12 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
 
 def _build_strategy_graph(
     args: argparse.Namespace, strategy: str
-) -> tuple[nx.Graph, str]:
+) -> tuple[PaperGraph, str]:
     """Dispatch a namespace already normalized by the build command.
 
     :param argparse.Namespace args: Validated build arguments.
     :param str strategy: Selected strategy name.
-    :return tuple[nx.Graph, str]: Graph and normalized seed paper ID.
+    :return tuple[PaperGraph, str]: Graph and normalized seed paper ID.
     :raises ValueError: If the strategy is unsupported.
     """
     if strategy not in _STRATEGY_DISPATCH:

@@ -12,14 +12,20 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from citemesh.core.choices import (
     MODEL_PROFILE_CHOICES as EMBEDDING_MODEL_PROFILE_CHOICES,
 )
 
-QueryFormatter = Callable[[str, dict[str, str] | None], str]
-DocumentFormatter = Callable[[dict[str, str]], str]
-SimilarityFormatter = Callable[[str, dict[str, str] | None], str]
+from .cache import read_json_object
+
+if TYPE_CHECKING:
+    from .embedding_cache.models import EmbeddingInputMetadata
+
+QueryFormatter = Callable[[str, "EmbeddingInputMetadata | None"], str]
+DocumentFormatter = Callable[["EmbeddingInputMetadata"], str]
+SimilarityFormatter = Callable[[str, "EmbeddingInputMetadata | None"], str]
 
 logger = logging.getLogger(__name__)
 
@@ -46,30 +52,30 @@ def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
     return abstract
 
 
-def _identity_query_formatter(text: str, _: dict[str, str] | None) -> str:
+def _identity_query_formatter(text: str, _: EmbeddingInputMetadata | None) -> str:
     """Return input text unchanged for query formatting.
 
     :param str text: Original query text.
-    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :param Optional[EmbeddingInputMetadata] _: Unused metadata context.
     :return str: Unmodified query text.
     """
     return text
 
 
-def _identity_document_formatter(metadata: dict[str, str]) -> str:
+def _identity_document_formatter(metadata: EmbeddingInputMetadata) -> str:
     """Compose a minimal document string from title and abstract.
 
-    :param Dict[str, str] metadata: Paper metadata payload.
+    :param EmbeddingInputMetadata metadata: Paper metadata payload.
     :return str: Best-effort ``\"title. abstract\"`` representation.
     """
     return compose_title_abstract_text(metadata)
 
 
-def _identity_similarity_formatter(text: str, _: dict[str, str] | None) -> str:
+def _identity_similarity_formatter(text: str, _: EmbeddingInputMetadata | None) -> str:
     """Return symmetric-similarity input text unchanged.
 
     :param str text: Composed paper text.
-    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :param Optional[EmbeddingInputMetadata] _: Unused metadata context.
     :return str: Unmodified similarity text.
     """
     return text
@@ -95,30 +101,36 @@ class EmbeddingModelProfile:
     recommended_truncate_dim: int | None = None
     notes: str | None = None
 
-    def format_query(self, text: str, metadata: dict[str, str] | None = None) -> str:
+    def format_query(
+        self,
+        text: str,
+        metadata: EmbeddingInputMetadata | None = None,
+    ) -> str:
         """Format a query using the profile-specific rule.
 
         :param str text: Raw query string.
-        :param Optional[Dict[str, str]] metadata: Optional metadata context.
+        :param Optional[EmbeddingInputMetadata] metadata: Optional metadata context.
         :return str: Profile-formatted query string.
         """
         return self.query_formatter(text, metadata)
 
-    def format_document(self, metadata: dict[str, str]) -> str:
+    def format_document(self, metadata: EmbeddingInputMetadata) -> str:
         """Format paper metadata into embedding model input text.
 
-        :param Dict[str, str] metadata: Paper metadata payload.
+        :param EmbeddingInputMetadata metadata: Paper metadata payload.
         :return str: Profile-formatted document text.
         """
         return self.document_formatter(metadata)
 
     def format_similarity(
-        self, text: str, metadata: dict[str, str] | None = None
+        self,
+        text: str,
+        metadata: EmbeddingInputMetadata | None = None,
     ) -> str:
         """Format paper text for symmetric semantic-similarity scoring.
 
         :param str text: Composed paper text.
-        :param Optional[Dict[str, str]] metadata: Optional paper metadata context.
+        :param Optional[EmbeddingInputMetadata] metadata: Optional paper metadata context.
         :return str: Profile-formatted symmetric-similarity input.
         """
         return self.similarity_formatter(text, metadata)
@@ -134,21 +146,21 @@ class EmbeddingModelProfile:
         return any(model_name.startswith(alias) for alias in self.aliases)
 
 
-def _gemma_query_formatter(text: str, _: dict[str, str] | None) -> str:
+def _gemma_query_formatter(text: str, _: EmbeddingInputMetadata | None) -> str:
     """Format a query with Gemma-style task prompt.
 
     :param str text: Raw query text.
-    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :param Optional[EmbeddingInputMetadata] _: Unused metadata context.
     :return str: Prompt-prefixed query string.
     """
     text = text.strip()
     return f"task: search result | query: {text}"
 
 
-def _gemma_document_formatter(metadata: dict[str, str]) -> str:
+def _gemma_document_formatter(metadata: EmbeddingInputMetadata) -> str:
     """Format paper metadata with explicit fields for Gemma models.
 
-    :param Dict[str, str] metadata: Paper metadata payload.
+    :param EmbeddingInputMetadata metadata: Paper metadata payload.
     :return str: Gemma-friendly text representation.
     """
     title = metadata.get("title") or "none"
@@ -158,11 +170,11 @@ def _gemma_document_formatter(metadata: dict[str, str]) -> str:
     return f"title: {title} | text: {abstract}"
 
 
-def _gemma_similarity_formatter(text: str, _: dict[str, str] | None) -> str:
+def _gemma_similarity_formatter(text: str, _: EmbeddingInputMetadata | None) -> str:
     """Format paper text for EmbeddingGemma's symmetric STS task.
 
     :param str text: Composed title and abstract text.
-    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :param Optional[EmbeddingInputMetadata] _: Unused metadata context.
     :return str: EmbeddingGemma sentence-similarity prompt.
     """
     return f"task: sentence similarity | query: {text.strip()}"
@@ -204,26 +216,24 @@ _PROFILE_BY_KEY: Mapping[str, EmbeddingModelProfile] = {
 }
 
 
-def _read_json_object(path: Path) -> dict[str, object]:
-    """Read a JSON object, returning an empty mapping for absent/invalid files.
+def embedding_model_profile_key(profile: EmbeddingModelProfile) -> str:
+    """Return the selector that reopens a resolved model profile.
 
-    :param Path path: JSON file to inspect.
-    :return Dict[str, object]: Parsed object or an empty mapping.
+    :param EmbeddingModelProfile profile: Resolved profile to identify.
+    :return str: Registered profile key.
+    :raises ValueError: If no explicit selector is registered for the profile.
     """
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    for key, registered in _PROFILE_BY_KEY.items():
+        if profile == registered:
+            return key
+    raise ValueError(f"No explicit selector is registered for profile {profile.name!r}")
 
 
-def _local_transformer_configs(root: Path) -> tuple[dict[str, object], ...]:
+def _local_transformer_configs(root: Path) -> tuple[Mapping[str, object], ...]:
     """Read transformer configs from root and SentenceTransformers modules.
 
     :param Path root: Local model directory.
-    :return Tuple[Dict[str, object], ...]: Non-empty transformer config objects.
+    :return Tuple[Mapping[str, object], ...]: Non-empty raw transformer config objects.
     """
     config_paths = [root / "config.json"]
     try:
@@ -241,7 +251,9 @@ def _local_transformer_configs(root: Path) -> tuple[dict[str, object], ...]:
             continue
         config_paths.append(root / module_path / "config.json")
 
-    configs = tuple(_read_json_object(path) for path in dict.fromkeys(config_paths))
+    configs = tuple(
+        read_json_object(path) or {} for path in dict.fromkeys(config_paths)
+    )
     return tuple(config for config in configs if config)
 
 
@@ -268,8 +280,8 @@ def _local_embeddinggemma_evidence(root: Path) -> tuple[bool, bool, bool]:
                 transformer_config.get("use_bidirectional_attention") is True
             )
 
-    sentence_transformer_config = _read_json_object(
-        root / "config_sentence_transformers.json"
+    sentence_transformer_config = (
+        read_json_object(root / "config_sentence_transformers.json") or {}
     )
     raw_prompts = sentence_transformer_config.get("prompts", {})
     prompt_names = (

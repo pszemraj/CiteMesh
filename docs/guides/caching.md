@@ -12,18 +12,14 @@ The [environment settings](../reference/environment.md#platform-variables-used-f
 ├── config.toml.lock           # config write coordination
 ├── .locks/
 │   └── cache-operations.db    # SQLite operation/clear coordination
-├── embeddings/
-│   ├── metadata_<hash>.db     # SQLite: ids, text hashes, row_idx, metadata, chronology, hydration
-│   ├── embeddings_<hash>.h5   # HDF5: vectors, int8 calibration ranges, binary index
-│   ├── cache_<hash>.lock      # namespace mutation lock
-│   └── hydration_<hash>.lock  # hydration and consuming-search lock
+├── embeddings/                # native embedding namespaces
 ├── papers/
 │   └── <sha1>.json            # canonical S2 metadata and identifier lookups
 └── references/
     └── <sha1>.json            # S2 reference IDs
 ```
 
-Dashboard collection locks live beside their output packages, not here. Hugging Face downloads stay outside CiteMesh's cache ([`HF_HOME`](../reference/environment.md#other-respected-variables)).
+For embedding files, see [physical layout](../internals/embedding-cache.md#physical-layout). Dashboard collection locks live beside their output packages. Hugging Face downloads stay outside CiteMesh's cache ([`HF_HOME`](../reference/environment.md#other-respected-variables)).
 
 ## Paper metadata and reference IDs
 
@@ -33,7 +29,11 @@ Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and 
 
 Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API.
 
-Caching does not make a build offline: citation, reference, recommendation, and search calls still need the network.
+Local semantic search over a ready namespace uses cached vectors and metadata
+without fetching the corpus, though query encoding still uses the recorded
+model, which may need downloading. Uncached Semantic Scholar search and
+citation, reference, or recommendation discovery need network access; graph
+builds may also request provider metadata.
 
 ## Discovery checks
 
@@ -57,17 +57,166 @@ Local custom model fingerprints include declared Python modules, their package i
 - The binary prefilter is not part of the namespace: toggling it reuses the same vectors, ranges, and hydration state, rebuilding or dropping only the derived index.
 - A vector is re-encoded only when the paper is new to the namespace or its input text changed. Metadata-only updates refresh the SQLite row, not the vector.
 
-The migration that removed compute dtype from namespace names deliberately leaves older dtype-keyed `.db` and `.h5` pairs untouched: their filename hashes cannot be retargeted safely. Upgrading rehydrates a new shared namespace while the old vectors remain on disk. `citemesh cache scan` lists every embedding namespace separately and marks these schema-3 pairs as reclaimable; after confirming the replacement cache works, delete the matching `metadata_<namespace>.db` and `embeddings_<namespace>.h5` files to reclaim their space. `citemesh cache clear` also reclaims them, but deletes every namespace.
+Older dtype-keyed `.db` and `.h5` pairs remain separate and appear as reclaimable schema-3 namespaces in `citemesh cache scan`. After confirming the replacement cache works, delete the matching `metadata_<namespace>.db` and `embeddings_<namespace>.h5` files to reclaim their space. `citemesh cache clear` also reclaims them, but deletes every namespace.
 
 Crash safety, the replacement journal, flush ordering, and locking are in [Embedding Cache Internals](../internals/embedding-cache.md).
+
+## Portable corpus indexes
+
+### Import and selection
+
+A portable index installs precomputed retrieval-document embeddings into the
+native cache. Install the `embeddings` extra first. Import and export copy the
+stored int8 or float32 values without loading an encoder; query encoding and
+the selected graph papers' symmetric embeddings still use the recorded model.
+
+```bash
+# Import a local export, or one configuration from a Storage Bucket.
+citemesh cache import --path ./arxiv-index
+citemesh cache import --bucket OWNER/INDEX --config embeddinggemma-512-int8 \
+  --snapshot SNAPSHOT_ID
+citemesh cache scan
+
+# Use the namespace printed by import or scan.
+citemesh search "long-context language models" --mode local \
+  --cache-namespace NAMESPACE --corpus-size 50000
+citemesh build arxiv:2404.08801 --strategy embedding \
+  --cache-namespace NAMESPACE --all-corpus
+
+# Export a completed corpus into a new directory.
+citemesh cache export --namespace NAMESPACE --output ./arxiv-index
+```
+
+`--path` and `--bucket` are alternatives. Bucket imports use the selected
+configuration, or the catalog's default, and download only its declared files.
+Omit `--snapshot` to install the catalog's current snapshot; an explicit
+snapshot requires `--config`. Snapshot identity identifies the portable files;
+the manifest separately records the immutable model and upstream dataset
+revisions. The upstream source revision is provenance, not namespace identity.
+Each configuration can have different coverage and freshness.
+
+Private buckets require a Hugging Face token with read access for import and
+write access for publication. Set [`HF_TOKEN`](../reference/environment.md#other-respected-variables)
+or save a token with `hf auth login`; public bucket reads need no token.
+
+Explicit `--cache-namespace` selects existing files and pins model, profile,
+formatter, dimension, storage precision, calibration sample size, dataset, and
+split. Conflicting flags fail; device, batch size, scoring, and result limits
+remain configurable. In `--mode auto`, installed-index readiness/compatibility
+errors stay errors under
+explicit or ordinary namespace selection. Import does not change saved defaults.
+
+For an installed index, `--corpus-size N` ranks only the newest N active members
+at the completed revision; `--all-corpus` uses every installed active member. Chronology ties
+prefer later source rows; undated papers fill remaining places in source
+order. A smaller view changes neither stored coverage nor membership. A capped
+index cannot supply a larger view or claim full coverage. Seed lookup is
+independent of neighbor eligibility, so an older seed can search newer papers.
+The same membership and view rules apply when ordinary model settings resolve
+to a certified namespace. Explicit local-search corpus-view flags require
+certified membership; uncertified caches reject them.
+
+### Refresh
+
+Installed indexes are manually refreshed. Build and search use their completed
+source revision without checking or scanning the upstream dataset:
+
+```bash
+citemesh cache refresh --namespace NAMESPACE
+citemesh cache refresh --namespace NAMESPACE --dataset-revision SOURCE_COMMIT
+```
+
+A new refresh resolves its source revision once, compares full normalized
+records, and encodes only new or changed document text. Metadata-only changes
+retain their vectors and need no encoder. Existing int8 calibration ranges stay
+fixed. Removed source papers keep their physical vectors but leave active
+membership, retrieval, and export. Refresh scans source metadata; it does not
+promise a delta download.
+
+Repeated source IDs are resolved before calibration, encoding, or newest-N
+selection. The most recent valid `update_date` wins, followed by the highest
+arXiv version number and its creation time. When conflicting records have equal
+or unavailable revision information, a stable ordering of their normalized
+content breaks the tie and CiteMesh warns once with the number of ambiguous
+comparisons. This tie-break is deterministic; it does not establish freshness.
+Unparseable timestamps rank below valid ones, which are compared in UTC. The
+winning record retains its original source position. Equally recent, identical
+records retain the first occurrence.
+
+### Resume and adoption
+
+An interrupted import or refresh remains unavailable to consumers. Resume an
+import with the same local snapshot or the same bucket configuration and
+snapshot ID. A conflicting-import error prints the pinned resume command.
+Complete bucket downloads remain in the Hugging Face cache, so
+native import can resume from that copy even after the publisher retires the
+remote snapshot. An unfinished transfer may need to restart from the current
+snapshot if its files have been retired. Resume refresh against its recorded
+source target; a moving upstream branch cannot change that pending target.
+The cache recovers committed vector writes and reuses them on retry.
+
+Import accepts a fresh destination, the same incomplete import, or an identical
+completed import. An occupied incompatible destination is preserved and
+refused, including a bootstrap snapshot whose local copy has since been
+refreshed. Use another cache root for a different source or calibration lineage
+that would otherwise share a native address. Existing legacy caches need an
+explicit reconciliation before they can be exported with certified coverage:
+
+```bash
+# Supply the original model/storage/source settings when they differ from defaults.
+citemesh cache refresh --namespace NAMESPACE --adopt \
+  --model-revision main --dataset-revision SOURCE_COMMIT
+```
+
+Adoption checks the supplied historical selectors and stored model fingerprint;
+it never labels old vectors with the current moving model revision. A namespace
+whose original settings cannot be established is preserved and refused.
+
+### Publishing
+
+The manual publisher uses these same refresh and export operations. Create a
+private Storage Bucket first, then run from a source checkout:
+
+```bash
+hf buckets create OWNER/PRIVATE_INDEX --private
+python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
+  --adopt-namespace NAMESPACE --device cuda
+```
+
+Use `--namespace` for an already certified corpus, or omit both namespace flags
+to create a new configuration. Optional `--config NAME` overrides the published
+configuration name; otherwise export derives `<profile>-<dimension>-<dtype>`
+from the stored contract, such as `embeddinggemma-512-int8`. The output directory
+must be new. The script resolves and pins the source, refreshes, exports, and
+publishes one complete configuration. For upload ordering, see
+[Embedding Cache Internals](../internals/embedding-cache.md#portable-format).
+Use one publisher at a time. The bucket must already exist and be private.
+
+The publisher creates a starter `README.md` only when one is missing. Edit it
+freely and add links, images, or diagrams; later publications preserve it and
+assets outside `variants/`. Imports read the catalog, selected manifest, and its
+declared data files, without reading or validating documentation.
+
+Only the current snapshot of each configuration is retained remotely, so old
+full indexes do not accumulate as repository history. Keep a local export if
+you need an older snapshot later. Downloads and installed native caches remain
+on each consumer until removed there. Int8 ranges are established once for a
+new configuration and reused on refresh; a different calibration lineage needs
+a different configuration and native destination.
 
 ## Corpus records
 
 The dataset adapter accepts `id`, `paper_id`, or `paperId`, taking the first non-empty identifier. Stable source IDs preserve cache identity across updates. Without an ID, usable title or abstract text produces a content-derived ID; a row with neither fails and reports its source-row index.
 
-`title` supplies the paper name. `abstract` supplies the text, with `summary` used when the abstract is empty or unusable. Optional fields include `authors`, `authors_parsed`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal`. Structured `authors_parsed` entries take precedence over free-text authors. Missing titles become `Unknown`; years fall back to the arXiv submission year when available. Arbitrary column mappings are unsupported.
+`title` supplies the paper name. `abstract` supplies the text, with `summary` used when the abstract is empty or unusable. Optional fields include `authors`, `authors_parsed`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal-ref` / `journal`. Structured `authors_parsed` entries take precedence over free-text authors. Missing titles become `Unknown`; years fall back to the arXiv submission year when available. Arbitrary column mappings are unsupported.
+
+The `doi` field accepts a bare DOI, a `doi:` prefix, or a DOI URL. It uses the first token if valid, then falls back to a DOI-based paper ID.
 
 ## Corpus hydration and resume
+
+The automatic hydration rules below apply to ordinary legacy corpus caches.
+Certified portable indexes follow the explicit refresh and membership rules
+above.
 
 arXiv-corpus mode hydrates the full selected `--dataset-split` by default - "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; on a cold build the cap bounds what gets embedded, not how many rows are scanned to establish that order. Streaming ranking drains the source before encoding begins. An indexable non-streaming dataset instead scans its identifier columns. A slice such as `train[:2%]` limits the population ranked. Rows without parseable arXiv IDs fill any shortfall in source order, with a warning; when none can be parsed, the cap selects the first N rows.
 
@@ -108,7 +257,16 @@ citemesh cache scan
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-`cache scan` reports section totals and then each standard embedding namespace's ID, files, bytes, and schema status. `cache clear` deletes every entry under the cache root except `config.toml`, its lock, and `.locks/`. It fails without deleting anything while a cache operation is live, and it cannot interrupt a pending config write. To drop a single namespace instead, delete the matching `.db` and `.h5` in `embeddings/`.
+`cache scan` reports section totals and then each standard embedding namespace's ID, files, bytes, and status, reading SQLite metadata without loading a model. An installed corpus's status lists its dimension and stored dtype, active and physical row counts, source revision, coverage, and origin when recorded, ending in its state:
+
+- `ready`: the import or refresh finished and membership is certified, so search, builds, and export accept it.
+- `pending import` or `pending refresh`: an interrupted operation that blocks search, builds, and export until you [resume it](#resume-and-adoption).
+- `membership uncertified`: source membership is not yet certified, so an explicit `cache refresh` (or [adoption](#resume-and-adoption) for a legacy cache) must finish before the corpus can be searched, viewed, or exported.
+- `Current schema`: a namespace with no installed-corpus state; this reports schema reachability, not vector health. Older layouts show as `Legacy dtype-keyed namespace` or `Legacy schema vN`.
+- `Metadata busy` or `SQLite recovery pending`: another operation holds the namespace or an interrupted one needs write access to recover, so scan again or resume the import or refresh.
+- `Metadata unavailable`, `Corpus metadata unavailable`, or `Orphaned artifact (metadata database missing)`: inspect the files before removing them.
+
+`cache clear` deletes every entry under the cache root except `config.toml`, its lock, and `.locks/`. It fails without deleting anything while a cache operation is live, and it cannot interrupt a pending config write. To drop a single namespace instead, delete the matching `.db` and `.h5` in `embeddings/`.
 
 > [!CAUTION]
 > `cache clear` and `--force-rebuild-cache` are irreversible. A forced rebuild clears both namespaces for the resolved model contract and re-encodes from scratch, which on a hydrated corpus means hours of GPU time. Both prompt interactively on a TTY and refuse outright without one, so `--yes` and `--overwrite-cache` are how a script approves them; `--cache-overwrite-reason "<text>"` records a rationale that otherwise logs as `reason=unspecified`.

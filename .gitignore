@@ -1,5 +1,6 @@
 # local files
 .DS_Store
+/LOCAL.md
 out/*
 cache/*
 src/citemesh/_version.py

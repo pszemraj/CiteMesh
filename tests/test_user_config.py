@@ -9,7 +9,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -39,6 +38,36 @@ from citemesh.data.user_config import (
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
 from tests._helpers import PausedFirstWrite, run_captured_cli
+
+
+def _deny_mkdir(monkeypatch: pytest.MonkeyPatch, denied_path: Path) -> None:
+    """Reject creation of one directory while allowing other mkdir calls.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture installing the scoped patch.
+    :param Path denied_path: Directory whose creation should fail.
+    :return None: Patches ``Path.mkdir`` for this test.
+    """
+    original_mkdir = Path.mkdir
+
+    def deny_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        """Reject the selected path and forward other mkdir options.
+
+        :param Path path: Directory being created.
+        :param int mode: Permissions passed to ``mkdir``.
+        :param bool parents: Whether parent directories are created.
+        :param bool exist_ok: Whether an existing directory is accepted.
+        :return None: Creates unrelated directories normally.
+        """
+        if path == denied_path:
+            raise PermissionError("config directory denied")
+        original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", deny_mkdir)
 
 
 def _run_cli(args: list[str]) -> SimpleNamespace:
@@ -120,18 +149,23 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
 
 
 def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
-    """config.toml must stay owner-only because it can hold api.s2_api_key.
+    """config.toml must stay owner-only on POSIX because it can hold an API key.
 
     :param Path tmp_path: Pytest temporary directory.
-    :return None: Assertions validate permission bits for new and existing files.
+    :return None: Assertions validate persisted values and POSIX permission bits.
     """
     config_path = tmp_path / "config.toml"
     set_config_value("defaults.max_papers", "25", path=config_path)
-    assert config_path.stat().st_mode & 0o7777 == 0o600
+    if os.name == "posix":
+        assert config_path.stat().st_mode & 0o7777 == 0o600
+    assert load_user_config(config_path).defaults["max_papers"] == 25
 
-    config_path.chmod(0o644)
+    if os.name == "posix":
+        config_path.chmod(0o644)
     set_config_value("defaults.max_papers", "30", path=config_path)
-    assert config_path.stat().st_mode & 0o7777 == 0o600
+    if os.name == "posix":
+        assert config_path.stat().st_mode & 0o7777 == 0o600
+    assert load_user_config(config_path).defaults["max_papers"] == 30
 
 
 def test_config_set_serializes_concurrent_writes(
@@ -311,21 +345,7 @@ def test_config_write_wraps_parent_directory_error(
     :return None: Assertions verify the stable configuration error boundary.
     """
     config_path = tmp_path / "blocked" / "config.toml"
-    original_mkdir = Path.mkdir
-
-    def denied_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
-        """Reject creation of the target config directory only.
-
-        :param Path path: Directory being created.
-        :param Any args: Forwarded positional arguments.
-        :param Any kwargs: Forwarded keyword arguments.
-        :return None: Creates unrelated directories normally.
-        """
-        if path == config_path.parent:
-            raise PermissionError("config directory denied")
-        original_mkdir(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+    _deny_mkdir(monkeypatch, config_path.parent)
 
     with pytest.raises(ConfigFileError, match="Failed to prepare config directory"):
         user_config_module._write_document(config_path, {"defaults": {"theme": "dark"}})
@@ -346,21 +366,7 @@ def test_config_cli_wraps_mutation_filesystem_errors(
     lock: MagicMock | None = None
     if failure_site == "parent":
         config_parent = user_config_path().parent
-        original_mkdir = Path.mkdir
-
-        def denied_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
-            """Reject preparation of the active config directory only.
-
-            :param Path path: Directory being created.
-            :param Any args: Forwarded positional arguments.
-            :param Any kwargs: Forwarded keyword arguments.
-            :return None: Creates unrelated directories normally.
-            """
-            if path == config_parent:
-                raise PermissionError("config directory denied")
-            original_mkdir(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+        _deny_mkdir(monkeypatch, config_parent)
     else:
         lock = MagicMock()
         lock.acquire.side_effect = PermissionError("config lock denied")

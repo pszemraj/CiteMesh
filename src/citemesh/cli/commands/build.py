@@ -1,26 +1,22 @@
 """``citemesh build``: construct a graph and write the requested export artifacts.
 
-The run is a pipeline: plan the exports, build the graph, resolve output paths,
-assemble metadata, render the artifacts, then write the sidecar and -- in
-collection mode -- upsert the dashboard package. Each stage is a function here
-so the names tests patch on this module (``GraphExporter``, ``compute_layout``,
-``visualize_graph``, ``_build_strategy_graph``, ``update_dashboard_package``)
-stay module globals resolved at call time.
+Plan exports, build the graph, render artifacts, and write the configuration
+sidecar. Collection builds stage a result bundle before updating the package
+and refreshing its viewer.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
-
-import networkx as nx
+from typing import TYPE_CHECKING, cast
 
 from citemesh.data.cache import atomic_write_json, path_exists
 from citemesh.data.user_config import UserConfig
@@ -40,6 +36,15 @@ from citemesh.visualization.dashboard.package import (
     update_dashboard_package,
 )
 
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+    from citemesh.core.models import PaperGraph
+    from citemesh.strategies.embedding.builder import EmbeddingRuntimeMetadata
+    from citemesh.visualization.dashboard.contracts import GraphConfigData
+    from citemesh.visualization.export import ExportMetadata, PlotOverlayMetadata
+
 from ..build_contract import (
     _build_strategy_graph,
     _log_build_side_effect_contract,
@@ -53,6 +58,7 @@ from ..build_options import (
     _strategy_score_contract,
 )
 from ..cache_ops import _confirm_force_rebuild_cache
+from ..cache_selection import _apply_cache_selection
 from ..console import logger
 from ..graph_config import (
     _build_graph_config_payload,
@@ -140,14 +146,14 @@ def _resolve_build_plan(args: argparse.Namespace) -> _BuildPlan:
 def _resolve_run_output_paths(
     args: argparse.Namespace,
     plan: _BuildPlan,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
 ) -> tuple[dict[str, Path], Path | None]:
     """Resolve every artifact path for this run and create their directories.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param _BuildPlan plan: Export selection resolved before the graph was built.
-    :param nx.Graph graph: Constructed graph, used to derive a default path.
+    :param PaperGraph graph: Constructed graph, used to derive a default path.
     :param str seed_id: Canonical seed identifier for the run.
     :return tuple[dict[str, Path], Path | None]: Format-keyed output paths and
         the collection package path, or ``None`` outside collection mode.
@@ -199,16 +205,16 @@ def _resolve_run_output_paths(
 
 
 def _build_export_metadata(
-    args: argparse.Namespace, graph: nx.Graph, seed_id: str
-) -> dict[str, Any]:
+    args: argparse.Namespace, graph: PaperGraph, seed_id: str
+) -> ExportMetadata:
     """Assemble the run metadata embedded in every export artifact.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
-    :param nx.Graph graph: Constructed graph carrying runtime annotations.
+    :param PaperGraph graph: Constructed graph carrying runtime annotations.
     :param str seed_id: Canonical seed identifier for the run.
-    :return dict[str, Any]: Metadata passed to the exporter and sidecar payload.
+    :return ExportMetadata: Metadata passed to the exporter and sidecar payload.
     """
-    metadata: dict[str, Any] = {
+    metadata: ExportMetadata = {
         "paper_id": canonicalize_paper_id_for_metadata(args.paper_id),
         "seed_id": seed_id,
         "strategy": args.strategy,
@@ -227,10 +233,12 @@ def _build_export_metadata(
         }
     include_embedding_metadata = _embedding_branch_enabled(args)
     if include_embedding_metadata:
-        runtime_embedding_metadata: dict[str, Any] | None = None
+        runtime_embedding_metadata: EmbeddingRuntimeMetadata | None = None
         raw_runtime_metadata = graph.graph.get("embedding_runtime")
         if isinstance(raw_runtime_metadata, dict):
-            runtime_embedding_metadata = raw_runtime_metadata
+            runtime_embedding_metadata = cast(
+                "EmbeddingRuntimeMetadata", raw_runtime_metadata
+            )
         metadata["embedding"] = _embedding_export_metadata(
             args, runtime_embedding_metadata
         )
@@ -241,22 +249,22 @@ def _build_export_metadata(
 
 def _create_graph_exporter(
     args: argparse.Namespace,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
-    metadata: dict[str, Any],
+    metadata: ExportMetadata,
     output_paths: dict[str, Path],
-) -> tuple[Any, Any]:
+) -> tuple[GraphExporter, dict[Hashable, NDArray[np.float64]] | None]:
     """Compute the run's shared layout and build the exporter bound to it.
 
     JSON embeds dashboard geometry too, so it shares the run's layout (honoring
     ``--spring-iterations``/``--seed``) instead of a default one.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
-    :param nx.Graph graph: Constructed graph to export.
+    :param PaperGraph graph: Constructed graph to export.
     :param str seed_id: Canonical seed identifier for the run.
-    :param dict[str, Any] metadata: Run metadata embedded in exports.
+    :param ExportMetadata metadata: Run metadata embedded in exports.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
-    :return tuple[Any, Any]: The exporter and the shared layout, which is
+    :return: The exporter and the shared layout, which is
         ``None`` when no selected format needs one.
     """
     layout_required = any(fmt in output_paths for fmt in _LAYOUT_DEPENDENT_FORMATS)
@@ -284,22 +292,22 @@ def _write_export_artifacts(
     export_paths: dict[str, Path],
     *,
     args: argparse.Namespace,
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
-    exporter: Any,
-    plot_metadata: dict[str, Any],
-    shared_layout: Any,
+    exporter: GraphExporter,
+    plot_metadata: PlotOverlayMetadata,
+    shared_layout: dict[Hashable, NDArray[np.float64]] | None,
     defer_collection_formats: bool,
 ) -> None:
     """Write selected graph exports to their supplied paths.
 
     :param dict[str, Path] export_paths: Destination paths for this write.
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
-    :param nx.Graph graph: Constructed graph to render.
+    :param PaperGraph graph: Constructed graph to render.
     :param str seed_id: Canonical seed identifier for the run.
-    :param Any exporter: Exporter bound to the run's graph and layout.
-    :param dict[str, Any] plot_metadata: Compact metadata overlaid on the plot.
-    :param Any shared_layout: Layout shared by every geometry-bearing format.
+    :param GraphExporter exporter: Exporter bound to the run's graph and layout.
+    :param PlotOverlayMetadata plot_metadata: Compact metadata overlaid on the plot.
+    :param shared_layout: Layout shared by every geometry-bearing format.
     :param bool defer_collection_formats: Whether the collection stages JSON
         separately and renders the viewer from the package afterward.
     :return None: Writes the selected artifacts to their resolved paths.
@@ -335,7 +343,7 @@ def _write_run_sidecar(
     plan: _BuildPlan,
     *,
     output_paths: dict[str, Path],
-    graph_config_payload: dict[str, Any],
+    graph_config_payload: GraphConfigData,
     dashboard_package_path: Path | None,
 ) -> Path | None:
     """Write the run's ``*.config.json`` sidecar when this run owns one.
@@ -346,7 +354,7 @@ def _write_run_sidecar(
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param _BuildPlan plan: Export selection resolved for this run.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
-    :param dict[str, Any] graph_config_payload: Reproducible build payload.
+    :param GraphConfigData graph_config_payload: Reproducible build payload.
     :param Path | None dashboard_package_path: Collection package path, if any.
     :return Path | None: The sidecar path written, or ``None`` if skipped.
     """
@@ -368,10 +376,10 @@ def _stage_dashboard_result(
     *,
     dashboard_package_path: Path,
     output_paths: dict[str, Path],
-    graph: nx.Graph,
+    graph: PaperGraph,
     seed_id: str,
-    exporter: Any,
-    graph_config_payload: dict[str, Any],
+    exporter: GraphExporter,
+    graph_config_payload: GraphConfigData,
     write_export_artifacts: Callable[[dict[str, Path]], None],
 ) -> Path:
     """Stage this run's result bundle and upsert it into the collection package.
@@ -383,10 +391,10 @@ def _stage_dashboard_result(
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param Path dashboard_package_path: Collection package to update.
     :param dict[str, Path] output_paths: Final artifact paths for the run.
-    :param nx.Graph graph: Constructed graph being recorded.
+    :param PaperGraph graph: Constructed graph being recorded.
     :param str seed_id: Canonical seed identifier for the run.
-    :param Any exporter: Exporter bound to the run's graph and layout.
-    :param dict[str, Any] graph_config_payload: Reproducible build payload.
+    :param GraphExporter exporter: Exporter bound to the run's graph and layout.
+    :param GraphConfigData graph_config_payload: Reproducible build payload.
     :param Callable[[dict[str, Path]], None] write_export_artifacts: Writer that
         renders the selected formats into the supplied paths.
     :return Path: Final sidecar path promoted into the result directory.
@@ -423,7 +431,7 @@ def _stage_dashboard_result(
             seed_id=seed_id,
             strategy=args.strategy,
             payload=graph_payload,
-            build=dict(graph_config_payload.get("build", {})),
+            build=graph_config_payload["build"].copy(),
             staged_result_files=staged_result_files,
             obsolete_result_paths=(
                 _dashboard_optional_result_paths(output_paths)
@@ -438,8 +446,8 @@ def _render_dashboard_viewer(
     *,
     dashboard_package_path: Path,
     output_paths: dict[str, Path],
-    exporter: Any,
-    metadata: dict[str, Any],
+    exporter: GraphExporter,
+    metadata: ExportMetadata,
 ) -> bool:
     """Refresh the collection viewer from the just-committed package.
 
@@ -449,8 +457,8 @@ def _render_dashboard_viewer(
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param Path dashboard_package_path: Committed collection package.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
-    :param Any exporter: Exporter bound to the run's graph and layout.
-    :param dict[str, Any] metadata: Run metadata embedded in the viewer.
+    :param GraphExporter exporter: Exporter bound to the run's graph and layout.
+    :param ExportMetadata metadata: Run metadata embedded in the viewer.
     :return bool: ``True`` if the viewer was refreshed, ``False`` on failure.
     """
     try:
@@ -476,7 +484,7 @@ def _render_dashboard_viewer(
 
 
 def _log_run_summary(
-    graph: nx.Graph,
+    graph: PaperGraph,
     *,
     output_paths: dict[str, Path],
     graph_config_path: Path | None,
@@ -484,7 +492,7 @@ def _log_run_summary(
 ) -> None:
     """Log one user-facing completion result and auxiliary paths for debugging.
 
-    :param nx.Graph graph: Constructed graph being summarized.
+    :param PaperGraph graph: Constructed graph being summarized.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
     :param Path | None graph_config_path: Sidecar path, if one was written.
     :param Path | None dashboard_package_path: Collection package path, if any.
@@ -557,6 +565,24 @@ def run_build_command(
     config_default_dests = _apply_user_config_defaults(
         args, provided_build_options, user_config
     )
+    try:
+        stored_dests = _apply_cache_selection(
+            args, provided_build_options, build_parser
+        )
+    except (
+        ValueError,
+        OSError,
+        ImportError,
+        RuntimeError,
+        sqlite3.DatabaseError,
+    ) as exc:
+        logger.error(
+            "Cannot use selected corpus: %s",
+            exc,
+            exc_info=logger.isEnabledFor(logging.DEBUG),
+        )
+        return 1
+    config_default_dests.difference_update(stored_dests)
     _validate_build_cli_contract(
         args,
         build_parser,

@@ -66,34 +66,6 @@ def _dataset_slice(dataset: Any, split: str) -> Any:
     return dataset.select(range(start, min(stop, len(dataset))))
 
 
-def _read_cached_vectors(cache: Any, paper_ids: set[str]) -> dict[str, np.ndarray]:
-    """Read selected persisted vectors without invoking the encoder.
-
-    :param Any cache: Hydrated embedding cache whose SQLite and HDF5 rows agree.
-    :param set[str] paper_ids: Canonical cache identifiers to retrieve.
-    :return dict[str, np.ndarray]: Detached FP32 copies keyed by paper identifier.
-    """
-    with (
-        cache._cache_lock(),
-        cache._connect_db() as conn,
-        h5py.File(cache.h5_path, "r") as h5_file,
-    ):
-        row_indices = {
-            str(paper_id): int(row_index)
-            for paper_id, row_index in conn.execute(
-                "SELECT paper_id, row_idx FROM papers"
-            ).fetchall()
-            if str(paper_id) in paper_ids
-        }
-        embeddings = h5_file[EMBEDDINGS_DATASET_NAME]
-        vectors = {
-            paper_id: np.asarray(embeddings[row_index], dtype=np.float32).copy()
-            for paper_id, row_index in row_indices.items()
-        }
-    assert vectors.keys() == paper_ids
-    return vectors
-
-
 def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -182,7 +154,8 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     assert cache.is_hydrated("train", None, dataset_source=DEFAULT_DATASET_SOURCE)
     historical_ids = cache.get_cached_paper_ids()
     assert len(historical_ids) == len(initial_snapshot)
-    historical_vectors = _read_cached_vectors(cache, historical_ids)
+    historical_vectors = cache.get_cached_embeddings(list(historical_ids))
+    assert historical_vectors.keys() == historical_ids
     assert all(vector.dtype == np.float32 for vector in historical_vectors.values())
 
     clear_calls: list[str] = []
@@ -257,10 +230,12 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     builder.corpus_size = None
     builder._ensure_cache_hydrated(use_streaming=False)
     assert requested_splits == []
-    restored_vectors = _read_cached_vectors(cache, historical_ids)
+    restored_vectors = cache.get_cached_embeddings(list(historical_ids))
+    assert restored_vectors.keys() == historical_ids
     for paper_id, original_vector in historical_vectors.items():
         np.testing.assert_array_equal(restored_vectors[paper_id], original_vector)
-    new_vectors = _read_cached_vectors(cache, new_ids)
+    new_vectors = cache.get_cached_embeddings(list(new_ids))
+    assert new_vectors.keys() == new_ids
     assert all(vector.dtype == np.float32 for vector in new_vectors.values())
     assert all(np.isfinite(vector).all() for vector in new_vectors.values())
     with h5py.File(cache.h5_path, "r") as h5_file:

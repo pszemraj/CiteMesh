@@ -7,8 +7,8 @@ import re
 from collections.abc import Hashable
 from functools import lru_cache
 from importlib import resources
-from typing import Any
 
+from citemesh.core.values import parse_float
 from citemesh.visualization.export.geometry import (
     _UI_PALETTES,
     DASHBOARD_AXIS_MIN_PADDING,
@@ -24,6 +24,7 @@ from citemesh.visualization.export.geometry import (
 )
 from citemesh.visualization.export.nodes import _sorted_edges, _strategy
 
+from ..export._host import _ExporterHost
 from ..themes import Theme
 from ..years import optional_publication_year_bounds
 from .contracts import (
@@ -31,6 +32,12 @@ from .contracts import (
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
     GRAPH_PAYLOAD_KIND,
     GRAPH_PAYLOAD_SCHEMA_VERSION,
+    DashboardCollectionBundle,
+    DashboardCollectionResult,
+    DashboardMetadata,
+    DashboardPayload,
+    EnrichedNodePayload,
+    YearRange,
 )
 
 _DASHBOARD_ASSET_PACKAGE = "citemesh.visualization.dashboard"
@@ -139,24 +146,24 @@ class DashboardPayloadMixin:
     """Exporter-state dashboard metadata, payload, and collection assembly."""
 
     def _dashboard_meta(
-        self,
+        self: _ExporterHost,
         *,
         theme_obj: Theme,
         node_ids: list[Hashable],
-        node_payloads: list[dict[str, Any]],
-        sorted_edges: list[tuple[Hashable, Hashable, dict[str, Any]]],
+        node_payloads: list[EnrichedNodePayload],
+        sorted_edges: list[tuple[Hashable, Hashable, dict[str, object]]],
         include_plotly_geometry: bool,
-    ) -> dict[str, Any]:
+    ) -> DashboardMetadata:
         """Build dashboard metadata shared by dashboard HTML and JSON exports.
 
         :param Theme theme_obj: Active visualization theme.
         :param list[Hashable] node_ids: Node order used by Plotly points.
-        :param list[Dict[str, Any]] node_payloads: Enriched node payloads.
-        :param list[tuple[Hashable, Hashable, Dict[str, Any]]] sorted_edges:
+        :param list[EnrichedNodePayload] node_payloads: Enriched node payloads.
+        :param list[tuple[Hashable, Hashable, dict[str, object]]] sorted_edges:
             Deterministically ordered edge payloads.
         :param bool include_plotly_geometry: Whether layout-backed Plotly geometry
             should be embedded in the metadata.
-        :return Dict[str, Any]: Dashboard metadata payload.
+        :return DashboardMetadata: Dashboard metadata payload.
         """
         # The dashboard import contract requires a non-empty strategy token;
         # graphs built outside the CLI/builders may carry none.
@@ -166,9 +173,11 @@ class DashboardPayloadMixin:
         bounds = optional_publication_year_bounds(
             node.get("year") for node in node_payloads
         )
-        year_range = {"min": bounds[0], "max": bounds[1]} if bounds else None
+        year_range: YearRange | None = (
+            {"min": bounds[0], "max": bounds[1]} if bounds else None
+        )
 
-        meta: dict[str, Any] = {
+        meta: DashboardMetadata = {
             "seed_id": str(self.seed_id),
             "strategy": strategy,
             "theme": theme_obj.name,
@@ -199,17 +208,17 @@ class DashboardPayloadMixin:
         return meta
 
     def _dashboard_payload(
-        self, *, theme_obj: Theme, node_ids: list[Hashable]
-    ) -> dict[str, Any]:
+        self: _ExporterHost, *, theme_obj: Theme, node_ids: list[Hashable]
+    ) -> DashboardPayload:
         """Build deterministic dashboard payload from graph metadata.
 
         :param Theme theme_obj: Active visualization theme.
         :param list[Hashable] node_ids: Node order used by Plotly points.
-        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        :return DashboardPayload: Payload consumed by dashboard JS.
         """
         node_payloads = self._enriched_nodes()
         sorted_edges = _sorted_edges(self.graph)
-        payload: dict[str, Any] = {
+        payload: DashboardPayload = {
             "meta": self._dashboard_meta(
                 theme_obj=theme_obj,
                 node_ids=node_ids,
@@ -222,19 +231,21 @@ class DashboardPayloadMixin:
                 {
                     "source": str(left),
                     "target": str(right),
-                    "weight": float(data.get("weight", 0.0)),
+                    "weight": parse_float(data.get("weight", 0.0)),
                 }
                 for left, right, data in sorted_edges
             ],
         }
         return payload
 
-    def _dashboard_collection_bundle(self) -> dict[str, Any]:
+    def _dashboard_collection_bundle(
+        self: _ExporterHost,
+    ) -> DashboardCollectionBundle:
         """Normalize optional collection metadata for shared dashboard shells.
 
-        :return Dict[str, Any]: Collection result descriptors and embedded payloads.
+        :return DashboardCollectionBundle: Collection result descriptors and payloads.
         """
-        empty_bundle: dict[str, Any] = {
+        empty_bundle: DashboardCollectionBundle = {
             "kind": DASHBOARD_COLLECTION_KIND,
             "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
             "current_result_id": None,
@@ -248,7 +259,7 @@ class DashboardPayloadMixin:
         raw_results = raw_bundle.get("results")
         raw_payloads = raw_bundle.get("payloads")
         legacy_payloads = raw_payloads if isinstance(raw_payloads, dict) else {}
-        results: list[dict[str, Any]] = []
+        results: list[DashboardCollectionResult] = []
         if isinstance(raw_results, list):
             for raw_entry in raw_results:
                 if not isinstance(raw_entry, dict):
@@ -259,20 +270,19 @@ class DashboardPayloadMixin:
                     payload = legacy_payloads.get(result_id)
                 if not result_id or not isinstance(payload, dict):
                     continue
-                entry: dict[str, Any] = {
-                    key: raw_entry[key]
-                    for key in (
-                        "result_id",
-                        "seed_id",
-                        "title",
-                        "strategy",
-                        "summary",
-                        "updated_at",
-                    )
-                    if key in raw_entry
+                entry: DashboardCollectionResult = {
+                    "result_id": result_id,
+                    "payload": payload,
                 }
-                entry["result_id"] = result_id
-                entry["payload"] = payload
+                for key in (
+                    "seed_id",
+                    "title",
+                    "strategy",
+                    "summary",
+                    "updated_at",
+                ):
+                    if key in raw_entry:
+                        entry[key] = raw_entry[key]
                 build = raw_entry.get("build")
                 if isinstance(build, dict):
                     entry["build"] = build
@@ -291,7 +301,7 @@ class DashboardPayloadMixin:
             # Malformed entries are dropped above, and the viewer rejects a bundle
             # whose current_result_id names no included result.
             current_result_id = results[0]["result_id"] if results else None
-        bundle: dict[str, Any] = {
+        bundle: DashboardCollectionBundle = {
             "current_result_id": current_result_id,
             "results": results,
         }

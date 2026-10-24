@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from pathlib import Path
 
 import httpx
+import httpx2
 import pytest
 import requests
 
@@ -77,3 +79,9 @@ def test_external_http_guard_blocks_unpatched_sessions() -> None:
         )
     with pytest.raises(AssertionError, match="attempted an external HTTP request"):
         httpx.Client().send(httpx.Request("GET", "https://huggingface.co"))
+    with pytest.raises(AssertionError, match="attempted an external HTTP request"):
+        httpx2.Client().send(httpx2.Request("GET", "https://huggingface.co"))
+    with pytest.raises(AssertionError, match="attempted an external HTTP request"):
+        asyncio.run(
+            httpx2.AsyncClient().send(httpx2.Request("GET", "https://huggingface.co"))
+        )
