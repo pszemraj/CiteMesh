@@ -254,7 +254,13 @@ def _parse_doi(doi_data: object) -> str:
     :param object doi_data: Raw DOI field from source or cached metadata.
     :return str: Canonical bare DOI, or an empty string when unavailable.
     """
-    source_doi = re.split(r"[\s,;]+", str(doi_data or "").strip())[0]
+    # Suffix punctuation separates records only when another DOI follows it.
+    source_doi = re.split(
+        r"\s+|[,;](?=\s*(?:10\.\d{4,9}/|doi:|https?://))",
+        str(doi_data or "").strip(),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
     canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
     if canonical_source_doi is None:
         return ""

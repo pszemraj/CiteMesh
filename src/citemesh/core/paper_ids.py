@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlsplit
 
 
 def strip_arxiv_version(identifier: str) -> str:
@@ -248,7 +248,7 @@ def _normalize_hosted_identifier(candidate: str) -> str | None:
     :param str candidate: URL-like identifier candidate.
     :return Optional[str]: Canonical ID when the host/path matches a known source.
     """
-    parsed = urlparse(candidate)
+    parsed = urlsplit(candidate)
     host = (parsed.hostname or "").lower()
     path = unquote(parsed.path)
 
