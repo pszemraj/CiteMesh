@@ -260,7 +260,7 @@ def _normalize_hosted_identifier(candidate: str) -> str | None:
     if host_matches_domain(host, "doi.org"):
         # DOI names are case-insensitive; lowercase so one paper cannot split
         # into distinct cache keys or graph identities by casing.
-        doi_id = path.strip("/")
+        doi_id = path.lstrip("/")
         if doi_id:
             return doi_id.lower()
 

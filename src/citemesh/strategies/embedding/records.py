@@ -254,10 +254,14 @@ def _parse_doi(doi_data: object) -> str:
     :param object doi_data: Raw DOI field from source or cached metadata.
     :return str: Canonical bare DOI, or an empty string when unavailable.
     """
+    doi_text = re.sub(
+        r"^(doi:)\s+", r"\1", str(doi_data or "").strip(), flags=re.IGNORECASE
+    )
     # Suffix punctuation separates records only when another DOI follows it.
     source_doi = re.split(
-        r"\s+|[,;](?=\s*(?:10\.\d{4,9}/|doi:|https?://))",
-        str(doi_data or "").strip(),
+        r"\s+|[,;](?=\s*(?:10\.\d{4,9}/|doi:|https?://"
+        r"|(?:[\w-]+\.)*doi\.org(?::\d+)?/))",
+        doi_text,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
