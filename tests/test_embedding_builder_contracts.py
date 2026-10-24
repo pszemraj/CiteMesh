@@ -59,6 +59,7 @@ from citemesh.strategies.embedding import text as embedding_text_module
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from tests._helpers import (
     ConstantEncodeModel,
+    LengthRecordingEncodeModel,
     disable_embedding_dep_checks,
     raise_import_error,
 )
@@ -1334,20 +1335,8 @@ def test_encode_texts_uses_length_bucketed_batches(
         client=MagicMock(),
     )
 
-    captured_batches: list[list[str]] = []
-
-    class _CaptureEncodeModel:
-        def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
-            del kwargs
-            captured_batches.append(list(texts))
-            return np.asarray(
-                [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
-                dtype=np.float32,
-            )
-
-    monkeypatch.setattr(
-        builder, "_get_model_for_encoding", lambda: _CaptureEncodeModel()
-    )
+    model = LengthRecordingEncodeModel()
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
 
     texts = [
         "x " * 120,
@@ -1358,10 +1347,9 @@ def test_encode_texts_uses_length_bucketed_batches(
     ]
     embeddings = builder._encode_texts(texts, batch_size=2, show_progress_bar=False)
 
-    assert [len(batch) for batch in captured_batches] == [2, 2, 1]
+    assert [len(batch) for batch in model.calls] == [2, 2, 1]
     batch_estimates = [
-        [estimate_text_length_bucket(text) for text in batch]
-        for batch in captured_batches
+        [estimate_text_length_bucket(text) for text in batch] for batch in model.calls
     ]
     assert batch_estimates == sorted(
         batch_estimates, key=lambda item: (max(item), item)

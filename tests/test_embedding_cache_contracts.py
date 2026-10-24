@@ -56,6 +56,7 @@ from citemesh.data.embedding_cache import (
 from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import (
     BlockingEncodeModel,
+    LengthRecordingEncodeModel,
     LookupEncodeModel,
     SeededRandomEncodeModel,
 )
@@ -1327,25 +1328,13 @@ def test_embedding_cache_rechecks_misses_after_encode_race(
 def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
     """Cache encode work should batch similarly sized texts together."""
 
-    class _CaptureEncodeModel:
-        def __init__(self) -> None:
-            self.calls: list[list[str]] = []
-
-        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
-            del kwargs
-            self.calls.append(list(texts))
-            return np.asarray(
-                [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
-                dtype=np.float32,
-            )
-
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
             model_name="length-bucketed-cache",
             storage_precision="float32",
         )
-        model = _CaptureEncodeModel()
+        model = LengthRecordingEncodeModel()
         papers = {
             "p1": {"title": "Long", "abstract": "x " * 120},
             "p2": {"title": "Tiny", "abstract": "short"},

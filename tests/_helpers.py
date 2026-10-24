@@ -1,4 +1,4 @@
-"""Shared helpers for consolidated CiteMesh tests."""
+"""Shared helpers for CiteMesh tests."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import Any
 import networkx as nx
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 
 def fail_stat_for(
@@ -80,6 +81,23 @@ class ConstantEncodeModel:
         if not texts:
             return np.empty((0, int(self.vector.shape[0])), dtype=np.float32)
         return np.repeat(self.vector[np.newaxis, :], len(texts), axis=0)
+
+
+class LengthRecordingEncodeModel:
+    """Record batches and encode text length and batch-local index."""
+
+    def __init__(self) -> None:
+        """Initialize an empty batch log."""
+        self.calls: list[list[str]] = []
+
+    def encode(self, texts: Sequence[str], **kwargs: object) -> NDArray[np.float32]:
+        """Log texts and return two-column FP32 rows; ignore encoding options."""
+        del kwargs
+        self.calls.append(list(texts))
+        return np.asarray(
+            [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
+            dtype=np.float32,
+        )
 
 
 class BlockingEncodeModel:
