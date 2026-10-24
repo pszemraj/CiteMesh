@@ -28,21 +28,31 @@ Inside sandboxed agent shells Metal is not visible: `torch.backends.mps.is_avail
 
 ## Environment and commands
 
+Read the repository-root `LOCAL.md`, if present, for this machine's development
+environment, test worker selection, and hardware notes. Keep `LOCAL.md` local and
+gitignored; keep shared project instructions in this tracked `AGENTS.md`. If the
+Python environment is not specified, ask which one to use.
+
 Install the project for development with `pip install -e ".[all]"`. Versions come
 from Git tags via setuptools-scm, so fetch tags when a checkout reports an
 unexpected development version.
 
-Use the `inf` conda environment for development, validation, and Semble. Run
-project commands with `conda run -n inf --live-stream <command>`. Before
-committing, run:
+Before committing, run these checks using the environment and pytest worker
+selection from `LOCAL.md` when available:
 
 ```bash
-python -m pytest -n logical --dist worksteal
+python -m pytest -n auto --dist worksteal
 ruff check .
 ruff format --check .
 ```
 
-The default suite is network-free and excludes `slow` tests. The command above uses one pytest-xdist worker per logical CPU with work stealing; the development extra includes `psutil` for CPU counting. Choose another worker count with `-n N`, or use `-n 0` for serial debugging. Cache-locking, subprocess, threaded-export, and rendering tests belong in this parallel suite: each test has isolated cache and temporary paths.
+The default suite is network-free and excludes `slow` tests. Run it in parallel
+when the machine has sufficient CPU and memory. Without a local worker selection,
+`-n auto` starts one worker per physical CPU core using the development extra's
+`psutil` dependency. Adjust with `-n N` for the machine's resources and other
+workloads; use `-n 0` for serial debugging. Cache-locking, subprocess,
+threaded-export, and rendering tests belong in this parallel suite: each test has
+isolated cache and temporary paths.
 
 Run opt-in real-model and compilation checks serially with `python -m pytest -n 0 -m slow`. These tests can compete for the same accelerator, CPU inference threads, and compiler resources. For CUDA only, use `python -m pytest -n 0 -m "slow and cuda"`. Some slow tests may download the designated model or fetch live arXiv data; CPU semantic-quality tests require the model already cached.
 
