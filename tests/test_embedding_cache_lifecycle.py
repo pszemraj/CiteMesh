@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 
@@ -23,7 +25,7 @@ from citemesh.data.embedding_contract import (
     EmbeddingContract,
     serialize_embedding_namespace,
 )
-from tests._helpers import BlockingEncodeModel
+from tests._helpers import BlockingEncodeModel, ConstantEncodeModel
 
 
 def _settings(tmp_path, dtype="float32", dimension=4):
@@ -372,8 +374,11 @@ def test_fresh_import_preflight_does_not_initialize_payload(tmp_path):
     assert not list(tmp_path.glob("*.db"))
 
 
-def test_import_rebuilds_binary_only_once_after_all_batches(tmp_path, monkeypatch):
+def test_import_rebuilds_binary_only_once_after_all_batches(
+    tmp_path, monkeypatch, caplog
+):
     settings = _settings(tmp_path, "int8")
+    caplog.set_level("DEBUG")
     calls = []
     original = EmbeddingCache._rebuild_binary_dataset
 
@@ -392,6 +397,13 @@ def test_import_rebuilds_binary_only_once_after_all_batches(tmp_path, monkeypatc
             assert calls == []
         session.finish(expected_rows=4, source_records_examined=4)
         assert calls == [4]
+    rebuilds = [
+        record
+        for record in caplog.records
+        if "Rebuilding binary index" in record.message
+    ]
+    assert len(rebuilds) == 1
+    assert rebuilds[0].levelname == "DEBUG"
 
 
 def test_refresh_prevents_later_import_of_bootstrap_snapshot(tmp_path):
@@ -511,3 +523,158 @@ def test_strict_selection_preserves_existing_lzf_compression(tmp_path):
     with h5py.File(selected.h5_path, "r") as h5:
         assert h5["embeddings"].compression == "lzf"
         np.testing.assert_array_equal(h5["embeddings"][:], np.eye(4, dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    "entrypoint", ["constructor", "selection", "metadata", "import"]
+)
+@pytest.mark.parametrize("kind", ["import", "refresh"])
+def test_existing_cache_entrypoints_recover_a_hot_sqlite_journal(
+    tmp_path, entrypoint, kind
+):
+    """Abrupt SQLite writes must recover before import or refresh resumes."""
+    settings = _settings(tmp_path)
+    with import_destination_session(**settings) as session:
+        session.append_stored_embeddings(
+            _records(), np.eye(4, dtype=np.float32), first_row=0
+        )
+        cache = session.cache
+    if kind == "refresh":
+        with import_destination_session(**settings) as session:
+            session.finish(expected_rows=4, source_records_examined=4)
+        with cache.operation_session(
+            kind="refresh",
+            identity={"source": settings["source"].to_dict()},
+            target_source=settings["source"],
+            contract=settings["contract"],
+            namespace_selectors=settings["namespace_selectors"],
+        ):
+            pass
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sqlite3, sys; "
+            "conn = sqlite3.connect(sys.argv[1]); "
+            "conn.execute('PRAGMA cache_size=8'); "
+            "conn.execute('BEGIN IMMEDIATE'); "
+            "conn.executemany('INSERT INTO papers(paper_id, abstract) VALUES (?, ?)', "
+            "((f'uncommitted-{i}', 'x' * 1500) for i in range(6000))); "
+            "os._exit(9)",
+            str(cache.db_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 9, child.stderr
+    assert cache.db_path.with_name(cache.db_path.name + "-journal").is_file()
+    connection = sqlite3.connect(cache.db_path.as_uri() + "?mode=ro", uri=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("SELECT COUNT(*) FROM papers").fetchone()
+    finally:
+        connection.close()
+    if entrypoint == "constructor":
+        reopened = EmbeddingCache(
+            cache_dir=tmp_path,
+            model_name=settings["namespace_serialization"],
+            storage_precision="float32",
+            text_formatter_fingerprint=settings["contract"].formatter_identity,
+        )
+        assert reopened.corpus_state()["pending"]["kind"] == kind
+    elif entrypoint == "selection":
+        assert select_existing_cache(cache.namespace_id, tmp_path, require_ready=False)
+    elif entrypoint == "metadata":
+        assert lifecycle.read_existing_cache_metadata(cache.namespace_id, tmp_path)
+    elif kind == "import":
+        assert preflight_import_destination(**settings) == "resume_same_import"
+    else:
+        with pytest.raises(ValueError, match="Conflicting incomplete import"):
+            preflight_import_destination(**settings)
+    if kind == "import":
+        with import_destination_session(**settings) as session:
+            assert session.committed_rows == 4
+            session.finish(expected_rows=4, source_records_examined=4)
+    else:
+        with cache.operation_session(
+            kind="refresh",
+            identity={"source": settings["source"].to_dict()},
+            target_source=settings["source"],
+            contract=settings["contract"],
+            namespace_selectors=settings["namespace_selectors"],
+        ) as session:
+            session.record_membership(_records())
+            session.finish(expected_rows=4, source_records_examined=4)
+    assert cache.get_cached_paper_ids() == {record["paper_id"] for record in _records()}
+
+
+def test_clear_releases_an_imported_namespace_for_ordinary_rebuild(tmp_path):
+    """Clearing an installed cache must permit writes through that same object."""
+    settings = _settings(tmp_path)
+    cache, _, _ = _populate(settings)
+    cache = open_existing_cache(
+        select_existing_cache(cache.namespace_id, tmp_path), tmp_path
+    )
+    cache.clear("explicit rebuild")
+    cache.upsert_embeddings(
+        {"replacement": {"title": "Replacement"}},
+        ConstantEncodeModel((1.0, 0.0, 0.0, 0.0)),
+    )
+    assert cache.get_cached_paper_ids() == {"replacement"}
+    assert cache.corpus_state() == {}
+
+
+def test_legacy_open_migrates_chronology_before_persisting_pending_state(tmp_path):
+    """Adoption must migrate supported SQLite columns before refresh begins."""
+    settings = _settings(tmp_path)
+    cache, _, _ = _populate(settings)
+    selection = select_existing_cache(cache.namespace_id, tmp_path)
+    with cache._connect_db() as connection:
+        connection.execute(
+            "DELETE FROM cache_metadata WHERE key = ?", (lifecycle.CORPUS_STATE_KEY,)
+        )
+        connection.execute("DROP INDEX idx_papers_chronology_key")
+        connection.execute("ALTER TABLE papers DROP COLUMN chronology_key")
+    adopted = open_existing_cache(
+        selection, tmp_path, require_ready=False, allow_legacy=True
+    )
+    with adopted._connect_db() as connection:
+        assert "chronology_key" in {
+            row[1] for row in connection.execute("PRAGMA table_info(papers)")
+        }
+    assert adopted.corpus_state() == {}
+    with adopted.operation_session(
+        kind="refresh",
+        identity={"source": settings["source"].to_dict()},
+        target_source=settings["source"],
+        contract=settings["contract"],
+        namespace_selectors=settings["namespace_selectors"],
+    ) as session:
+        session.record_membership(_records())
+        session.finish(expected_rows=4, source_records_examined=4)
+    assert adopted.corpus_state()["membership_complete"]
+
+
+@pytest.mark.parametrize(
+    "reader", [select_existing_cache, lifecycle.read_existing_cache_metadata]
+)
+def test_unknown_namespace_inspection_reports_not_installed(tmp_path, reader):
+    """Inspection must report a missing namespace without creating its database."""
+    directory = tmp_path / "absent"
+    with pytest.raises(
+        ValueError, match="Namespace deadbeef0000 is not installed; see cache scan"
+    ):
+        reader("deadbeef0000", directory)
+    assert not directory.exists()
+
+
+def test_installed_corpus_summary_can_inspect_an_active_import(tmp_path, monkeypatch):
+    """Scan metadata must remain readable while an importer owns hydration."""
+    monkeypatch.setattr(constants, "_resolve_cache_lock_timeout_seconds", lambda: 0.05)
+    with import_destination_session(**_settings(tmp_path)) as session:
+        summary = lifecycle.read_installed_corpus_summary(session.cache.db_path)
+        assert summary is not None
+        assert summary.state["pending"]["kind"] == "import"
+        assert summary.physical_rows == summary.active_rows == 0

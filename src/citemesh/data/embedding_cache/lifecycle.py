@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -139,27 +139,115 @@ def _write_state(conn: sqlite3.Connection, state: CorpusState) -> None:
     )
 
 
+@contextmanager
+def _existing_database(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Open existing SQLite state, permitting journal recovery.
+
+    :param Path db_path: Existing native metadata database.
+    Yields:
+        The connection, closed on context exit.
+    """
+    if not db_path.is_file():
+        namespace_id = db_path.stem.removeprefix("metadata_")
+        raise ValueError(f"Namespace {namespace_id} is not installed; see cache scan")
+    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=rw", uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _existing_namespace_connection(
+    namespace_id: str, cache_dir: Path | None = None, *, acquire_hydration: bool = True
+) -> Iterator[sqlite3.Connection]:
+    """Hold native cache locks while reading existing SQLite state.
+
+    :param str namespace_id: Twelve-character native namespace ID.
+    :param Path | None cache_dir: Optional embedding cache directory.
+    :param bool acquire_hydration: Wait for whole-corpus operations before inspection.
+    Yields:
+        The existing database connection, with hot-journal recovery enabled.
+    """
+    if len(namespace_id) != 12 or any(
+        c not in "0123456789abcdef" for c in namespace_id
+    ):
+        raise ValueError("Expected a native 12-character namespace ID")
+    from .store import EmbeddingCache
+
+    configured_root = get_cache_dir(create=False)
+    directory = Path(cache_dir) if cache_dir else configured_root / "embeddings"
+    db_path = directory / f"metadata_{namespace_id}.db"
+    if not db_path.is_file():
+        raise ValueError(f"Namespace {namespace_id} is not installed; see cache scan")
+    managed_root = EmbeddingCache._resolve_managed_cache_root(
+        directory, configured_root
+    )
+    operation_lock = (
+        cache_operation_lock(managed_root) if managed_root else nullcontext()
+    )
+    timeout = constants._resolve_cache_lock_timeout_seconds()
+    hydration_lock = (
+        FileLock(str(directory / f"hydration_{namespace_id}.lock"), timeout=timeout)
+        if acquire_hydration
+        else nullcontext()
+    )
+    with (
+        operation_lock,
+        hydration_lock,
+        FileLock(str(directory / f"cache_{namespace_id}.lock"), timeout=timeout),
+        _existing_database(db_path) as conn,
+    ):
+        yield conn
+
+
+@dataclass(frozen=True)
+class InstalledCorpusSummary:
+    """Persisted corpus state and row counts used by namespace inspection."""
+
+    state: CorpusState
+    physical_rows: int
+    active_rows: int
+
+
+def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary | None:
+    """Read installed corpus state and row counts under native namespace locks.
+
+    :param Path db_path: Native metadata database to inspect.
+    :return InstalledCorpusSummary | None: Corpus state and counts, or no installed corpus.
+    """
+    namespace_id = db_path.stem.removeprefix("metadata_")
+    with _existing_namespace_connection(
+        namespace_id, db_path.parent, acquire_hydration=False
+    ) as conn:
+        state = _read_state(conn)
+        if state == {}:
+            return None
+        physical = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        active = conn.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0]
+        return InstalledCorpusSummary(state, physical, active)
+
+
 class _LifecycleMixin(_EmbeddingCacheHost):
     """Operations that preserve a corpus's fixed contract and certified membership."""
 
     @contextmanager
-    def _read_only_db(self) -> Iterator[sqlite3.Connection]:
-        """Open the cache database in read-only mode.
+    def _inspect_db(self) -> Iterator[sqlite3.Connection]:
+        """Open existing SQLite state, allowing hot-journal rollback.
+
+        The namespace lock must be held.
 
         Yields:
-            The SQLite connection, closed when the context exits.
+            The connection, closed on context exit.
         """
-        conn = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True)
-        try:
+        with _existing_database(self.db_path) as conn:
             yield conn
-        finally:
-            conn.close()
 
-    def _has_corpus_state_read_only(self) -> bool:
+    def _has_corpus_state(self) -> bool:
         """Return whether this database contains nonempty corpus state."""
         if not self.db_path.exists():
             return False
-        with self._read_only_db() as conn:
+        with self._inspect_db() as conn:
             if not conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='cache_metadata'"
             ).fetchone():
@@ -169,7 +257,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
     def _inspect_existing_locked(
         self, *, contract: EmbeddingContract | None = None, allow_legacy: bool = False
     ) -> CorpusState:
-        """Inspect the existing SQLite and HDF5 cache without modifying either.
+        """Validate existing SQLite state and HDF5 layout without initializing them.
 
         :param EmbeddingContract | None contract: Optional contract required of the cache.
         :param bool allow_legacy: Accept matching legacy fingerprint metadata when
@@ -184,7 +272,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
                 "the existing files were preserved"
             )
         with (
-            self._read_only_db() as conn,
+            self._inspect_db() as conn,
             h5py.File(self.h5_path, "r")
             if self.h5_path.is_file()
             else nullcontext() as h5,
@@ -263,11 +351,11 @@ class _LifecycleMixin(_EmbeddingCacheHost):
             return state
 
     def corpus_state(self) -> CorpusState:
-        """Read the source and operation state without model construction or repair.
+        """Read the source and operation state without model construction.
 
         :return CorpusState: State stored in the cache metadata table.
         """
-        with self.namespace_lock_only(), self._read_only_db() as conn:
+        with self.namespace_lock_only(), self._inspect_db() as conn:
             return _read_state(conn)
 
     def _require_ready_locked(self, conn: sqlite3.Connection) -> CorpusState:
@@ -295,7 +383,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         :return CorpusState: Complete persisted corpus state.
         :raises RuntimeError: If membership has not been explicitly reconciled.
         """
-        with self.namespace_lock_only(), self._read_only_db() as conn:
+        with self.namespace_lock_only(), self._inspect_db() as conn:
             state = self._require_ready_locked(conn)
             if not state.get("membership_complete"):
                 raise RuntimeError(
@@ -463,7 +551,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         :raises RuntimeError: If the corpus membership is not certified.
         """
         with self.hydration_operation_lock(), self.namespace_lock_only():
-            with self._read_only_db() as conn:
+            with self._inspect_db() as conn:
                 state = self._require_ready_locked(conn)
                 if not state.get("membership_complete"):
                     raise RuntimeError(
@@ -718,7 +806,7 @@ class CorpusOperationSession(Generic[_CacheT]):
     @property
     def membership_count(self) -> int:
         """Return the number of active source records in corpus membership."""
-        with self.cache.namespace_lock_only(), self.cache._read_only_db() as conn:
+        with self.cache.namespace_lock_only(), self.cache._inspect_db() as conn:
             return int(
                 conn.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0]
             )
@@ -964,21 +1052,13 @@ def select_existing_cache(
     :param bool require_ready: Require completed, certified corpus membership.
     :return ExistingCacheSelection: Selection metadata for the installed cache.
     :raises RuntimeError: If the cache has no certified embedding contract.
-    :raises ValueError: If ``namespace_id`` is not a native namespace ID.
+    :raises ValueError: If the namespace ID is invalid or is not installed.
     """
-    if len(namespace_id) != 12 or any(
-        c not in "0123456789abcdef" for c in namespace_id
-    ):
-        raise ValueError("Expected a native 12-character namespace ID")
+    with _existing_namespace_connection(namespace_id, cache_dir) as conn:
+        state = _read_state(conn)
     directory = (
         Path(cache_dir) if cache_dir else get_cache_dir(create=False) / "embeddings"
     )
-    db_path = directory / f"metadata_{namespace_id}.db"
-    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
-    try:
-        state = _read_state(conn)
-    finally:
-        conn.close()
     if not state or not state.get("contract"):
         raise RuntimeError(
             "Selected cache has no certified embedding contract; refresh/adopt it first"
@@ -1008,34 +1088,10 @@ def read_existing_cache_metadata(
     :param str namespace_id: Twelve-character native namespace ID.
     :param Path | None cache_dir: Optional directory containing the namespace files.
     :return dict[str, str]: Cache metadata keyed by name.
-    :raises ValueError: If ``namespace_id`` is not a native namespace ID.
+    :raises ValueError: If the namespace ID is invalid or is not installed.
     """
-    if len(namespace_id) != 12 or any(
-        c not in "0123456789abcdef" for c in namespace_id
-    ):
-        raise ValueError("Expected a native 12-character namespace ID")
-    from .store import EmbeddingCache
-
-    configured_root = get_cache_dir(create=False)
-    directory = Path(cache_dir) if cache_dir else configured_root / "embeddings"
-    managed_root = EmbeddingCache._resolve_managed_cache_root(
-        directory, configured_root
-    )
-    operation_lock = (
-        cache_operation_lock(managed_root) if managed_root else nullcontext()
-    )
-    timeout = constants._resolve_cache_lock_timeout_seconds()
-    with (
-        operation_lock,
-        FileLock(str(directory / f"hydration_{namespace_id}.lock"), timeout=timeout),
-        FileLock(str(directory / f"cache_{namespace_id}.lock"), timeout=timeout),
-    ):
-        db_path = directory / f"metadata_{namespace_id}.db"
-        conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
-        try:
-            return dict(conn.execute("SELECT key,value FROM cache_metadata"))
-        finally:
-            conn.close()
+    with _existing_namespace_connection(namespace_id, cache_dir) as conn:
+        return dict(conn.execute("SELECT key,value FROM cache_metadata"))
 
 
 def open_existing_cache(
@@ -1063,11 +1119,13 @@ def open_existing_cache(
             "Stored namespace serialization does not match selected address"
         )
     with cache.namespace_lock_only():
-        cache._inspect_existing_locked(
+        state = cache._inspect_existing_locked(
             contract=selection.contract, allow_legacy=allow_legacy
         )
+        if allow_legacy and not state:
+            cache._init_db()
         if require_ready:
-            with cache._read_only_db() as conn:
+            with cache._inspect_db() as conn:
                 state = cache._require_ready_locked(conn)
                 if not state.get("membership_complete"):
                     raise RuntimeError("Selected cache membership is not certified")
@@ -1135,7 +1193,7 @@ def _classify_import_locked(
         raise ValueError(
             "Occupied import destination has HDF5 without SQLite; files preserved"
         )
-    with cache._read_only_db() as conn:
+    with cache._inspect_db() as conn:
         try:
             state = _read_state(conn)
             count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]

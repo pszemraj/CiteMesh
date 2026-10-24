@@ -178,7 +178,7 @@ class EmbeddingCache(
 
         if _initialize:
             with self.namespace_lock_only():
-                protected = self._has_corpus_state_read_only()
+                protected = self._has_corpus_state()
                 if strict or protected:
                     self._inspect_existing_locked()
                     self._strict_existing = True
@@ -1108,5 +1108,7 @@ class EmbeddingCache(
                 )
             self.db_path.unlink(missing_ok=True)
             self.h5_path.unlink(missing_ok=True)
+            self._strict_existing = False
+            self._operation_owner = None
             self._reset_effective_compression()
             self._init_db()

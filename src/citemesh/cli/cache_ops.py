@@ -8,7 +8,6 @@ embedding artifacts while preserving the user config.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import shutil
 import sqlite3
@@ -357,29 +356,26 @@ def _installed_corpus_status(db_path: Path) -> str | None:
     :param Path db_path: Cache metadata database to inspect.
     :return Optional[str]: Status summary, or ``None`` when no corpus is installed.
     """
+    from citemesh.data.embedding_cache.lifecycle import read_installed_corpus_summary
+
     try:
-        with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
-            row = connection.execute(
-                "SELECT value FROM cache_metadata WHERE key = 'corpus_state'"
-            ).fetchone()
-            if row is None:
-                return None
-            state = json.loads(row[0])
-            physical = connection.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
-            active = connection.execute(
-                "SELECT COUNT(*) FROM corpus_membership"
-            ).fetchone()[0]
-        contract = state.get("contract") or {}
-        source = state.get("source") or {}
-        origin = state.get("origin") or {}
+        summary = read_installed_corpus_summary(db_path)
+        if summary is None:
+            return None
+        state = summary.state
+        physical, active = summary.physical_rows, summary.active_rows
+        contract = state.get("contract")
+        source = state.get("source")
+        origin = state.get("origin")
         pending = state.get("pending")
-        coverage = source.get("selection", "unknown")
-        if source.get("limit") is not None:
+        coverage: str = source.get("selection", "unknown") if source else "unknown"
+        if source and source.get("limit") is not None:
             coverage += f" {source['limit']}"
         labels = [
-            f"{contract.get('dimension', '?')}d {contract.get('stored_dtype', '?')}",
+            f"{contract.get('dimension', '?') if contract else '?'}d "
+            f"{contract.get('stored_dtype', '?') if contract else '?'}",
             f"active {active:,} / physical {physical:,}",
-            f"source {source.get('revision', 'unknown')}",
+            f"source {source.get('revision', 'unknown') if source else 'unknown'}",
             f"coverage {coverage}",
         ]
         if origin:

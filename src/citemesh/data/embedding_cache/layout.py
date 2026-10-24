@@ -1030,7 +1030,7 @@ class _H5LayoutMixin(_EmbeddingCacheHost):
             != BINARY_INDEX_ENCODING
         ):
             if embedding_rows:
-                logger.warning(
+                logger.debug(
                     "Rebuilding binary index in %s from %d persisted embedding row(s).",
                     self.h5_path,
                     embedding_rows,

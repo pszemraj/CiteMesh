@@ -595,7 +595,7 @@ def test_interrupted_old_duplicate_membership_reconciles_winner(monkeypatch, run
         ]
         == "new"
     )
-    with cache._read_only_db() as connection:
+    with cache._inspect_db() as connection:
         assert dict(
             connection.execute("SELECT paper_id,source_ordinal FROM corpus_membership")
         ) == {
