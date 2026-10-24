@@ -3568,6 +3568,60 @@ def test_dashboard_labels_clear_selection_halos_after_import(
     assert "&lt;b&gt;Imported&lt;/b&gt;" in imported["layout"]["annotations"][0]["text"]
 
 
+@pytest.mark.parametrize("zero_span", [False, True])
+def test_dashboard_title_labels_face_inward_after_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zero_span: bool
+) -> None:
+    """Authorless title labels face inward at edges and stay centered elsewhere."""
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph = nx.Graph()
+    titles = {
+        node: f"The {node} paper has a long title fallback without author metadata"
+        for node in ("left", "middle", "right")
+    }
+    for node, title in titles.items():
+        graph.add_node(node, title=title, authors=[], year=2026, is_seed=node == "left")
+    graph.add_edge("left", "middle", weight=0.8)
+    graph.add_edge("left", "right", weight=0.7)
+    positions = {
+        "left": (0.0, 0.0),
+        "middle": (0.0 if zero_span else 0.5, 0.5),
+        "right": (0.0 if zero_span else 1.0, 1.0),
+    }
+    path = tmp_path / "inward-labels.dashboard.html"
+    GraphExporter(graph, "left", layout=positions).to_dashboard_html(path)
+    rendered = path.read_text(encoding="utf-8")
+    initial = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
+    payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
+    imported = _probe_dashboard_runtime_in_node(
+        path, "buildFigureSpecFromPayload(payload)"
+    )
+    node_order = payload["meta"]["plotly_node_order"]
+    expected = (
+        dict.fromkeys(titles, "center")
+        if zero_span
+        else {"left": "left", "middle": "center", "right": "right"}
+    )
+    initial_labels = initial["layout"]["annotations"]
+    imported_labels = imported["layout"]["annotations"]
+    assert len(initial_labels) == len(imported_labels) == 3
+    assert [label["text"] for label in initial_labels] == [
+        titles[node] for node in node_order
+    ]
+    for figure in (initial, imported):
+        labels = figure["layout"]["annotations"]
+        trace = next(item for item in figure["data"] if item.get("name") == "nodes")
+        assert [label["text"] for label in labels] == trace["text"]
+        assert [label["xanchor"] for label in labels] == [
+            expected[node] for node in node_order
+        ]
+        assert [label["x"] for label in labels] == trace["x"]
+        assert all(label["yanchor"] == "bottom" for label in labels)
+    assert [label["yshift"] for label in initial_labels] == pytest.approx(
+        [label["yshift"] for label in imported_labels]
+    )
+
+
 @pytest.mark.parametrize("seed_title", ["Seed Paper", None, "", "   "])
 def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -> None:
     """Dense static plots should label only the highest-priority non-seed papers."""

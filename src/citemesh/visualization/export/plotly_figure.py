@@ -99,7 +99,7 @@ class _PlotlyAnnotation(TypedDict):
     text: str
     font: _TextFont
     showarrow: Literal[False]
-    xanchor: Literal["center"]
+    xanchor: Literal["left", "center", "right"]
     yanchor: Literal["bottom"]
     borderpad: int
     yshift: float
@@ -475,7 +475,7 @@ def _build_label_annotations(
     marker_line_width: int | list[float],
     text_font: _TextFont,
 ) -> list[_PlotlyAnnotation]:
-    """Build dashboard label annotations shifted clear of every selection halo.
+    """Build labels clear of selection halos and facing into the horizontal span.
 
     :param list[float] node_x: Node x coordinates.
     :param list[float] node_y: Node y coordinates.
@@ -486,6 +486,18 @@ def _build_label_annotations(
     :param _TextFont text_font: Shared annotation font spec.
     :return list[_PlotlyAnnotation]: Plotly annotation dictionaries.
     """
+    x_min = min(node_x, default=0.0)
+    x_span = max(node_x, default=0.0) - x_min
+
+    def horizontal_anchor(x: float) -> Literal["left", "center", "right"]:
+        # Long title fallbacks near either edge should extend into the graph.
+        if x_span > 0:
+            if x < x_min + x_span / 3:
+                return "left"
+            if x > x_min + 2 * x_span / 3:
+                return "right"
+        return "center"
+
     return [
         dict(
             x=node_x[idx],
@@ -495,7 +507,7 @@ def _build_label_annotations(
             text=label,
             font=text_font,
             showarrow=False,
-            xanchor="center",
+            xanchor=horizontal_anchor(node_x[idx]),
             yanchor="bottom",
             borderpad=0,
             yshift=max(

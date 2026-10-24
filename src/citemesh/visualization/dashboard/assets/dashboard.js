@@ -561,6 +561,14 @@
       });
       layout.hoverlabel = deepClone(HOVER_LABEL);
       layout.shapes = edgeShapes;
+      const horizontalLabelAnchor = (x) => {
+        // Keep title fallbacks near either edge extending into the graph.
+        if (xMax > xMin) {
+          if (x < xMin + (xMax - xMin) / 3) return "left";
+          if (x > xMin + 2 * (xMax - xMin) / 3) return "right";
+        }
+        return "center";
+      };
       layout.annotations = nodeTexts.flatMap((text, idx) => text ? [{
         x: xPairs[idx],
         y: yPairs[idx],
@@ -569,7 +577,7 @@
         text,
         font: nodeTrace.textfont,
         showarrow: false,
-        xanchor: "center",
+        xanchor: horizontalLabelAnchor(xPairs[idx]),
         yanchor: "bottom",
         borderpad: 0,
         yshift: Math.max(
