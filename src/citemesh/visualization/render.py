@@ -1034,9 +1034,9 @@ def visualize_graph(
 
     # Add title
     seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-    title = seed_attrs.get("title", "Unknown")
+    title = " ".join(str(seed_attrs.get("title") or "").split()) or "Seed paper"
     wrapped_title = textwrap.fill(
-        " ".join(str(title).split()),
+        title,
         width=72,
         break_long_words=False,
     )

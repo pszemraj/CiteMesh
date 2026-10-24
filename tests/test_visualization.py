@@ -3373,6 +3373,24 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert graph.nodes["related"]["authors"] == ["Stale Author"]
 
 
+@pytest.mark.parametrize("seed_title", [None, "", "   "])
+def test_visualize_graph_heading_uses_seed_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_title: str | None
+) -> None:
+    """Use the seed label fallback for scalar graph metadata without a title."""
+    import matplotlib.axes
+
+    graph = nx.Graph()
+    graph.add_node("seed", title=seed_title, is_seed=True)
+    title_spy = MagicMock()
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_title", title_spy)
+    visualize_graph(
+        graph, "seed", tmp_path / "graph.png", layout={"seed": (0.0, 0.0)}, dpi=40
+    )
+    assert title_spy.call_args.args[0] == "CiteMesh Visualization: Seed paper"
+    assert graph.nodes["seed"]["title"] == seed_title
+
+
 def test_visualize_graph_metadata_overlay_is_compact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
