@@ -192,6 +192,11 @@ publishes one complete configuration. For upload ordering, see
 [Embedding Cache Internals](../internals/embedding-cache.md#portable-format).
 Use one publisher at a time. The bucket must already exist and be private.
 
+The publisher creates a starter `README.md` only when one is missing. Edit it
+freely and add links, images, or diagrams; later publications preserve it and
+assets outside `variants/`. Imports read the catalog, selected manifest, and its
+declared data files, without reading or validating documentation.
+
 Only the current snapshot of each configuration is retained remotely, so old
 full indexes do not accumulate as repository history. Keep a local export if
 you need an older snapshot later. Downloads and installed native caches remain

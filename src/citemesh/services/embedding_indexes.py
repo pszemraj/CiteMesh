@@ -396,8 +396,8 @@ def publish_snapshot(
 ) -> str:
     """Publish a validated snapshot and update its catalog entry.
 
-    Payload files are uploaded before the manifest, then the catalog and README
-    are updated to point at the completed snapshot.
+    Payload files are uploaded before the manifest, then the catalog is updated
+    to point at the completed snapshot. A starter README is created if missing.
 
     :param str bucket_id: Private Hugging Face bucket identifier.
     :param Path snapshot_dir: Validated portable snapshot directory.
@@ -505,7 +505,9 @@ def publish_snapshot(
                 ],
             )
         _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
-        api.batch_bucket_files(
-            bucket_id, add=[(_readme(catalog, manifests).encode(), "README.md")]
-        )
+        # Bucket owners maintain their README after its initial creation.
+        if "README.md" not in bucket_paths:
+            api.batch_bucket_files(
+                bucket_id, add=[(_readme(catalog, manifests).encode(), "README.md")]
+            )
         return manifest.snapshot_id

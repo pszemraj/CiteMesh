@@ -412,7 +412,43 @@ def test_repeat_publication_only_prunes_leftovers(hub, tmp_path):
     indexes.publish_snapshot("owner/index", export)
     hub.uploads.clear()
     assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"
-    assert hub.uploads == [{"add": ["README.md"], "delete": []}]
+    assert not hub.uploads
+
+
+def test_owner_readme_and_assets_survive_publication_and_do_not_affect_download(
+    hub, tmp_path
+):
+    from citemesh.data.embedding_cache.portable import validate_snapshot
+
+    install(hub)
+    readme = hub.root / "README.md"
+    content = (
+        "# My index\n\n[Project](https://example.com)\n\n"
+        "![Diagram](assets/diagram.svg)\n\n```mermaid\ngraph LR; A-->B\n```\n"
+    )
+    readme.write_text(content, encoding="utf-8")
+    diagram = hub.root / "assets/diagram.svg"
+    diagram.parent.mkdir()
+    diagram.write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+    export = local_export(tmp_path, with_payload=True)
+
+    assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"
+    assert readme.read_text(encoding="utf-8") == content
+    assert diagram.read_bytes() == b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+    content += "\nOwner edit after publication.\n"
+    readme.write_text(content, encoding="utf-8")
+    publication = indexes.resolve_publication("owner/index")
+    downloaded = indexes.download_publication(publication)
+    assert validate_snapshot(downloaded).row_count == 1
+    assert "README.md" not in hub.downloads
+    assert "assets/diagram.svg" not in hub.downloads
+
+    hub.uploads.clear()
+    assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"
+    assert not hub.uploads
+    assert readme.read_text(encoding="utf-8") == content
+    assert diagram.is_file()
 
 
 def test_snapshot_id_cannot_overwrite_different_manifest(hub, tmp_path):
