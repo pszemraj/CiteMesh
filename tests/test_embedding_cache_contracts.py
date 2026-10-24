@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
-from typing import Any
+from typing import Any, Literal
 
 import h5py
 import numpy as np
@@ -46,6 +46,7 @@ from citemesh.data.embedding_cache import (
     MODEL_FINGERPRINT_KEY,
     SCHEMA_VERSION_KEY,
     SOURCE_TORCH_DTYPE_KEY,
+    SQLITE_QUERY_BATCH_SIZE,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
     _corpus_size_coverage,
@@ -441,16 +442,19 @@ def test_embedding_cache_lifecycle_contract() -> None:
 
 
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("recovery_operation", ["get", "cached"])
 def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     storage_precision: str,
+    recovery_operation: Literal["get", "cached"],
 ) -> None:
     """A failed replacement commit must restore its old metadata/vector pair.
 
     :param Path tmp_path: Isolated cache directory.
     :param pytest.MonkeyPatch monkeypatch: Replaces only the final SQLite commit.
     :param str storage_precision: Persisted vector format under test.
+    :param str recovery_operation: First vector reader after the failed replacement.
     :return None: Checks immediate same-instance undo recovery.
     """
     cache = EmbeddingCache(
@@ -471,7 +475,7 @@ def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
             "Other. Abstract": np.asarray([0.0, 1.0], dtype=np.float32),
         }
     )
-    cache.get_embeddings(original, model, show_progress=False)
+    original_vectors = cache.get_embeddings(original, model, show_progress=False)
     with h5py.File(cache.h5_path, "r") as h5:
         original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
         original_binary = (
@@ -498,7 +502,12 @@ def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
     with h5py.File(cache.h5_path, "r") as h5:
         assert not np.array_equal(h5[EMBEDDINGS_DATASET_NAME][:], original_embedding)
 
-    cache.get_embeddings(original, model, show_progress=False)
+    recovered = (
+        cache.get_cached_embeddings(["p1"])
+        if recovery_operation == "cached"
+        else cache.get_embeddings(original, model, show_progress=False)
+    )
+    np.testing.assert_array_equal(recovered["p1"], original_vectors["p1"])
     with cache._connect_db() as conn:
         assert (
             conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
@@ -2229,6 +2238,72 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
         )
 
     assert results == []
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("paper_ids", [[], ["missing"]])
+def test_cached_embedding_reader_returns_empty_before_first_write(
+    tmp_path: Path, storage_precision: str, paper_ids: list[str]
+) -> None:
+    """Fresh namespaces have no vectors or HDF5 file until their first write."""
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="empty-vector-reader",
+        storage_precision=storage_precision,
+    )
+    assert not cache.h5_path.exists()
+    assert cache.get_cached_embeddings(paper_ids) == {}
+    assert not cache.h5_path.exists()
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_cached_embedding_reader_deduplicates_ids_across_query_batches(
+    tmp_path: Path, storage_precision: str
+) -> None:
+    """Repeated requests preserve each paper's vector across SQLite batches."""
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="duplicate-vector-reader",
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    papers = {
+        paper_id: {"title": title, "abstract": "Text"}
+        for paper_id, title in [("p2", "Two"), ("p0", "Zero"), ("p1", "One")]
+    }
+    model = LookupEncodeModel(
+        {
+            "Two. Text": np.asarray([0, 1], dtype=np.float32),
+            "Zero. Text": np.asarray([1, 0], dtype=np.float32),
+            "One. Text": np.asarray([-1, 0], dtype=np.float32),
+        }
+    )
+    expected = cache.get_embeddings(papers, model, show_progress=False)
+    requested = ["p1"] * SQLITE_QUERY_BATCH_SIZE + ["p0", "p2", "p1", "missing"]
+    actual = cache.get_cached_embeddings(requested)
+    assert actual.keys() == expected.keys()
+    for paper_id, vector in expected.items():
+        np.testing.assert_array_equal(actual[paper_id], vector)
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_cached_embedding_reader_rejects_missing_populated_matrix(
+    tmp_path: Path, storage_precision: str
+) -> None:
+    """A lost matrix must remain an error when committed paper mappings exist."""
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="missing-populated-vector-reader",
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    model = LookupEncodeModel({"Paper. Text": np.asarray([1, 0], dtype=np.float32)})
+    cache.get_embeddings(
+        {"paper": {"title": "Paper", "abstract": "Text"}}, model, show_progress=False
+    )
+    cache.h5_path.unlink()
+    with pytest.raises(FileNotFoundError):
+        cache.get_cached_embeddings(["paper"])
 
 
 def test_corpus_size_token_encodes_newest_slice_policy() -> None:

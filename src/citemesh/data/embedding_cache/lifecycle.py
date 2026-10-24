@@ -25,7 +25,7 @@ import numpy as np
 import numpy.typing as npt
 from filelock import FileLock
 
-from citemesh.data.cache import cache_operation_lock, get_cache_dir
+from citemesh.data.cache import cache_operation_lock, get_cache_dir, path_exists
 from citemesh.data.embedding_contract import (
     CorpusSource,
     CorpusSourceData,
@@ -579,9 +579,18 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         :param int | None corpus_size: Optional newest-N view within active membership.
         :return dict[str, npt.NDArray[np.float32]]: Normalized float32 vectors keyed by
             paper ID; missing or out-of-view IDs are omitted.
+        :raises RuntimeError: If corpus membership is unavailable or recovery fails.
+        :raises OSError: If a populated namespace's vector storage is unavailable.
         """
         with self._cache_lock(), self._connect_db() as conn:
             view = self._corpus_view_query_locked(conn, corpus_size)
+            self._recover_pending_replacements_with_connection_locked(conn)
+            if (
+                not path_exists(self.h5_path)
+                and view is None
+                and conn.execute("SELECT 1 FROM papers LIMIT 1").fetchone() is None
+            ):
+                return {}
             with h5py.File(self.h5_path, "r") as h5:
                 dataset = self._get_embeddings_dataset(h5)
                 if dataset is None:
@@ -590,7 +599,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
                     (row[0], cast(int, row[2]))
                     for row in self._query_paper_rows(
                         conn,
-                        list(paper_ids),
+                        list(dict.fromkeys(paper_ids)),
                         lookup_column="paper_id",
                         corpus_view=view,
                     )
