@@ -807,6 +807,26 @@ def test_installed_corpus_summary_can_inspect_an_active_import(tmp_path, monkeyp
         assert summary.physical_rows == summary.active_rows == 0
 
 
+def test_installed_corpus_namespaces_lists_managed_state_read_only(tmp_path):
+    """Completed and pending corpora are listed; ordinary or unreadable ones are not."""
+    absent = tmp_path / "absent"
+    assert lifecycle.installed_corpus_namespaces(absent) == []
+    assert not absent.exists()
+
+    completed, _, _ = _populate(_settings(tmp_path, "float32"))
+    with import_destination_session(**_settings(tmp_path, "int8")) as session:
+        pending_id = session.cache.namespace_id
+    with sqlite3.connect(tmp_path / "metadata_aaaaaaaaaaaa.db") as conn:
+        conn.execute("CREATE TABLE cache_metadata (key TEXT, value TEXT)")
+    (tmp_path / "metadata_bbbbbbbbbbbb.db").write_bytes(b"not a database")
+
+    before = sorted(path.name for path in tmp_path.iterdir())
+    assert lifecycle.installed_corpus_namespaces(tmp_path) == sorted(
+        [completed.namespace_id, pending_id]
+    )
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+
+
 @pytest.mark.parametrize("kind", ["import", "refresh"])
 @pytest.mark.parametrize("reader", ["selection", "metadata"])
 def test_namespace_inspection_does_not_wait_for_active_corpus_operation(

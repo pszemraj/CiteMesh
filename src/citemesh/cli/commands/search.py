@@ -12,6 +12,7 @@ from typing import TypedDict, cast
 from rich.text import Text
 
 from citemesh.data.embedding_cache import EmbeddingCache, _corpus_size_from_token
+from citemesh.data.embedding_cache.lifecycle import installed_corpus_namespaces
 from citemesh.data.embedding_contract import InstalledCorpusError
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
@@ -125,6 +126,44 @@ def _empty_cache_alternative_guidance(defaults: argparse.Namespace) -> str:
         "--semantic-source arxiv-corpus (plus --dataset-source when it is not "
         "the default). Use --mode s2 for keyword search."
     )
+
+
+def _installed_corpus_guidance(
+    builder: EmbeddingGraphBuilder, args: argparse.Namespace
+) -> str | None:
+    """Name installed corpora the current search settings did not select.
+
+    An installed corpus is reached by ``--cache-namespace`` or by settings that
+    match its fixed ones, so an empty namespace for the current settings can
+    coexist with a usable installed index. The scan is read-only.
+
+    :param EmbeddingGraphBuilder builder: Builder whose cache directory is scanned.
+    :param argparse.Namespace args: Parsed search command arguments.
+    :return str | None: A sentence naming the corpora and the command that selects
+        one, or ``None`` when the directory holds no unselected installed corpus.
+    """
+    selected = (
+        builder._cache_selection.namespace_id
+        if builder._cache_selection is not None
+        else None
+    )
+    namespaces = [
+        namespace_id
+        for namespace_id in installed_corpus_namespaces(
+            builder.embedding_cache_directory()
+        )
+        if namespace_id != selected
+    ]
+    if not namespaces:
+        return None
+    example = shlex.join(
+        ["citemesh", "search", args.query, "--cache-namespace", namespaces[0]]
+    )
+    if len(namespaces) == 1:
+        subject = f"Installed corpus {namespaces[0]} is"
+    else:
+        subject = f"Installed corpora {', '.join(namespaces)} are"
+    return f"{subject} selected with --cache-namespace (for example: {example})."
 
 
 def _resolve_search_mode(
@@ -465,7 +504,8 @@ def _run_search_command(
     falls back to the Semantic Scholar API when the cache is empty or local
     dependencies or model loading are unavailable. An unusable installed corpus
     requires operator action and fails in either mode. Explicitly requested
-    local mode treats an empty cache as an error.
+    local mode treats an empty cache as an error. Both name installed corpora
+    that the current settings did not select.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -586,9 +626,18 @@ def _run_search_command(
             )
             # Query failures stay visible once local results were selected.
             return _render_local_search(args, builder, defaults)
-        logger.info(
-            "No local embeddings available; searching the Semantic Scholar API instead."
-        )
+        installed_guidance = _installed_corpus_guidance(builder, args)
+        if installed_guidance is None:
+            logger.info(
+                "No local embeddings available; searching the Semantic Scholar API "
+                "instead."
+            )
+        else:
+            logger.warning(
+                "No local embeddings match the current model settings. %s "
+                "Searching the Semantic Scholar API instead.",
+                installed_guidance,
+            )
         logger.debug(
             "Empty local embedding namespace: model=%s, semantic_source=%s, "
             "dataset_source=%s. Namespace keys include model, revision, profile, "
@@ -612,6 +661,15 @@ def _run_search_command(
             )
         else:
             requested_via = f"defaults.search_mode in {user_config.path}"
+        alternatives = " ".join(
+            filter(
+                None,
+                [
+                    _installed_corpus_guidance(builder, args),
+                    _empty_cache_alternative_guidance(defaults),
+                ],
+            )
+        )
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
             "has no vectors for model=%s semantic-source=%s dataset-source=%s. "
@@ -624,7 +682,7 @@ def _run_search_command(
             defaults.model,
             defaults.semantic_source,
             defaults.dataset_source,
-            _empty_cache_alternative_guidance(defaults),
+            alternatives,
         )
         return 1
     # Local vectors are available and the search source is now selected.

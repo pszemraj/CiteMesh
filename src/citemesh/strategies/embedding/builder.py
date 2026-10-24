@@ -16,6 +16,7 @@ import re
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Literal,
@@ -1752,6 +1753,18 @@ class EmbeddingGraphBuilder(
 
         return refresh_builder_corpus(self, revision)
 
+    def embedding_cache_directory(self) -> Path:
+        """Return the directory holding this builder's embedding namespaces.
+
+        Nothing is created: a builder that has not opened a cache reports the
+        configured default directory, which may not exist yet.
+
+        :return Path: Directory of the open cache, else the configured default.
+        """
+        if self._embedding_cache is not None:
+            return self._embedding_cache.h5_path.parent
+        return get_cache_dir("embeddings", create=False)
+
     def has_persistent_embedding_artifacts(self) -> bool:
         """Return whether a potentially searchable vector cache exists.
 
@@ -1759,19 +1772,23 @@ class EmbeddingGraphBuilder(
         user has never built an embedding cache. Exact namespace selection still
         occurs before any vector is searched.
 
+        Managed corpora are always ``arxiv-corpus`` namespaces, so outside that
+        source they are never searchable here and are skipped.
+
         :return bool: Whether at least one namespace carries managed corpus state
-            or a non-empty HDF5/metadata pair that may contain searchable papers.
+            (``arxiv-corpus`` only) or a non-empty HDF5/metadata pair that may
+            contain searchable papers.
         """
-        cache_directory = (
-            self._embedding_cache.h5_path.parent
-            if self._embedding_cache is not None
-            else get_cache_dir("embeddings", create=False)
-        )
+        cache_directory = self.embedding_cache_directory()
         for db_path in cache_directory.glob("metadata_*.db"):
-            # An import interrupted before its first batch commits holds corpus
-            # state but no papers, and its HDF5 file may be absent or empty. It is
-            # an installed corpus awaiting resume, not an empty cache.
             if embedding_namespace_has_corpus_state(db_path):
+                # The namespace contract rejects non-corpus sources for managed
+                # state, so a candidates builder can never address this namespace.
+                if self.semantic_source != "arxiv-corpus":
+                    continue
+                # An import interrupted before its first batch commits holds corpus
+                # state but no papers, and its HDF5 file may be absent or empty. It
+                # is an installed corpus awaiting resume, not an empty cache.
                 return True
             namespace_id = db_path.name.removeprefix("metadata_").removesuffix(".db")
             h5_path = cache_directory / f"embeddings_{namespace_id}.h5"

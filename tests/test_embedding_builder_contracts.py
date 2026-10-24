@@ -10,7 +10,7 @@ import sys
 import threading
 import types
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -2434,7 +2434,9 @@ def test_embedding_artifact_probe_counts_paperless_managed_corpus_state(
     from citemesh.data.embedding_cache import lifecycle
 
     _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
     cache_dir = builder_module.get_cache_dir("embeddings", create=False)
     cache_dir.mkdir(parents=True)
 
@@ -2463,6 +2465,54 @@ def test_embedding_artifact_probe_counts_paperless_managed_corpus_state(
     assert builder.has_persistent_embedding_artifacts()
     assert sorted(path.name for path in cache_dir.iterdir()) == before
     assert builder._embedding_cache is None
+
+
+def test_embedding_artifact_probe_skips_managed_corpus_for_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidates builder can never select a managed corpus, so it does not count.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
+    :return None: Verify a populated managed namespace is invisible to candidates
+        mode, visible to arxiv-corpus mode, and hides no ordinary namespace.
+    """
+    from citemesh.data.embedding_cache import lifecycle
+
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    candidates_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    corpus_builder = EmbeddingGraphBuilder(
+        max_papers=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    cache_dir = builder_module.get_cache_dir("embeddings", create=False)
+    cache_dir.mkdir(parents=True)
+
+    def install(namespace: str, state: str | None) -> None:
+        with closing(sqlite3.connect(cache_dir / f"metadata_{namespace}.db")) as conn:
+            conn.execute(
+                "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO cache_metadata (key, value) VALUES ('schema_version', '4')"
+            )
+            if state is not None:
+                conn.execute(
+                    "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+                    (lifecycle.CORPUS_STATE_KEY, state),
+                )
+            conn.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+            conn.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
+            conn.commit()
+        (cache_dir / f"embeddings_{namespace}.h5").write_bytes(b"not an HDF5 file")
+
+    install("eeeeeeeeeeee", json.dumps({"membership_complete": True}))
+    before = sorted(path.name for path in cache_dir.iterdir())
+    assert not candidates_builder.has_persistent_embedding_artifacts()
+    assert corpus_builder.has_persistent_embedding_artifacts()
+    assert sorted(path.name for path in cache_dir.iterdir()) == before
+    assert candidates_builder._embedding_cache is None
+
+    install("ffffffffffff", None)
+    assert candidates_builder.has_persistent_embedding_artifacts()
 
 
 def test_embedding_cache_namespace_partition_contracts(

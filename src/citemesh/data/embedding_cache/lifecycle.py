@@ -305,6 +305,23 @@ def embedding_namespace_has_corpus_state(db_path: Path) -> bool | None:
         return None
 
 
+def installed_corpus_namespaces(cache_dir: Path) -> list[str]:
+    """List the managed corpus namespaces present in an embedding cache directory.
+
+    Read-only like :func:`embedding_namespace_has_corpus_state`: it takes no locks,
+    never recovers a hot journal and creates nothing. Interrupted installs are
+    listed alongside completed ones.
+
+    :param Path cache_dir: Embedding cache directory to scan; it may be absent.
+    :return list[str]: Sorted namespace IDs whose metadata records corpus state.
+    """
+    return sorted(
+        db_path.name.removeprefix("metadata_").removesuffix(".db")
+        for db_path in cache_dir.glob("metadata_*.db")
+        if embedding_namespace_has_corpus_state(db_path)
+    )
+
+
 def resume_command(namespace_id: str, state: CorpusState) -> str:
     """Name the command that resumes a namespace's pending operation.
 

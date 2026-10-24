@@ -9,6 +9,7 @@ import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import networkx as nx
 import pytest
@@ -286,6 +287,121 @@ def test_interrupted_import_survives_implicit_consumers(
     resumed = portable.import_snapshot(snapshot, destination, batch_rows=2)
     assert resumed.embedding_count() == 4
     assert resumed.corpus_state()["membership_complete"]
+
+
+@pytest.mark.parametrize("mode", ["auto", "local"])
+def test_search_names_installed_corpus_its_settings_do_not_select(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+) -> None:
+    """Default settings address the candidates namespace, never an installed corpus.
+
+    The cache holds only an installed corpus, so the probe must not load a model or
+    leave a provisional namespace behind, and the guidance must name the corpus.
+    """
+    from citemesh import cli
+    from citemesh.data import get_cache_dir
+    from citemesh.data.embedding_cache.portable import export_snapshot, import_snapshot
+    from citemesh.strategies.embedding import builder as builder_module
+    from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
+    from tests._helpers import disable_embedding_dep_checks
+    from tests.test_embedding_portable import ExportFixture
+
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setattr(builder_module, "resolve_embedding_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
+    )
+    export_snapshot(
+        ExportFixture(dtype="int8", dimension=4, count=7),
+        tmp_path / "snapshot",
+        shard_rows=4,
+    )
+    destination = get_cache_dir("embeddings")
+    installed = import_snapshot(tmp_path / "snapshot", destination)
+    namespace_id = installed.db_path.stem.removeprefix("metadata_")
+    before = sorted(path.name for path in destination.iterdir())
+
+    def unexpected_model_load(*args: object, **kwargs: object) -> None:
+        pytest.fail("an installed corpus the settings do not select loaded a model")
+
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", unexpected_model_load)
+    monkeypatch.setattr(search, "_run_s2_search", s2_search)
+    monkeypatch.setattr(cli, "_configure_logging", lambda **kwargs: None)
+    caplog.set_level(logging.INFO)
+
+    exit_code = cli.main(["search", "attention mechanism", "--mode", mode])
+
+    assert sorted(path.name for path in destination.iterdir()) == before
+    expected_command = (
+        f"citemesh search 'attention mechanism' --cache-namespace {namespace_id}"
+    )
+    selected = f"Installed corpus {namespace_id} is selected with --cache-namespace"
+    if mode == "auto":
+        assert exit_code == 0
+        s2_search.assert_called_once()
+        warning = next(
+            record for record in caplog.records if record.levelno == logging.WARNING
+        )
+        assert warning.getMessage() == (
+            "No local embeddings match the current model settings. "
+            f"{selected} (for example: {expected_command}). "
+            "Searching the Semantic Scholar API instead."
+        )
+    else:
+        assert exit_code == 1
+        s2_search.assert_not_called()
+        error = next(
+            record for record in caplog.records if record.levelno == logging.ERROR
+        )
+        assert "Run `citemesh build` with this configuration" in error.getMessage()
+        assert f"{selected} (for example: {expected_command})." in error.getMessage()
+
+
+def test_installed_corpus_guidance_pluralizes_and_skips_the_selected_namespace(
+    tmp_path: Path,
+) -> None:
+    """Several unselected corpora are all listed; a selected one is not."""
+    from citemesh.data.embedding_cache import lifecycle
+
+    for namespace_id in ("111111111111", "222222222222", "333333333333"):
+        with sqlite3.connect(tmp_path / f"metadata_{namespace_id}.db") as conn:
+            conn.execute("CREATE TABLE cache_metadata (key TEXT, value TEXT)")
+            conn.execute(
+                "INSERT INTO cache_metadata VALUES (?, '{\"pending\": {}}')",
+                (lifecycle.CORPUS_STATE_KEY,),
+            )
+    args = argparse.Namespace(query="attention")
+
+    def guidance(selected: str | None) -> str | None:
+        builder = SimpleNamespace(
+            _cache_selection=(
+                SimpleNamespace(namespace_id=selected) if selected else None
+            ),
+            embedding_cache_directory=lambda: tmp_path,
+        )
+        return search._installed_corpus_guidance(builder, args)  # type: ignore[arg-type]
+
+    assert guidance(None) == (
+        "Installed corpora 111111111111, 222222222222, 333333333333 are selected "
+        "with --cache-namespace (for example: citemesh search attention "
+        "--cache-namespace 111111111111)."
+    )
+    assert guidance("111111111111") == (
+        "Installed corpora 222222222222, 333333333333 are selected with "
+        "--cache-namespace (for example: citemesh search attention "
+        "--cache-namespace 222222222222)."
+    )
+    (tmp_path / "metadata_222222222222.db").unlink()
+    assert guidance("111111111111") == (
+        "Installed corpus 333333333333 is selected with --cache-namespace "
+        "(for example: citemesh search attention --cache-namespace 333333333333)."
+    )
+    (tmp_path / "metadata_333333333333.db").unlink()
+    assert guidance("111111111111") is None
 
 
 def test_search_corpus_view_options_flow_into_overrides() -> None:
