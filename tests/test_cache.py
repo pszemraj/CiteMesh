@@ -223,6 +223,22 @@ def test_atomic_writes_without_fchmod(
     assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "seed"}
 
 
+def test_atomic_output_path_replaces_existing_writable_file(tmp_path: Path) -> None:
+    """A library-written staged output replaces its writable destination.
+
+    :param Path tmp_path: Temporary directory for the atomic output target.
+    :return None: Validates staged-file synchronization and replacement.
+    """
+    destination = tmp_path / "graph.png"
+    destination.write_bytes(b"old")
+
+    with cache_module.atomic_output_path(destination) as staged:
+        staged.write_bytes(b"new")
+
+    assert destination.read_bytes() == b"new"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
 @pytest.mark.parametrize("write_json", [False, True], ids=["text", "json"])
 @pytest.mark.parametrize(
     "failure_stage", ["stat", "chmod", "fdopen", "fsync", "replace"]
@@ -303,6 +319,7 @@ def test_atomic_write_failure_closes_descriptor_and_preserves_target(
     [0o644, 0o444, 0o222, 0o000],
     ids=["read-write", "read-only", "write-only", "no-access"],
 )
+@pytest.mark.skipif(os.name != "posix", reason="exact mode bits are POSIX semantics")
 def test_atomic_write_text_preserves_target_permissions(
     tmp_path: Path, target_mode: int
 ) -> None:

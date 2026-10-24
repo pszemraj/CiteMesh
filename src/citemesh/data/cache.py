@@ -273,9 +273,10 @@ def atomic_output_path(path: Path) -> Iterator[Path]:
     tmp_path = Path(tmp_name)
     try:
         yield tmp_path
-        with tmp_path.open("rb") as tmp_file:
-            tmp_path.chmod(mode)
+        # Sync while writable; Windows rejects fsync on a read-only descriptor.
+        with tmp_path.open("r+b") as tmp_file:
             os.fsync(tmp_file.fileno())
+        tmp_path.chmod(mode)
         os.replace(tmp_path, path)
         directory_fd: int | None = None
         try:

@@ -676,7 +676,8 @@ def test_exporter_interactive_html_contracts(
 
     instance = FakeNetwork.instances[-1]
     assert out_path.exists()
-    assert out_path.stat().st_mode & 0o7777 == 0o640
+    if os.name != "nt":
+        assert out_path.stat().st_mode & 0o7777 == 0o640
     assert instance.options is not None
     assert instance.kwargs["cdn_resources"] == "in_line"
     assert len(instance.nodes) == 2
@@ -754,7 +755,8 @@ def test_exporter_plotly_contracts(
     exporter.to_plotly_html(out_path)
 
     assert out_path.exists()
-    assert out_path.stat().st_mode & 0o7777 == 0o640
+    if os.name != "nt":
+        assert out_path.stat().st_mode & 0o7777 == 0o640
     node_trace = captured["data"][1]
     assert list(node_trace["text"]) == ["Jones, 2021", "Smith, 2020"]
     layout = captured["layout"]
