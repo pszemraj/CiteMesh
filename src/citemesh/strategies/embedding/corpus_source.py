@@ -129,7 +129,10 @@ def _source_records(
     :param stats: Optional counter for raw rows examined.
     Yields:
         Normalized source record and its duplicate-selection priority.
+    :raises OSError: If opening or iterating the dataset fails in transport.
     """
+    from huggingface_hub.utils import httpx
+
     kwargs = {
         "split": source.split,
         "revision": source.revision,
@@ -137,17 +140,22 @@ def _source_records(
     }
     if source.config_name is not None:
         kwargs["name"] = source.config_name
-    dataset = deps._import_datasets_module().load_dataset(source.repo_id, **kwargs)
-    for ordinal, raw_record in enumerate(dataset):
-        if stats is not None:
-            stats["source_records_examined"] = ordinal + 1
-        extracted = _extract_dataset_paper_metadata(raw_record, ordinal)
-        metadata: CorpusSourceRecord = {
-            **extracted,
-            "source_ordinal": ordinal,
-            "chronology_key": encode_arxiv_id_chronology_key(extracted["paper_id"]),
-        }
-        yield metadata, _source_priority(raw_record)
+    try:
+        dataset = deps._import_datasets_module().load_dataset(source.repo_id, **kwargs)
+        for ordinal, raw_record in enumerate(dataset):
+            if stats is not None:
+                stats["source_records_examined"] = ordinal + 1
+            extracted = _extract_dataset_paper_metadata(raw_record, ordinal)
+            metadata: CorpusSourceRecord = {
+                **extracted,
+                "source_ordinal": ordinal,
+                "chronology_key": encode_arxiv_id_chronology_key(extracted["paper_id"]),
+            }
+            yield metadata, _source_priority(raw_record)
+    except httpx.HTTPError as exc:
+        raise OSError(
+            f"Cannot read dataset {source.repo_id}@{source.revision}: {exc}"
+        ) from exc
 
 
 def iter_source_records(
@@ -162,6 +170,7 @@ def iter_source_records(
     :param stats: Optional counter for raw rows examined.
     Yields:
         Normalized row with its source ordinal and chronology key.
+    :raises OSError: If opening or iterating the dataset fails in transport.
     """
     with (
         tempfile.TemporaryDirectory(prefix="citemesh-source-") as temporary,
@@ -248,6 +257,7 @@ def iter_source_batches(
     :param stats: Optional counter for raw rows examined.
     Yields:
         A batch of normalized source rows.
+    :raises OSError: If opening or iterating the dataset fails in transport.
     """
     batch: list[CorpusSourceRecord] = []
     for record in iter_source_records(source, stats):

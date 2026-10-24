@@ -2,13 +2,16 @@
 
 import json
 import runpy
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import h5py
 import numpy as np
 import pytest
+from huggingface_hub.utils import httpx
 
 from citemesh.data import get_cache_dir
 from citemesh.data.embedding_cache import select_existing_cache
@@ -16,6 +19,7 @@ from citemesh.data.embedding_contract import CorpusSource, InstalledCorpusError
 from citemesh.strategies.embedding import builder as builder_module
 from citemesh.strategies.embedding import corpus_source, deps
 from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
+from citemesh.strategies.embedding.records import DatasetRecord
 from citemesh.strategies.embedding.refresh import (
     adopt_legacy_cache,
     refresh_cache_selection,
@@ -228,8 +232,16 @@ def test_refresh_preserves_encoder_batching_capabilities(
         assert "truncate 3 of 3 inputs" in caplog.text
 
 
-def test_interrupted_refresh_resumes_recorded_target(monkeypatch, runtime):
-    revisions = {
+@pytest.mark.parametrize(
+    "source_error", [None, httpx.ReadError, httpx.RemoteProtocolError]
+)
+def test_interrupted_refresh_resumes_recorded_target(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: tuple[list[str], list[str]],
+    source_error: type[httpx.HTTPError] | None,
+) -> None:
+    """Keep interrupted refreshes pending and resume their recorded source target."""
+    revisions: dict[str, Iterable[DatasetRecord]] = {
         "one": [row("2401.00001")],
         "two": [row("2401.00001", "new"), row("2401.00002")],
         "three": [row("2401.00003")],
@@ -238,16 +250,46 @@ def test_interrupted_refresh_resumes_recorded_target(monkeypatch, runtime):
     reads, resolutions = install_source(monkeypatch, revisions, active)
     builder = make_builder()
     builder.refresh_corpus()
-    original = builder.embedding_cache.upsert_embeddings
+    cache = builder.embedding_cache
+    completed_state = cache.corpus_state()
+    assert completed_state["membership_complete"]
+    encoded_before = len(runtime[0])
+    with h5py.File(cache.h5_path, "r") as handle:
+        vectors_before = handle["embeddings"][:]
+    original = cache.upsert_embeddings
     active[0] = "two"
 
     def interrupt(*args, **kwargs):
         original(*args, **kwargs)
         raise RuntimeError("interrupted after vector commit")
 
-    monkeypatch.setattr(builder.embedding_cache, "upsert_embeddings", interrupt)
-    with pytest.raises(RuntimeError, match="interrupted"):
+    if source_error is None:
+        monkeypatch.setattr(cache, "upsert_embeddings", interrupt)
+    else:
+        failure = source_error("interrupted source stream")
+
+        def broken_source() -> Iterator[DatasetRecord]:
+            """Read one changed source row before the transport fails."""
+            yield row("2401.00001", "new")
+            raise failure
+
+        revisions["two"] = broken_source()
+    expected_error = RuntimeError if source_error is None else OSError
+    with pytest.raises(expected_error, match="interrupted"):
         builder.refresh_corpus()
+    state = cache.corpus_state()
+    assert state["source"] == completed_state["source"]
+    assert state["contract"] == completed_state["contract"]
+    assert (
+        state["namespace_serialization"] == completed_state["namespace_serialization"]
+    )
+    assert state["pending"]["target_source"]["revision"] == "two"
+    assert not state["membership_complete"]
+    if source_error is not None:
+        assert len(runtime[0]) == encoded_before
+        assert cache.embedding_count() == len(vectors_before)
+        with h5py.File(cache.h5_path, "r") as handle:
+            np.testing.assert_array_equal(handle["embeddings"][:], vectors_before)
     with pytest.raises(RuntimeError, match="incomplete"):
         builder.embedding_cache.search(
             np.asarray([1, 0], dtype=np.float32),
@@ -256,13 +298,17 @@ def test_interrupted_refresh_resumes_recorded_target(monkeypatch, runtime):
             binary_rescore_multiplier=1,
         )
     active[0] = "three"
-    monkeypatch.setattr(builder.embedding_cache, "upsert_embeddings", original)
+    revisions["two"] = [row("2401.00001", "new"), row("2401.00002")]
+    monkeypatch.setattr(cache, "upsert_embeddings", original)
     reads.clear()
     resolutions.clear()
     builder.refresh_corpus()
     assert reads == ["two"]
     assert not resolutions
-    assert builder.embedding_cache.corpus_state()["source"]["revision"] == "two"
+    assert cache.corpus_state()["source"]["revision"] == "two"
+    assert cache.corpus_state()["membership_complete"]
+    assert "pending" not in cache.corpus_state()
+    assert cache.get_cached_paper_ids() == {"arxiv:2401.00001", "arxiv:2401.00002"}
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -700,20 +746,31 @@ def test_interrupted_old_duplicate_membership_reconciles_winner(monkeypatch, run
     assert cache.corpus_state()["membership_complete"]
 
 
+@pytest.mark.parametrize("source_error", [RuntimeError, httpx.ReadTimeout])
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("missing_h5", [False, True])
 def test_source_failure_during_duplicate_staging_can_be_resumed(
-    monkeypatch, runtime, storage_precision, missing_h5
-):
-    def broken_source():
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: tuple[list[str], list[str]],
+    storage_precision: Literal["float32", "int8"],
+    missing_h5: bool,
+    source_error: type[RuntimeError] | type[httpx.HTTPError],
+) -> None:
+    """Resume the pinned source after staging fails before writing any vectors."""
+
+    def broken_source() -> Iterator[DatasetRecord]:
+        """Read one source row before the upstream iterator fails."""
         yield row("2401.00001")
-        raise RuntimeError("source stream interrupted")
+        raise source_error("source stream interrupted")
 
     sources = {"one": broken_source(), "two": [row("2501.00001")]}
     active = ["one"]
     reads, resolutions = install_source(monkeypatch, sources, active)
     builder = make_builder(storage_precision=storage_precision)
-    with pytest.raises(RuntimeError, match="source stream interrupted"):
+    expected_error = (
+        OSError if issubclass(source_error, httpx.HTTPError) else RuntimeError
+    )
+    with pytest.raises(expected_error, match="source stream interrupted"):
         builder.refresh_corpus()
     assert runtime == ([], [])
     cache = builder.embedding_cache
@@ -855,6 +912,46 @@ def test_sliced_source_uses_nonstreaming_with_same_pinned_revision(monkeypatch):
             },
         )
     ]
+
+
+@pytest.mark.parametrize("failure_stage", ["load", "iterate"])
+@pytest.mark.parametrize(
+    "source_error",
+    [httpx.ConnectError, httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError],
+)
+def test_source_transport_failures_are_operation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: Literal["load", "iterate"],
+    source_error: type[httpx.HTTPError],
+) -> None:
+    """Normalize transport errors from opening and consuming the pinned dataset."""
+    failure = source_error("source transport unavailable")
+
+    def broken_source() -> Iterator[DatasetRecord]:
+        """Read one source row before the upstream iterator fails."""
+        yield row("2401.00001")
+        raise failure
+
+    def load_dataset(repo: str, **kwargs: str | bool) -> Iterator[DatasetRecord]:
+        """Fail at dataset construction or return the interrupted source stream."""
+        if failure_stage == "load":
+            raise failure
+        return broken_source()
+
+    monkeypatch.setattr(
+        deps,
+        "_import_datasets_module",
+        lambda: SimpleNamespace(load_dataset=load_dataset),
+    )
+    source = CorpusSource("org/source", None, "train", "pinned-revision", "all", None)
+    stats: corpus_source.SourceScanStats = {"source_records_examined": 0}
+
+    with pytest.raises(OSError, match="source transport unavailable") as captured:
+        list(corpus_source.iter_source_records(source, stats))
+
+    assert "org/source@pinned-revision" in str(captured.value)
+    assert captured.value.__cause__ is failure
+    assert stats["source_records_examined"] == (1 if failure_stage == "iterate" else 0)
 
 
 def test_pending_refresh_retains_owned_handle_across_transient_model_reset(
