@@ -105,15 +105,7 @@ def _namespace_override_labels(overrides: _NamespaceOverrides) -> list[str]:
 
 
 class _LocalSearchOptionError(ValueError):
-    """A namespace-flag combination on this command line the contract refuses.
-
-    Distinguished from every other local-search failure because it is a usage
-    error, not an unavailable cache: ``auto`` mode must report the bad flags
-    rather than treat them as a reason to quietly search Semantic Scholar. A
-    contract failure this invocation did not cause — a device in config.toml
-    that does not resolve, say — stays an availability failure and keeps the
-    fallback it has always had.
-    """
+    """Invalid local-search selectors that must fail without an API fallback."""
 
 
 def _empty_cache_alternative_guidance(defaults: argparse.Namespace) -> str:
@@ -160,14 +152,7 @@ def _prepare_local_search_builder(
     build_parser: argparse.ArgumentParser,
     user_config: UserConfig,
 ) -> tuple[EmbeddingGraphBuilder, argparse.Namespace]:
-    """Construct the embedding builder local search runs against.
-
-    Mirrors a flagless build's defaults pipeline (config.toml defaults plus
-    candidate-mode storage normalization) so the search targets the same cache
-    namespace a default build writes to; ``--model``, ``--model-profile``,
-    ``--model-revision``, ``--device``, ``--semantic-source``,
-    ``--dataset-source``, ``--truncate-dim``, ``--storage-precision``, and
-    ``--calibration-sample-size`` override.
+    """Construct a local-search builder from build defaults and supplied selectors.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -189,18 +174,8 @@ def _prepare_local_search_builder(
     for dest, value in overrides.items():
         setattr(defaults, dest, value)
         config_default_dests.discard(dest)
-    # The overrides must land before contract validation: it coerces int8
-    # storage to float32 outside arxiv-corpus mode, and storage precision is
-    # part of the cache namespace, so a late override would compute a
-    # float32 namespace that no corpus build ever wrote.
-    #
-    # The destinations this invocation actually supplied go with them, so the
-    # build contract applies its own rules to them instead of search restating
-    # a subset: --dataset-source alone implies arxiv-corpus, and pairing it with
-    # --semantic-source candidates is the contradiction the contract rejects.
-    # Passed an empty set, the contract can only see the resolved values, and a
-    # contradiction reads as a plain candidates search that silently discards
-    # the dataset the user named.
+    # Validate the supplied selectors together so source inference, conflicts,
+    # and storage normalization match the build command.
     provided_dests = set(overrides)
     try:
         stored_dests = _apply_cache_selection(
@@ -218,9 +193,7 @@ def _prepare_local_search_builder(
         if not getattr(
             args, "cache_namespace", None
         ) and not provided_dests.intersection(exc.related_dests):
-            # This command line did not produce the failing value, so it stays
-            # what it has always been: a config-sourced reason local search is
-            # unavailable, which auto mode may answer from Semantic Scholar.
+            # Config-only failures may fall back to Semantic Scholar in auto mode.
             raise
         raise _LocalSearchOptionError(str(exc)) from exc
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
@@ -230,23 +203,17 @@ def _prepare_local_search_builder(
 def _apply_active_model_identity(
     defaults: argparse.Namespace, builder: EmbeddingGraphBuilder
 ) -> None:
-    """Record the checkpoint that local search actually opened.
-
-    Model loading may replace the requested default checkpoint with its configured
-    fallback. The active model name must then drive result labels and the generated
-    build command because cache fingerprinting already binds the namespace to that
-    fallback. The remaining selectors stay as validated: an explicit revision
-    disables fallback, while the profile token, truncation, storage precision, and
-    calibration size reproduce the active builder contract without changing its
-    compute or storage policy.
+    """Record the resolved checkpoint and certified namespace for result commands.
 
     :param argparse.Namespace defaults: Effective build-equivalent namespace.
     :param EmbeddingGraphBuilder builder: Prepared builder with an active model.
-    :return None: Updates the namespace model selector in place when resolved.
+    :return None: Updates resolved selectors in place.
     """
     active_model_name = str(getattr(builder, "_active_model_name", "") or "").strip()
     if active_model_name:
         defaults.model = active_model_name
+    if builder._cache_selection is not None:
+        defaults.cache_namespace = builder._cache_selection.namespace_id
 
 
 def _local_result_build_command(
@@ -300,9 +267,7 @@ def _local_result_build_command(
             return None
         command.extend(["--dataset-source", str(defaults.dataset_source)])
         command.extend(["--dataset-split", stats.hydration_split])
-        recorded_corpus_size = None if defaults.all_corpus else defaults.corpus_size
-        if recorded_corpus_size is None and not defaults.all_corpus:
-            recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
+        recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
         if recorded_corpus_size is None:
             command.append("--all-corpus")
         else:
@@ -508,6 +473,9 @@ def _run_search_command(
     mode, origin = _resolve_search_mode(args, user_config)
     selected_namespace = bool(getattr(args, "cache_namespace", None))
     overrides = _namespace_overrides(args)
+    requested_view = bool(
+        overrides.keys() & {"dataset_split", "corpus_size", "all_corpus"}
+    )
     override_labels = _namespace_override_labels(overrides)
     if overrides:
         if args.mode == "s2":
@@ -548,7 +516,7 @@ def _run_search_command(
                 args, build_parser, user_config
             )
         except ImportError as exc:
-            if mode == "auto":
+            if mode == "auto" and not requested_view:
                 logger.info(
                     "Local semantic search dependencies are unavailable; "
                     "searching the Semantic Scholar API instead."
@@ -564,6 +532,11 @@ def _run_search_command(
             cached_count = builder.embedding_cache.embedding_count()
         else:
             cached_count = 0
+        if requested_view and builder._cache_selection is None:
+            raise _LocalSearchOptionError(
+                "--dataset-split, --corpus-size, and --all-corpus require a "
+                "certified corpus namespace; refresh/adopt the cache first."
+            )
     except _LocalSearchOptionError as exc:
         # A usage error, so it is reported in every mode: falling back to S2
         # would answer a question the flags say was not asked.
@@ -580,7 +553,7 @@ def _run_search_command(
             runtime_selectors = (
                 f" (device={builder.device} compute_dtype={builder.compute_dtype})"
             )
-        if mode == "auto":
+        if mode == "auto" and not requested_view:
             logger.warning(
                 "Local semantic search unavailable; searching the Semantic Scholar "
                 "API instead."

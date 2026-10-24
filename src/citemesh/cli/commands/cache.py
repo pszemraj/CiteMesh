@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import shlex
+import sqlite3
 
 from rich.text import Text
 
@@ -29,18 +30,6 @@ class _CacheUsageError(ValueError):
     """Report portable-source selection errors through argparse."""
 
 
-def _hub_http_error_types() -> tuple[type[Exception], ...]:
-    """Resolve the Hub HTTP exception across supported SDK versions on failure."""
-    try:
-        from huggingface_hub.errors import HfHubHTTPError
-    except ImportError:
-        try:
-            from huggingface_hub.utils import HfHubHTTPError
-        except ImportError:
-            return ()
-    return (HfHubHTTPError,)
-
-
 def _adopt_legacy_namespace(
     args: argparse.Namespace, error_sink: argparse.ArgumentParser
 ) -> None:
@@ -55,6 +44,22 @@ def _adopt_legacy_namespace(
     from ..build_contract import _validate_build_cli_contract
     from ..build_options import _shared_embedding_builder_kwargs
     from ..parser import _create_parser, _pop_tracked_option_dests
+
+    if args.all_corpus:
+        from citemesh.data.embedding_cache.constants import (
+            HYDRATION_CORPUS_SIZE_KEY,
+            _corpus_size_from_token,
+        )
+        from citemesh.data.embedding_cache.lifecycle import (
+            read_existing_cache_metadata,
+        )
+
+        metadata = read_existing_cache_metadata(args.namespace)
+        coverage = metadata.get(HYDRATION_CORPUS_SIZE_KEY)
+        if coverage is not None and _corpus_size_from_token(coverage) is not None:
+            raise ValueError(
+                "--all-corpus conflicts with the recorded legacy corpus limit"
+            )
 
     _, build_parser, _, _ = _create_parser()
     defaults = build_parser.parse_args(["legacy-adoption", "--strategy", "embedding"])
@@ -108,12 +113,8 @@ def _run_portable_command(args: argparse.Namespace) -> int:
 
     if args.cache_command == "export":
         selection = select_existing_cache(args.namespace)
-        contract = selection.contract
         cache = open_existing_cache(selection)
-        config_name = (
-            f"{contract.profile_key}-{contract.dimension}-{contract.stored_dtype}"
-        )
-        manifest = export_snapshot(cache, args.output, config_name=config_name)
+        manifest = export_snapshot(cache, args.output)
         logger.info(
             "Exported %s corpus rows to %s.", f"{manifest.row_count:,}", args.output
         )
@@ -196,10 +197,7 @@ def run_cache_command(
                 exc,
             )
             return 1
-        except (OSError, ValueError, RuntimeError) as exc:
-            logger.error("Corpus %s failed: %s", args.cache_command, exc)
-            return 1
-        except _hub_http_error_types() as exc:
+        except (OSError, ValueError, RuntimeError, sqlite3.DatabaseError) as exc:
             logger.error("Corpus %s failed: %s", args.cache_command, exc)
             return 1
     if args.cache_command == "scan":

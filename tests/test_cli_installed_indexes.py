@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
+import networkx as nx
 import pytest
 
 from citemesh.cli.build_contract import _validate_build_cli_contract
 from citemesh.cli.build_options import _shared_embedding_builder_kwargs
 from citemesh.cli.cache_selection import _apply_cache_selection
 from citemesh.cli.commands import search
+from citemesh.cli.commands.build import run_build_command
 from citemesh.cli.commands.cache import run_cache_command
 from citemesh.cli.parser import _create_parser, _pop_tracked_option_dests
 from citemesh.data.embedding_contract import EmbeddingContract, ExistingCacheSelection
+from citemesh.data.user_config import UserConfig
+from tests._helpers import build_seed_graph
 
 
 @pytest.fixture
@@ -158,6 +165,81 @@ def test_search_corpus_view_options_flow_into_overrides() -> None:
         "dataset_split": "train",
         "corpus_size": 5,
     }
+
+
+@pytest.mark.parametrize("mode", ["local", "auto"])
+@pytest.mark.parametrize(
+    "flags", [["--corpus-size", "2"], ["--all-corpus"], ["--dataset-split", "train"]]
+)
+def test_legacy_search_rejects_unsupported_views(
+    monkeypatch: pytest.MonkeyPatch, mode: str, flags: list[str]
+) -> None:
+    """Uncertified caches cannot silently ignore explicit corpus-view options."""
+    parser, build_parser, _, _ = _create_parser()
+    args = parser.parse_args(["search", "query", "--mode", mode, *flags])
+    builder = SimpleNamespace(
+        _cache_selection=None,
+        _active_model_name=None,
+        has_persistent_embedding_artifacts=lambda: True,
+        prepare_embedding_cache=lambda: None,
+        embedding_cache=SimpleNamespace(embedding_count=lambda: 5),
+    )
+    defaults = build_parser.parse_args(["seed"])
+    monkeypatch.setattr(
+        search, "_prepare_local_search_builder", lambda *args: (builder, defaults)
+    )
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("unsupported local view fell back to Semantic Scholar")
+
+    monkeypatch.setattr(search, "_run_s2_search", unexpected)
+    assert (
+        search._run_search_command(args, build_parser, UserConfig(Path("config.toml")))
+        == 2
+    )
+
+
+@pytest.mark.parametrize("flags", [["--corpus-size", "2"], ["--all-corpus"]])
+def test_implicit_installed_search_replays_its_namespace_and_view(
+    installed_selection: ExistingCacheSelection,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flags: list[str],
+) -> None:
+    """A discovered certified cache produces a command for the searched view."""
+    parser, build_parser, _, _ = _create_parser()
+    defaults = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--semantic-source", "arxiv-corpus", *flags]
+    )
+    builder = SimpleNamespace(
+        _cache_selection=None,
+        _active_model_name=installed_selection.contract.model_id,
+        has_persistent_embedding_artifacts=lambda: True,
+        embedding_cache=SimpleNamespace(
+            embedding_count=lambda: 5,
+            hydration_operation_lock=nullcontext,
+            last_search_total_embeddings=2 if "--corpus-size" in flags else 5,
+        ),
+        search_local=lambda query, top_k: [
+            SimpleNamespace(paper_id="paper", score=0.9, metadata={"title": "Result"})
+        ],
+    )
+
+    def prepare() -> None:
+        builder._cache_selection = installed_selection
+
+    builder.prepare_embedding_cache = prepare
+    monkeypatch.setattr(
+        search, "_prepare_local_search_builder", lambda *args: (builder, defaults)
+    )
+    args = parser.parse_args(["search", "query", "--mode", "local", *flags])
+    assert (
+        search._run_search_command(args, build_parser, UserConfig(Path("config.toml")))
+        == 0
+    )
+    output = " ".join(capsys.readouterr().out.split())
+    assert f"--cache-namespace {installed_selection.namespace_id}" in output
+    assert " ".join(flags) in output
 
 
 def test_cache_import_requires_one_source() -> None:
@@ -412,22 +494,171 @@ def test_unknown_published_config_is_a_usage_error(
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("failure", ["missing", "transport", "batch"])
 def test_hub_http_failures_return_an_operation_error(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    from citemesh.cli.commands.cache import _hub_http_error_types
-    from citemesh.services import embedding_indexes
+    """Real SDK failures cross the transfer boundary as clean CLI errors."""
+    import huggingface_hub
+    from httpx2 import ConnectError, Request, Response
+    from huggingface_hub.errors import BucketBatchError, EntryNotFoundError
 
     parser, _, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "import", "--bucket", "owner/index"])
-    error_type = _hub_http_error_types()[0]
+    response = Response(503, request=Request("GET", "https://huggingface.co"))
+    error = {
+        "missing": EntryNotFoundError("missing catalog"),
+        "transport": ConnectError("offline"),
+        "batch": BucketBatchError("failed bucket operation", response=response),
+    }[failure]
 
     def unavailable(*args: object, **kwargs: object) -> None:
-        response = SimpleNamespace(headers={}, request=None)
-        raise error_type("503 Service Unavailable", response=response)
+        raise error
 
-    monkeypatch.setattr(embedding_indexes, "resolve_publication", unavailable)
+    monkeypatch.setattr(
+        huggingface_hub,
+        "HfApi",
+        lambda: SimpleNamespace(download_bucket_files=unavailable),
+    )
     assert run_cache_command(args, cache_parser) == 1
+
+
+@pytest.mark.parametrize("command", ["export", "refresh", "build"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("Namespace 0123456789ab is not installed; see cache scan"),
+        RuntimeError("Selected cache membership is not certified"),
+        RuntimeError("Corpus import is pending"),
+        sqlite3.DatabaseError("file is not a database"),
+    ],
+)
+def test_namespace_failures_return_operation_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str, error: Exception
+) -> None:
+    """Namespace selection failures return exit1 before graph or transfer work."""
+    from citemesh.data.embedding_cache import lifecycle
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(lifecycle, "select_existing_cache", unavailable)
+    parser, build_parser, cache_parser, _ = _create_parser()
+    if command == "build":
+        args = parser.parse_args(
+            [
+                "build",
+                "seed",
+                "--strategy",
+                "embedding",
+                "--cache-namespace",
+                "0123456789ab",
+            ]
+        )
+        result = run_build_command(
+            args,
+            build_parser,
+            provided_build_options=_pop_tracked_option_dests(args),
+            user_config=UserConfig(tmp_path / "config.toml"),
+        )
+    else:
+        flags = ["--output", str(tmp_path / "out")] if command == "export" else []
+        args = parser.parse_args(
+            ["cache", command, "--namespace", "0123456789ab", *flags]
+        )
+        result = run_cache_command(args, cache_parser)
+    assert result == 1
+    assert not (tmp_path / "out").exists()
+
+
+def test_legacy_adoption_rejects_explicit_all_against_recorded_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adoption cannot silently replace an explicit all-corpus selector with a cap."""
+    from citemesh.data.embedding_cache import lifecycle
+    from citemesh.strategies.embedding import refresh
+
+    monkeypatch.setattr(
+        lifecycle,
+        "read_existing_cache_metadata",
+        lambda _: {"hydration_corpus_size": "newest:5"},
+    )
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("conflicting adoption started")
+
+    monkeypatch.setattr(refresh, "adopt_legacy_cache", unexpected)
+    parser, _, cache_parser, _ = _create_parser()
+    args = parser.parse_args(
+        ["cache", "refresh", "--namespace", "0123456789ab", "--adopt", "--all-corpus"]
+    )
+    assert run_cache_command(args, cache_parser) == 1
+
+
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+def test_selected_build_writes_contract_and_runtime_provenance(
+    installed_selection: ExistingCacheSelection,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strategy: str,
+) -> None:
+    """The build command carries selected identity through export and sidecar writing."""
+    from citemesh.cli.commands import build
+
+    graph = build_seed_graph()
+    origin = {
+        "bucket_id": "owner/index",
+        "config_name": "variant",
+        "snapshot_id": "snapshot-one",
+    }
+    graph.graph["embedding_runtime"] = {
+        "cache_namespace": installed_selection.namespace_id,
+        "dataset_revision": "source-pin",
+        "index_origin": origin,
+    }
+
+    def build_graph(
+        args: argparse.Namespace, selected_strategy: str
+    ) -> tuple[nx.Graph, str]:
+        assert selected_strategy == strategy
+        assert args._cache_selection is installed_selection
+        assert args.model == installed_selection.contract.model_id
+        assert args.truncate_dim == installed_selection.contract.dimension
+        return graph, "seed"
+
+    monkeypatch.setattr(build, "_build_strategy_graph", build_graph)
+    output = tmp_path / "graph.json"
+    parser, build_parser, _, _ = _create_parser()
+    args = parser.parse_args(
+        [
+            "build",
+            "seed",
+            "--strategy",
+            strategy,
+            "--cache-namespace",
+            installed_selection.namespace_id,
+            "--export",
+            "json",
+            "--output",
+            str(output),
+        ]
+    )
+    assert (
+        run_build_command(
+            args,
+            build_parser,
+            provided_build_options=_pop_tracked_option_dests(args),
+            user_config=UserConfig(tmp_path / "config.toml"),
+        )
+        == 0
+    )
+    payload = json.loads(output.with_suffix(".config.json").read_text())
+    embedding = payload["build"]["embedding"]
+    assert embedding["model"] == installed_selection.contract.model_id
+    assert embedding["truncate_dim"] == installed_selection.contract.dimension
+    assert embedding["cache_namespace"] == installed_selection.namespace_id
+    assert embedding["dataset_revision"] == "source-pin"
+    assert embedding["index_origin"] == origin
 
 
 def test_minimal_selected_finite_corpus_uses_certified_limit(

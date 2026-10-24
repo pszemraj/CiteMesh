@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import huggingface_hub
 import pytest
 import requests
@@ -69,6 +70,8 @@ def _forbid_external_http(
     monkeypatch.setattr(requests.sessions.Session, "send", blocked)
     monkeypatch.setattr(httpx.Client, "send", blocked)
     monkeypatch.setattr(httpx.AsyncClient, "send", blocked_async)
+    monkeypatch.setattr(httpx2.Client, "send", blocked)
+    monkeypatch.setattr(httpx2.AsyncClient, "send", blocked_async)
 
 
 @pytest.fixture(autouse=True)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import tempfile
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
@@ -568,7 +569,13 @@ def run_build_command(
         stored_dests = _apply_cache_selection(
             args, provided_build_options, build_parser
         )
-    except (ValueError, OSError, ImportError) as exc:
+    except (
+        ValueError,
+        OSError,
+        ImportError,
+        RuntimeError,
+        sqlite3.DatabaseError,
+    ) as exc:
         logger.error("Cannot use selected corpus: %s", exc)
         return 1
     config_default_dests.difference_update(stored_dests)

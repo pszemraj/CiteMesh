@@ -1161,6 +1161,7 @@ def _fake_local_search_builder(
     fake_builder.device = "cpu"
     fake_builder.compute_dtype = "float32"
     fake_builder._active_model_name = None
+    fake_builder._cache_selection = None
     fake_builder.search_local.return_value = list(results or [])
     fake_builder.has_persistent_embedding_artifacts.return_value = cached_count > 0
     fake_builder.embedding_cache = SimpleNamespace(
@@ -1455,6 +1456,7 @@ def test_search_local_build_footer_preserves_effective_namespace_and_scope(
         "--calibration-sample-size",
         "100",
     ]
+    cli_module.set_config_value("defaults.corpus_size", "3")
 
     result = run_cli_command(search_args)
 
