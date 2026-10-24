@@ -906,3 +906,119 @@ def test_nonsearch_readers_enforce_installed_coverage(tmp_path):
             cache.get_cached_embeddings(ids, corpus_size=size)
     assert cache.require_complete_certified_corpus(corpus_size=2)["membership_complete"]
     assert cache.get_cached_paper_ids(corpus_size=2) == {"paper-1", "paper-2"}
+
+
+@pytest.mark.parametrize(
+    "selection,limit", [("all", None), ("newest", 4), ("newest", 8)]
+)
+@pytest.mark.parametrize("refresh", [False, True])
+def test_whole_coverage_views_avoid_sorting(
+    tmp_path, monkeypatch, selection, limit, refresh
+):
+    """Native readers skip ranking whole coverage while retaining smaller views."""
+    from citemesh.data.embedding_cache import layout
+
+    settings = _settings(tmp_path)
+    settings["source"] = replace(settings["source"], selection=selection, limit=limit)
+    records = _records()
+    for record in records:
+        record["doi"] = f"10.1234/{record['paper_id']}"
+    with import_destination_session(**settings) as session:
+        session.append_stored_embeddings(
+            records, np.eye(4, dtype=np.float32), first_row=0
+        )
+        session.finish(expected_rows=4, source_records_examined=4)
+        cache = session.cache
+    active = records[1:] if refresh else records
+    if refresh:
+        with cache.operation_session(
+            kind="refresh",
+            identity={"source": settings["source"].to_dict()},
+            target_source=settings["source"],
+            contract=settings["contract"],
+            namespace_selectors=settings["namespace_selectors"],
+        ) as session:
+            session.record_membership(active)
+            session.finish(expected_rows=len(active), source_records_examined=4)
+    with cache._connect_db() as conn:
+        assert conn.execute(
+            "SELECT value FROM cache_metadata WHERE key = ?",
+            (constants.HYDRATION_RECONCILED_CACHE_ROWS_KEY,),
+        ).fetchone() == (str(len(active)),)
+
+    statements = []
+    connect = cache._connect_db
+
+    @contextmanager
+    def observe_queries():
+        """Capture statements issued through native readers' shared connection."""
+        with connect() as conn:
+            conn.set_trace_callback(statements.append)
+            yield conn
+
+    monkeypatch.setattr(cache, "_connect_db", observe_queries)
+    monkeypatch.setattr(layout, "SQLITE_QUERY_BATCH_SIZE", 1)
+    monkeypatch.setattr(constants, "EMBEDDING_SEARCH_CHUNK_ROWS", 1)
+    ids = [record["paper_id"] for record in records]
+    aliases = [record["doi"] for record in records]
+    for size in {1, len(active), limit or len(active) + 1}:
+        statements.clear()
+        expected = (
+            {record["paper_id"] for record in active}
+            if size >= len(active)
+            else {"paper-2"}
+        )
+        assert cache.get_cached_paper_ids(corpus_size=size) == expected
+        assert set(cache.get_paper_metadata_batch(ids, corpus_size=size)) == expected
+        assert (
+            set(cache.get_paper_metadata_alias_candidates(aliases, corpus_size=size))
+            == expected
+        )
+        assert set(cache.get_cached_embeddings(ids, corpus_size=size)) == expected
+        assert {
+            result.paper_id
+            for result in cache.search(
+                np.ones(4, dtype=np.float32),
+                10,
+                corpus_size=size,
+                binary_prefilter=False,
+                binary_rescore_multiplier=1,
+            )
+        } == expected
+        membership_reads = [sql for sql in statements if "corpus_membership" in sql]
+        assert membership_reads
+        assert any("ORDER BY" in sql for sql in membership_reads) == (
+            size < len(active)
+        )
+        point_reads = [sql for sql in membership_reads if "papers AS owners" in sql]
+        assert point_reads
+        assert all(
+            (" AND EXISTS " in sql) == (size >= len(active)) for sql in point_reads
+        )
+        assert not any("COUNT(*) FROM corpus_membership" in sql for sql in statements)
+
+
+@pytest.mark.parametrize("marker", [None, "", "-1", "unknown"])
+def test_missing_reconciliation_count_preserves_view_semantics(tmp_path, marker):
+    """Unavailable row counts retain ranking except at the certified source limit."""
+    settings = _settings(tmp_path)
+    settings["source"] = replace(settings["source"], selection="newest", limit=4)
+    cache, _, _ = _populate(settings)
+    with cache._connect_db() as conn:
+        if marker is None:
+            conn.execute(
+                "DELETE FROM cache_metadata WHERE key = ?",
+                (constants.HYDRATION_RECONCILED_CACHE_ROWS_KEY,),
+            )
+        else:
+            conn.execute(
+                "UPDATE cache_metadata SET value = ? WHERE key = ?",
+                (marker, constants.HYDRATION_RECONCILED_CACHE_ROWS_KEY),
+            )
+        query, parameters = cache._corpus_view_query_locked(conn, 4)
+        assert parameters == ()
+        assert "ORDER BY" not in query
+    assert cache.get_cached_paper_ids(corpus_size=1) == {"paper-2"}
+    assert cache.get_cached_paper_ids(corpus_size=4) == {
+        record["paper_id"] for record in _records()
+    }

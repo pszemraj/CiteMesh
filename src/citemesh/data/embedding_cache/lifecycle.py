@@ -483,6 +483,9 @@ class _LifecycleMixin(_EmbeddingCacheHost):
     ) -> tuple[str, tuple[int, ...]] | None:
         """Build SQL for the active corpus view.
 
+        Whole-coverage requests use unordered membership; smaller views rank
+        members by newest submission.
+
         :param sqlite3.Connection conn: Open cache database connection.
         :param int | None corpus_size: Optional newest-N limit within installed coverage.
         :return tuple[str, tuple[int, ...]] | None: Row query and bindings, or ``None`` for unmanaged caches.
@@ -495,6 +498,19 @@ class _LifecycleMixin(_EmbeddingCacheHost):
             "JOIN papers p ON p.paper_id=m.paper_id"
         )
         if corpus_size is None:
+            return query, ()
+        source = state["source"]
+        if source["selection"] == "newest" and corpus_size == source["limit"]:
+            return query, ()
+        reconciled = conn.execute(
+            "SELECT value FROM cache_metadata WHERE key = ?",
+            (constants.HYDRATION_RECONCILED_CACHE_ROWS_KEY,),
+        ).fetchone()
+        if (
+            reconciled
+            and reconciled[0].isdecimal()
+            and corpus_size >= int(reconciled[0])
+        ):
             return query, ()
         return (
             query
