@@ -8,8 +8,12 @@ from typing import Any
 import httpx
 import httpx2
 import huggingface_hub
+import matplotlib
 import pytest
 import requests
+
+# Threaded export tests need rendering without a GUI event loop.
+matplotlib.use("Agg")
 
 
 @pytest.fixture(autouse=True)
