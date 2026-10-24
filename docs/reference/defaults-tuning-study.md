@@ -192,9 +192,9 @@ Per-run elapsed time has heavy-tail behavior driven by network-bound citation-co
 
 ### Default decision
 
-The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. The active values are listed in [CLI Usage](../guides/cli.md).
+The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. Run `citemesh build --help` for [current defaults](../guides/cli.md#option-reference).
 
 Why:
 
 - The broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
-- The updated defaults improve practical triage for "recent follow-up + foundational prior work" without forcing users to set branch-specific knobs each run.
+- The selected defaults support practical triage for "recent follow-up + foundational prior work" without per-run tuning.

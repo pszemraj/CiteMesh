@@ -29,7 +29,11 @@ Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and 
 
 Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API.
 
-Caching does not make a build offline: citation, reference, recommendation, and search calls still need the network.
+Local semantic search over a ready namespace uses cached vectors and metadata
+without fetching the corpus, though query encoding still uses the recorded
+model, which may need downloading. Uncached Semantic Scholar search and
+citation, reference, or recommendation discovery need network access; graph
+builds may also request provider metadata.
 
 ## Discovery checks
 
@@ -96,9 +100,10 @@ write access for publication. Set [`HF_TOKEN`](../reference/environment.md#other
 or save a token with `hf auth login`; public bucket reads need no token.
 
 Explicit `--cache-namespace` selects existing files and pins model, profile,
-formatter, dimension, storage precision, dataset, and split. Conflicting flags
-fail; device, batch size, scoring, and result limits remain configurable. In
-`--mode auto`, installed-index readiness/compatibility errors stay errors under
+formatter, dimension, storage precision, calibration sample size, dataset, and
+split. Conflicting flags fail; device, batch size, scoring, and result limits
+remain configurable. In `--mode auto`, installed-index readiness/compatibility
+errors stay errors under
 explicit or ordinary namespace selection. Import does not change saved defaults.
 
 For an installed index, `--corpus-size N` ranks only the newest N active members
@@ -198,7 +203,9 @@ a different configuration and native destination.
 
 The dataset adapter accepts `id`, `paper_id`, or `paperId`, taking the first non-empty identifier. Stable source IDs preserve cache identity across updates. Without an ID, usable title or abstract text produces a content-derived ID; a row with neither fails and reports its source-row index.
 
-`title` supplies the paper name. `abstract` supplies the text, with `summary` used when the abstract is empty or unusable. Optional fields include `authors`, `authors_parsed`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal`. Structured `authors_parsed` entries take precedence over free-text authors. Missing titles become `Unknown`; years fall back to the arXiv submission year when available. Arbitrary column mappings are unsupported.
+`title` supplies the paper name. `abstract` supplies the text, with `summary` used when the abstract is empty or unusable. Optional fields include `authors`, `authors_parsed`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal-ref` / `journal`. Structured `authors_parsed` entries take precedence over free-text authors. Missing titles become `Unknown`; years fall back to the arXiv submission year when available. Arbitrary column mappings are unsupported.
+
+The `doi` field accepts a bare DOI, a `doi:` prefix, or a DOI URL. It uses the first token if valid, then falls back to a DOI-based paper ID.
 
 ## Corpus hydration and resume
 

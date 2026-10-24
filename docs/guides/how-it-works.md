@@ -31,7 +31,7 @@ A free-text seed starts with keyword search capped at 20 hits and the total sour
 
 S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate.
 
-Acquisition follows the [source-failure and retry policy](cli.md#appendix-b-troubleshooting), recording availability in exported metadata.
+Acquisition follows the [source-failure and retry policy](cli.md#troubleshooting), recording availability in exported metadata.
 
 Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py).
 
@@ -59,7 +59,9 @@ Hybrid collects two pools, citation-derived and semantic, and reranks the union 
 score = 0.62 · semantic + 0.16 · temporal + 0.14 · citation + 0.08 · bibliographic
 ```
 
-where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(citations) / log1p(max_citations_in_pool + 1)` compresses the long tail. Then **+0.10** when both branches found the candidate, since citation-plus-semantic agreement is the strongest evidence available, and **+0.02** for citation-derived candidates. `--max-semantic` caps semantic-*only* additions; overlap papers do not count against it. It is a ceiling, not a reservation: if citation-derived candidates fill `--max-papers` first, no semantic-only paper is added.
+where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(max(citations, 0)) / log1p(max(max_citations_in_pool, 1))` compresses the long tail. Add **0.10** when both branches found the candidate, or **0.02** for a citation-derived candidate without semantic overlap; cap the final score at `1.0`.
+
+`--max-semantic` caps semantic-*only* additions; overlap papers do not count against it. It is a ceiling, not a reservation: if citation-derived candidates fill `--max-papers` first, no semantic-only paper is added.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
@@ -78,7 +80,7 @@ similarity = (0.5 · semantic + 0.2 · temporal + 0.2 · category) × author_fac
 author_factor = 1.5 if the papers share an author, else 1.0
 ```
 
-The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), then flattens at `0.1`. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate - they never create an edge.
+The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), scoring `0.2` at exactly five years and flattening at `0.1` for greater differences. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate - they never create an edge.
 
 Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` - `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed - then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
 

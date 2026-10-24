@@ -9,7 +9,7 @@
 ```python
 class EmbeddingCache(
     _LifecycleMixin, _IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin
-):
+): ...
 ```
 
 - `lifecycle.py` (`_LifecycleMixin`) - strict existing-cache inspection, certified corpus state, membership, read-only vector access, and owned import/refresh sessions.

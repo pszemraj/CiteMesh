@@ -51,7 +51,7 @@ For installed-index selection, fixed settings, corpus views, and recovery, see
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
-`--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. It is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
+`--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. It is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard
 
@@ -113,7 +113,7 @@ Formats, dashboard collection and standalone behavior, package schemas, sidecars
 
 _`--theme light` with a paper selected._
 
-## Appendix B: Troubleshooting
+## Troubleshooting
 
 CiteMesh paces authenticated Semantic Scholar requests at 1 request/second and anonymous requests at 0.5. Calls retry with exponential full jitter: up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and recovery waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
 

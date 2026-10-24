@@ -137,7 +137,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from citemesh import EmbeddingGraphBuilder, Paper
-from citemesh.data.embedding_cache.lifecycle import (
+from citemesh.data.embedding_cache import (
     open_existing_cache,
     select_existing_cache,
 )
