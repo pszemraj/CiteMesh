@@ -576,7 +576,11 @@ def run_build_command(
         RuntimeError,
         sqlite3.DatabaseError,
     ) as exc:
-        logger.error("Cannot use selected corpus: %s", exc)
+        logger.error(
+            "Cannot use selected corpus: %s",
+            exc,
+            exc_info=logger.isEnabledFor(logging.DEBUG),
+        )
         return 1
     config_default_dests.difference_update(stored_dests)
     _validate_build_cli_contract(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -525,17 +527,45 @@ def test_manual_publisher_reuses_refresh_export_and_publication(
     assert calls[2:] == [("export", output, "one"), ("publish", "owner/index", output)]
 
 
-def test_manual_publisher_failure_returns_exit_code_without_traceback(
-    publisher, monkeypatch, capsys, tmp_path
+@pytest.mark.parametrize("failure", ["validation", "database", "offline"])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_manual_publisher_failure_returns_exit_code_with_optional_traceback(
+    publisher, monkeypatch, capsys, caplog, tmp_path, failure, verbose
 ):
+    from huggingface_hub import HfApi
+
+    from citemesh.data.embedding_contract import CorpusSource
+    from citemesh.strategies.embedding.corpus_source import resolve_source_snapshot
+
+    caplog.set_level(logging.DEBUG if verbose else logging.WARNING)
+
+    def offline(*args, **kwargs):
+        raise ConnectError("offline")
+
+    monkeypatch.setattr(HfApi, "dataset_info", offline)
+
     def fail(*args, **kwargs):
+        if failure == "offline":
+            resolve_source_snapshot(
+                CorpusSource("test/source", None, "train", "main", "all", None)
+            )
+        if failure == "database":
+            raise sqlite3.DatabaseError("file is not a database")
         raise ValueError("bucket must be private")
 
     monkeypatch.setattr(publisher, "publish_arxiv_index", fail)
-    assert publisher.main(["owner/index", str(tmp_path / "out")]) == 1
+    flags = ["-vv"] if verbose else []
+    assert publisher.main(["owner/index", str(tmp_path / "out"), *flags]) == 1
     captured = capsys.readouterr()
     assert not captured.out
-    assert captured.err == "error: bucket must be private\n"
+    expected = {
+        "validation": "bucket must be private",
+        "database": "file is not a database",
+        "offline": "Cannot resolve dataset test/source@main: offline",
+    }[failure]
+    assert captured.err == f"error: {expected}\n"
+    failures = [record for record in caplog.records if record.exc_info]
+    assert bool(failures) is verbose
 
 
 @pytest.mark.parametrize("failure", ["part.parquet", "index.json", "catalog.json"])

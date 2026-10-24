@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
@@ -524,6 +525,7 @@ def test_hub_http_failures_return_an_operation_error(
 
 
 @pytest.mark.parametrize("command", ["export", "refresh", "build"])
+@pytest.mark.parametrize("verbose", [False, True])
 @pytest.mark.parametrize(
     "error",
     [
@@ -534,10 +536,17 @@ def test_hub_http_failures_return_an_operation_error(
     ],
 )
 def test_namespace_failures_return_operation_errors(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str, error: Exception
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    command: str,
+    error: Exception,
+    verbose: bool,
 ) -> None:
     """Namespace selection failures return exit1 before graph or transfer work."""
     from citemesh.data.embedding_cache import lifecycle
+
+    caplog.set_level(logging.DEBUG if verbose else logging.INFO)
 
     def unavailable(*args: object, **kwargs: object) -> None:
         raise error
@@ -569,6 +578,41 @@ def test_namespace_failures_return_operation_errors(
         result = run_cache_command(args, cache_parser)
     assert result == 1
     assert not (tmp_path / "out").exists()
+    failures = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(failures) == 1
+    assert bool(failures[0].exc_info) is verbose
+
+
+def test_refresh_reports_offline_source_resolution(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Report transport failures from source resolution as refresh operation errors."""
+    from httpx2 import ConnectError
+    from huggingface_hub import HfApi
+
+    from citemesh.data.embedding_cache import lifecycle
+    from citemesh.data.embedding_contract import CorpusSource
+    from citemesh.strategies.embedding import refresh
+    from citemesh.strategies.embedding.corpus_source import resolve_source_snapshot
+
+    source = CorpusSource("test/source", None, "train", "main", "all", None)
+
+    def offline(*args: object, **kwargs: object) -> None:
+        raise ConnectError("offline")
+
+    def refresh_source(*args: object, **kwargs: object) -> None:
+        resolve_source_snapshot(source)
+
+    monkeypatch.setattr(HfApi, "dataset_info", offline)
+    monkeypatch.setattr(
+        lifecycle, "select_existing_cache", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(refresh, "refresh_cache_selection", refresh_source)
+    parser, _, cache_parser, _ = _create_parser()
+    args = parser.parse_args(["cache", "refresh", "--namespace", "0123456789ab"])
+    assert run_cache_command(args, cache_parser) == 1
+    assert "Cannot resolve dataset test/source@main: offline" in caplog.text
+    assert not any(record.exc_info for record in caplog.records)
 
 
 def test_legacy_adoption_rejects_explicit_all_against_recorded_limit(

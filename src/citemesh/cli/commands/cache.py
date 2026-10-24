@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import shlex
 import sqlite3
 
@@ -195,10 +196,16 @@ def run_cache_command(
                 "Corpus transfer/refresh dependencies are unavailable; install "
                 "CiteMesh with the embeddings extra: pip install 'citemesh[embeddings]'. %s",
                 exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
             )
             return 1
         except (OSError, ValueError, RuntimeError, sqlite3.DatabaseError) as exc:
-            logger.error("Corpus %s failed: %s", args.cache_command, exc)
+            logger.error(
+                "Corpus %s failed: %s",
+                args.cache_command,
+                exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
             return 1
     if args.cache_command == "scan":
         exit_code = _scan_cache_directory()

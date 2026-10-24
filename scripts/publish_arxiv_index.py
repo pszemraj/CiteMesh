@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -160,7 +161,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     except KeyboardInterrupt:
         return 130
-    except (OSError, ValueError, ImportError, RuntimeError) as exc:
+    except (
+        OSError,
+        ValueError,
+        ImportError,
+        RuntimeError,
+        sqlite3.DatabaseError,
+    ) as exc:
+        logging.debug("Index publication failed", exc_info=True)
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(snapshot_id)

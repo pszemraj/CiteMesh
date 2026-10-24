@@ -101,14 +101,22 @@ def resolve_source_snapshot(
     :param source: Dataset repository and split to resolve.
     :param revision: Branch, tag, or commit requested from the dataset host.
     :return: Source selection pinned to the resolved commit.
+    :raises OSError: If the dataset host cannot resolve the requested revision.
     """
     from dataclasses import replace
 
-    info = (
-        deps._import_huggingface_hub_module()
-        .HfApi()
-        .dataset_info(repo_id=source.repo_id, revision=revision)
-    )
+    from huggingface_hub.utils import httpx
+
+    try:
+        info = (
+            deps._import_huggingface_hub_module()
+            .HfApi()
+            .dataset_info(repo_id=source.repo_id, revision=revision)
+        )
+    except httpx.HTTPError as exc:
+        raise OSError(
+            f"Cannot resolve dataset {source.repo_id}@{revision}: {exc}"
+        ) from exc
     return replace(source, revision=info.sha)
 
 
