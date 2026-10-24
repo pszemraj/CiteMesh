@@ -348,7 +348,7 @@ def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 @pytest.mark.parametrize(
-    ("arguments", "html_path", "browser_name"),
+    ("arguments", "html_path", "requested_browser"),
     [
         ([], "out/dashboard.html", None),
         (["collection dir"], "collection dir/dashboard.html", None),
@@ -364,7 +364,7 @@ def test_view_opens_saved_html(
     monkeypatch: pytest.MonkeyPatch,
     arguments: list[str],
     html_path: str,
-    browser_name: str | None,
+    requested_browser: str | None,
 ) -> None:
     """View resolves saved results and sends a file URI to the chosen browser.
 
@@ -372,7 +372,7 @@ def test_view_opens_saved_html(
     :param pytest.MonkeyPatch monkeypatch: Isolated browser and working directory.
     :param list[str] arguments: Optional view arguments.
     :param str html_path: Saved HTML path relative to the working directory.
-    :param str | None browser_name: Explicit browser override, if any.
+    :param str | None requested_browser: Explicit browser override, if any.
     :return None: Checks browser dispatch without loading build configuration.
     """
     monkeypatch.chdir(tmp_path)
@@ -391,8 +391,8 @@ def test_view_opens_saved_html(
     result = run_cli_command(["view", *arguments])
 
     assert result.returncode == 0, result.stderr
-    if browser_name:
-        get_browser.assert_called_once_with(browser_name)
+    if requested_browser:
+        get_browser.assert_called_once_with(requested_browser)
         controller.open_new_tab.assert_called_once_with(saved_html.as_uri())
         open_default.assert_not_called()
     else:
@@ -431,15 +431,15 @@ def test_view_rejects_missing_or_non_html_results(
     open_default.assert_not_called()
 
 
-@pytest.mark.parametrize("browser_name", [None, "unavailable-browser"])
+@pytest.mark.parametrize("requested_browser", [None, "unavailable-browser"])
 def test_view_reports_browser_launch_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, browser_name: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requested_browser: str | None
 ) -> None:
     """View should report browser failures with the file available to open manually.
 
     :param Path tmp_path: Directory containing saved HTML.
     :param pytest.MonkeyPatch monkeypatch: Isolated browser launch behavior.
-    :param str | None browser_name: Unavailable named browser or default launch failure.
+    :param str | None requested_browser: Unavailable named browser or default launch failure.
     :return None: Checks the failure exit status and actionable browser error.
     """
     saved_html = tmp_path / "dashboard.html"
@@ -451,8 +451,8 @@ def test_view_reports_browser_launch_failure(
         MagicMock(side_effect=webbrowser.Error("browser unavailable")),
     )
     arguments = ["view", str(saved_html)]
-    if browser_name:
-        arguments.extend(["--browser", browser_name])
+    if requested_browser:
+        arguments.extend(["--browser", requested_browser])
 
     result = run_cli_command(arguments)
 
