@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from citemesh.core.paper_ids import canonicalize_or_none
 from citemesh.data.cache import JSONValue
-from citemesh.visualization.dashboard.contracts import (
-    CitationConfig,
-    EmbeddingConfig,
-    GraphConfigData,
-)
-from citemesh.visualization.export import ExportMetadata
+
+if TYPE_CHECKING:
+    from citemesh.visualization.dashboard.contracts import (
+        CitationConfig,
+        EmbeddingConfig,
+        GraphConfigData,
+    )
+    from citemesh.visualization.export import ExportMetadata
 
 from .build_options import (
     _embedding_branch_enabled,
@@ -188,7 +190,7 @@ def _build_graph_config_payload(
         "outputs": {fmt: str(path) for fmt, path in sorted(output_paths.items())},
         "metadata": metadata,
     }
-    return cast(GraphConfigData, _drop_none_values(cast(JSONValue, payload)))
+    return cast("GraphConfigData", _drop_none_values(cast(JSONValue, payload)))
 
 
 def canonicalize_paper_id_for_metadata(paper_id: str) -> str:

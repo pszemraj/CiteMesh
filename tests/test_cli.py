@@ -10,6 +10,8 @@ import re
 import runpy
 import shlex
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import webbrowser
@@ -80,6 +82,30 @@ from tests._helpers import (
 )
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
+
+@pytest.mark.parametrize(
+    ("module_name", "heavy_dependency"),
+    [
+        ("citemesh.strategies.citation", "h5py"),
+        ("citemesh.cli.parser", "matplotlib"),
+    ],
+)
+def test_metadata_annotations_do_not_load_heavy_dependencies(
+    module_name: str, heavy_dependency: str
+) -> None:
+    """Keep type-only metadata imports out of lightweight runtime paths."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import importlib, sys; importlib.import_module({module_name!r}); "
+            f"assert {heavy_dependency!r} not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def run_cli_command(args: list[str]) -> SimpleNamespace:

@@ -33,10 +33,10 @@ from citemesh.core.paper_ids import (
     paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
-from citemesh.data.embedding_cache.models import PaperMetadata
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
+    from citemesh.data.embedding_cache.models import PaperMetadata
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)

@@ -56,5 +56,8 @@ jobs:
       - name: Install package
         run: pip install -e ".[dev,viz]"
 
+      - name: Type check
+        run: python -m mypy
+
       - name: Test
         run: python -m pytest
