@@ -1540,14 +1540,14 @@ class EmbeddingGraphBuilder(
             return []
 
         embeddings = self.embed_papers(pool.papers)
-        query = np.asarray(seed_embedding, dtype=np.float32)
+        query = l2_normalize_embeddings(seed_embedding)
         scored: list[tuple[float, str, Paper, NDArray[np.float32], int]] = []
         for idx, (paper_id, paper) in enumerate(pool.papers.items()):
             embedding = embeddings.get(paper_id)
             if embedding is None:
                 continue
             vector = np.asarray(embedding, dtype=np.float32)
-            score = float(np.clip(np.dot(query, vector), -1.0, 1.0))
+            score = cosine_similarity_to_query(query, vector)
             scored.append((score, paper_id, paper, vector, idx))
         scored.sort(
             key=lambda item: deterministic_sort_key(
@@ -1891,8 +1891,9 @@ class EmbeddingGraphBuilder(
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
             emb1 = l2_normalize_embeddings(self.embeddings[paper1.paper_id])
-            emb2 = l2_normalize_embeddings(self.embeddings[paper2.paper_id])
-            semantic_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
+            semantic_sim = cosine_similarity_to_query(
+                emb1, self.embeddings[paper2.paper_id]
+            )
         else:
             semantic_sim = 0.0
 
