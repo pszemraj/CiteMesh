@@ -2845,7 +2845,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         builder._load_model = lambda: None
         builder._resolve_model_fingerprint = lambda: "test-fingerprint"
         builder._prepare_corpus_for_build = lambda: None
-        builder._update_citation_counts = lambda _: None
+        builder._enrich_corpus_papers = lambda _: None
         builder._select_candidates = (
             lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
                 (
@@ -3072,13 +3072,13 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     assert papers["seed"].citation_count == 7
     assert papers["arxiv:2501.00001"].citation_count == 0
     assert set(builder.retrieval_embeddings) == set(papers)
-    assert "Citation-count enrichment was rejected" in caplog.text
+    assert "Corpus metadata enrichment was rejected" in caplog.text
     assert "HTTP 403" in caplog.text
     client.get_papers.assert_called_once_with(["arxiv:2501.00001"])
     client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     client.get_papers.side_effect = ValueError("invalid local payload")
     with pytest.raises(ValueError, match="invalid local payload"):
-        builder._update_citation_counts(papers)
+        builder._enrich_corpus_papers(papers)
 
 
 @pytest.mark.parametrize(

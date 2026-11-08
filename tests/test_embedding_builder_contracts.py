@@ -4353,7 +4353,7 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
         "_select_candidates",
         lambda _seed_embedding, *, use_streaming: [],
     )
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _: None)
+    monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _: None)
 
     query = "attention mechanism test query"
     papers = builder.collect_papers(query)
@@ -4489,7 +4489,7 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
             ),
         ],
     )
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+    monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
     papers = builder.collect_papers("arxiv:2608.15411")
 
@@ -4571,7 +4571,7 @@ def test_collect_papers_keeps_corpus_primary_ids_stable(
             ),
         ],
     )
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+    monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
     papers = builder.collect_papers(seed.paper_id)
 
@@ -4655,7 +4655,7 @@ def test_collect_papers_does_not_bridge_corpus_rows(
             ),
         ],
     )
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+    monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
     papers = builder.collect_papers(seed.paper_id)
 
@@ -4721,7 +4721,7 @@ def test_corpus_collection_preserves_all_candidate_authors(
             )
         ],
     )
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+    monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
     papers = builder.collect_papers("seed")
 
@@ -4758,7 +4758,7 @@ def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
             "_select_candidates",
             lambda _seed_embedding, *, use_streaming: [],
         )
-        monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+        monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
         return builder, query_calls, document_calls
 
     query_builder, query_calls, query_documents = _build_builder()
@@ -8280,27 +8280,34 @@ def test_embedding_candidate_search_logs_comparison_counts(
 def test_embedding_citation_enrichment_logs_target_count(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Citation enrichment should batch-fetch counts and update paper metadata."""
+    """Enrichment fills missing fields while preserving corpus identity and text."""
     client = MagicMock()
     builder = EmbeddingGraphBuilder(max_papers=5, top_k=2, client=client)
     _pin_model_fingerprint(monkeypatch, builder)
 
     target = Paper(
-        paper_id="paper-1",
+        paper_id="arxiv:2401.00001",
         title="Paper One",
         year=2024,
         abstract="paper one abstract",
+        authors=[Author(name="Corpus Author")],
+        citation_count=100,
+        is_local_corpus=True,
         is_seed=False,
     )
     enriched = Paper(
-        paper_id="paper-1",
-        title="Paper One",
-        year=2024,
-        abstract="paper one abstract",
+        paper_id="s2-paper-1",
+        title="Provider title",
+        year=2025,
+        abstract="provider abstract",
+        authors=[Author(name="Provider Author")],
+        arxiv_id="2401.00001",
+        doi="10.5555/paper-one",
+        venue="ICML",
         citation_count=77,
         is_seed=False,
     )
-    client.get_papers = MagicMock(return_value={"paper-1": enriched})
+    client.get_papers = MagicMock(return_value={"arxiv:2401.00001": enriched})
     client.get_paper = MagicMock()
     papers = {
         "seed": Paper(
@@ -8310,20 +8317,30 @@ def test_embedding_citation_enrichment_logs_target_count(
             abstract="seed abstract",
             is_seed=True,
         ),
-        "paper-1": target,
+        "arxiv:2401.00001": target,
     }
 
     caplog.clear()
     with caplog.at_level(logging.DEBUG):
-        builder._update_citation_counts(papers)
+        builder._enrich_corpus_papers(papers)
 
-    assert papers["paper-1"].citation_count == 77
-    client.get_papers.assert_called_once_with(["paper-1"])
+    assert target.citation_count == 77
+    assert target.venue == "ICML"
+    assert target.doi == "10.5555/paper-one"
+    assert target.arxiv_id == "2401.00001"
+    assert papers["arxiv:2401.00001"] is target
+    assert target.paper_id == "arxiv:2401.00001"
+    assert target.is_local_corpus is True
+    assert target.title == "Paper One"
+    assert target.abstract == "paper one abstract"
+    assert target.year == 2024
+    assert target.authors == [Author(name="Corpus Author")]
+    client.get_papers.assert_called_once_with(["arxiv:2401.00001"])
     client.get_paper.assert_not_called()
     target_logs = [
         record
         for record in caplog.records
-        if "Fetching citation counts from Semantic Scholar for up to 1 papers..."
+        if "Enriching metadata from Semantic Scholar for 1 corpus papers..."
         in record.getMessage()
     ]
     assert len(target_logs) == 1
@@ -8373,7 +8390,7 @@ def test_embedding_citation_enrichment_skips_invalid_batch_rows(
         with caplog.at_level(
             logging.WARNING, logger="citemesh.services.semantic_scholar"
         ):
-            builder._update_citation_counts(papers)
+            builder._enrich_corpus_papers(papers)
 
     assert papers["valid"].citation_count == 77
     assert papers["invalid"].citation_count == 2
@@ -9667,10 +9684,10 @@ def test_uncached_raw_source_seed_keeps_external_resolution_path() -> None:
     assert resolved.is_seed is True
 
 
-def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts() -> (
+def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_counts() -> (
     None
 ):
-    """Twenty eligible papers are batched once, retaining available partial counts.
+    """All eligible candidates are batched, including those beyond the first twenty.
 
     :return None: Assertions validate eligible targets and absence of per-ID retries.
     """
@@ -9697,17 +9714,21 @@ def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts(
     client.get_papers.return_value = {
         "arxiv:2401.00000": Paper(
             paper_id="arxiv:2401.00000", title="Cached", year=2024, citation_count=77
-        )
+        ),
+        "arxiv:2401.00024": Paper(
+            paper_id="arxiv:2401.00024", title="Later", year=2024, citation_count=33
+        ),
     }
 
-    builder._update_citation_counts(papers)
+    builder._enrich_corpus_papers(papers)
 
     client.get_papers.assert_called_once_with(
-        ["arxiv_dataset-key"] + [f"arxiv:2401.{idx:05d}" for idx in range(19)]
+        ["arxiv_dataset-key"] + [f"arxiv:2401.{idx:05d}" for idx in range(25)]
     )
     client.get_paper.assert_not_called()
     assert papers["arxiv:2401.00000"].citation_count == 77
     assert papers["arxiv:2401.00001"].citation_count == 0
+    assert papers["arxiv:2401.00024"].citation_count == 33
 
 
 def test_citation_enrichment_uses_external_aliases_for_local_corpus_rows() -> None:
@@ -9756,7 +9777,7 @@ def test_citation_enrichment_uses_external_aliases_for_local_corpus_rows() -> No
         ),
     }
 
-    builder._update_citation_counts(papers)
+    builder._enrich_corpus_papers(papers)
 
     client.get_papers.assert_called_once_with(
         ["10.5555/local.1", "arxiv:2401.00001", "external"]
