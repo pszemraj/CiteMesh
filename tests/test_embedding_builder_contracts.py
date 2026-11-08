@@ -4266,23 +4266,7 @@ def test_capped_hydration_fills_partial_chronology_with_source_order_rows(
 
 
 def test_select_newest_corpus_rows_uses_dataset_id_column() -> None:
-    """Arrow-style datasets select newest rows via the id column, not full records."""
-
-    class _FakeArrowDataset:
-        """Minimal Dataset stand-in exposing column_names/select/__getitem__."""
-
-        column_names = ["id", "title", "abstract"]
-
-        def __init__(self, rows: list[dict[str, Any]]) -> None:
-            self.rows = rows
-            self.selected_indices: list[int] | None = None
-
-        def __getitem__(self, column: str) -> list[Any]:
-            return [row[column] for row in self.rows]
-
-        def select(self, indices: list[int]) -> _FakeIndexableDataset:
-            self.selected_indices = list(indices)
-            return [self.rows[idx] for idx in indices]
+    """Arrow-style datasets use the ID column to select newest rows in source order."""
 
     rows = [
         {"id": "2601.00001", "title": "Jan 2026", "abstract": "A."},
@@ -4291,14 +4275,16 @@ def test_select_newest_corpus_rows_uses_dataset_id_column() -> None:
         {"id": "2603.00001", "title": "Mar 2026", "abstract": "A."},
         {"id": "not-an-id", "title": "Skipped", "abstract": "A."},
     ]
-    fake_dataset = _FakeArrowDataset(rows)
+    fake_dataset = _FakeIndexableDataset(rows, ["id", "title", "abstract"])
     builder = EmbeddingGraphBuilder(
         max_papers=1, use_streaming=False, corpus_size=2, client=MagicMock()
     )
-    selected = builder._select_newest_corpus_rows(
-        fake_dataset, "fake/source", builder.corpus_size
-    )
-    assert fake_dataset.selected_indices == [0, 3]
+    with patch.object(fake_dataset, "select", wraps=fake_dataset.select) as select:
+        selected = builder._select_newest_corpus_rows(
+            fake_dataset, "fake/source", builder.corpus_size
+        )
+
+    select.assert_called_once_with([0, 3])
     assert [row["title"] for row in selected] == ["Jan 2026", "Mar 2026"]
 
 
