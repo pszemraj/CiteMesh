@@ -9732,12 +9732,26 @@ def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_count
 
 
 @pytest.mark.parametrize(
-    ("primary_id", "corpus_arxiv", "corpus_doi", "provider_arxiv", "provider_doi"),
+    (
+        "primary_id",
+        "corpus_arxiv",
+        "corpus_doi",
+        "provider_arxiv",
+        "provider_doi",
+        "lookup_id",
+    ),
     [
-        ("arxiv:2608.15413", "2608.15411", "", "2608.15411", ""),
-        ("arxiv:2608.15413", "", "", "2608.15411", ""),
-        ("arxiv:2608.15413", "", "10.1000/corpus", "2608.15413", "10.1000/other"),
-        ("10.1000/corpus", "", "10.1000/other", "", "10.1000/other"),
+        ("arxiv:2608.15413", "2608.15411", "", "2608.15411", "", "arxiv:2608.15411"),
+        ("arxiv:2608.15413", "", "", "2608.15411", "", "arxiv:2608.15413"),
+        (
+            "arxiv:2608.15413",
+            "",
+            "10.1000/corpus",
+            "2608.15413",
+            "10.1000/other",
+            "10.1000/corpus",
+        ),
+        ("10.1000/corpus", "", "10.1000/other", "", "10.1000/other", "10.1000/other"),
     ],
 )
 def test_corpus_enrichment_rejects_conflicting_identifiers(
@@ -9746,6 +9760,7 @@ def test_corpus_enrichment_rejects_conflicting_identifiers(
     corpus_doi: str,
     provider_arxiv: str,
     provider_doi: str,
+    lookup_id: str,
 ) -> None:
     """Conflicting aliases must not copy another paper's metadata or citation count."""
     target = Paper(
@@ -9766,15 +9781,12 @@ def test_corpus_enrichment_rejects_conflicting_identifiers(
         venue="Wrong venue",
         citation_count=27,
     )
-    lookup_id = builder_module.provider_lookup_identifier(primary_id, target)
-    assert lookup_id is not None
     client = MagicMock()
-    client.get_papers.return_value = {
-        paper_ids_module.normalize_paper_id(lookup_id): provider
-    }
+    client.get_papers.return_value = {lookup_id: provider}
 
     EmbeddingGraphBuilder(client=client)._enrich_corpus_papers({primary_id: target})
 
+    client.get_papers.assert_called_once_with([lookup_id])
     assert target.venue == ""
     assert target.citation_count == 3
     assert target.doi == (corpus_doi or None)

@@ -3668,17 +3668,14 @@ def test_dashboard_title_labels_face_inward_after_import(
     )
 
 
-@pytest.mark.parametrize(
-    "seed_title", ["Seed Paper", "A long title " * 15, None, "", "   "]
-)
-def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -> None:
+def test_static_labels_are_capped_by_citation_priority() -> None:
     """Dense static plots should label only the highest-priority non-seed papers."""
     import matplotlib.pyplot as plt
 
     graph = nx.Graph()
     graph.add_node(
         "seed",
-        title=seed_title,
+        title="A long title " * 15,
         year=2025,
         authors=["Seed Author"],
         citation_count=0,

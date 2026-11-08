@@ -155,11 +155,11 @@ def provider_lookup_identifier(paper_id: str, paper: Paper) -> str | None:
     return primary_doi or None
 
 
-def _external_identifiers(paper: Paper) -> dict[str, str]:
+def _external_identifiers(paper: Paper) -> dict[str, str] | None:
     """Return explicit normalized arXiv and DOI identifiers for one paper.
 
     :param Paper paper: Paper metadata supplying canonical and field identifiers.
-    :return dict[str, str]: Valid, internally consistent identifiers by namespace.
+    :return dict[str, str] | None: Identifiers by namespace, or ``None`` on conflict.
     """
     primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(paper.paper_id)
     primary_arxiv_id = (
@@ -173,7 +173,7 @@ def _external_identifiers(paper: Paper) -> dict[str, str]:
     if (primary_arxiv_id and field_arxiv_id and primary_arxiv_id != field_arxiv_id) or (
         primary_doi_id and field_doi_id and primary_doi_id != field_doi_id
     ):
-        return {}
+        return None
     arxiv_id = field_arxiv_id or primary_arxiv_id
     doi = field_doi_id or primary_doi_id
     return {
@@ -183,8 +183,8 @@ def _external_identifiers(paper: Paper) -> dict[str, str]:
     }
 
 
-def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...]:
-    """Return shared, conflict-free identifier namespaces for two records.
+def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...] | None:
+    """Return shared identifier namespaces, distinguishing conflicts from absence.
 
     Matching requires a shared normalized arXiv or DOI identifier. Any namespace
     supplied by both records must agree, so partial metadata cannot bridge two
@@ -193,16 +193,19 @@ def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...]:
 
     :param Paper left: First candidate record.
     :param Paper right: Second candidate record.
-    :return tuple[str, ...]: Matching namespaces, or empty when records differ.
+    :return tuple[str, ...] | None: Matching namespaces, empty without a match,
+        or ``None`` when identifiers conflict.
     """
-    if left.is_local_corpus and right.is_local_corpus:
-        return ()
     left_ids = _external_identifiers(left)
     right_ids = _external_identifiers(right)
+    if left_ids is None or right_ids is None:
+        return None
     shared_namespaces = left_ids.keys() & right_ids.keys()
-    if not shared_namespaces or any(
+    if any(
         left_ids[namespace] != right_ids[namespace] for namespace in shared_namespaces
     ):
+        return None
+    if left.is_local_corpus and right.is_local_corpus:
         return ()
     return tuple(sorted(shared_namespaces))
 
@@ -229,19 +232,7 @@ def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
     :param Paper right: Provider record returned for its requested identifier.
     :return bool: Whether either record or the pair names different works.
     """
-    arxiv_ids: set[str] = set()
-    dois: set[str] = set()
-    for paper in (left, right):
-        primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(
-            paper.paper_id
-        )
-        for raw_arxiv in (primary_arxiv, paper.arxiv_id):
-            if arxiv_id := recognize_arxiv_identifier(raw_arxiv, allow_bare=True):
-                arxiv_ids.add(arxiv_id.lower())
-        for raw_doi in (primary_doi, paper.doi):
-            if doi := _normalized_doi(raw_doi):
-                dois.add(doi)
-    return len(arxiv_ids) > 1 or len(dois) > 1
+    return _candidate_match_namespaces(left, right) is None
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
