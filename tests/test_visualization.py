@@ -3286,6 +3286,50 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     assert not any(nodes["query:abc123"]["links"].values())
 
 
+@pytest.mark.parametrize(
+    ("years", "expected_labels"),
+    [
+        ((None, None), ["Seed", "Year unknown"]),
+        ((2024, 2024), ["Seed", "2024"]),
+        ((2020, 2025), ["Seed", "2020 (older)", "2025 (newer)"]),
+    ],
+)
+@pytest.mark.parametrize("theme_name", ["dark", "light", "solarized"])
+def test_static_legend_explains_colors_without_covering_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    years: tuple[int | None, int | None],
+    expected_labels: list[str],
+    theme_name: str,
+) -> None:
+    """Legends show actual year bounds and remain inside the figure, below the graph."""
+    graph = nx.Graph()
+    graph.add_node("seed", title="Seed", year=years[0], is_seed=True)
+    graph.add_node("related", title="Related", year=years[1])
+    graph.add_edge("seed", "related", weight=0.8)
+    close_spy = MagicMock(wraps=render_module.plt.close)
+    monkeypatch.setattr(render_module.plt, "close", close_spy)
+
+    visualize_graph(
+        graph,
+        "seed",
+        tmp_path / "graph.png",
+        theme_name=theme_name,
+        dpi=40,
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    )
+
+    figure = close_spy.call_args.args[0]
+    legend = figure.legends[0]
+    assert [text.get_text() for text in legend.get_texts()] == expected_labels
+    assert "size reflects citations" in legend.get_title().get_text()
+    assert legend.get_title().get_color() == get_theme(theme_name).text_color
+    bounds = legend.get_window_extent()
+    assert figure.bbox.contains(bounds.x0, bounds.y0)
+    assert figure.bbox.contains(bounds.x1, bounds.y1)
+    assert bounds.y1 < figure.axes[0].get_window_extent().y0
+
+
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3624,7 +3668,9 @@ def test_dashboard_title_labels_face_inward_after_import(
     )
 
 
-@pytest.mark.parametrize("seed_title", ["Seed Paper", None, "", "   "])
+@pytest.mark.parametrize(
+    "seed_title", ["Seed Paper", "A long title " * 15, None, "", "   "]
+)
 def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -> None:
     """Dense static plots should label only the highest-priority non-seed papers."""
     import matplotlib.pyplot as plt
@@ -3667,9 +3713,7 @@ def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -
 
     labels = {text.get_text() for text in axis.texts}
     assert len(labels) == MAX_STATIC_NON_SEED_LABELS + 1
-    assert (
-        "Seed Paper" if seed_title and seed_title.strip() else "Seed paper"
-    ) in labels
+    assert "Author, 2025 (seed)" in labels
     assert "19, 2019" in labels
     assert "0, 2000" not in labels
     plt.close(figure)
@@ -3716,7 +3760,7 @@ def test_static_labels_suppress_overlapping_text_bounds() -> None:
     )
 
     labels = {text.get_text() for text in axis.texts}
-    assert "Seed Paper" in labels
+    assert "Author, 2025 (seed)" in labels
     assert sum(label.startswith("Extraordinarilylongsurname") for label in labels) == 1
     plt.close(figure)
 
