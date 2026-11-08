@@ -3040,6 +3040,7 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     seed.citation_count = 7
     client.get_paper.return_value = seed
     client.get_papers.side_effect = SemanticScholarRequestError("HTTP 403")
+    client.get_cached_papers.return_value = {}
     builder = EmbeddingGraphBuilder(
         max_papers=2, semantic_source="arxiv-corpus", client=client
     )
@@ -3075,6 +3076,7 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     assert "Corpus metadata enrichment was rejected" in caplog.text
     assert "HTTP 403" in caplog.text
     client.get_papers.assert_called_once_with(["arxiv:2501.00001"])
+    client.get_cached_papers.assert_called_once_with(["arxiv:2501.00001"])
     client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     client.get_papers.side_effect = ValueError("invalid local payload")
     with pytest.raises(ValueError, match="invalid local payload"):

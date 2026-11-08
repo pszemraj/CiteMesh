@@ -9731,6 +9731,99 @@ def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_count
     assert papers["arxiv:2401.00024"].citation_count == 33
 
 
+@pytest.mark.parametrize(
+    ("primary_id", "corpus_arxiv", "corpus_doi", "provider_arxiv", "provider_doi"),
+    [
+        ("arxiv:2608.15413", "2608.15411", "", "2608.15411", ""),
+        ("arxiv:2608.15413", "", "", "2608.15411", ""),
+        ("arxiv:2608.15413", "", "10.1000/corpus", "2608.15413", "10.1000/other"),
+        ("10.1000/corpus", "", "10.1000/other", "", "10.1000/other"),
+    ],
+)
+def test_corpus_enrichment_rejects_conflicting_identifiers(
+    primary_id: str,
+    corpus_arxiv: str,
+    corpus_doi: str,
+    provider_arxiv: str,
+    provider_doi: str,
+) -> None:
+    """Conflicting aliases must not copy another paper's metadata or citation count."""
+    target = Paper(
+        primary_id,
+        "Corpus paper",
+        2026,
+        arxiv_id=corpus_arxiv or None,
+        doi=corpus_doi or None,
+        citation_count=3,
+        is_local_corpus=True,
+    )
+    provider = Paper(
+        "a" * 40,
+        "Different paper",
+        2026,
+        arxiv_id=provider_arxiv or None,
+        doi=provider_doi or None,
+        venue="Wrong venue",
+        citation_count=27,
+    )
+    lookup_id = builder_module.provider_lookup_identifier(primary_id, target)
+    assert lookup_id is not None
+    client = MagicMock()
+    client.get_papers.return_value = {
+        paper_ids_module.normalize_paper_id(lookup_id): provider
+    }
+
+    EmbeddingGraphBuilder(client=client)._enrich_corpus_papers({primary_id: target})
+
+    assert target.venue == ""
+    assert target.citation_count == 3
+    assert target.doi == (corpus_doi or None)
+    assert target.arxiv_id == (corpus_arxiv or None)
+
+
+def test_corpus_enrichment_keeps_cached_and_completed_batches_after_rejection() -> None:
+    """A later rejected batch must preserve warm and newly cached metadata."""
+    from citemesh.services.semantic_scholar import disk_cache
+
+    ids = [f"arxiv:2401.{index:05d}" for index in range(502)]
+    papers = {
+        paper_id: Paper(paper_id, f"Corpus {index}", 2024, is_local_corpus=True)
+        for index, paper_id in enumerate(ids)
+    }
+    disk_cache._persist_paper(
+        Paper(ids[0], "Warm", 2024, citation_count=11, venue="Cached venue"), ids[0]
+    )
+    with SemanticScholarClient(api_key="", timeout=1) as client:
+        client._request_json = MagicMock(
+            side_effect=[
+                [
+                    {
+                        "paperId": f"provider-{index}",
+                        "title": f"Provider {index}",
+                        "year": 2024,
+                        "citationCount": 27,
+                        "venue": "Fetched venue",
+                        "externalIds": {"ArXiv": paper_id.removeprefix("arxiv:")},
+                    }
+                    for index, paper_id in enumerate(ids[1:501])
+                ],
+                SemanticScholarRequestError("HTTP 403"),
+            ]
+        )
+        EmbeddingGraphBuilder(client=client)._enrich_corpus_papers(papers)
+
+        assert client._request_json.call_count == 2
+        assert [
+            len(request.kwargs["payload"]["ids"])
+            for request in client._request_json.call_args_list
+        ] == [500, 1]
+    assert papers[ids[0]].venue == "Cached venue"
+    assert papers[ids[0]].citation_count == 11
+    assert all(papers[paper_id].venue == "Fetched venue" for paper_id in ids[1:501])
+    assert all(papers[paper_id].citation_count == 27 for paper_id in ids[1:501])
+    assert papers[ids[-1]].citation_count == 0
+
+
 def test_citation_enrichment_uses_external_aliases_for_local_corpus_rows() -> None:
     """Arbitrary corpus keys must stay local while DOI/arXiv aliases remain usable.
 

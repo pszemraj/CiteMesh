@@ -82,6 +82,7 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
+    candidate_identifiers_conflict,
     corpus_matches_s2,
     fetch_candidate_pool,
     merge_paper_metadata,
@@ -1829,6 +1830,9 @@ class EmbeddingGraphBuilder(
     def _enrich_corpus_papers(self, papers: dict[str, Paper]) -> None:
         """Enrich collected corpus papers with cached or batched provider metadata.
 
+        Conflicting identifiers leave a record unchanged. Rejected batches fall
+        back to available cached records, respecting the client's refresh policy.
+
         :param Dict[str, Paper] papers: Collected papers, including the skipped seed.
         :return None: Fills missing metadata and updates citation counts in place,
             preserving corpus identifiers and existing title/abstract text.
@@ -1858,14 +1862,21 @@ class EmbeddingGraphBuilder(
             )
         except SemanticScholarRequestError as exc:
             logger.warning(
-                "Corpus metadata enrichment was rejected; continuing with "
-                "existing metadata: %s",
+                "Corpus metadata enrichment was rejected; using available "
+                "cached metadata: %s",
                 exc,
             )
-            return
+            batch_results = self.client.get_cached_papers(
+                [lookup_id for _paper, lookup_id in targets]
+            )
         for paper, lookup_id in targets:
             batch_paper = batch_results.get(normalize_paper_id(lookup_id))
             if batch_paper is not None:
+                if candidate_identifiers_conflict(paper, batch_paper):
+                    logger.debug(
+                        "Skipping conflicting provider metadata for %s.", paper.paper_id
+                    )
+                    continue
                 merge_paper_metadata(paper, batch_paper)
                 paper.citation_count = batch_paper.citation_count
 

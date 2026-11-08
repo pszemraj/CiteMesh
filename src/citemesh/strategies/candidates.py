@@ -222,6 +222,28 @@ def candidate_records_match(left: Paper, right: Paper) -> bool:
     return bool(_candidate_match_namespaces(left, right))
 
 
+def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
+    """Detect contradictory arXiv or DOI identifiers, allowing missing aliases.
+
+    :param Paper left: Corpus record being enriched.
+    :param Paper right: Provider record returned for its requested identifier.
+    :return bool: Whether either record or the pair names different works.
+    """
+    arxiv_ids: set[str] = set()
+    dois: set[str] = set()
+    for paper in (left, right):
+        primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(
+            paper.paper_id
+        )
+        for raw_arxiv in (primary_arxiv, paper.arxiv_id):
+            if arxiv_id := recognize_arxiv_identifier(raw_arxiv, allow_bare=True):
+                arxiv_ids.add(arxiv_id.lower())
+        for raw_doi in (primary_doi, paper.doi):
+            if doi := _normalized_doi(raw_doi):
+                dois.add(doi)
+    return len(arxiv_ids) > 1 or len(dois) > 1
+
+
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
     """Return whether a corpus row and S2 paper explicitly identify one work.
 
