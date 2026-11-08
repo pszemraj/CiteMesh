@@ -1202,7 +1202,9 @@ class EmbeddingGraphBuilder(
             return
 
         provider_seed = provider_papers.get(normalize_paper_id(lookup_id))
-        if provider_seed is not None:
+        if provider_seed is not None and not candidate_identifiers_conflict(
+            seed, provider_seed
+        ):
             merge_paper_metadata(seed, provider_seed)
 
     def _resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:

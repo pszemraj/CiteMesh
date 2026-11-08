@@ -372,7 +372,9 @@ def _enrich_local_reference_records(
                 ),
                 None,
             )
-        if s2_paper is not None:
+        if s2_paper is not None and not candidate_identifiers_conflict(
+            local_paper, s2_paper
+        ):
             merge_paper_metadata(local_paper, s2_paper)
 
 

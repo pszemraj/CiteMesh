@@ -9740,6 +9740,7 @@ def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_count
         ("10.1000/corpus", "", "10.1000/other", "", "10.1000/other", "10.1000/other"),
     ],
 )
+@pytest.mark.parametrize("enrichment_path", ["candidate", "seed", "reference"])
 def test_corpus_enrichment_rejects_conflicting_identifiers(
     primary_id: str,
     corpus_arxiv: str,
@@ -9747,6 +9748,7 @@ def test_corpus_enrichment_rejects_conflicting_identifiers(
     provider_arxiv: str,
     provider_doi: str,
     lookup_id: str,
+    enrichment_path: str,
 ) -> None:
     """Conflicting aliases must not copy another paper's metadata or citation count."""
     target = Paper(
@@ -9769,10 +9771,23 @@ def test_corpus_enrichment_rejects_conflicting_identifiers(
     )
     client = MagicMock()
     client.get_papers.return_value = {lookup_id: provider}
+    client.refresh_paper_cache = False
+    client.get_cached_papers.return_value = {lookup_id: provider}
 
-    EmbeddingGraphBuilder(client=client)._enrich_corpus_papers({primary_id: target})
+    builder = EmbeddingGraphBuilder(client=client)
+    if enrichment_path == "reference":
+        from citemesh.strategies.candidates import _enrich_local_reference_records
 
-    client.get_papers.assert_called_once_with([lookup_id])
+        _enrich_local_reference_records(client, [target])
+        client.get_cached_papers.assert_called_once_with([lookup_id])
+        client.get_papers.assert_not_called()
+    else:
+        if enrichment_path == "seed":
+            target.is_seed = True
+            builder.enrich_cached_corpus_seed(target)
+        else:
+            builder._enrich_corpus_papers({primary_id: target})
+        client.get_papers.assert_called_once_with([lookup_id])
     assert target.venue == ""
     assert target.citation_count == 3
     assert target.doi == (corpus_doi or None)
