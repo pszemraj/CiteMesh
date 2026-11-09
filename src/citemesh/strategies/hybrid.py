@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -562,6 +563,28 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             lambda paper: cosine_similarity_to_query(query, embeddings[paper.paper_id]),
         )
 
+    def _select_s2_references_by_composite(
+        self, seed: Paper, references: Sequence[Paper], limit: int
+    ) -> list[Paper]:
+        """Rank provider references before optional reference-list hydration."""
+        if len(references) <= limit:
+            return list(references)
+
+        assert self.embedding_builder is not None
+        if self.semantic_source == "candidates":
+            self.embedding_builder._load_model()
+
+        by_id = {paper.paper_id: paper for paper in references}
+        scoring_papers = {
+            paper_id: replace(paper, references=[]) for paper_id, paper in by_id.items()
+        }
+        ranked = self._rank_candidates(
+            seed,
+            scoring_papers,
+            {paper_id: {"citation"} for paper_id in scoring_papers},
+        )
+        return [by_id[paper_id] for paper_id in ranked[:limit]]
+
     def _seed_relevance_score(
         self,
         seed_embedding: NDArray[np.float32] | None,
@@ -674,7 +697,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     if not paper.is_local_corpus:
                         self._candidate_provider_aliases[paper.paper_id] = paper_id
                 self._candidate_source_ranks.setdefault(paper_id, {}).setdefault(
-                    result.source, rank
+                    result.source, result.source_ranks.get(paper.paper_id, rank)
                 )
 
     def _fetch_recommendations(
@@ -831,6 +854,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     else None
                 ),
                 reference_selector=self._select_recovered_references_by_embedding,
+                s2_reference_selector=self._select_s2_references_by_composite,
             )
         else:
             citation_papers = self.citation_builder.collect_papers(seed_id)

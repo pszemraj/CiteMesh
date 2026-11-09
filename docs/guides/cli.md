@@ -79,7 +79,9 @@ commands and their import, export, refresh, selection, and recovery behavior.
 
 ### Missing Semantic Scholar references
 
-If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection; corpus-only embedding search does not fetch HTML. Nonempty S2 reference results are unchanged.
+When reference discovery is enabled, hybrid builds with semantic enrichment request up to 100 seed references from Semantic Scholar, or the effective reference limit if it is higher. They use the hybrid relevance score before optional reference hydration to choose which references to admit within the existing limit. A retrieved reference that enters through another source can still carry its known relationship to the seed.
+
+If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
 
 Recovery uses explicit arXiv IDs and DOIs in bibliography entries, resolves available local metadata before S2, and uses arXiv's metadata API for remaining arXiv IDs. When S2 returns an empty reference list and hybrid has a prepared corpus, entries without explicit identifiers can also match a unique corpus paper by normalized title, full first-author name, and year. An arXiv preprint may be one year earlier than the bibliography's publication year; multiple matches across either year remain unresolved. This lookup scans the active corpus metadata once and makes no additional metadata API requests.
 

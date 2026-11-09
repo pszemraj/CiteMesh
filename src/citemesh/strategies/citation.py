@@ -305,6 +305,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         ]
         | None = None,
         reference_selector: ReferenceSelector | None = None,
+        s2_reference_selector: ReferenceSelector | None = None,
         **kwargs: Unpack[_CorpusPreparedOption],
     ) -> dict[str, Paper]:
         """
@@ -323,6 +324,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             entries against an already prepared corpus.
         :param Callable | None reference_selector: Strategy-specific recovered-reference
             selector.
+        :param Callable | None s2_reference_selector: Strategy-specific provider-reference
+            selector applied before the reference limit.
         :param kwargs: Corpus-preparation option accepted by the shared interface.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -386,6 +389,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 local_lookup=reference_metadata_lookup,
                 local_bibliography_lookup=bibliography_metadata_lookup,
                 reference_selector=reference_selector,
+                s2_reference_selector=s2_reference_selector,
             )
             source_results.extend(reference_results)
             reference_ids = self._ingest_relation_batch(

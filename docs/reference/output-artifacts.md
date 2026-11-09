@@ -58,7 +58,7 @@ A malformed, unsupported, or inaccessible existing package stops the build befor
 The graph payload requires its `seed_id` to identify a node present in the graph. It contains:
 
 - `kind` (`"citemesh-graph"`), `schema_version` (`1`), `seed_id`
-- `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources; combined hybrid builds also include `candidate_source_ranks`, mapping each selected paper ID to its one-based positions in the materialized source lists (`references`, `arxiv_references`, `citations`, `arxiv_corpus`, `recommendations`)
+- `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources. Combined hybrid builds also include `candidate_source_ranks`, mapping each selected paper ID to its one-based positions in the materialized source lists (`references`, `arxiv_references`, `citations`, `arxiv_corpus`, `recommendations`). The `references` rank is the position in the materialized provider list before hybrid deduplication and reference selection.
 - `summary` - `nodes`, `edges`
 - `nodes` - enriched per-paper objects
 - `dashboard` - render metadata and stored layout geometry, always present

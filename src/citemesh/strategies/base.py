@@ -50,6 +50,7 @@ class _CitationSpecificOptions(TypedDict, total=False):
         Callable[[Sequence[BibliographyKey]], dict[BibliographyKey, Paper]] | None
     )
     reference_selector: Callable[[Paper, Sequence[Paper], int], list[Paper]] | None
+    s2_reference_selector: Callable[[Paper, Sequence[Paper], int], list[Paper]] | None
 
 
 class _CorpusPreparedOption(TypedDict, total=False):

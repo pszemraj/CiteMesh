@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from unittest.mock import MagicMock, call
 
+import numpy as np
 import pytest
 
 from citemesh.core import Paper
@@ -69,33 +70,44 @@ def paper(identifier: str, **kwargs: object) -> Paper:
     return Paper(paper_id=identifier, title=identifier, year=2024, **kwargs)
 
 
-@pytest.mark.parametrize("limit", [0, 2])
+@pytest.mark.parametrize("limit", [0, 2, 105])
+@pytest.mark.parametrize("semantic", [False, True])
 def test_successful_s2_or_disabled_discovery_never_fetches_html(
-    providers: tuple, limit: int
+    providers: tuple, limit: int, semantic: bool
 ) -> None:
     """Usable S2 references and disabled discovery bypass the fallback.
 
     :param tuple providers: Mock services.
     :param int limit: Disabled or positive source limit.
+    :param bool semantic: Enable selection from a wider provider response.
     :return None: Checks provider calls.
     """
     client, bibliography, metadata = providers
     client.get_paper_references.return_value = [paper("reference")]
     title_lookup = MagicMock()
+    selector = MagicMock(side_effect=lambda _seed, refs, cap: refs[:cap])
     results = fetch_seed_references(
         client,
         paper("arxiv:2608.27147"),
         limit,
         local_bibliography_lookup=title_lookup,
+        s2_reference_selector=selector if semantic else None,
     )
     title_lookup.assert_not_called()
     bibliography.assert_not_called()
     metadata.assert_not_called()
     if limit:
         assert results[0].papers[0].paper_id == "reference"
+        client.get_paper_references.assert_called_once_with(
+            "arxiv:2608.27147",
+            limit=max(limit, 100) if semantic else limit,
+            raise_on_unavailable=True,
+        )
+        assert selector.call_count == int(semantic)
     else:
         assert results == ()
         client.get_paper_references.assert_not_called()
+        selector.assert_not_called()
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -121,6 +133,7 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
     ]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
     title_lookup = MagicMock(return_value={})
+    s2_selector = MagicMock()
     with caplog.at_level(logging.DEBUG):
         results = fetch_seed_references(
             client,
@@ -128,9 +141,11 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
             2,
             seed_identifier="arxiv:2608.27147v1",
             local_bibliography_lookup=title_lookup,
+            s2_reference_selector=s2_selector,
         )
         require_available_candidate_source(results, context="test")
     assert title_lookup.call_count == int(not failed)
+    s2_selector.assert_not_called()
     bibliography.assert_called_once_with("2608.27147v1")
     assert [result.state.value for result in results] == [
         "unavailable" if failed else "empty",
@@ -601,6 +616,79 @@ def test_hybrid_reference_evidence_does_not_consume_a_citation_slot(
     assert builder.paper_sources[rediscovered.paper_id] == "semantic"
     assert builder.seed_relations[rediscovered.paper_id] == "referenced_by_seed"
     title_lookup.assert_not_called()
+
+
+def test_hybrid_admits_healthy_references_by_composite_with_provider_ranks(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider cap, admission cap, and reference evidence remain separate."""
+    client, bibliography, _ = providers
+    seed = paper("arxiv:2608.27147", references=["shared"])
+    seed_alias = paper("seed-alias", arxiv_id="2608.27147")
+    skipped = paper(
+        "early", doi="10.1000/early", citation_count=5, references=["shared"]
+    )
+    duplicate = paper("duplicate", doi=skipped.doi)
+    admitted = paper("later", citation_count=10, references=["different"])
+    rediscovered = paper("recommendation", doi=skipped.doi)
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [
+        seed_alias,
+        skipped,
+        duplicate,
+        admitted,
+    ]
+    client.get_recommended_papers.return_value = [rediscovered]
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=0,
+        max_semantic=1,
+        semantic_source="both",
+        fetch_references=False,
+        client=client,
+    )
+    engine = builder.embedding_builder
+    assert engine is not None
+    monkeypatch.setattr(engine, "_corpus_operation_lock", nullcontext)
+    monkeypatch.setattr(engine, "_prepare_corpus_for_build", MagicMock())
+    monkeypatch.setattr(
+        engine, "resolve_cached_corpus_seed", MagicMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        engine,
+        "collect_papers",
+        lambda _, **kwargs: {seed.paper_id: kwargs["seed_paper"]},
+    )
+
+    def embed(seed_paper: Paper, candidates: dict[str, Paper]) -> np.ndarray:
+        vector = np.array([1.0, 0.0], dtype=np.float32)
+        engine.retrieval_embeddings.update(dict.fromkeys(candidates, vector))
+        engine.retrieval_embeddings[seed_paper.paper_id] = vector
+        return vector
+
+    monkeypatch.setattr(builder, "_ensure_candidate_embeddings", embed)
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert set(papers) == {seed.paper_id, admitted.paper_id, rediscovered.paper_id}
+    assert papers[admitted.paper_id].references == ["different"]
+    assert skipped.references == ["shared"]
+    assert builder.paper_sources[rediscovered.paper_id] == "semantic"
+    assert builder.seed_relations[rediscovered.paper_id] == "referenced_by_seed"
+    assert builder._candidate_source_ranks == {
+        admitted.paper_id: {"references": 4},
+        rediscovered.paper_id: {"recommendations": 1},
+    }
+    result = builder.citation_builder.candidate_source_results[0]
+    assert result.papers == (admitted,)
+    assert result.verified_references == (skipped, admitted)
+    assert result.source_ranks == {skipped.paper_id: 2, admitted.paper_id: 4}
+    client.get_paper_references.assert_called_once_with(
+        seed.paper_id, limit=100, raise_on_unavailable=True
+    )
+    client.get_reference_ids.assert_not_called()
+    bibliography.assert_not_called()
 
 
 @pytest.mark.parametrize("html", [None, []])
