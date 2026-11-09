@@ -824,7 +824,7 @@ def draw_labels(
     sizes: list[float] | None = None,
 ) -> None:
     """
-    Draw paper labels in "Author, Year" format.
+    Draw compact author and year labels, using "Seed" for an authorless seed.
 
     :param plt.Axes ax: Matplotlib axes
     :param PaperGraph graph: NetworkX graph
@@ -832,7 +832,7 @@ def draw_labels(
     :param str seed_id: ID of seed paper (gets bold label)
     :param Theme theme: Theme palette for text color.
     :param Optional[List[float]] sizes: Optional node-size list aligned with ``ordered_nodes(graph)``.
-    :return None: Draws all node labels.
+    :return None: Draws the seed label and a capped set of non-overlapping paper labels.
     """
 
     ordered = ordered_nodes(graph)
@@ -873,7 +873,7 @@ def draw_labels(
         # Keep the full seed title in the heading, clear of the graph itself.
         is_seed = node == seed_id
         if is_seed:
-            label += " (seed)"
+            label = f"{label} (seed)" if author_parts else "Seed"
             fontsize = 9
             xytext = (0, node_radius + 8)
             vertical_alignment = "bottom"
