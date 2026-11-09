@@ -515,10 +515,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if len(recovered) <= limit:
             return list(recovered)
 
+        assert self.embedding_builder is not None
+        if self.semantic_source == "candidates":
+            # Bibliography recovery can rank papers before semantic enrichment starts.
+            self.embedding_builder._load_model()
+
         candidates = {paper.paper_id: paper for paper in recovered}
         seed_embedding = self._ensure_candidate_embeddings(seed, candidates)
         assert seed_embedding is not None
-        assert self.embedding_builder is not None
         query = l2_normalize_embeddings(seed_embedding)
         embeddings = self.embedding_builder.retrieval_embeddings
         return select_recovered_references_by_score(

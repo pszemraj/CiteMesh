@@ -2305,14 +2305,17 @@ def test_embedding_strategies_rank_recovered_references_by_retrieval_cosine(
     else:
         builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
         assert builder.embedding_builder is not None
-        builder.embedding_builder.retrieval_embeddings = {
-            seed.paper_id: query,
-            **embeddings,
-        }
+        embedding_builder = builder.embedding_builder
+        load_model = MagicMock()
+        monkeypatch.setattr(embedding_builder, "_load_model", load_model)
+
+        def encode_seed(paper: Paper) -> None:
+            load_model.assert_called_once()
+            embedding_builder.retrieval_embeddings[paper.paper_id] = query
+
+        monkeypatch.setattr(embedding_builder, "_encode_seed_embedding", encode_seed)
         monkeypatch.setattr(
-            builder,
-            "_ensure_candidate_embeddings",
-            MagicMock(return_value=query),
+            embedding_builder, "embed_papers", MagicMock(return_value=embeddings)
         )
         selected = builder._select_recovered_references_by_embedding(
             seed, [early, relevant], 1
