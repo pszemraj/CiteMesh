@@ -127,7 +127,7 @@ The sidecar records `schema_version`, `build`, `outputs` (resolved artifact path
 
 - run metadata `paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`
 - `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence
-- `candidate_source_status` - per attempted Semantic Scholar source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); see [source-failure handling](../guides/cli.md#troubleshooting).
+- `candidate_source_status` - per requested candidate source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); combined hybrid also records `arxiv_corpus`. See [source-failure handling](../guides/cli.md#troubleshooting).
 - embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
 - selected corpus provenance when available - `cache_namespace`, completed upstream `dataset_revision`, `installed_corpus_selection` (`all` or `newest`), `installed_corpus_limit` for a capped index, and `index_origin` identifying the imported `bucket_id`, `config_name`, and `snapshot_id`. Coverage and requested views follow the [installed-index selection rules](../guides/caching.md#import-and-selection). Explicit refresh advances the dataset revision while preserving the original import origin.
 
