@@ -42,6 +42,10 @@ survive deduplication and are available in [graph JSON](../reference/output-arti
 Unavailable recommendations are recorded in source status while usable corpus
 results can continue; a failed corpus load still stops the build.
 
-A heavily cited seed can fill the graph before semantic-only papers qualify. Lower the citation budget or use corpus sourcing when semantic recall matters.
+A heavily cited seed can fill the graph before semantic-only papers qualify.
+`--max-semantic` permits semantic additions without reserving slots. For a
+45-paper graph, `--max-semantic 44` lets semantic-only papers compete for every
+non-seed slot; this can replace citation-derived papers. Lowering the citation
+budget instead changes which candidates reach ranking.
 
 The [hybrid tuning study](../reference/defaults-tuning-study.md#hybrid-defaults-february-2026) explains the discovery tradeoff behind its defaults. For overrides, see the [CLI controls](cli.md#option-reference).
