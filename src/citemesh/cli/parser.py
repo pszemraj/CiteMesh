@@ -32,6 +32,7 @@ from citemesh.core import (
 from citemesh.core.choices import (
     DEVICE_CHOICES,
     EXPORT_CHOICES,
+    HYBRID_SEMANTIC_SOURCE_CHOICES,
     MODEL_PROFILE_CHOICES,
     SEARCH_MODE_CHOICES,
     SEMANTIC_SOURCE_CHOICES,
@@ -889,11 +890,12 @@ def _add_build_runtime_arguments(
         "--semantic-source",
         metavar="SOURCE",
         dest="semantic_source",
-        choices=list(SEMANTIC_SOURCE_CHOICES),
+        choices=HYBRID_SEMANTIC_SOURCE_CHOICES,
         default="candidates",
         help=(
-            "candidates embeds S2 seed neighbors; arxiv-corpus builds a local "
-            "corpus (default: %(default)s). Corpus flags imply arxiv-corpus."
+            "candidates embeds S2 seed neighbors; arxiv-corpus searches a local "
+            "corpus; both adds S2 all-cs recommendations (hybrid only). "
+            "Default: %(default)s. Corpus flags imply arxiv-corpus."
         ),
     )
     semantic_group.add_argument(
@@ -903,7 +905,7 @@ def _add_build_runtime_arguments(
         metavar="N",
         default=DEFAULT_CANDIDATE_POOL_SIZE,
         help=(
-            "Maximum S2 candidate pool size fetched in candidates mode "
+            "Maximum S2 candidate pool size for candidates or both "
             "(default: %(default)s)."
         ),
     )

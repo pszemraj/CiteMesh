@@ -23,13 +23,24 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
 ## 2. Candidate acquisition
 
-S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid keeps separate S2 citation budgets in either source mode; its semantic branch fetches recommendations in `candidates` mode, capped at the smallest of 100, `candidate_pool_size`, and `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, or searches the corpus in `arxiv-corpus` mode.
+S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid keeps separate S2 citation budgets. Its semantic branch fetches recommendations in `candidates` mode, capped at the smallest of 100, `candidate_pool_size`, and `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, or searches the corpus in `arxiv-corpus` mode. Hybrid's opt-in `both` mode uses the same bounded corpus search and recommendation limit together, requesting S2's `all-cs` pool directly. Corpus and recommendation overlap receives one semantic-source contribution; it does not receive the citation/semantic overlap bonus unless citation discovery also found that paper.
 
 When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references).
+
+Hybrid retains verified fallback-reference relationships beyond the reference
+admission cap. If semantic retrieval independently selects one of those papers,
+its seed relation records the citation evidence while its admission source and
+semantic budget remain unchanged.
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
 S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate.
+
+Combined retrieval retains reconciled S2 IDs so a later recommendation with
+sparser metadata still joins its existing corpus record. Each selected paper's
+original positions in the materialized citation, reference, corpus, and
+recommendation lists are retained for inspection; they do not replace the
+relevance score.
 
 Acquisition follows the [source-failure and retry policy](cli.md#troubleshooting), recording availability in exported metadata.
 

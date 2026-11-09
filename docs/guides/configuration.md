@@ -24,12 +24,17 @@ Configured values behave like *your* built-in defaults rather than like flags yo
 - They never trigger "unsupported option for strategy" errors: `defaults.device` does not break a `--strategy citation` run, it is just unused there.
 - They outrank tuned implicit defaults such as hybrid's citation and reference budgets.
 - They lose to a flag that implies a mode: `--dataset-source` or `--corpus-size` implies `--semantic-source arxiv-corpus` against a configured `candidates`, and `--candidate-pool-size` implies `candidates` symmetrically, leaving config-only settings for the other mode inert. `--all-corpus` likewise beats a configured `corpus_size`.
+- A configured `semantic_source = "both"` accepts corpus and candidate-pool flags together for hybrid builds; selecting an installed namespace preserves that choice. Local search uses its corpus namespace. An embedding build requires `candidates` or `arxiv-corpus` instead.
 
 Config defaults, including ignored corpus-only settings, are logged at DEBUG with their keys and file path. The build sidecar records only settings applicable to the selected source and precision.
 
 ## Supported keys
 
 Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size` maps to `--batch-size`; `search_mode` maps to `search --mode`.
+
+`semantic_source` accepts `candidates`, `arxiv-corpus`, and hybrid-only `both`.
+See [Hybrid](strategies.md#hybrid) for combined retrieval and its shared semantic
+budget.
 
 | Group | Keys |
 | --- | --- |

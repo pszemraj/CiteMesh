@@ -211,6 +211,13 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         candidate_source_status = dashboard_meta.get("candidate_source_status")
         if isinstance(candidate_source_status, dict):
             portable_meta["candidate_source_status"] = candidate_source_status
+        candidate_source_ranks = self.graph.graph.get("candidate_source_ranks")
+        if isinstance(candidate_source_ranks, dict):
+            portable_meta["candidate_source_ranks"] = {
+                str(node_id): dict(sorted(ranks.items()))
+                for node_id, _ in sorted_nodes
+                if isinstance((ranks := candidate_source_ranks.get(node_id)), dict)
+            }
         payload: GraphPayload = {
             "kind": GRAPH_PAYLOAD_KIND,
             "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,

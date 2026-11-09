@@ -2440,13 +2440,18 @@ def test_hybrid_graph_preparation_fails_closed_on_sts_inference() -> None:
         )
 
 
+@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
 def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, semantic_source: str
 ) -> None:
     """Hybrid collection should fail when semantic enrichment cannot complete."""
     builder = HybridGraphBuilder(
-        max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
+        max_papers=5,
+        max_semantic=2,
+        semantic_source=semantic_source,
+        client=MagicMock(),
     )
+    builder.client.get_recommended_papers = MagicMock(return_value=[_paper("rec")])
 
     seed = _paper("seed")
     seed.is_seed = True
@@ -2559,12 +2564,16 @@ def test_hybrid_rerank_rejects_invalid_candidate_embeddings(
         )
 
 
+@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
 def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
-    monkeypatch: pytest.MonkeyPatch,
+    semantic_source: str,
 ) -> None:
     """Hybrid rerank should not persist citation-candidate embeddings into cache."""
     builder = HybridGraphBuilder(
-        max_papers=4, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
+        max_papers=4,
+        max_semantic=1,
+        semantic_source=semantic_source,
+        client=MagicMock(),
     )
     assert builder.embedding_builder is not None
 
@@ -4152,6 +4161,171 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
         assert builder.seed_relations[paper_id] == "semantic_only"
     # Candidate vectors flow through the persistent cache namespace.
     assert "mode=candidates" in builder.embedding_builder.embedding_cache.model_name
+
+
+@pytest.mark.parametrize("recommendation_id", ["reference", "citation"])
+def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    recommendation_id: str,
+) -> None:
+    """An alias-free recommendation still joins the matching corpus paper."""
+    seed = _seed_paper("local-seed")
+    seed.is_local_corpus = True
+    seed.arxiv_id = "2501.00001"
+    reference = _paper("reference")
+    reference.doi = "10.1000/shared"
+    citation = _paper("citation")
+    citation.doi = reference.doi
+    corpus_overlap = _paper("corpus-overlap")
+    corpus_overlap.is_local_corpus = True
+    corpus_overlap.doi = reference.doi
+    corpus_semantic = _paper("corpus-semantic")
+    corpus_semantic.is_local_corpus = True
+    corpus_semantic.doi = "10.1000/semantic"
+    semantic_alias = _paper("semantic-alias")
+    semantic_alias.doi = corpus_semantic.doi
+    recommendation = _paper(recommendation_id)
+    recommendation_only = _paper("recommendation-only")
+    events: list[str] = []
+
+    def recommendations(*_args: object, **_kwargs: object) -> list[Paper]:
+        events.append("recommendations")
+        return [semantic_alias, recommendation_only, recommendation]
+
+    def corpus(*_args: object, **_kwargs: object) -> dict[str, Paper]:
+        events.append("corpus")
+        return {
+            paper.paper_id: paper for paper in (seed, corpus_overlap, corpus_semantic)
+        }
+
+    client = MagicMock()
+    client.get_paper_references.return_value = [reference]
+    client.get_paper_citations.return_value = [citation]
+    client.get_recommended_papers.side_effect = recommendations
+    builder = HybridGraphBuilder(
+        semantic_source="both",
+        max_papers=5,
+        max_references=1,
+        max_citations=1,
+        max_semantic=3,
+        candidate_pool_size=3,
+        fetch_references=False,
+        client=client,
+    )
+    assert builder.embedding_builder is not None
+    assert builder.embedding_builder.semantic_source == "arxiv-corpus"
+    assert builder.embedding_builder.max_papers == 5
+    _stub_hybrid_corpus_operation_lock(builder)
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
+    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=seed)
+    builder.embedding_builder.enrich_cached_corpus_seed = MagicMock()
+    builder.embedding_builder.collect_papers = MagicMock(side_effect=corpus)
+    builder.embedding_builder._embedding_runtime_metadata = MagicMock(return_value={})
+    monkeypatch.setattr(builder, "_rank_candidates", lambda _, pool, __: list(pool))
+    monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _: None)
+
+    graph, _ = builder.build_graph(seed.paper_id)
+
+    assert events == ["recommendations", "corpus"]
+    client.get_recommended_papers.assert_called_once_with(
+        "arxiv:2501.00001", limit=3, raise_on_unavailable=True, pool="all-cs"
+    )
+    assert set(graph) == {
+        seed.paper_id,
+        corpus_overlap.paper_id,
+        corpus_semantic.paper_id,
+        recommendation_only.paper_id,
+    }
+    assert graph.graph["candidate_source_ranks"] == {
+        corpus_overlap.paper_id: {
+            "references": 1,
+            "citations": 1,
+            "recommendations": 3,
+            "arxiv_corpus": 1,
+        },
+        corpus_semantic.paper_id: {"arxiv_corpus": 2, "recommendations": 1},
+        recommendation_only.paper_id: {"recommendations": 2},
+    }
+    assert builder.paper_sources[corpus_overlap.paper_id] == "both"
+    assert builder.seed_relations[corpus_overlap.paper_id] == "overlap"
+    assert builder.paper_sources[corpus_semantic.paper_id] == "semantic"
+    assert builder.seed_relations[corpus_semantic.paper_id] == "semantic_only"
+    assert builder.candidate_source_status == {
+        "arxiv_corpus": "complete",
+        "citations": "complete",
+        "recommendations": "complete",
+        "references": "complete",
+    }
+
+
+@pytest.mark.parametrize(
+    ("lookup_available", "outage", "recommendation_status"),
+    [
+        (True, True, "unavailable"),
+        (False, False, "unavailable"),
+        (True, False, "empty"),
+    ],
+)
+def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_source(
+    monkeypatch: pytest.MonkeyPatch,
+    lookup_available: bool,
+    outage: bool,
+    recommendation_status: str,
+) -> None:
+    """Empty results, outages, and opaque seeds preserve the corpus candidates."""
+    seed = _seed_paper("local-seed")
+    seed.is_local_corpus = True
+    seed.arxiv_id = "2501.00001" if lookup_available else ""
+    client = MagicMock()
+    client.get_recommended_papers.return_value = []
+    if outage:
+        client.get_recommended_papers.side_effect = s2.SemanticScholarUnavailableError(
+            "recommendation outage"
+        )
+    builder = HybridGraphBuilder(
+        semantic_source="both",
+        max_papers=2,
+        max_references=0,
+        max_citations=0,
+        client=client,
+    )
+    assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
+    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=seed)
+    builder.embedding_builder.enrich_cached_corpus_seed = MagicMock()
+    builder.embedding_builder.collect_papers = MagicMock(
+        return_value={seed.paper_id: seed, "local-result": _paper("local-result")}
+    )
+    monkeypatch.setattr(builder, "_rank_candidates", lambda _, pool, __: list(pool))
+
+    assert set(builder.collect_papers(seed.paper_id)) == {seed.paper_id, "local-result"}
+    assert builder.candidate_source_status == {
+        "recommendations": recommendation_status,
+        "arxiv_corpus": "complete",
+    }
+    assert client.get_recommended_papers.call_count == int(lookup_available)
+
+
+def test_hybrid_adjudication_keeps_a_ceiling_on_semantic_only_papers() -> None:
+    """Selection respects both budgets when either source could fill the graph."""
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=3, client=MagicMock())
+    citations = ["c1", "c2", "overlap", "c3", "c4"]
+    semantics = ["s1", "s2", "s3", "s4", "s5"]
+    sources = {paper_id: {"citation"} for paper_id in citations}
+    sources["overlap"].add("semantic")
+    sources.update({paper_id: {"semantic"} for paper_id in semantics})
+    assert (
+        builder._select_candidate_ids(citations + semantics, sources) == citations[:4]
+    )
+    assert builder._select_candidate_ids(semantics + citations, sources) == [
+        *semantics[:3],
+        "c1",
+    ]
+    assert builder._select_candidate_ids(semantics + ["overlap"], sources) == [
+        *semantics[:3],
+        "overlap",
+    ]
 
 
 @pytest.mark.parametrize(

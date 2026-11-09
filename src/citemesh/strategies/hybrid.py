@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
+from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ from citemesh.core import (
     HYBRID_CONFIG,
     Paper,
 )
+from citemesh.core.choices import HYBRID_SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import is_local_corpus_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
@@ -39,7 +41,6 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
-    SEMANTIC_SOURCE_CHOICES,
     CandidateAcquisitionError,
     CandidateSourceResult,
     CandidateSourceState,
@@ -192,17 +193,18 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             semantic branch (``auto``/``cuda``/``mps``/``cpu``).
         :param str semantic_source: Semantic candidate sourcing mode:
             ``candidates`` (default; S2 recommendations, no local corpus) or
-            ``arxiv-corpus`` (hydrated arXiv corpus search).
-        :param int candidate_pool_size: Maximum S2 candidate pool size used by
-            the embedding builder in ``candidates`` mode.
+            ``arxiv-corpus`` (hydrated arXiv corpus search), or ``both`` (corpus
+            search plus S2's all-cs recommendations).
+        :param int candidate_pool_size: Maximum S2 recommendation pool size in
+            ``candidates`` and ``both`` modes.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         :param cache_selection: Existing corpus cache selected for semantic retrieval.
         """
-        if cache_selection is not None:
-            semantic_source = "arxiv-corpus"
         normalized_semantic_source = str(semantic_source).strip().lower()
-        if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
-            formatted = ", ".join(SEMANTIC_SOURCE_CHOICES)
+        if cache_selection is not None and normalized_semantic_source != "both":
+            normalized_semantic_source = "arxiv-corpus"
+        if normalized_semantic_source not in HYBRID_SEMANTIC_SOURCE_CHOICES:
+            formatted = ", ".join(HYBRID_SEMANTIC_SOURCE_CHOICES)
             raise ValueError(f"semantic_source must be one of: {formatted}")
 
         if max_semantic is None:
@@ -222,12 +224,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
         self.semantic_source = normalized_semantic_source
+        self._uses_corpus = normalized_semantic_source != "candidates"
         self._semantic_candidate_cap = 0
 
         if self.max_semantic > 0:
             _check_embedding_deps(
-                require_corpus=normalized_semantic_source == "arxiv-corpus"
-                and cache_selection is None
+                require_corpus=self._uses_corpus and cache_selection is None
             )
             self._semantic_candidate_cap = max(
                 self.max_semantic,
@@ -261,7 +263,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     encode_batch_size=encode_batch_size,
                     enable_torch_compile=enable_torch_compile,
                     device=device,
-                    semantic_source=normalized_semantic_source,
+                    semantic_source=(
+                        "arxiv-corpus" if self._uses_corpus else "candidates"
+                    ),
                     candidate_pool_size=candidate_pool_size,
                     client=self.client,
                     cache_selection=cache_selection,
@@ -289,6 +293,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources: dict[str, str] = {}  # paper_id -> citation|semantic|both
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
+        self._candidate_source_ranks: dict[str, dict[str, int]] = {}
+        self._candidate_provider_aliases: dict[str, str] = {}
 
     def _ingest_candidate(
         self,
@@ -322,6 +328,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         canonical_id = incoming_id
         existing = candidates.get(incoming_id)
+        if existing is None and not incoming.is_local_corpus:
+            alias_target = self._candidate_provider_aliases.get(incoming_id)
+            if alias_target is not None and alias_target in candidates:
+                canonical_id = alias_target
+                existing = candidates[canonical_id]
         if existing is not None:
             merge_paper_metadata(existing, incoming)
         else:
@@ -340,12 +351,22 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     candidate_sources[canonical_id] = candidate_sources.pop(
                         matched_id, set()
                     )
+                    # Later lists can carry the same provider ID without the
+                    # external IDs that established the corpus match.
+                    for provider_id, target in self._candidate_provider_aliases.items():
+                        if target == matched_id:
+                            self._candidate_provider_aliases[provider_id] = canonical_id
+                    self._candidate_provider_aliases[matched_id] = canonical_id
+                    previous_ranks = self._candidate_source_ranks.pop(matched_id, None)
+                    if previous_ranks is not None:
+                        self._candidate_source_ranks[canonical_id] = previous_ranks
                     previous_relation = self.seed_relations.pop(matched_id, "")
                     if previous_relation:
                         self.seed_relations[canonical_id] = previous_relation
                 else:
                     canonical_id = matched_id
                     merge_paper_metadata(existing, incoming)
+                    self._candidate_provider_aliases[incoming_id] = canonical_id
             else:
                 candidates[canonical_id] = incoming
 
@@ -378,7 +399,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if not candidate_ids or self.embedding_builder is None:
             return
 
-        if self.semantic_source != "arxiv-corpus":
+        if not self._uses_corpus:
             subset = {
                 paper_id: candidates[paper_id]
                 for paper_id in candidate_ids
@@ -621,6 +642,97 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         return [paper_id for _, paper_id, _ in scored]
 
+    def _record_citation_source_ranks(
+        self, seed: Paper, candidates: dict[str, Paper]
+    ) -> None:
+        """Record citation/reference positions on the reconciled paper IDs."""
+        for result in self.citation_builder.candidate_source_results:
+            for rank, paper in enumerate(result.papers, start=1):
+                if paper.paper_id == seed.paper_id or candidate_records_match(
+                    paper, seed
+                ):
+                    continue
+                paper_id = paper.paper_id
+                if paper_id not in candidates:
+                    matches = [
+                        candidate_id
+                        for candidate_id, candidate in candidates.items()
+                        if candidate_records_match(paper, candidate)
+                    ]
+                    if len(matches) != 1:
+                        continue
+                    paper_id = matches[0]
+                    if not paper.is_local_corpus:
+                        self._candidate_provider_aliases[paper.paper_id] = paper_id
+                self._candidate_source_ranks.setdefault(paper_id, {}).setdefault(
+                    result.source, rank
+                )
+
+    def _fetch_recommendations(
+        self, provider_seed_id: str | None, candidate_pool_size: int
+    ) -> CandidateSourceResult:
+        """Fetch one bounded recommendation list through the shared S2 client."""
+        if provider_seed_id is None:
+            return CandidateSourceResult(
+                "recommendations",
+                CandidateSourceState.UNAVAILABLE,
+                error="The corpus seed has no Semantic Scholar lookup identifier.",
+            )
+        fetch = partial(
+            self.client.get_recommended_papers,
+            provider_seed_id,
+            limit=min(100, self._semantic_candidate_cap, candidate_pool_size),
+            raise_on_unavailable=True,
+        )
+        return fetch_candidate_source(
+            "recommendations",
+            lambda: fetch(pool="all-cs") if self.semantic_source == "both" else fetch(),
+        )
+
+    def _ingest_recommendations(
+        self,
+        seed: Paper,
+        candidates: dict[str, Paper],
+        candidate_sources: dict[str, set[str]],
+        recommendations: Sequence[Paper],
+    ) -> None:
+        """Add the ordered recommendation list after corpus reconciliation."""
+        for rank, paper in enumerate(recommendations, start=1):
+            if paper.is_seed:
+                continue
+            paper_id = self._ingest_candidate(
+                seed,
+                candidates,
+                candidate_sources,
+                paper,
+                source="semantic",
+                relation="semantic_only",
+            )
+            if paper_id is not None:
+                self._candidate_source_ranks.setdefault(paper_id, {}).setdefault(
+                    "recommendations", rank
+                )
+
+    def _select_candidate_ids(
+        self,
+        ranked_ids: list[str],
+        candidate_sources: dict[str, set[str]],
+    ) -> list[str]:
+        """Walk the composite order, capping semantic-only additions."""
+        max_added = self.max_papers - 1
+        selected: list[str] = []
+        added_semantic = 0
+        for paper_id in ranked_ids:
+            if len(selected) >= max_added:
+                break
+            if candidate_sources[paper_id] == {"semantic"}:
+                if added_semantic >= self.max_semantic:
+                    continue
+                added_semantic += 1
+            selected.append(paper_id)
+        logger.debug("Added %s semantic papers", added_semantic)
+        return selected
+
     @scope_candidate_collection
     def collect_papers(
         self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
@@ -633,8 +745,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         operation_lock = (
             self.embedding_builder._corpus_operation_lock()
-            if self.embedding_builder is not None
-            and self.semantic_source == "arxiv-corpus"
+            if self.embedding_builder is not None and self._uses_corpus
             else nullcontext()
         )
         with operation_lock:
@@ -654,6 +765,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources = {}
         self.seed_relations = {}
         self.candidate_source_status = {}
+        self._candidate_source_ranks = {}
+        self._candidate_provider_aliases = {}
         if self.embedding_builder is not None:
             self.embedding_builder.retrieval_embeddings = {}
             self.embedding_builder.embeddings = {}
@@ -668,10 +781,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         cached_corpus_seed: Paper | None = None
         corpus_prepared = False
-        if (
-            self.embedding_builder is not None
-            and self.semantic_source == "arxiv-corpus"
-        ):
+        if self.embedding_builder is not None and self._uses_corpus:
             try:
                 self.embedding_builder._prepare_corpus_for_build()
                 corpus_prepared = True
@@ -756,71 +866,57 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 self.seed_relations.setdefault(paper_id, "citation")
             return papers
 
-        # Step 2: Enrich with semantic matches
-        semantic_budget = min(self.max_semantic, max(0, self.max_papers - 1))
-        if semantic_budget <= 0:
-            ranked_ids = self._rank_candidates(
-                seed_paper, candidate_pool, candidate_sources
-            )
-            for paper_id in ranked_ids:
-                if len(papers) >= self.max_papers:
-                    break
-                papers[paper_id] = candidate_pool[paper_id]
-                self.paper_sources[paper_id] = "citation"
-                self.seed_relations.setdefault(paper_id, "citation")
-            return papers
-
-        logger.info("Enriching with up to %s semantic matches...", semantic_budget)
+        combined = self.semantic_source == "both"
+        if combined:
+            self._record_citation_source_ranks(seed_paper, candidate_pool)
+        logger.info("Enriching with up to %s semantic matches...", self.max_semantic)
 
         from citemesh.services import SemanticScholarUnavailableError
 
+        source_results = list(self.citation_builder.candidate_source_results)
+        recommendations: Sequence[Paper] = ()
         try:
-            if self.semantic_source == "arxiv-corpus":
+            if combined or not self._uses_corpus:
+                recommendation_result = self._fetch_recommendations(
+                    provider_lookup_identifier(seed_paper.paper_id, seed_paper)
+                    if combined
+                    else seed_paper.paper_id,
+                    embedding_builder.candidate_pool_size,
+                )
+                recommendations = recommendation_result.papers
+                source_results.append(recommendation_result)
+                self.candidate_source_status["recommendations"] = (
+                    recommendation_result.state.value
+                )
+            if self._uses_corpus:
                 semantic_papers = embedding_builder.collect_papers(
                     seed_id,
                     seed_paper=seed_paper,
                     _corpus_prepared=corpus_prepared,
                 )
-                require_available_candidate_source(
-                    [
-                        *self.citation_builder.candidate_source_results,
-                        CandidateSourceResult(
-                            "arxiv_corpus", CandidateSourceState.COMPLETE
-                        ),
-                    ],
-                    context=f"hybrid corpus acquisition for {seed_paper.paper_id}",
+                corpus_state = (
+                    CandidateSourceState.EMPTY
+                    if combined
+                    and not any(not paper.is_seed for paper in semantic_papers.values())
+                    else CandidateSourceState.COMPLETE
                 )
-            else:
-                # Candidate mode: the citation branch already covers references
-                # and citations, so the semantic branch adds recommendations only.
-                recommendation_result = fetch_candidate_source(
-                    "recommendations",
-                    lambda: self.client.get_recommended_papers(
-                        seed_paper.paper_id,
-                        # Per-source fetches stay within S2's endpoint limits,
-                        # matching EmbeddingGraphBuilder._candidate_pool_budgets.
-                        limit=min(
-                            100,
-                            self._semantic_candidate_cap,
-                            embedding_builder.candidate_pool_size,
-                        ),
-                        raise_on_unavailable=True,
-                    ),
+                source_results.append(
+                    CandidateSourceResult("arxiv_corpus", corpus_state)
                 )
-                self.candidate_source_status["recommendations"] = (
-                    recommendation_result.state.value
-                )
-                require_available_candidate_source(
-                    [
-                        *self.citation_builder.candidate_source_results,
-                        recommendation_result,
-                    ],
-                    context=f"hybrid candidate acquisition for {seed_paper.paper_id}",
-                )
+                if combined:
+                    self.candidate_source_status["arxiv_corpus"] = corpus_state.value
+            acquisition = {
+                "both": "combined",
+                "arxiv-corpus": "corpus",
+                "candidates": "candidate",
+            }
+            require_available_candidate_source(
+                source_results,
+                context=f"hybrid {acquisition[self.semantic_source]} acquisition for {seed_paper.paper_id}",
+            )
+            if not self._uses_corpus:
                 embedding_builder._load_model()
-                semantic_papers = {
-                    paper.paper_id: paper for paper in recommendation_result.papers
-                }
+                semantic_papers = {paper.paper_id: paper for paper in recommendations}
         except SemanticScholarUnavailableError:
             raise
         except CandidateAcquisitionError:
@@ -835,10 +931,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             embedding_builder.enrich_cached_corpus_seed(seed_paper)
         self.citation_builder.hydrate_collected_references(citation_papers, seed_paper)
 
-        for paper in semantic_papers.values():
-            if paper.is_seed:
-                continue
-            self._ingest_candidate(
+        semantic_candidates = (
+            paper for paper in semantic_papers.values() if not paper.is_seed
+        )
+        for rank, paper in enumerate(semantic_candidates, start=1):
+            canonical_id = self._ingest_candidate(
                 seed_paper,
                 candidate_pool,
                 candidate_sources,
@@ -846,30 +943,24 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 source="semantic",
                 relation="semantic_only",
             )
+            if combined and canonical_id is not None:
+                self._candidate_source_ranks.setdefault(canonical_id, {}).setdefault(
+                    "arxiv_corpus", rank
+                )
+        if combined:
+            self._ingest_recommendations(
+                seed_paper, candidate_pool, candidate_sources, recommendations
+            )
 
         ranked_ids = self._rank_candidates(
             seed_paper, candidate_pool, candidate_sources
         )
-        added_semantic = 0
-        for paper_id in ranked_ids:
-            if len(papers) >= self.max_papers:
-                break
-            tags = candidate_sources.get(paper_id, {"citation"})
-            semantic_only = "semantic" in tags and "citation" not in tags
-            if semantic_only and added_semantic >= semantic_budget:
-                continue
+        for paper_id in self._select_candidate_ids(ranked_ids, candidate_sources):
             papers[paper_id] = candidate_pool[paper_id]
-            if semantic_only:
-                added_semantic += 1
-                self.seed_relations[paper_id] = merge_seed_relation(
-                    self.seed_relations.get(paper_id, ""),
-                    "semantic_only",
-                )
+            tags = candidate_sources[paper_id]
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
             if "citation" in tags:
                 self.seed_relations.setdefault(paper_id, "citation")
-
-        logger.debug("Added %s semantic papers", added_semantic)
 
         annotate_verified_seed_references(
             candidate_pool,
@@ -997,6 +1088,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
+        if self._candidate_source_ranks:
+            graph.graph["candidate_source_ranks"] = {
+                paper_id: ranks.copy()
+                for paper_id, ranks in self._candidate_source_ranks.items()
+                if paper_id in graph
+            }
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:

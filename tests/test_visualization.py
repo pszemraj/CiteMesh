@@ -603,6 +603,22 @@ def test_json_payload_without_layout_passes_dashboard_import_contract() -> None:
         assert geometry_key in dashboard_meta
 
 
+def test_graph_json_preserves_candidate_source_ranks(tmp_path: Path) -> None:
+    """Portable JSON carries original per-source positions for exported papers."""
+    graph, seed_id = _build_graph()
+    ranks = {"related": {"citations": 7, "arxiv_corpus": 4, "recommendations": 11}}
+    graph.graph["candidate_source_ranks"] = ranks
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)}
+    )
+    output = tmp_path / "graph.json"
+    exporter.to_json(output)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:seed")
+    assert validated["meta"]["candidate_source_ranks"] == ranks
+
+
 def test_graph_payload_rejects_absent_seed_before_replacing_json(
     tmp_path: Path,
 ) -> None:

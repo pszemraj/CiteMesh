@@ -1376,14 +1376,17 @@ def test_search_mode_local_has_no_s2_result_ceiling(
 
 
 @pytest.mark.parametrize("binary_prefilter", [False, True])
+@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
 def test_search_local_uses_configured_corpus_dataset_source(
     monkeypatch: pytest.MonkeyPatch,
     binary_prefilter: bool,
+    semantic_source: str,
 ) -> None:
     """Local corpus search should target the configured int8 cache namespace.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture replacing local runtime dependencies.
     :param bool binary_prefilter: Persisted binary-prefilter setting.
+    :param str semantic_source: Persisted build source sharing the corpus cache.
     :return None: Assertions validate the build-defaults namespace passed to search.
     """
     fake_builder = _fake_local_search_builder(
@@ -1393,7 +1396,7 @@ def test_search_local_uses_configured_corpus_dataset_source(
     monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
     dataset_source = "research/arxiv-snapshot"
     for key, value in {
-        "semantic_source": "arxiv-corpus",
+        "semantic_source": semantic_source,
         "dataset_source": dataset_source,
         "calibration_sample_size": "200",
         "binary_prefilter": str(binary_prefilter).lower(),
@@ -2642,6 +2645,40 @@ def test_cli_argument_validation_contracts() -> None:
         result = run_cli_command(args)
         assert result.returncode != 0
         assert expected_error in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["build", "seed", "--strategy", "embedding", "--semantic-source", "both"],
+            "--semantic-source both requires --strategy hybrid",
+        ),
+        (
+            [
+                "build",
+                "seed",
+                "--strategy",
+                "hybrid",
+                "--semantic-source",
+                "both",
+                "--max-semantic",
+                "0",
+            ],
+            "Hybrid semantic branch is disabled with --max-semantic 0",
+        ),
+        (
+            ["search", "topic", "--semantic-source", "both"],
+            "invalid choice",
+        ),
+    ],
+)
+def test_combined_semantic_source_requires_hybrid_discovery(
+    args: list[str], message: str
+) -> None:
+    result = run_cli_command(args)
+    assert result.returncode == 2
+    assert message in result.stderr
 
 
 def test_cli_rejects_strategy_incompatible_options() -> None:

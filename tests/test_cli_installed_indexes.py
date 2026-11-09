@@ -916,19 +916,24 @@ def test_legacy_adoption_rejects_explicit_all_against_recorded_limit(
     assert run_cache_command(args, cache_parser) == 1
 
 
-@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+@pytest.mark.parametrize(
+    ("strategy", "combined_from"),
+    [("embedding", ""), ("hybrid", ""), ("hybrid", "cli"), ("hybrid", "config")],
+)
 @pytest.mark.parametrize("installed_limit", [None, 5])
 def test_selected_build_writes_contract_and_runtime_provenance(
     installed_selection: ExistingCacheSelection,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     strategy: str,
+    combined_from: str,
     installed_limit: int | None,
 ) -> None:
     """The build command carries selected identity through export and sidecar writing."""
     from citemesh.cli.commands import build
     from citemesh.data.embedding_cache import lifecycle
 
+    combined = bool(combined_from)
     installed_scope = "all" if installed_limit is None else "newest"
     monkeypatch.setattr(
         lifecycle,
@@ -962,6 +967,9 @@ def test_selected_build_writes_contract_and_runtime_provenance(
         assert args._cache_selection is installed_selection
         assert args.model == installed_selection.contract.model_id
         assert args.truncate_dim == installed_selection.contract.dimension
+        assert args.semantic_source == ("both" if combined else "arxiv-corpus")
+        if combined:
+            assert args.candidate_pool_size == 13
         return graph, "seed"
 
     monkeypatch.setattr(build, "_build_strategy_graph", build_graph)
@@ -976,6 +984,8 @@ def test_selected_build_writes_contract_and_runtime_provenance(
             "--cache-namespace",
             installed_selection.namespace_id,
             "--all-corpus",
+            *(["--semantic-source", "both"] if combined_from == "cli" else []),
+            *(["--candidate-pool-size", "13"] if combined else []),
             "--export",
             "json",
             "--output",
@@ -987,7 +997,12 @@ def test_selected_build_writes_contract_and_runtime_provenance(
             args,
             build_parser,
             provided_build_options=_pop_tracked_option_dests(args),
-            user_config=UserConfig(tmp_path / "config.toml"),
+            user_config=UserConfig(
+                tmp_path / "config.toml",
+                defaults={"semantic_source": "both"}
+                if combined_from == "config"
+                else {},
+            ),
         )
         == 0
     )
@@ -1001,6 +1016,13 @@ def test_selected_build_writes_contract_and_runtime_provenance(
     assert embedding["all_corpus"] is True
     assert embedding["installed_corpus_selection"] == installed_scope
     assert embedding.get("installed_corpus_limit") == installed_limit
+    if combined:
+        assert embedding["semantic_source"] == "both"
+        assert embedding["candidate_pool_size"] == 13
+        assert embedding["dataset_source"] == installed_selection.source_repo_id
+        metadata = payload["metadata"]
+        assert metadata["embedding"]["cache_namespace"] == embedding["cache_namespace"]
+        assert metadata["embedding"]["candidate_pool_size"] == 13
 
 
 def test_minimal_selected_finite_corpus_uses_certified_limit(

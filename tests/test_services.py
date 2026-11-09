@@ -772,7 +772,51 @@ def test_recommendations_fallback_when_recent_cannot_materialize() -> None:
         )
         papers = client.get_recommended_papers("seed", raise_on_unavailable=True)
     assert [paper.paper_id for paper in papers] == ["b", "a"]
+    assert "from" not in client._session.get.call_args_list[0].kwargs["params"]
     assert client._session.get.call_args_list[1].kwargs["params"]["from"] == "all-cs"
+
+
+@pytest.mark.parametrize(
+    ("status", "paper_ids", "expected_error"),
+    [
+        (200, ["b", "a"], None),
+        (200, [], None),
+        (404, [], SemanticScholarUnavailableError),
+        (403, [], SemanticScholarRequestError),
+    ],
+)
+def test_recommendations_can_query_all_cs_directly(
+    status: int, paper_ids: list[str], expected_error: type[Exception] | None
+) -> None:
+    """Direct all-cs discovery keeps provider order and does not try another pool."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(
+                status, {"recommendedPapers": [{"paperId": pid} for pid in paper_ids]}
+            )
+        )
+        client._session.post = MagicMock(
+            return_value=_MockResponse(200, [_paper_payload(pid) for pid in paper_ids])
+        )
+        if expected_error is None:
+            papers = client.get_recommended_papers(
+                "seed", limit=2, raise_on_unavailable=True, pool="all-cs"
+            )
+            assert [paper.paper_id for paper in papers] == paper_ids
+        else:
+            with pytest.raises(expected_error, match=f"HTTP {status}"):
+                client.get_recommended_papers(
+                    "seed", limit=2, raise_on_unavailable=True, pool="all-cs"
+                )
+
+    client._session.get.assert_called_once()
+    assert client._session.get.call_args.kwargs["params"] == {
+        "fields": "paperId",
+        "limit": 2,
+        "from": "all-cs",
+    }
+    assert client._session.post.call_count == int(bool(paper_ids))
 
 
 def test_custom_projection_adds_paper_id_and_never_overwrites_complete_cache() -> None:

@@ -21,6 +21,7 @@ from .build_options import (
     _CANDIDATE_ONLY_OPTION_DESTS,
     _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS,
     _CORPUS_ONLY_OPTION_DESTS,
+    _CORPUS_SEMANTIC_SOURCES,
     _HYBRID_EMBEDDING_OPTION_DESTS,
     _STRATEGY_DISPATCH,
     _apply_hybrid_default_overrides,
@@ -241,7 +242,10 @@ def _resolve_implied_semantic_source(
     args = context.args
     provided_corpus_flags = context.provided_labels(_CORPUS_ONLY_OPTION_DESTS)
     provided_candidate_flags = context.provided_labels(_CANDIDATE_ONLY_OPTION_DESTS)
-    if "semantic_source" not in context.contract_provided:
+    if (
+        "semantic_source" not in context.contract_provided
+        and args.semantic_source != "both"
+    ):
         if provided_corpus_flags and provided_candidate_flags:
             context.reject(
                 "Corpus-only and candidate-only options cannot be combined: "
@@ -301,12 +305,18 @@ def _validate_semantic_source_options(
     :return None: Normalizes candidate-mode storage precision in place.
     """
     args = context.args
-    if args.semantic_source != "arxiv-corpus":
+    if args.semantic_source == "both" and context.strategy != "hybrid":
+        context.fail(
+            "--semantic-source both requires --strategy hybrid.",
+            related_dests={"semantic_source", "strategy"},
+        )
+    combined_choice = " or both" if context.strategy == "hybrid" else ""
+    if args.semantic_source not in _CORPUS_SEMANTIC_SOURCES:
         _drop_ignored_corpus_config_defaults(context)
         if provided_corpus_flags:
             option_text = ", ".join(provided_corpus_flags)
             context.fail(
-                f"Corpus-only option(s) require --semantic-source arxiv-corpus: "
+                f"Corpus-only option(s) require --semantic-source arxiv-corpus{combined_choice}: "
                 f"{option_text}.",
                 related_dests={"semantic_source"},
             )
@@ -316,7 +326,7 @@ def _validate_semantic_source_options(
         ):
             context.fail(
                 "--storage-precision int8 requires --semantic-source "
-                "arxiv-corpus (int8 calibration ranges are computed during "
+                f"arxiv-corpus{combined_choice} (int8 calibration ranges are computed during "
                 "corpus hydration).",
                 related_dests={"semantic_source", "storage_precision"},
             )
@@ -327,9 +337,9 @@ def _validate_semantic_source_options(
                 "Candidate mode stores embeddings as float32 "
                 "(int8 calibration requires corpus hydration)."
             )
-    elif provided_candidate_flags:
+    elif args.semantic_source == "arxiv-corpus" and provided_candidate_flags:
         context.fail(
-            "--candidate-pool-size requires --semantic-source candidates.",
+            f"--candidate-pool-size requires --semantic-source candidates{combined_choice}.",
             related_dests={"semantic_source"},
         )
 
@@ -342,7 +352,7 @@ def _validate_streaming_dataset_split(context: _BuildContractContext) -> None:
     """
     args = context.args
     if (
-        args.semantic_source == "arxiv-corpus"
+        args.semantic_source in _CORPUS_SEMANTIC_SOURCES
         and args.streaming
         and ":" in str(args.dataset_split)
     ):
@@ -543,7 +553,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     if not _embedding_branch_enabled(args):
         return
 
-    corpus_mode = str(args.semantic_source) == "arxiv-corpus"
+    corpus_mode = args.semantic_source in _CORPUS_SEMANTIC_SOURCES
     _, cache_files, _ = _embedding_cache_directory_stats()
     if cache_files == 0:
         if corpus_mode:
@@ -568,10 +578,11 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             else str(args.corpus_size)
         )
         logger.debug(
-            "Embedding config: model=%s@%s device=%s source=arxiv-corpus dataset=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
+            "Embedding config: model=%s@%s device=%s source=%s dataset=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
             args.model,
             revision_label,
             args.device,
+            args.semantic_source,
             args.dataset_source,
             args.dataset_split,
             corpus_label,
@@ -579,6 +590,10 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             args.storage_precision,
             int(args.encode_batch_size),
         )
+        if args.semantic_source == "both":
+            logger.debug(
+                "Recommendation candidate pool limit: %s.", args.candidate_pool_size
+            )
     else:
         logger.debug(
             "Embedding config: model=%s@%s device=%s source=%s pool=%s storage=%s encode_batch=%s.",

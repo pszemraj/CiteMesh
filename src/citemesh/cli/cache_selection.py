@@ -42,7 +42,6 @@ def _apply_cache_selection(
         "truncate_dim": contract.dimension,
         "storage_precision": contract.stored_dtype,
         "calibration_sample_size": contract.calibration_sample_size,
-        "semantic_source": "arxiv-corpus",
         "dataset_source": selection.source_repo_id,
         "dataset_split": selection.source_split,
     }
@@ -53,6 +52,17 @@ def _apply_cache_selection(
                 f"{selection.namespace_id} (stored value: {value})."
             )
         setattr(args, dest, value)
+    combined = args.semantic_source == "both" and (
+        args.strategy == "hybrid" or "semantic_source" in provided
+    )
+    if not combined:
+        if "semantic_source" in provided and args.semantic_source != "arxiv-corpus":
+            error_sink.error(
+                f"--semantic-source conflicts with --cache-namespace "
+                f"{selection.namespace_id} (stored value: arxiv-corpus)."
+            )
+        args.semantic_source = "arxiv-corpus"
+        selectors["semantic_source"] = "arxiv-corpus"
     if args.force_rebuild_cache:
         error_sink.error("--force-rebuild-cache cannot be used with --cache-namespace.")
     cache = open_existing_cache(selection)

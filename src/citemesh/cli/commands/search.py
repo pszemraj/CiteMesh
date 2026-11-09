@@ -210,6 +210,8 @@ def _prepare_local_search_builder(
         defaults, {"strategy"}, user_config
     )
     defaults.strategy = "embedding"
+    if defaults.semantic_source == "both":
+        defaults.semantic_source = "arxiv-corpus"
     overrides = _namespace_overrides(args)
     for dest, value in overrides.items():
         setattr(defaults, dest, value)

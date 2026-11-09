@@ -593,6 +593,7 @@ class _EndpointsMixin:
         fields: list[str] | None = None,
         *,
         raise_on_unavailable: bool = False,
+        pool: str = "recent",
     ) -> list[Paper]:
         """Freshly fetch recommendation IDs and materialize available papers.
 
@@ -600,8 +601,12 @@ class _EndpointsMixin:
         :param int limit: Maximum results, up to 500.
         :param list[str] | None fields: Optional direct-response projection.
         :param bool raise_on_unavailable: Raise on discovery/enrichment failure.
+        :param str pool: Start with ``recent`` and fall back to ``all-cs`` if no
+            papers are materialized, or query ``all-cs`` directly.
         :return list[Paper]: Ordered recommendations.
         """
+        if pool not in ("recent", "all-cs"):
+            raise ValueError("Recommendation pool must be 'recent' or 'all-cs'.")
         parsed_limit = payloads._validate_integer_limit(
             limit, "limit", maximum=RECOMMENDATION_MAX_RESULTS
         )
@@ -618,25 +623,26 @@ class _EndpointsMixin:
             requested_fields.append("paperId")
 
         skipped_records = 0
-        for pool in ("recent", "all-cs"):
+        pools = ("recent", "all-cs") if pool == "recent" else ("all-cs",)
+        for active_pool in pools:
             params: dict[str, str | int] = {
                 "fields": ",".join(requested_fields)
                 if custom_projection
                 else "paperId",
                 "limit": parsed_limit,
             }
-            if pool == "all-cs":
-                params["from"] = pool
+            if active_pool == "all-cs":
+                params["from"] = active_pool
             response = self._request_json(
                 f"{RECOMMENDATION_BASE_URL}/{encoded_id}",
                 params,
-                context=f"fetching {pool} recommendations for {normalized_id}",
+                context=f"fetching {active_pool} recommendations for {normalized_id}",
                 raise_on_unavailable=raise_on_unavailable,
             )
             if response is None:
                 if raise_on_unavailable:
                     raise SemanticScholarUnavailableError(
-                        f"Could not fetch {pool} recommendations for {normalized_id}: "
+                        f"Could not fetch {active_pool} recommendations for {normalized_id}: "
                         "HTTP 404 (paper not found)."
                     )
                 return []
@@ -648,7 +654,7 @@ class _EndpointsMixin:
             logger.debug(
                 "Checked recommendations discovery upstream for %s, %s pool: %d rows.",
                 normalized_id,
-                pool,
+                active_pool,
                 len(records),
             )
             if custom_projection:

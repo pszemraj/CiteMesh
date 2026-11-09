@@ -110,8 +110,8 @@ _BUILD_STRATEGY_OPTION_SUPPORT: dict[str, set[str]] = {
     "candidate_pool_size": {"embedding", "hybrid"},
     "max_semantic": {"hybrid"},
 }
-# Flags that only affect arxiv-corpus hydration; providing them implies (or
-# requires) --semantic-source arxiv-corpus.
+_CORPUS_SEMANTIC_SOURCES = frozenset({"arxiv-corpus", "both"})
+# Corpus hydration flags imply arxiv-corpus when no source is explicit.
 _CORPUS_ONLY_OPTION_DESTS: set[str] = {
     "dataset_source",
     "dataset_split",
@@ -304,8 +304,8 @@ def _embedding_export_metadata(
         ),
     }
     if payload["semantic_source"] == "arxiv-corpus":
-        # Candidate pool settings apply only to candidate builds.
         payload.pop("candidate_pool_size")
+    if payload["semantic_source"] in _CORPUS_SEMANTIC_SOURCES:
         for key in (
             "dataset_revision",
             "cache_namespace",

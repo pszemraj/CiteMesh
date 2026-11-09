@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from citemesh.visualization.export import ExportMetadata
 
 from .build_options import (
+    _CORPUS_SEMANTIC_SOURCES,
     _embedding_branch_enabled,
     _normalized_cache_reason,
     _resolved_hybrid_max_semantic,
@@ -152,13 +153,13 @@ def _build_graph_config_payload(
                 embedding_config["truncate_dim"] = effective_truncate_dim
         if strategy == "embedding":
             embedding_config["top_k"] = int(cli_args.top_k)
-        if cli_args.semantic_source != "arxiv-corpus":
+        if cli_args.semantic_source not in _CORPUS_SEMANTIC_SOURCES:
             embedding_config.pop("dataset_source", None)
             embedding_config.pop("dataset_split", None)
             embedding_config.pop("corpus_size", None)
             embedding_config.pop("all_corpus", None)
             embedding_config.pop("streaming", None)
-        else:
+        if cli_args.semantic_source == "arxiv-corpus":
             embedding_config.pop("candidate_pool_size")
         if cli_args.storage_precision != "int8":
             embedding_config.pop("binary_prefilter")
