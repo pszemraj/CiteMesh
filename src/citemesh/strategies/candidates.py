@@ -72,12 +72,13 @@ class CandidateSourceState(str, Enum):
 
 @dataclass(frozen=True)
 class CandidateSourceResult:
-    """Papers, availability state, and optional failure detail for a source."""
+    """Candidate papers, source availability, and uncapped bibliography evidence."""
 
     source: str
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
     error: str | None = ""
+    verified_references: tuple[Paper, ...] = ()
 
 
 def scope_candidate_collection(
@@ -578,8 +579,9 @@ def fetch_seed_references(
             else:
                 recovered.append(resolved_paper)
     identifiable_entries = len({frozenset(entry) for entry in entries if entry})
-    materialized_count = len(recovered)
     _enrich_local_reference_records(client, recovered)
+    verified_references = tuple(recovered)
+    materialized_count = len(verified_references)
     selector = reference_selector or _select_recovered_references_by_text
     recovered = selector(seed, recovered, limit)
     logger.debug(
@@ -625,6 +627,7 @@ def fetch_seed_references(
             state,
             papers=tuple(recovered),
             error=error,
+            verified_references=verified_references,
         ),
     )
 
@@ -713,6 +716,30 @@ def merge_seed_relation(existing: str, incoming: str) -> str:
     if normalized_incoming == "semantic_only":
         return normalized_existing
     return normalized_existing
+
+
+def annotate_verified_seed_references(
+    candidates: dict[str, Paper],
+    source_results: Sequence[CandidateSourceResult],
+    seed_relations: dict[str, str],
+) -> None:
+    """Label verified references already in the deduplicated candidate pool."""
+    for result in source_results:
+        for reference in result.verified_references:
+            paper_id = reference.paper_id
+            if paper_id not in candidates:
+                matches = [
+                    candidate_id
+                    for candidate_id, candidate in candidates.items()
+                    if candidate_records_match(reference, candidate)
+                ]
+                if len(matches) != 1:
+                    continue
+                paper_id = matches[0]
+            previous = seed_relations.get(paper_id, "")
+            seed_relations[paper_id] = merge_seed_relation(
+                "" if previous == "citation" else previous, "referenced_by_seed"
+            )
 
 
 def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:

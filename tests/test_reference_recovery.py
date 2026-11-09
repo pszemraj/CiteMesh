@@ -20,11 +20,13 @@ from citemesh.services.semantic_scholar.disk_cache import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
+    annotate_verified_seed_references,
     fetch_candidate_pool,
     fetch_seed_references,
     require_available_candidate_source,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.hybrid import HybridGraphBuilder
 
 
 @pytest.fixture
@@ -333,6 +335,87 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
         "ranked 3 resolved references and keeping 2 (reference limit: 2)."
     )
     metadata.assert_called_once()
+
+
+def test_references_beyond_admission_limit_label_existing_candidates(
+    providers: tuple,
+) -> None:
+    """A capped reference can still establish a selected paper's seed relation."""
+    client, bibliography, metadata = providers
+    admitted = paper("arxiv:1706.03762")
+    omitted = paper("arxiv:2303.08774")
+    ambiguous = paper("arxiv:2401.12345")
+    bibliography.return_value = [
+        (ref.paper_id,) for ref in (admitted, omitted, ambiguous)
+    ]
+    metadata.return_value = {
+        ref.paper_id: ref for ref in (admitted, omitted, ambiguous)
+    }
+    results = fetch_seed_references(
+        client,
+        paper("arxiv:2608.27147"),
+        1,
+        reference_selector=lambda _seed, recovered, limit: list(recovered[:limit]),
+    )
+    assert results[-1].papers == (admitted,)
+    assert results[-1].verified_references == (admitted, omitted, ambiguous)
+
+    candidates = {
+        "semantic": paper("semantic", arxiv_id="2303.08774"),
+        "local-a": paper("local-a", arxiv_id="2401.12345", is_local_corpus=True),
+        "local-b": paper("local-b", arxiv_id="2401.12345", is_local_corpus=True),
+    }
+    relations = dict.fromkeys(candidates, "semantic_only")
+    annotate_verified_seed_references(candidates, results, relations)
+    assert relations == {
+        "semantic": "referenced_by_seed",
+        "local-a": "semantic_only",
+        "local-b": "semantic_only",
+    }
+
+
+def test_hybrid_reference_evidence_does_not_consume_a_citation_slot(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirmed relation leaves the candidate's semantic budget intact."""
+    client, bibliography, metadata = providers
+    seed = paper("arxiv:2608.27147")
+    admitted = paper("arxiv:1706.03762")
+    omitted = paper("arxiv:2303.08774")
+    rediscovered = paper("recommendation", arxiv_id="2303.08774")
+    unrelated = paper("other-recommendation")
+    client.get_paper.return_value = seed
+    bibliography.return_value = [(admitted.paper_id,), (omitted.paper_id,)]
+    metadata.return_value = {ref.paper_id: ref for ref in (admitted, omitted)}
+    client.get_recommended_papers.return_value = [rediscovered, unrelated]
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=0,
+        max_semantic=1,
+        fetch_references=False,
+        client=client,
+    )
+    assert builder.embedding_builder is not None
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", MagicMock())
+    monkeypatch.setattr(
+        builder,
+        "_select_recovered_references_by_embedding",
+        lambda _seed, recovered, limit: list(recovered[:limit]),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda *_: [rediscovered.paper_id, unrelated.paper_id, admitted.paper_id],
+    )
+
+    assert list(builder.collect_papers(seed.paper_id)) == [
+        seed.paper_id,
+        rediscovered.paper_id,
+        admitted.paper_id,
+    ]
+    assert builder.paper_sources[rediscovered.paper_id] == "semantic"
+    assert builder.seed_relations[rediscovered.paper_id] == "referenced_by_seed"
 
 
 @pytest.mark.parametrize("html", [None, []])

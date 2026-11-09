@@ -43,6 +43,7 @@ from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
     CandidateSourceResult,
     CandidateSourceState,
+    annotate_verified_seed_references,
     candidate_records_match,
     fetch_candidate_source,
     merge_paper_metadata,
@@ -870,6 +871,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         logger.debug("Added %s semantic papers", added_semantic)
 
+        annotate_verified_seed_references(
+            candidate_pool,
+            self.citation_builder.candidate_source_results,
+            self.seed_relations,
+        )
         return papers
 
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
