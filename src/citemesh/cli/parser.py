@@ -937,8 +937,9 @@ def _add_build_hybrid_arguments(
         metavar="N",
         default=None,
         help=(
-            "Semantic additions, at most max-papers - 1; 0 disables embeddings. "
-            f"Default: reserve citation depth, then add up to {DEFAULT_MAX_SEMANTIC}."
+            "Hard cap on semantic-only additions, at most max-papers - 1. "
+            f"Zero disables embeddings. If omitted, cap the first pass at "
+            f"{DEFAULT_MAX_SEMANTIC}, then fill vacant slots with semantic matches."
         ),
     )
 

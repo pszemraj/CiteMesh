@@ -72,7 +72,11 @@ score = 0.62 · semantic + 0.16 · temporal + 0.14 · citation + 0.08 · bibliog
 
 where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(max(citations, 0)) / log1p(max(max_citations_in_pool, 1))` compresses the long tail. Add **0.10** when both branches found the candidate, or **0.02** for a citation-derived candidate without semantic overlap; cap the final score at `1.0`.
 
-`--max-semantic` caps semantic-*only* additions; overlap papers do not count against it. It is a ceiling, not a reservation: if citation-derived candidates fill `--max-papers` first, no semantic-only paper is added.
+The first selection pass follows score order and counts only semantic-only
+papers against the semantic ceiling. With the default budget, a second pass
+appends skipped semantic-only papers in score order until the graph fills or
+the candidate pool runs out. See [Hybrid](strategies.md#hybrid) for ceiling
+overrides.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 

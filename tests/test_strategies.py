@@ -4329,6 +4329,34 @@ def test_hybrid_adjudication_keeps_a_ceiling_on_semantic_only_papers() -> None:
     ]
 
 
+def test_hybrid_default_fills_only_vacant_semantic_slots() -> None:
+    """Preserve first-pass papers and honor an explicit ceiling at the default value."""
+    cap = hybrid_strategy.DEFAULT_MAX_SEMANTIC
+    max_papers = cap + 4
+    default = HybridGraphBuilder(max_papers=max_papers, client=MagicMock())
+    explicit = HybridGraphBuilder(
+        max_papers=max_papers, max_semantic=cap, client=MagicMock()
+    )
+    semantics = [f"s{i}" for i in range(cap + 3)]
+    sources = {paper_id: {"semantic"} for paper_id in semantics}
+    sources.update({"c1": {"citation"}, "overlap": {"citation", "semantic"}})
+    ranked = [*semantics, "c1", "overlap"]
+    first_pass = [*semantics[:cap], "c1", "overlap"]
+
+    assert explicit._select_candidate_ids(ranked, sources) == first_pass
+    assert default._select_candidate_ids(ranked, sources) == [
+        *first_pass,
+        semantics[cap],
+    ]
+
+    sources["c2"] = {"citation"}
+    full_ranked = [*ranked, "c2"]
+    assert default._select_candidate_ids(full_ranked, sources) == [
+        *first_pass,
+        "c2",
+    ]
+
+
 @pytest.mark.parametrize(
     "sources",
     [

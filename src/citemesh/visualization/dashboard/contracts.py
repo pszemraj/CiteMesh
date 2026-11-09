@@ -346,6 +346,7 @@ class HybridConfig(TypedDict):
     """Semantic candidate budget recorded for a hybrid graph build."""
 
     max_semantic: int
+    fill_semantic_vacancies: bool
 
 
 class EmbeddingConfig(TypedDict, total=False):

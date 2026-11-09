@@ -180,7 +180,10 @@ def _build_graph_config_payload(
             "s2_retry_budget": s2_retry_budget,
             "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
-                {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
+                {
+                    "max_semantic": _resolved_hybrid_max_semantic(cli_args),
+                    "fill_semantic_vacancies": cli_args.max_semantic is None,
+                }
                 if strategy == "hybrid"
                 else None
             ),

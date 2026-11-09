@@ -34,7 +34,8 @@ Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size`
 
 `semantic_source` accepts `candidates`, `arxiv-corpus`, and hybrid-only `both`.
 See [Hybrid](strategies.md#hybrid) for combined retrieval and its shared semantic
-budget.
+budget. Leave `max_semantic` out of `[defaults]` to allow the built-in vacancy
+fill. Setting it applies a hard ceiling.
 
 | Group | Keys |
 | --- | --- |

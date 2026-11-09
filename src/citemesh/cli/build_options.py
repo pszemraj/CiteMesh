@@ -480,9 +480,10 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
     elif strategy == "hybrid":
         contract["score_type"] = "hybrid_similarity_composite"
         contract["adjudication_policy"] = (
-            "seed-relevance-ranked union across citation+semantic candidates "
-            "with overlap priority; purely semantic additions are capped by "
-            "max_semantic."
+            "Citation and semantic candidates are ranked by seed relevance with "
+            "a bonus for overlap. An explicit max_semantic is a hard ceiling. "
+            "The default can add skipped semantic-only papers to vacant slots "
+            "after the first pass."
         )
     return contract
 

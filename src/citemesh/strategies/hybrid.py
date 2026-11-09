@@ -161,9 +161,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_references: Maximum referenced papers from S2
         :param bool fetch_references: Whether citation branch fetches reference lists.
         :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
-        :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
-            enrichment. Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
-            When omitted, defaults to ``min(20, max_papers - 1)``.
+        :param Optional[int] max_semantic: Hard cap on semantic-only papers.
+            Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
+            If omitted, the first pass uses ``min(20, max_papers - 1)`` and
+            skipped semantic-only papers can fill vacant slots afterward.
         :param str model_name: Embedding model name
         :param str model_profile: Model task/runtime profile override.
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
@@ -223,6 +224,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         super().__init__(max_papers)
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
+        self._fill_semantic_vacancies = max_semantic is None
         self.semantic_source = normalized_semantic_source
         self._uses_corpus = normalized_semantic_source != "candidates"
         self._semantic_candidate_cap = 0
@@ -718,18 +720,24 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         ranked_ids: list[str],
         candidate_sources: dict[str, set[str]],
     ) -> list[str]:
-        """Walk the composite order, capping semantic-only additions."""
+        """Apply the semantic ceiling, then fill vacancies under the default."""
         max_added = self.max_papers - 1
         selected: list[str] = []
+        skipped_semantic: list[str] = []
         added_semantic = 0
         for paper_id in ranked_ids:
             if len(selected) >= max_added:
                 break
             if candidate_sources[paper_id] == {"semantic"}:
                 if added_semantic >= self.max_semantic:
+                    if self._fill_semantic_vacancies:
+                        skipped_semantic.append(paper_id)
                     continue
                 added_semantic += 1
             selected.append(paper_id)
+        backfill = skipped_semantic[: max_added - len(selected)]
+        selected.extend(backfill)
+        added_semantic += len(backfill)
         logger.debug("Added %s semantic papers", added_semantic)
         return selected
 
@@ -874,7 +882,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         combined = self.semantic_source == "both"
         if combined:
             self._record_citation_source_ranks(seed_paper, candidate_pool)
-        logger.info("Enriching with up to %s semantic matches...", self.max_semantic)
+        logger.info("Collecting semantic candidates...")
 
         from citemesh.services import SemanticScholarUnavailableError
 

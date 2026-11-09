@@ -43,9 +43,12 @@ Unavailable recommendations are recorded in source status while usable corpus
 results can continue; a failed corpus load still stops the build.
 
 A heavily cited seed can fill the graph before semantic-only papers qualify.
-`--max-semantic` permits semantic additions without reserving slots. For a
-45-paper graph, `--max-semantic 44` lets semantic-only papers compete for every
-non-seed slot; this can replace citation-derived papers. Lowering the citation
-budget instead changes which candidates reach ranking.
+By default, the first pass admits up to 20 semantic-only papers. If slots
+remain, the highest-ranked skipped semantic-only papers can fill them while
+keeping the first-pass selections. A value supplied through `--max-semantic`
+or configuration is a hard ceiling. For a 45-paper graph, `--max-semantic 44`
+lets semantic-only papers compete for every non-seed slot and can displace
+citation-derived papers. Lowering the citation budget instead changes which
+candidates reach ranking.
 
 The [hybrid tuning study](../reference/defaults-tuning-study.md#hybrid-defaults-february-2026) explains the discovery tradeoff behind its defaults. For overrides, see the [CLI controls](cli.md#option-reference).

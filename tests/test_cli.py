@@ -3168,6 +3168,50 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
     assert build_options_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
 
 
+@pytest.mark.parametrize(
+    ("setting_source", "limit"),
+    [("default", None), ("cli", 20), ("config", 20), ("cli", 0), ("config", 0)],
+)
+def test_hybrid_sidecar_distinguishes_default_from_explicit_semantic_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    setting_source: str,
+    limit: int | None,
+) -> None:
+    """The sidecar identifies whether to omit max_semantic when repeating a build."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        build_options_module,
+        "HybridGraphBuilder",
+        _make_builder_stub(captured, graph=build_seed_graph("seed")),
+    )
+    if setting_source == "config":
+        cli_module.set_config_value("defaults.max_semantic", str(limit))
+    output = tmp_path / "hybrid.json"
+    args = [
+        "build",
+        "seed",
+        "--strategy",
+        "hybrid",
+        "--export",
+        "json",
+        "--output",
+        str(output),
+    ]
+    if setting_source == "cli":
+        args.extend(["--max-semantic", str(limit)])
+
+    result = run_cli_command(args)
+
+    assert result.returncode == 0, result.stderr
+    assert captured["max_semantic"] == limit
+    payload = json.loads(output.with_suffix(".config.json").read_text(encoding="utf-8"))
+    assert payload["build"]["hybrid"] == {
+        "max_semantic": DEFAULT_MAX_SEMANTIC if limit is None else limit,
+        "fill_semantic_vacancies": limit is None,
+    }
+
+
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share one seeded layout across PNG and JSON exports."""
     graph = build_seed_graph("seed")
