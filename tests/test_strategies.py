@@ -15,6 +15,7 @@ import pytest
 import requests
 
 from citemesh.core import API_CONFIG, EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
+from citemesh.core.paper_ids import arxiv_identifier_from_doi, normalize_paper_id
 from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -27,6 +28,8 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
     CandidatePool,
+    candidate_identifiers_conflict,
+    candidate_records_match,
     fetch_candidate_pool,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
@@ -3554,6 +3557,124 @@ def test_identity_shared_external_identifier_merges_compatible_records() -> None
     assert set(pool.papers) == {left.paper_id, middle.paper_id}
     assert pool.sources[left.paper_id] == {"reference"}
     assert pool.sources[middle.paper_id] == {"citation", "recommendation"}
+
+
+@pytest.mark.parametrize(
+    ("doi", "expected"),
+    [
+        ("10.48550/arXiv.2310.03262V3", "arxiv:2310.03262"),
+        ("10.48550/arXiv.HEP-TH/9901001v2", "arxiv:hep-th/9901001"),
+        ("10.48550/arxiv.2310.03262vX", None),
+        ("10.48550/arxiv.arxiv:2310.03262", None),
+        ("10.48550/arxiv.2313.03262", None),
+        ("10.1000/arxiv.2310.03262", None),
+    ],
+)
+def test_arxiv_issued_doi_identity_is_validated(doi: str, expected: str | None) -> None:
+    """Only an arXiv-issued DOI with a valid suffix supplies an arXiv identity."""
+    assert arxiv_identifier_from_doi(doi) == expected
+    assert normalize_paper_id(f"doi:{doi}") == doi.lower()
+
+
+@pytest.mark.parametrize("publication_in_primary", [False, True])
+def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
+    publication_in_primary: bool,
+) -> None:
+    """A compatible publication DOI remains available for later conflict checks."""
+    pool = CandidatePool(seed=_seed_paper())
+    preprint = _paper("1" * 40)
+    preprint.doi = "https://doi.org/10.48550/arXiv.2310.03262V2"
+    publication_doi = "10.1000/published"
+    published = _paper(f"doi:{publication_doi}" if publication_in_primary else "2" * 40)
+    published.arxiv_id = "2310.03262v3"
+    published.doi = preprint.doi if publication_in_primary else publication_doi
+    conflicting = _paper("3" * 40)
+    conflicting.arxiv_id = "2310.03262"
+    conflicting.doi = "10.1000/other-publication"
+
+    pool.add(preprint, source="reference", relation="referenced_by_seed")
+    pool.add(published, source="recommendation", relation="semantic_only")
+    assert preprint.arxiv_id == "2310.03262"
+    assert preprint.doi == publication_doi
+    assert candidate_identifiers_conflict(preprint, conflicting)
+    pool.add(conflicting, source="citation", relation="cites_seed")
+
+    assert set(pool.papers) == {preprint.paper_id, conflicting.paper_id}
+    assert pool.sources[preprint.paper_id] == {"reference", "recommendation"}
+
+
+def test_identity_publication_merge_keeps_incoming_primary_arxiv_doi_alias() -> None:
+    """A shared publication DOI can introduce a compatible arXiv identity."""
+    pool = CandidatePool(seed=_seed_paper())
+    published = _paper("1" * 40)
+    published.doi = "10.1000/published"
+    cross_link = _paper("doi:10.48550/arXiv.2310.03262v2")
+    cross_link.doi = published.doi
+    arxiv_only = _paper("arxiv:2310.03262")
+
+    for record in (published, cross_link, arxiv_only):
+        pool.add(record, source="reference", relation="referenced_by_seed")
+
+    assert set(pool.papers) == {published.paper_id}
+    assert published.arxiv_id == "2310.03262"
+    assert published.doi == "10.1000/published"
+
+
+def test_identity_arxiv_issued_doi_respects_conflicts_and_local_rows() -> None:
+    """DOI-derived aliases obey the same identity boundaries as explicit arXiv IDs."""
+    local = _paper("arxiv:2310.03262")
+    local.is_local_corpus = True
+    local.doi = "10.1000/shared"
+    other_local = _paper("local-copy")
+    other_local.is_local_corpus = True
+    other_local.doi = "10.48550/arxiv.2310.03262"
+    contradictory = _paper("doi:10.48550/arxiv.2310.03263")
+    contradictory.arxiv_id = "2310.03262"
+    contradictory.doi = local.doi
+    different = _paper("doi:10.48550/arxiv.2310.03263")
+    different.doi = local.doi
+
+    assert not candidate_records_match(local, other_local)
+    assert not candidate_identifiers_conflict(local, other_local)
+    assert not candidate_records_match(local, contradictory)
+    assert candidate_identifiers_conflict(local, contradictory)
+    assert not candidate_records_match(local, different)
+    assert candidate_identifiers_conflict(local, different)
+
+
+def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
+    """DOI-only and arXiv-only provider records join the same local work."""
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    seed = _seed_paper()
+    candidates: dict[str, Paper] = {}
+    sources: dict[str, set[str]] = {}
+    doi_only = _paper("45cbff3a7e803dd949628a91bedef52b28bd63c7")
+    doi_only.title = "Unlock Predictable Scaling from Emergent Abilities"
+    doi_only.doi = "10.48550/arXiv.2310.03262"
+    arxiv_only = _paper("b9fb5262a6c6778f29f54fc8ee502c65bd2d7f65")
+    arxiv_only.title = (
+        "Predicting Emergent Abilities with Infinite Resolution Evaluation"
+    )
+    arxiv_only.arxiv_id = "2310.03262"
+    local = _paper("arxiv:2310.03262")
+    local.is_local_corpus = True
+    local.title = arxiv_only.title
+
+    builder._ingest_candidate(
+        seed, candidates, sources, arxiv_only, source="citation", relation="cites_seed"
+    )
+    builder._candidate_source_ranks[arxiv_only.paper_id] = {"citations": 5}
+    builder._ingest_candidate(
+        seed, candidates, sources, local, source="semantic", relation="semantic_only"
+    )
+    builder._ingest_recommendations(seed, candidates, sources, [doi_only, arxiv_only])
+
+    assert set(candidates) == {local.paper_id}
+    assert sources[local.paper_id] == {"citation", "semantic"}
+    assert builder.seed_relations[local.paper_id] == "cites_seed"
+    assert builder._candidate_source_ranks == {
+        local.paper_id: {"citations": 5, "recommendations": 1}
+    }
 
 
 def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:

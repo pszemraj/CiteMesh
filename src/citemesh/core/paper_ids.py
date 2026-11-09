@@ -33,6 +33,7 @@ _ARXIV_IDENTIFIER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LEGACY_POSITIONAL_CORPUS_ID = re.compile(r"arxiv_\d+")
+_ARXIV_DOI_PREFIX = "10.48550/arxiv."
 
 
 def is_local_corpus_paper_id(paper_id: str) -> bool:
@@ -85,6 +86,22 @@ def recognize_arxiv_identifier(
     if not explicitly_prefixed and not _ARXIV_IDENTIFIER_PATTERN.fullmatch(candidate):
         return None
     return f"arxiv:{strip_arxiv_version(candidate)}"
+
+
+def arxiv_identifier_from_doi(doi: str) -> str | None:
+    """Return a versionless arXiv ID for a normalized arXiv-issued DOI.
+
+    :param str doi: DOI suffix without a ``doi:`` prefix or URL wrapper.
+    :return str | None: Canonical arXiv ID, or ``None`` for other DOI forms.
+    """
+    normalized = doi.lower()
+    if not normalized.startswith(_ARXIV_DOI_PREFIX):
+        return None
+    suffix = normalized.removeprefix(_ARXIV_DOI_PREFIX)
+    match = _ARXIV_IDENTIFIER_PATTERN.fullmatch(suffix)
+    if match is None or not 1 <= int(match["new_month"] or match["old_month"]) <= 12:
+        return None
+    return f"arxiv:{strip_arxiv_version(suffix)}"
 
 
 # Field scales for the packed integer form of a chronology key. A month never

@@ -27,6 +27,7 @@ from typing import (
 from citemesh.core import Paper
 from citemesh.core.choices import SEMANTIC_SOURCE_CHOICES as SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import (
+    arxiv_identifier_from_doi,
     external_ids_from_canonical_paper_id,
     is_local_corpus_paper_id,
     normalize_paper_id,
@@ -161,29 +162,30 @@ def provider_lookup_identifier(paper_id: str, paper: Paper) -> str | None:
 def _external_identifiers(paper: Paper) -> dict[str, str] | None:
     """Return explicit normalized arXiv and DOI identifiers for one paper.
 
+    An arXiv-issued DOI belongs to the arXiv namespace, independently of
+    any publication DOI on the same record.
+
     :param Paper paper: Paper metadata supplying canonical and field identifiers.
     :return dict[str, str] | None: Identifiers by namespace, or ``None`` on conflict.
     """
     primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(paper.paper_id)
-    primary_arxiv_id = (
-        recognize_arxiv_identifier(primary_arxiv, allow_bare=True) or ""
-    ).lower()
-    field_arxiv_id = (
-        recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True) or ""
-    ).lower()
-    primary_doi_id = _normalized_doi(primary_doi)
-    field_doi_id = _normalized_doi(paper.doi)
-    if (primary_arxiv_id and field_arxiv_id and primary_arxiv_id != field_arxiv_id) or (
-        primary_doi_id and field_doi_id and primary_doi_id != field_doi_id
+    identifiers: dict[str, str] = {}
+    for namespace, identifier in (
+        ("arxiv", recognize_arxiv_identifier(primary_arxiv, allow_bare=True)),
+        ("arxiv", recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)),
+        ("doi", _normalized_doi(primary_doi)),
+        ("doi", _normalized_doi(paper.doi)),
     ):
-        return None
-    arxiv_id = field_arxiv_id or primary_arxiv_id
-    doi = field_doi_id or primary_doi_id
-    return {
-        namespace: identifier
-        for namespace, identifier in (("arxiv", arxiv_id), ("doi", doi))
-        if identifier
-    }
+        if not identifier:
+            continue
+        identifier = identifier.lower()
+        if namespace == "doi" and (
+            arxiv_alias := arxiv_identifier_from_doi(identifier)
+        ):
+            namespace, identifier = "arxiv", arxiv_alias
+        if identifiers.setdefault(namespace, identifier) != identifier:
+            return None
+    return identifiers
 
 
 def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...] | None:
@@ -824,12 +826,38 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     )
     if (not preferred.venue) and incoming.venue:
         preferred.venue = incoming.venue
-    for record in (preferred, incoming):
-        arxiv_id, doi = external_ids_from_canonical_paper_id(record.paper_id)
-        if not preferred.arxiv_id:
-            preferred.arxiv_id = record.arxiv_id or arxiv_id
-        if not preferred.doi:
-            preferred.doi = record.doi or doi
+    preferred_arxiv, preferred_doi = external_ids_from_canonical_paper_id(
+        preferred.paper_id
+    )
+    incoming_arxiv, incoming_doi = external_ids_from_canonical_paper_id(
+        incoming.paper_id
+    )
+    supplemental_doi = incoming.doi or incoming_doi
+    doi = preferred.doi or preferred_doi or supplemental_doi
+    preprint_alias = arxiv_identifier_from_doi(_normalized_doi(doi))
+    if preprint_alias:
+        arxiv_suffix = preprint_alias.removeprefix("arxiv:")
+        if preferred.doi or preferred_doi:
+            preferred_arxiv = preferred_arxiv or arxiv_suffix
+        # Keep the arXiv identity alongside compatible publication DOI evidence.
+        if not candidate_identifiers_conflict(preferred, incoming):
+            incoming_arxiv = incoming_arxiv or arxiv_suffix
+            for candidate_doi in (preferred_doi, incoming.doi, incoming_doi):
+                normalized_doi = _normalized_doi(candidate_doi)
+                if normalized_doi and arxiv_identifier_from_doi(normalized_doi) is None:
+                    doi = candidate_doi
+                    break
+    arxiv_id = (
+        preferred.arxiv_id or preferred_arxiv or incoming.arxiv_id or incoming_arxiv
+    )
+    if not arxiv_id:
+        incoming_alias = arxiv_identifier_from_doi(
+            _normalized_doi(supplemental_doi)
+        ) or arxiv_identifier_from_doi(_normalized_doi(incoming_doi))
+        if incoming_alias and not candidate_identifiers_conflict(preferred, incoming):
+            arxiv_id = incoming_alias.removeprefix("arxiv:")
+    preferred.arxiv_id = arxiv_id
+    preferred.doi = doi
     if (not preferred.categories) and incoming.categories:
         preferred.categories = incoming.categories
     reference_ids: list[str] = []
