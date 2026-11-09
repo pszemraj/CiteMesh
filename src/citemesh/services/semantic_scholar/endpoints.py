@@ -17,6 +17,7 @@ from citemesh.data.cache import JSONValue
 
 from . import disk_cache, payloads
 from .errors import (
+    SemanticScholarRequestError,
     SemanticScholarUnavailableError,
     _SemanticScholarResponseContractError,
 )
@@ -235,6 +236,8 @@ class _EndpointsMixin:
         :param Sequence[str] paper_ids: Arbitrary number of paper identifiers.
         :param bool raise_on_unavailable: Raise if a required batch cannot complete.
         :return dict[str, Paper]: Results keyed by normalized requested identifier.
+        :raises SemanticScholarRequestError: A rejected batch; ``partial_results``
+            retains records reused or fetched earlier in this call.
         """
         normalized_ids: list[str] = []
         for raw_id in paper_ids:
@@ -250,14 +253,18 @@ class _EndpointsMixin:
 
         for offset in range(0, len(missing), PAPER_BATCH_SIZE):
             batch_ids = missing[offset : offset + PAPER_BATCH_SIZE]
-            response = self._request_json(
-                f"{PAPER_BASE_URL}/batch",
-                {"fields": ",".join(payloads._default_paper_fields())},
-                payload={"ids": batch_ids},
-                context=f"batch fetching {len(batch_ids)} papers",
-                raise_on_unavailable=raise_on_unavailable,
-                retry_not_found=True,
-            )
+            try:
+                response = self._request_json(
+                    f"{PAPER_BASE_URL}/batch",
+                    {"fields": ",".join(payloads._default_paper_fields())},
+                    payload={"ids": batch_ids},
+                    context=f"batch fetching {len(batch_ids)} papers",
+                    raise_on_unavailable=raise_on_unavailable,
+                    retry_not_found=True,
+                )
+            except SemanticScholarRequestError as exc:
+                exc.partial_results = papers
+                raise
             if response is None:
                 logger.debug(
                     "Paper metadata: stopped after an unavailable batch; %d "

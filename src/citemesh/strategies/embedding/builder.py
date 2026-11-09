@@ -1832,8 +1832,8 @@ class EmbeddingGraphBuilder(
     def _enrich_corpus_papers(self, papers: dict[str, Paper]) -> None:
         """Enrich collected corpus papers with cached or batched provider metadata.
 
-        Conflicting identifiers leave a record unchanged. Rejected batches fall
-        back to available cached records, respecting the client's refresh policy.
+        Conflicting identifiers leave a record unchanged. Rejected batches retain
+        metadata already reused or fetched during the current request.
 
         :param Dict[str, Paper] papers: Collected papers, including the skipped seed.
         :return None: Fills missing metadata and updates citation counts in place,
@@ -1864,13 +1864,11 @@ class EmbeddingGraphBuilder(
             )
         except SemanticScholarRequestError as exc:
             logger.warning(
-                "Corpus metadata enrichment was rejected; using available "
-                "cached metadata: %s",
+                "Corpus metadata enrichment was rejected; keeping metadata "
+                "already collected: %s",
                 exc,
             )
-            batch_results = self.client.get_cached_papers(
-                [lookup_id for _paper, lookup_id in targets]
-            )
+            batch_results = exc.partial_results
         for paper, lookup_id in targets:
             batch_paper = batch_results.get(normalize_paper_id(lookup_id))
             if batch_paper is not None:
@@ -1880,7 +1878,6 @@ class EmbeddingGraphBuilder(
                     )
                     continue
                 merge_paper_metadata(paper, batch_paper)
-                paper.citation_count = batch_paper.citation_count
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

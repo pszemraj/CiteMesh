@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from citemesh.core import Paper
 
 
 class SemanticScholarUnavailableError(RuntimeError):
@@ -11,7 +15,12 @@ class SemanticScholarUnavailableError(RuntimeError):
 
 
 class SemanticScholarRequestError(RuntimeError):
-    """Raised when Semantic Scholar rejects a non-retryable request."""
+    """A rejected request, with any paper results collected before rejection."""
+
+    def __init__(self, message: str) -> None:
+        """Store the rejection message and initialize the partial paper results."""
+        super().__init__(message)
+        self.partial_results: dict[str, Paper] = {}
 
 
 class _SemanticScholarResponseContractError(TypeError):

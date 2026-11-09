@@ -8277,7 +8277,6 @@ def test_embedding_citation_enrichment_logs_target_count(
         year=2024,
         abstract="paper one abstract",
         authors=[Author(name="Corpus Author")],
-        citation_count=100,
         is_local_corpus=True,
         is_seed=False,
     )
@@ -9794,8 +9793,11 @@ def test_corpus_enrichment_rejects_conflicting_identifiers(
     assert target.arxiv_id == (corpus_arxiv or None)
 
 
-def test_corpus_enrichment_keeps_cached_and_completed_batches_after_rejection() -> None:
-    """A later rejected batch must preserve warm and newly cached metadata."""
+@pytest.mark.parametrize("refresh_paper_cache", [False, True])
+def test_corpus_enrichment_keeps_cached_and_completed_batches_after_rejection(
+    refresh_paper_cache: bool,
+) -> None:
+    """A later rejection retains completed batches under either refresh policy."""
     from citemesh.services.semantic_scholar import disk_cache
 
     ids = [f"arxiv:2401.{index:05d}" for index in range(502)]
@@ -9806,7 +9808,12 @@ def test_corpus_enrichment_keeps_cached_and_completed_batches_after_rejection() 
     disk_cache._persist_paper(
         Paper(ids[0], "Warm", 2024, citation_count=11, venue="Cached venue"), ids[0]
     )
-    with SemanticScholarClient(api_key="", timeout=1) as client:
+    missing_ids = ids if refresh_paper_cache else ids[1:]
+    fetched_ids = missing_ids[:500]
+    with SemanticScholarClient(
+        api_key="", timeout=1, refresh_paper_cache=refresh_paper_cache
+    ) as client:
+        client.get_cached_papers = MagicMock(wraps=client.get_cached_papers)
         client._request_json = MagicMock(
             side_effect=[
                 [
@@ -9818,7 +9825,7 @@ def test_corpus_enrichment_keeps_cached_and_completed_batches_after_rejection() 
                         "venue": "Fetched venue",
                         "externalIds": {"ArXiv": paper_id.removeprefix("arxiv:")},
                     }
-                    for index, paper_id in enumerate(ids[1:501])
+                    for index, paper_id in enumerate(fetched_ids)
                 ],
                 SemanticScholarRequestError("HTTP 403"),
             ]
@@ -9829,12 +9836,14 @@ def test_corpus_enrichment_keeps_cached_and_completed_batches_after_rejection() 
         assert [
             len(request.kwargs["payload"]["ids"])
             for request in client._request_json.call_args_list
-        ] == [500, 1]
-    assert papers[ids[0]].venue == "Cached venue"
-    assert papers[ids[0]].citation_count == 11
-    assert all(papers[paper_id].venue == "Fetched venue" for paper_id in ids[1:501])
-    assert all(papers[paper_id].citation_count == 27 for paper_id in ids[1:501])
-    assert papers[ids[-1]].citation_count == 0
+        ] == [500, len(missing_ids) - 500]
+        client.get_cached_papers.assert_called_once_with(ids)
+    if not refresh_paper_cache:
+        assert papers[ids[0]].venue == "Cached venue"
+        assert papers[ids[0]].citation_count == 11
+    assert all(papers[paper_id].venue == "Fetched venue" for paper_id in fetched_ids)
+    assert all(papers[paper_id].citation_count == 27 for paper_id in fetched_ids)
+    assert all(papers[paper_id].citation_count == 0 for paper_id in missing_ids[500:])
 
 
 def test_citation_enrichment_uses_external_aliases_for_local_corpus_rows() -> None:
