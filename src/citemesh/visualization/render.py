@@ -21,6 +21,7 @@ import networkx as nx
 import numpy as np
 from matplotlib.backend_bases import RendererBase
 from matplotlib.figure import Figure, SubFigure
+from matplotlib.lines import Line2D
 from matplotlib.transforms import Bbox
 from numpy.typing import NDArray
 
@@ -40,7 +41,11 @@ from .paths import _output_dir_name as _output_dir_name
 from .paths import _seed_suffix as _seed_suffix
 from .paths import generate_output_path as generate_output_path
 from .themes import Theme, get_theme
-from .years import coerce_publication_year, publication_year_bounds
+from .years import (
+    coerce_publication_year,
+    optional_publication_year_bounds,
+    publication_year_bounds,
+)
 
 if TYPE_CHECKING:
     from citemesh.core.models import PaperGraph
@@ -819,7 +824,7 @@ def draw_labels(
     sizes: list[float] | None = None,
 ) -> None:
     """
-    Draw paper labels in "Author, Year" format.
+    Draw compact author and year labels, using "Seed" for an authorless seed.
 
     :param plt.Axes ax: Matplotlib axes
     :param PaperGraph graph: NetworkX graph
@@ -827,20 +832,8 @@ def draw_labels(
     :param str seed_id: ID of seed paper (gets bold label)
     :param Theme theme: Theme palette for text color.
     :param Optional[List[float]] sizes: Optional node-size list aligned with ``ordered_nodes(graph)``.
-    :return None: Draws all node labels.
+    :return None: Draws the seed label and a capped set of non-overlapping paper labels.
     """
-
-    def _wrap_title(title: str, width: int = 34) -> str:
-        """Wrap long seed labels without dropping any title text.
-
-        :param str title: Full seed paper title.
-        :param int width: Approximate character width for line wrapping.
-        :return str: Wrapped title label.
-        """
-        title = " ".join((title or "").split())
-        if not title:
-            return "Seed paper"
-        return textwrap.fill(title, width=width, break_long_words=False)
 
     ordered = ordered_nodes(graph)
     if sizes is None or len(sizes) != len(ordered):
@@ -866,11 +859,21 @@ def draw_labels(
         # Scatter areas are points squared; the two-point outline adds one point.
         node_radius = math.sqrt(size_map[node]) / 2.0 + 1.0
 
-        # Seed paper gets larger, bold label
+        authors = graph.nodes[node].get("authors", [])
+        author_parts = (
+            str(authors[0]).strip().split()
+            if isinstance(authors, Sequence) and authors
+            else []
+        )
+        last_name = author_parts[-1] if author_parts else "Unknown"
+        year = graph.nodes[node].get("year")
+        year_label = "n.d." if year is None else str(year)
+        label = f"{last_name}, {year_label}"
+
+        # Keep the full seed title in the heading, clear of the graph itself.
         is_seed = node == seed_id
         if is_seed:
-            title = str(graph.nodes[node].get("title") or "")
-            label = _wrap_title(title)
+            label = f"{label} (seed)" if author_parts else "Seed"
             fontsize = 9
             xytext = (0, node_radius + 8)
             vertical_alignment = "bottom"
@@ -881,18 +884,6 @@ def draw_labels(
                 linewidth=0,
             )
         else:
-            # Extract author surname
-            authors = graph.nodes[node].get("authors", [])
-            author_parts = (
-                str(authors[0]).strip().split()
-                if isinstance(authors, Sequence) and authors
-                else []
-            )
-            last_name = author_parts[-1] if author_parts else "Unknown"
-
-            year = graph.nodes[node].get("year")
-            year_label = "n.d." if year is None else str(year)
-            label = f"{last_name}, {year_label}"
             fontsize = VIZ_CONFIG.font_size
             xytext = (0, -node_radius - 3)
             vertical_alignment = "top"
@@ -1013,7 +1004,7 @@ def visualize_graph(
         fig, ax = plt.subplots(
             figsize=VIZ_CONFIG.figure_size, facecolor=theme.background
         )
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.1)
     ax.set_aspect("equal")
     ax.axis("off")
     fig.patch.set_facecolor(theme.background)
@@ -1050,6 +1041,46 @@ def visualize_graph(
     # Add metadata annotation if requested **after** title so we can reference it
     if metadata:
         add_metadata_box(ax, metadata, pos, theme)
+
+    year_bounds = optional_publication_year_bounds(
+        attrs.get("year") for _, attrs in graph.nodes(data=True)
+    )
+    legend_items = [("Seed", theme.seed_color)]
+    if year_bounds is None:
+        legend_items.append(("Year unknown", theme.interpolate(0.5)))
+    elif year_bounds[0] == year_bounds[1]:
+        legend_items.append((str(year_bounds[0]), theme.interpolate(0.5)))
+    else:
+        legend_items.extend(
+            [
+                (f"{year_bounds[0]} (older)", theme.interpolate(0.0)),
+                (f"{year_bounds[1]} (newer)", theme.interpolate(1.0)),
+            ]
+        )
+    legend = fig.legend(
+        handles=[
+            Line2D(
+                [],
+                [],
+                linestyle="none",
+                marker="o",
+                markersize=7,
+                markerfacecolor=color,
+                markeredgecolor=theme.text_color,
+                label=label,
+            )
+            for label, color in legend_items
+        ],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.015),
+        ncol=len(legend_items),
+        frameon=False,
+        labelcolor=theme.text_color,
+        fontsize=9,
+        title="Color: publication year · size reflects citations",
+        title_fontsize=9,
+    )
+    legend.get_title().set_color(theme.text_color)
 
     # Save figure
     try:

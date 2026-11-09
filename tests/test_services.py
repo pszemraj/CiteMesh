@@ -511,15 +511,20 @@ def test_tolerant_get_papers_warns_after_unavailable_batch(
     assert "batch fetching 500 papers" in warnings[0]
 
 
+@pytest.mark.parametrize("refresh_paper_cache", [False, True])
 def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
     caplog: pytest.LogCaptureFixture,
+    refresh_paper_cache: bool,
 ) -> None:
     """Batch misses skip and only the exact unknown-400 normalizes.
 
     :param pytest.LogCaptureFixture caplog: Captured warning log.
-    :return None: Verifies batch row and error handling.
+    :param bool refresh_paper_cache: Whether previous cached rows are bypassed.
+    :return None: Verifies batch rows and partial results on a rejected request.
     """
-    with SemanticScholarClient(api_key="") as client:
+    with SemanticScholarClient(
+        api_key="", refresh_paper_cache=refresh_paper_cache
+    ) as client:
         _disable_pacing(client)
         client._session.post = MagicMock(
             side_effect=[
@@ -531,8 +536,11 @@ def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
         with caplog.at_level(logging.DEBUG):
             assert list(client.get_papers(["ok", "missing", "bad"])) == ["ok"]
         assert client.get_papers(["unknown"]) == {}
-        with pytest.raises(SemanticScholarRequestError, match="HTTP 400"):
-            client.get_papers(["rejected"])
+        with pytest.raises(SemanticScholarRequestError, match="HTTP 400") as caught:
+            client.get_papers(["ok", "rejected"])
+        assert list(caught.value.partial_results) == (
+            [] if refresh_paper_cache else ["ok"]
+        )
     assert "Skipping malformed batch paper" in caplog.text
     assert "Paper metadata skipped 1 malformed records." in caplog.text
 

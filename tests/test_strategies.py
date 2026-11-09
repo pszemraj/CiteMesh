@@ -2197,6 +2197,52 @@ def test_graph_nodes_mirror_all_paper_authors(
     assert graph.nodes["seed"]["authors"] == author_names
 
 
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+@pytest.mark.parametrize(("query_scale", "candidate_scale"), [(1, 1), (10, 1), (1, 10)])
+def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+    query_scale: int,
+    candidate_scale: int,
+) -> None:
+    """Candidate order must follow cosine direction rather than vector magnitude."""
+    seed = _seed_paper("seed")
+    candidates = {
+        "a-less-aligned": _paper("a-less-aligned"),
+        "b-more-aligned": _paper("b-more-aligned"),
+    }
+    query = query_scale * np.asarray([1.0, 0.0], dtype=np.float32)
+    embeddings = {
+        "a-less-aligned": candidate_scale * np.asarray([0.6, 0.8], dtype=np.float32),
+        "b-more-aligned": np.asarray([0.8, 0.6], dtype=np.float32),
+    }
+    if strategy == "embedding":
+        builder = EmbeddingGraphBuilder(
+            semantic_source="candidates", client=MagicMock()
+        )
+        pool = CandidatePool(seed=seed)
+        for paper in candidates.values():
+            pool.add(paper, source="recommendation", relation="semantic_only")
+        monkeypatch.setattr(
+            "citemesh.strategies.embedding.builder.fetch_candidate_pool",
+            MagicMock(return_value=pool),
+        )
+        monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
+        ranked = [
+            paper_id
+            for paper_id, _, _ in builder._select_candidates_from_pool(query, seed)
+        ]
+    else:
+        builder = HybridGraphBuilder(max_papers=3, max_semantic=2, client=MagicMock())
+        assert builder.embedding_builder is not None
+        builder.embedding_builder.retrieval_embeddings = {"seed": query, **embeddings}
+        ranked = builder._rank_candidates(
+            seed, candidates, {paper_id: {"semantic"} for paper_id in candidates}
+        )
+
+    assert ranked == ["b-more-aligned", "a-less-aligned"]
+
+
 def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() -> None:
     """Hybrid seed ranking and pairwise topology must consume different spaces."""
     builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
@@ -2845,7 +2891,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         builder._load_model = lambda: None
         builder._resolve_model_fingerprint = lambda: "test-fingerprint"
         builder._prepare_corpus_for_build = lambda: None
-        builder._update_citation_counts = lambda _: None
+        builder._enrich_corpus_papers = lambda _: None
         builder._select_candidates = (
             lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
                 (
@@ -3072,13 +3118,14 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     assert papers["seed"].citation_count == 7
     assert papers["arxiv:2501.00001"].citation_count == 0
     assert set(builder.retrieval_embeddings) == set(papers)
-    assert "Citation-count enrichment was rejected" in caplog.text
+    assert "Corpus metadata enrichment was rejected" in caplog.text
     assert "HTTP 403" in caplog.text
     client.get_papers.assert_called_once_with(["arxiv:2501.00001"])
+    client.get_cached_papers.assert_not_called()
     client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     client.get_papers.side_effect = ValueError("invalid local payload")
     with pytest.raises(ValueError, match="invalid local payload"):
-        builder._update_citation_counts(papers)
+        builder._enrich_corpus_papers(papers)
 
 
 @pytest.mark.parametrize(

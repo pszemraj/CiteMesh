@@ -19,7 +19,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import networkx as nx
 import numpy as np
@@ -87,7 +87,7 @@ from tests._helpers import raise_import_error
 def _install_fake_plotly(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    figure_cls: type,
+    figure_cls: Callable[..., object],
     scatter_factory: Callable[..., dict[str, object]] | None = None,
     plotly_js: str = "window.Plotly={};",
 ) -> None:
@@ -115,6 +115,14 @@ class _BaseFakeFigure:
     def write_html(self, path: str, **kwargs: Any) -> None:
         del kwargs
         Path(path).write_text("<html>plotly</html>")
+
+
+@pytest.fixture
+def plotly_figure(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Install a fake Plotly figure and capture its constructor arguments."""
+    figure = MagicMock(side_effect=_BaseFakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=figure)
+    return figure
 
 
 def _canonicalize_graphml(path: Path) -> str:
@@ -247,8 +255,8 @@ def _build_hostile_graph(
 
 def test_exporter_serialization_contracts_and_determinism(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    plotly_figure: MagicMock,
 ) -> None:
     """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
@@ -328,15 +336,6 @@ def test_exporter_serialization_contracts_and_determinism(
         assert len(determinism_logs) == 2
         assert all(record.levelno == logging.DEBUG for record in determinism_logs)
 
-    captured: dict[str, object] = {}
-
-    class FakeFigure(_BaseFakeFigure):
-        def __init__(self, data: Any, layout: Any) -> None:
-            super().__init__(data, layout)
-            captured["data"] = data
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
-
     ordered_graph = nx.Graph()
     ordered_graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
     ordered_graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
@@ -379,7 +378,7 @@ def test_exporter_serialization_contracts_and_determinism(
     assert node_ids == ["a", "seed", "z"]
     assert edge_pairs == [("a", "z"), ("seed", "z")]
 
-    edge_trace = captured["data"][0]
+    edge_trace = plotly_figure.call_args.kwargs["data"][0]
     normalized_layout = ordered_exporter._get_layout()
     edge_x = list(edge_trace["x"])
     assert edge_x[2] is None
@@ -721,47 +720,41 @@ def test_interactive_html_is_self_contained(
 
 
 def test_exporter_plotly_contracts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plotly_figure: MagicMock
 ) -> None:
     """Plotly export should cover missing dependency, div-id handling, and labels."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setattr(
-        loaders_module, "_load_plotly_graph_objects", raise_import_error
-    )
-    with pytest.raises(RuntimeError, match="plotly is required"):
-        exporter.to_plotly_html(tmp_path / "missing.plotly.html")
+    with monkeypatch.context() as missing_plotly:
+        missing_plotly.setattr(
+            loaders_module, "_load_plotly_graph_objects", raise_import_error
+        )
+        with pytest.raises(RuntimeError, match="plotly is required"):
+            exporter.to_plotly_html(tmp_path / "missing.plotly.html")
 
-    captured: dict[str, object] = {}
-
-    class FakeFigure(_BaseFakeFigure):
-        def __init__(self, data: Any, layout: Any) -> None:
-            super().__init__(data, layout)
-            captured["data"] = data
-            captured["layout"] = layout
-
-        def write_html(self, path: str, **kwargs: Any) -> None:
-            captured["kwargs"] = kwargs
-            Path(path).write_text("<html>plotly</html>")
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
     exporter = GraphExporter(
         graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     out_path = tmp_path / "graph.plotly.html"
     out_path.write_text("previous", encoding="utf-8")
     out_path.chmod(0o640)
-    exporter.to_plotly_html(out_path)
+    with patch.object(
+        _BaseFakeFigure,
+        "write_html",
+        autospec=True,
+        side_effect=_BaseFakeFigure.write_html,
+    ) as write_html:
+        exporter.to_plotly_html(out_path)
 
     assert out_path.exists()
     if os.name != "nt":
         assert out_path.stat().st_mode & 0o7777 == 0o640
-    node_trace = captured["data"][1]
+    node_trace = plotly_figure.call_args.kwargs["data"][1]
     assert list(node_trace["text"]) == ["Jones, 2021", "Smith, 2020"]
-    layout = captured["layout"]
+    layout = plotly_figure.call_args.kwargs["layout"]
     assert layout["title"] == "CiteMesh: Seed Paper"
-    kwargs = captured["kwargs"]
+    kwargs = write_html.call_args.kwargs
     assert isinstance(kwargs, dict)
     assert kwargs["div_id"] == exporter._plotly_div_id()
 
@@ -1528,7 +1521,7 @@ def test_dashboard_curve_direction_is_endpoint_order_independent() -> None:
 
 
 def test_plotly_hover_text_wraps_long_titles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, plotly_figure: MagicMock
 ) -> None:
     """Long titles wrap across hover lines instead of one full-width banner."""
     graph, seed_id = _build_graph()
@@ -1546,24 +1539,12 @@ def test_plotly_hover_text_wraps_long_titles(
     )
     graph.nodes["related"]["title"] = long_title
 
-    captured: dict[str, object] = {}
-
-    class FakeFigure(_BaseFakeFigure):
-        def __init__(self, data: Any, layout: Any) -> None:
-            super().__init__(data, layout)
-            captured["data"] = data
-
-        def write_html(self, path: str, **kwargs: Any) -> None:
-            del kwargs
-            Path(path).write_text("<html>plotly</html>")
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
     exporter = GraphExporter(
         graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     exporter.to_plotly_html(tmp_path / "graph.plotly.html")
 
-    node_trace = captured["data"][1]
+    node_trace = plotly_figure.call_args.kwargs["data"][1]
     related_hover = node_trace["hovertext"][0]
     title_line = related_hover.split("</b>")[0]
     assert title_line.count("<br>") >= 1
@@ -2689,16 +2670,9 @@ def test_saved_reading_list_survives_a_rebuild_that_dropped_a_node(
     assert sorted(probed["displayed"]) == ["related", "seed"]
 
 
-def test_copy_saved_links_escapes_bracketed_titles(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Brackets in a title must not terminate the copied Markdown link label.
-
-    :param Path tmp_path: Isolated output directory.
-    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
-    :return None: Checks the Markdown label escaper used by Copy Saved Links.
-    """
+@pytest.fixture
+def two_node_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Export a two-paper dashboard for runtime probes."""
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
@@ -2706,11 +2680,15 @@ def test_copy_saved_links_escapes_bracketed_titles(
         seed_id,
         layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
     )
-    out_path = tmp_path / "markdown.dashboard.html"
+    out_path = tmp_path / "graph.dashboard.html"
     exporter.to_dashboard_html(out_path)
+    return out_path
 
+
+def test_copy_saved_links_escapes_bracketed_titles(two_node_dashboard: Path) -> None:
+    """Brackets in a title must not terminate the copied Markdown link label."""
     probed = _probe_dashboard_runtime_in_node(
-        out_path,
+        two_node_dashboard,
         '[markdownLinkText("Attention [Is] All You Need"), markdownLinkText("Plain")]',
     )
 
@@ -2817,31 +2795,16 @@ def test_dashboard_scope_filter_keys_on_seed_relation_before_year(
 
 
 def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    two_node_dashboard: Path,
 ) -> None:
     """Clicking a row must leave the detail panel locked without moving the mouse.
 
     Re-rendering the list drops a fresh row under a stationary cursor, so the
     runtime ignores hover previews until the pointer actually moves, and hovering
     the selected row renders it as a selection rather than a preview.
-
-    :param Path tmp_path: Isolated output directory.
-    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
-    :return None: Checks the detail-mode label across re-render and hover.
     """
-    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(
-        graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
-    )
-    out_path = tmp_path / "hover.dashboard.html"
-    exporter.to_dashboard_html(out_path)
-
     probed = _probe_dashboard_runtime_in_node(
-        out_path,
+        two_node_dashboard,
         "(() => {"
         ' controls.detailMode = { textContent: "" };'
         ' controls.graphHint = { textContent: "" };'
@@ -2867,27 +2830,11 @@ def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
 
 
 def test_dashboard_semantic_scholar_button_disables_without_a_link(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    two_node_dashboard: Path,
 ) -> None:
-    """The Semantic Scholar button must disable when the focused paper has no link.
-
-    :param Path tmp_path: Isolated output directory.
-    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
-    :return None: Checks the ``disabled`` attribute across selection changes.
-    """
-    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(
-        graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
-    )
-    out_path = tmp_path / "more.dashboard.html"
-    exporter.to_dashboard_html(out_path)
-
+    """Disable the Semantic Scholar button when the focused paper has no link."""
     probed = _probe_dashboard_runtime_in_node(
-        out_path,
+        two_node_dashboard,
         "(() => {"
         " const attrs = {};"
         " controls.moreBtn = {"
@@ -3286,6 +3233,50 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     assert not any(nodes["query:abc123"]["links"].values())
 
 
+@pytest.mark.parametrize(
+    ("years", "expected_labels"),
+    [
+        ((None, None), ["Seed", "Year unknown"]),
+        ((2024, 2024), ["Seed", "2024"]),
+        ((2020, 2025), ["Seed", "2020 (older)", "2025 (newer)"]),
+    ],
+)
+@pytest.mark.parametrize("theme_name", ["dark", "light", "solarized"])
+def test_static_legend_explains_colors_without_covering_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    years: tuple[int | None, int | None],
+    expected_labels: list[str],
+    theme_name: str,
+) -> None:
+    """Legends show actual year bounds and remain inside the figure, below the graph."""
+    graph = nx.Graph()
+    graph.add_node("seed", title="Seed", year=years[0], is_seed=True)
+    graph.add_node("related", title="Related", year=years[1])
+    graph.add_edge("seed", "related", weight=0.8)
+    close_spy = MagicMock(wraps=render_module.plt.close)
+    monkeypatch.setattr(render_module.plt, "close", close_spy)
+
+    visualize_graph(
+        graph,
+        "seed",
+        tmp_path / "graph.png",
+        theme_name=theme_name,
+        dpi=40,
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    )
+
+    figure = close_spy.call_args.args[0]
+    legend = figure.legends[0]
+    assert [text.get_text() for text in legend.get_texts()] == expected_labels
+    assert "size reflects citations" in legend.get_title().get_text()
+    assert legend.get_title().get_color() == get_theme(theme_name).text_color
+    bounds = legend.get_window_extent()
+    assert figure.bbox.contains(bounds.x0, bounds.y0)
+    assert figure.bbox.contains(bounds.x1, bounds.y1)
+    assert bounds.y1 < figure.axes[0].get_window_extent().y0
+
+
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3375,22 +3366,34 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert graph.nodes["related"]["authors"] == ["Stale Author"]
 
 
-@pytest.mark.parametrize("seed_title", [None, "", "   "])
-def test_visualize_graph_heading_uses_seed_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_title: str | None
+@pytest.mark.parametrize(
+    ("seed_title", "heading"),
+    [
+        (None, "Seed paper"),
+        ("", "Seed paper"),
+        ("   ", "Seed paper"),
+        ("attention mechanism", "attention mechanism"),
+    ],
+)
+def test_visualize_graph_labels_authorless_seed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_title: str | None,
+    heading: str,
 ) -> None:
-    """Use the seed label fallback for scalar graph metadata without a title."""
-    import matplotlib.axes
-
+    """Label an authorless query seed while keeping its title in the heading."""
     graph = nx.Graph()
-    graph.add_node("seed", title=seed_title, is_seed=True)
-    title_spy = MagicMock()
-    monkeypatch.setattr(matplotlib.axes.Axes, "set_title", title_spy)
+    seed_id = "query:abc123"
+    graph.add_node(seed_id, title=seed_title, is_seed=True)
+    close_spy = MagicMock(wraps=render_module.plt.close)
+    monkeypatch.setattr(render_module.plt, "close", close_spy)
     visualize_graph(
-        graph, "seed", tmp_path / "graph.png", layout={"seed": (0.0, 0.0)}, dpi=40
+        graph, seed_id, tmp_path / "graph.png", layout={seed_id: (0.0, 0.0)}, dpi=40
     )
-    assert title_spy.call_args.args[0] == "CiteMesh Visualization: Seed paper"
-    assert graph.nodes["seed"]["title"] == seed_title
+    axis = close_spy.call_args.args[0].axes[0]
+    assert axis.get_title() == f"CiteMesh Visualization: {heading}"
+    assert [text.get_text() for text in axis.texts] == ["Seed"]
+    assert graph.nodes[seed_id]["title"] == seed_title
 
 
 def test_visualize_graph_metadata_overlay_is_compact(
@@ -3624,15 +3627,14 @@ def test_dashboard_title_labels_face_inward_after_import(
     )
 
 
-@pytest.mark.parametrize("seed_title", ["Seed Paper", None, "", "   "])
-def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -> None:
+def test_static_labels_are_capped_by_citation_priority() -> None:
     """Dense static plots should label only the highest-priority non-seed papers."""
     import matplotlib.pyplot as plt
 
     graph = nx.Graph()
     graph.add_node(
         "seed",
-        title=seed_title,
+        title="A long title " * 15,
         year=2025,
         authors=["Seed Author"],
         citation_count=0,
@@ -3667,9 +3669,7 @@ def test_static_labels_are_capped_by_citation_priority(seed_title: str | None) -
 
     labels = {text.get_text() for text in axis.texts}
     assert len(labels) == MAX_STATIC_NON_SEED_LABELS + 1
-    assert (
-        "Seed Paper" if seed_title and seed_title.strip() else "Seed paper"
-    ) in labels
+    assert "Author, 2025 (seed)" in labels
     assert "19, 2019" in labels
     assert "0, 2000" not in labels
     plt.close(figure)
@@ -3716,7 +3716,7 @@ def test_static_labels_suppress_overlapping_text_bounds() -> None:
     )
 
     labels = {text.get_text() for text in axis.texts}
-    assert "Seed Paper" in labels
+    assert "Author, 2025 (seed)" in labels
     assert sum(label.startswith("Extraordinarilylongsurname") for label in labels) == 1
     plt.close(figure)
 

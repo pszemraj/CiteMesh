@@ -82,6 +82,7 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
+    candidate_identifiers_conflict,
     corpus_matches_s2,
     fetch_candidate_pool,
     merge_paper_metadata,
@@ -94,7 +95,6 @@ from citemesh.strategies.similarity import cosine_similarity_to_query
 
 from . import deps
 from .config import (
-    CITATION_COUNT_ENRICHMENT_LIMIT,
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
 )
@@ -1202,7 +1202,9 @@ class EmbeddingGraphBuilder(
             return
 
         provider_seed = provider_papers.get(normalize_paper_id(lookup_id))
-        if provider_seed is not None:
+        if provider_seed is not None and not candidate_identifiers_conflict(
+            seed, provider_seed
+        ):
             merge_paper_metadata(seed, provider_seed)
 
     def _resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
@@ -1362,7 +1364,7 @@ class EmbeddingGraphBuilder(
         :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
         :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
-        :return None: Extends ``papers`` in place and backfills citation counts.
+        :return None: Extends ``papers`` in place and fills missing provider metadata.
         """
         use_streaming = self.use_streaming
         if use_streaming:
@@ -1393,7 +1395,7 @@ class EmbeddingGraphBuilder(
             papers[paper_id] = paper
             self.retrieval_embeddings[paper_id] = embedding
 
-        self._update_citation_counts(papers)
+        self._enrich_corpus_papers(papers)
 
     @staticmethod
     def _paper_from_cached_metadata(
@@ -1540,14 +1542,14 @@ class EmbeddingGraphBuilder(
             return []
 
         embeddings = self.embed_papers(pool.papers)
-        query = np.asarray(seed_embedding, dtype=np.float32)
+        query = l2_normalize_embeddings(seed_embedding)
         scored: list[tuple[float, str, Paper, NDArray[np.float32], int]] = []
         for idx, (paper_id, paper) in enumerate(pool.papers.items()):
             embedding = embeddings.get(paper_id)
             if embedding is None:
                 continue
             vector = np.asarray(embedding, dtype=np.float32)
-            score = float(np.clip(np.dot(query, vector), -1.0, 1.0))
+            score = cosine_similarity_to_query(query, vector)
             scored.append((score, paper_id, paper, vector, idx))
         scored.sort(
             key=lambda item: deterministic_sort_key(
@@ -1827,28 +1829,30 @@ class EmbeddingGraphBuilder(
                 self._ensure_cache_hydrated(use_streaming=use_streaming)
             return self._search_cache_candidates(seed_embedding)
 
-    def _update_citation_counts(self, papers: dict[str, Paper]) -> None:
-        """
-        Enrich top semantic candidates with citation counts from Semantic Scholar.
+    def _enrich_corpus_papers(self, papers: dict[str, Paper]) -> None:
+        """Enrich collected corpus papers with cached or batched provider metadata.
 
-        :param Dict[str, Paper] papers: Dictionary of collected papers (including seed)
+        Conflicting identifiers leave a record unchanged. Rejected batches retain
+        metadata already reused or fetched during the current request.
+
+        :param Dict[str, Paper] papers: Collected papers, including the skipped seed.
+        :return None: Fills missing metadata and updates citation counts in place,
+            preserving corpus identifiers and existing title/abstract text.
         """
-        targets: list[tuple[str, Paper, str]] = []
+        targets: list[tuple[Paper, str]] = []
         for paper_id, paper in papers.items():
             if paper.is_seed:
                 continue
             lookup_id = provider_lookup_identifier(paper_id, paper)
             if lookup_id is None:
                 continue
-            targets.append((paper_id, paper, lookup_id))
-            if len(targets) >= CITATION_COUNT_ENRICHMENT_LIMIT:
-                break
+            targets.append((paper, lookup_id))
 
         if not targets:
             return
 
         logger.debug(
-            "Fetching citation counts from Semantic Scholar for up to %d papers...",
+            "Enriching metadata from Semantic Scholar for %d corpus papers...",
             len(targets),
         )
 
@@ -1856,19 +1860,24 @@ class EmbeddingGraphBuilder(
 
         try:
             batch_results = self.client.get_papers(
-                [lookup_id for _paper_id, _paper, lookup_id in targets]
+                [lookup_id for _paper, lookup_id in targets]
             )
         except SemanticScholarRequestError as exc:
             logger.warning(
-                "Citation-count enrichment was rejected; continuing with "
-                "existing citation counts: %s",
+                "Corpus metadata enrichment was rejected; keeping metadata "
+                "already collected: %s",
                 exc,
             )
-            return
-        for _paper_id, paper, lookup_id in targets:
+            batch_results = exc.partial_results
+        for paper, lookup_id in targets:
             batch_paper = batch_results.get(normalize_paper_id(lookup_id))
             if batch_paper is not None:
-                paper.citation_count = batch_paper.citation_count
+                if candidate_identifiers_conflict(paper, batch_paper):
+                    logger.debug(
+                        "Skipping conflicting provider metadata for %s.", paper.paper_id
+                    )
+                    continue
+                merge_paper_metadata(paper, batch_paper)
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """
@@ -1881,8 +1890,9 @@ class EmbeddingGraphBuilder(
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
             emb1 = l2_normalize_embeddings(self.embeddings[paper1.paper_id])
-            emb2 = l2_normalize_embeddings(self.embeddings[paper2.paper_id])
-            semantic_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
+            semantic_sim = cosine_similarity_to_query(
+                emb1, self.embeddings[paper2.paper_id]
+            )
         else:
             semantic_sim = 0.0
 

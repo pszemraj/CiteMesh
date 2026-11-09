@@ -474,23 +474,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if not isinstance(embeddings_map, dict):
             return None
 
-        seed_embedding = embeddings_map.get(seed_paper.paper_id)
-        if seed_embedding is None:
+        if embeddings_map.get(seed_paper.paper_id) is None:
             try:
-                seed_text = format_paper_for_embedding(
-                    profile=self.embedding_builder.model_profile,
-                    paper=seed_paper,
-                    task=EmbeddingTask.RETRIEVAL_QUERY,
-                )
-                seed_embedding = self.embedding_builder._encode_texts(
-                    [seed_text], show_progress_bar=False
-                )[0]
+                self.embedding_builder._encode_seed_embedding(seed_paper)
             except Exception as exc:
                 raise EmbeddingInferenceError(
                     "Hybrid seed embedding failed during semantic reranking: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
-            embeddings_map[seed_paper.paper_id] = seed_embedding
 
         missing_ids = [
             paper_id for paper_id in candidates if paper_id not in embeddings_map
@@ -562,12 +553,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
             and candidate.paper_id in self.embedding_builder.retrieval_embeddings
         ):
-            candidate_embedding = np.asarray(
+            cosine = cosine_similarity_to_query(
+                l2_normalize_embeddings(seed_embedding),
                 self.embedding_builder.retrieval_embeddings[candidate.paper_id],
-                dtype=np.float32,
-            )
-            cosine = float(
-                np.clip(np.dot(seed_embedding, candidate_embedding), -1.0, 1.0)
             )
             semantic_score = 0.5 * (cosine + 1.0)
 
@@ -918,17 +906,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         # Compute embedding similarity if available
         embed_sim = 0.0
         if (
-            self.embedding_builder is not None
-            and paper1.paper_id in self.embedding_builder.embeddings
+            paper1.paper_id in self.embedding_builder.embeddings
             and paper2.paper_id in self.embedding_builder.embeddings
         ):
             emb1 = l2_normalize_embeddings(
                 self.embedding_builder.embeddings[paper1.paper_id]
             )
-            emb2 = l2_normalize_embeddings(
-                self.embedding_builder.embeddings[paper2.paper_id]
+            embed_sim = cosine_similarity_to_query(
+                emb1, self.embedding_builder.embeddings[paper2.paper_id]
             )
-            embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
         if (
             embed_sim < self.embedding_builder.min_semantic_similarity

@@ -26,7 +26,6 @@ from .builder import EmbeddingGraphBuilder
 from .config import (
     CALIBRATION_RESERVOIR_SEED,
     CANDIDATE_MULTIPLIER,
-    CITATION_COUNT_ENRICHMENT_LIMIT,
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
 )
@@ -46,7 +45,6 @@ from .text import EmbeddingTask, format_embedding_metadata, format_paper_for_emb
 __all__ = [
     "CALIBRATION_RESERVOIR_SEED",
     "CANDIDATE_MULTIPLIER",
-    "CITATION_COUNT_ENRICHMENT_LIMIT",
     "DEFAULT_DATASET_SOURCE",
     "EMBEDDING_DEVICE_CHOICES",
     "ENCODE_BATCH_SIZE",
