@@ -187,7 +187,9 @@ class DashboardPayloadMixin:
             },
             "year_range": year_range,
         }
-        raw_source_status = self.metadata.get("candidate_source_status")
+        raw_source_status = self.metadata.get(
+            "candidate_source_status", self.graph.graph.get("candidate_source_status")
+        )
         if isinstance(raw_source_status, dict):
             meta["candidate_source_status"] = {
                 str(source): str(status)

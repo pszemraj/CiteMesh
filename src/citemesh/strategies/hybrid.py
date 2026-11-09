@@ -45,6 +45,7 @@ from citemesh.strategies.candidates import (
     CandidateSourceResult,
     CandidateSourceState,
     annotate_verified_seed_references,
+    candidate_identifiers_conflict,
     candidate_records_match,
     fetch_candidate_source,
     merge_paper_metadata,
@@ -332,7 +333,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         existing = candidates.get(incoming_id)
         if existing is None and not incoming.is_local_corpus:
             alias_target = self._candidate_provider_aliases.get(incoming_id)
-            if alias_target is not None and alias_target in candidates:
+            if (
+                alias_target is not None
+                and alias_target in candidates
+                and not candidate_identifiers_conflict(
+                    candidates[alias_target], incoming
+                )
+            ):
                 canonical_id = alias_target
                 existing = candidates[canonical_id]
         if existing is not None:

@@ -3630,6 +3630,37 @@ def test_hybrid_ingest_merges_s2_duplicates_with_shared_external_id() -> None:
     assert builder.seed_relations[first.paper_id] == "cites_seed"
 
 
+def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> None:
+    """A changed provider payload cannot overwrite a reconciled corpus identity."""
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    seed = _seed_paper()
+    candidates: dict[str, Paper] = {}
+    sources: dict[str, set[str]] = {}
+    cited = _paper("1" * 40)
+    cited.arxiv_id = "2401.00001"
+    local = _paper(f"arxiv:{cited.arxiv_id}")
+    local.is_local_corpus = True
+    refreshed = _paper(cited.paper_id)
+    refreshed.arxiv_id = "2401.00002"
+    refreshed.doi = "10.1000/another-paper"
+
+    for paper, source, relation in (
+        (cited, "citation", "cites_seed"),
+        (local, "semantic", "semantic_only"),
+        (refreshed, "semantic", "semantic_only"),
+    ):
+        builder._ingest_candidate(
+            seed, candidates, sources, paper, source=source, relation=relation
+        )
+
+    assert candidates == {local.paper_id: local, refreshed.paper_id: refreshed}
+    assert candidates[refreshed.paper_id] is refreshed
+    assert not local.doi
+    assert sources[local.paper_id] == {"citation", "semantic"}
+    assert sources[refreshed.paper_id] == {"semantic"}
+    assert builder.seed_relations[local.paper_id] == "cites_seed"
+
+
 def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:
     """An S2 paper must not collapse two matching local-corpus records."""
     builder = HybridGraphBuilder(max_papers=5, max_semantic=0, client=MagicMock())
