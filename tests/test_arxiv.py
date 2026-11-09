@@ -93,11 +93,6 @@ def test_extract_identifier_free_bibliography_title_author_and_year() -> None:
         <span class="ltx_bibblock">A linked paper, 2023.</span>
         <a href="https://doi.org/10.1000/example">DOI</a>
       </li>
-      <li class="ltx_bibitem">
-        <span class="ltx_bibblock">Some Author, Other Author.</span>
-        <span class="ltx_bibblock">A paper with two dates, 2022.</span>
-        <span class="ltx_bibblock">Conference, 2023.</span>
-      </li>
     </section>
     """
     assert _extract_bibliography(html) == [
@@ -112,8 +107,37 @@ def test_extract_identifier_free_bibliography_title_author_and_year() -> None:
             ),
         ),
         BibliographyEntry(("10.1000/example",)),
-        BibliographyEntry(()),
     ]
+
+
+@pytest.mark.parametrize(
+    ("title", "publication", "expected_key"),
+    [
+        ("Measuring the 2019 benchmark at scale.", "Technical report.", None),
+        (
+            "Measuring the 2019 benchmark at scale.",
+            "Technical report, 2023.",
+            BibliographyKey(
+                "Measuring the 2019 benchmark at scale.", "First Author", 2023
+            ),
+        ),
+        ("Measuring the 2019 benchmark at scale, 2022.", "Conference, 2023.", None),
+    ],
+)
+def test_bibliography_does_not_use_title_words_as_publication_year(
+    title: str, publication: str, expected_key: BibliographyKey | None
+) -> None:
+    """Use publication dates and appended year suffixes as date evidence."""
+    html = f"""
+    <section role="doc-bibliography">
+      <li class="ltx_bibitem">
+        <span class="ltx_bibblock">First Author, Other Author.</span>
+        <span class="ltx_bibblock">{title}</span>
+        <span class="ltx_bibblock">{publication}</span>
+      </li>
+    </section>
+    """
+    assert _extract_bibliography(html) == [BibliographyEntry((), expected_key)]
 
 
 def test_extract_bibliography_accepts_semantic_bibliography_roles() -> None:

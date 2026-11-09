@@ -41,7 +41,7 @@ _ARXIV_URL_TEXT = re.compile(
 )
 _DOI = re.compile(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+", re.I)
 _BIBLIOGRAPHY_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
-_TITLE_YEAR_SUFFIX = re.compile(r"[,;]\s*(?:19|20)\d{2}[.\s]*$")
+_TITLE_YEAR_SUFFIX = re.compile(r"[,;]\s*((?:19|20)\d{2})[.\s]*$")
 _AUTHOR_SEPARATOR = re.compile(r",|\s+and\s+", re.IGNORECASE)
 _VOID_TAGS = {
     "area",
@@ -148,11 +148,14 @@ def _bibliography_key(blocks: list[list[str]]) -> BibliographyKey | None:
     if len(blocks) < 2:
         return None
     authors, title, *publication = ("".join(block).strip() for block in blocks)
-    years = set(_BIBLIOGRAPHY_YEAR.findall(" ".join([title, *publication])))
+    years = set(_BIBLIOGRAPHY_YEAR.findall(" ".join(publication)))
+    if (suffix := _TITLE_YEAR_SUFFIX.search(title)) is not None:
+        years.add(suffix[1])
+        title = title[: suffix.start()]
     if len(years) != 1:
         return None
     return BibliographyKey(
-        _TITLE_YEAR_SUFFIX.sub("", title),
+        title,
         _AUTHOR_SEPARATOR.split(authors, maxsplit=1)[0],
         int(years.pop()),
     )
