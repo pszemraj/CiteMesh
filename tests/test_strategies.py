@@ -2973,6 +2973,7 @@ def test_max_papers_is_total_node_cap_including_seed(
             self.max_papers = max_papers
             self.retrieval_embeddings: dict[str, np.ndarray] = {}
             self.embeddings: dict[str, np.ndarray] = {}
+            self.cached_bibliography_metadata = MagicMock()
 
         def _corpus_operation_lock(self) -> AbstractContextManager[None]:
             """Return the no-I/O operation boundary used by this capacity fake.

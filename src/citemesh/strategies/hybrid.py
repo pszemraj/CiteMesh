@@ -810,6 +810,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     if corpus_prepared
                     else None
                 ),
+                bibliography_metadata_lookup=(
+                    reference_embedding_builder.cached_bibliography_metadata
+                    if corpus_prepared
+                    else None
+                ),
                 reference_selector=self._select_recovered_references_by_embedding,
             )
         else:

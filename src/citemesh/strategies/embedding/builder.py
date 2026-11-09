@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
+    from citemesh.core.paper_ids import BibliographyKey
     from citemesh.core.text_batching import _TextEncoder
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
@@ -1460,6 +1461,19 @@ class EmbeddingGraphBuilder(
             alias: candidates[next(iter(matches))]
             for alias, matches in matches_by_alias.items()
             if len(matches) == 1
+        }
+
+    def cached_bibliography_metadata(
+        self, keys: Sequence[BibliographyKey]
+    ) -> dict[BibliographyKey, Paper]:
+        """Resolve title, first author, and year within the prepared corpus."""
+        metadata = self.embedding_cache.get_paper_metadata_for_bibliography(
+            keys,
+            corpus_size=self.corpus_size if self._cache_selection is not None else None,
+        )
+        return {
+            key: self._paper_from_cached_metadata(record["paper_id"], record)
+            for key, record in metadata.items()
         }
 
     def _candidate_pool_budgets(self) -> tuple[int, int, int]:

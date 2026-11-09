@@ -7,9 +7,12 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from citemesh.core.paper_ids import BibliographyKey
 from citemesh.services import arxiv as arxiv_module
 from citemesh.services.arxiv import (
     ArxivClient,
+    BibliographyEntry,
+    _extract_bibliography,
     arxiv_identifier,
     extract_reference_identifiers,
 )
@@ -69,6 +72,47 @@ def test_extract_bibliography_keeps_entry_order_and_ignores_article_prose() -> N
         ("arxiv:2608.27147", "10.1000/visible"),
         ("arxiv:hep-th/9901001", "10.2000/nested"),
         (),
+    ]
+
+
+def test_extract_identifier_free_bibliography_title_author_and_year() -> None:
+    """Structured LaTeXML blocks preserve full first author and explicit IDs."""
+    html = """
+    <section role="doc-bibliography">
+      <li class="ltx_bibitem">
+        <span class="ltx_bibblock"><em>Albert Gu</em> and Tri Dao.</span>
+        <span class="ltx_bibblock">Mamba: Linear-time sequence modeling, 2023.</span>
+      </li>
+      <li class="ltx_bibitem">
+        <span class="ltx_bibblock">Xuezhe Ma, Chunting Zhou, and Xiang Kong.</span>
+        <span class="ltx_bibblock">Mega: Moving average equipped gated attention.</span>
+        <span class="ltx_bibblock">In <em>ICLR</em>, 2023.</span>
+      </li>
+      <li class="ltx_bibitem">
+        <span class="ltx_bibblock">Some Author and Other Author.</span>
+        <span class="ltx_bibblock">A linked paper, 2023.</span>
+        <a href="https://doi.org/10.1000/example">DOI</a>
+      </li>
+      <li class="ltx_bibitem">
+        <span class="ltx_bibblock">Some Author, Other Author.</span>
+        <span class="ltx_bibblock">A paper with two dates, 2022.</span>
+        <span class="ltx_bibblock">Conference, 2023.</span>
+      </li>
+    </section>
+    """
+    assert _extract_bibliography(html) == [
+        BibliographyEntry(
+            (),
+            BibliographyKey("Mamba: Linear-time sequence modeling", "Albert Gu", 2023),
+        ),
+        BibliographyEntry(
+            (),
+            BibliographyKey(
+                "Mega: Moving average equipped gated attention.", "Xuezhe Ma", 2023
+            ),
+        ),
+        BibliographyEntry(("10.1000/example",)),
+        BibliographyEntry(()),
     ]
 
 

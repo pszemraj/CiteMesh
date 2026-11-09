@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
+    from citemesh.core.paper_ids import BibliographyKey
     from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 import networkx as nx
@@ -45,6 +46,9 @@ class _CitationSpecificOptions(TypedDict, total=False):
     validate_source_availability: bool
     hydrate_references: bool
     reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]] | None
+    bibliography_metadata_lookup: (
+        Callable[[Sequence[BibliographyKey]], dict[BibliographyKey, Paper]] | None
+    )
     reference_selector: Callable[[Paper, Sequence[Paper], int], list[Paper]] | None
 
 

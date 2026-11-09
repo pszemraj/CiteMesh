@@ -36,6 +36,7 @@ from citemesh.core.paper_ids import (
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
+    from citemesh.core.paper_ids import BibliographyKey
     from citemesh.data.embedding_cache.models import PaperMetadata
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
@@ -430,6 +431,25 @@ def _select_recovered_references_by_text(
     )
 
 
+def _add_recovered_reference(
+    seed: Paper, recovered: list[Paper], paper: Paper | None
+) -> None:
+    """Merge a resolved bibliography entry without admitting the seed again."""
+    if (
+        paper is None
+        or paper.paper_id == seed.paper_id
+        or candidate_records_match(seed, paper)
+    ):
+        return
+    for existing in recovered:
+        if existing.paper_id == paper.paper_id or candidate_records_match(
+            existing, paper
+        ):
+            merge_paper_metadata(existing, paper)
+            return
+    recovered.append(paper)
+
+
 def fetch_seed_references(
     client: SemanticScholarClient,
     seed: Paper,
@@ -437,6 +457,10 @@ def fetch_seed_references(
     *,
     seed_identifier: str | None = None,
     local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
+    local_bibliography_lookup: Callable[
+        [Sequence[BibliographyKey]], dict[BibliographyKey, Paper]
+    ]
+    | None = None,
     reference_selector: ReferenceSelector | None = None,
 ) -> tuple[CandidateSourceResult, ...]:
     """Recover an empty seed-reference source using its arXiv bibliography.
@@ -447,6 +471,8 @@ def fetch_seed_references(
     :param str | None seed_identifier: Original input, retaining arXiv version.
     :param Callable | None local_lookup: Read unambiguous requested aliases from an
         already prepared corpus, keyed by normalized request identifier.
+    :param Callable | None local_bibliography_lookup: Resolve identifier-free
+        entries by title, first author, and year after an empty S2 response.
     :param Callable | None reference_selector: Strategy-specific selector applied
         after the complete fallback bibliography is materialized.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
@@ -505,8 +531,9 @@ def fetch_seed_references(
     # Resolve the full bibliography in bounded batches before applying the cap.
     # Otherwise HTML order (often alphabetical) chooses survivors before useful
     # metadata is available for ranking.
-    for offset in range(0, len(entries), 50):
-        batch = entries[offset : offset + 50]
+    identified = [entry.identifiers for entry in entries if entry.identifiers]
+    for offset in range(0, len(identified), 50):
+        batch = identified[offset : offset + 50]
         ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
 
         resolver.bind_entries(batch)
@@ -558,48 +585,45 @@ def fetch_seed_references(
             resolver.bind_entries(batch)
         attempted.update(ids)
         for entry in batch:
-            resolved_paper = resolver.resolve(entry)
-            if (
-                resolved_paper is None
-                or resolved_paper.paper_id == seed.paper_id
-                or candidate_records_match(seed, resolved_paper)
-            ):
-                continue
-            existing = next(
-                (
-                    item
-                    for item in recovered
-                    if item.paper_id == resolved_paper.paper_id
-                    or candidate_records_match(item, resolved_paper)
-                ),
-                None,
-            )
-            if existing is not None:
-                merge_paper_metadata(existing, resolved_paper)
-            else:
-                recovered.append(resolved_paper)
-    identifiable_entries = len({frozenset(entry) for entry in entries if entry})
+            _add_recovered_reference(seed, recovered, resolver.resolve(entry))
     _enrich_local_reference_records(client, recovered)
+    resolved_with_identifiers = len(recovered)
+
+    if (
+        original.state is CandidateSourceState.EMPTY
+        and local_bibliography_lookup is not None
+    ):
+        keys = list(
+            dict.fromkeys(
+                entry.key
+                for entry in entries
+                if not entry.identifiers and entry.key is not None
+            )
+        )
+        if keys:
+            records_by_key = local_bibliography_lookup(keys)
+            for key in keys:
+                _add_recovered_reference(seed, recovered, records_by_key.get(key))
+
     verified_references = tuple(recovered)
     materialized_count = len(verified_references)
     selector = reference_selector or _select_recovered_references_by_text
     recovered = selector(seed, recovered, limit)
     logger.debug(
-        "arXiv bibliography extraction: entries=%d, identifiable=%d, "
-        "materialized=%d, selected=%d, reference_limit=%d.",
+        "arXiv bibliography extraction: entries=%d, resolved_with_identifiers=%d, "
+        "resolved_by_title=%d, materialized=%d, selected=%d, reference_limit=%d.",
         len(entries),
-        identifiable_entries,
+        resolved_with_identifiers,
+        materialized_count - resolved_with_identifiers,
         materialized_count,
         len(recovered),
         limit,
     )
     if recovered:
-        if identifiable_entries > len(recovered) and len(recovered) >= limit:
+        if materialized_count > len(recovered):
             logger.info(
-                "Recovered %d reference identifiers from the arXiv bibliography; "
-                "ranked %d resolved references and keeping %d "
+                "Ranked %d recovered references from the arXiv bibliography, keeping %d "
                 "(reference limit: %d).",
-                identifiable_entries,
                 materialized_count,
                 len(recovered),
                 limit,

@@ -14,6 +14,7 @@ import hashlib
 import logging
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ import numpy as np
 from filelock import FileLock
 from numpy.typing import NDArray
 
+from citemesh.core.paper_ids import BibliographyKey, arxiv_id_chronology_key
 from citemesh.core.text_batching import (
     _TextEncoder,
     l2_normalize_embeddings,
@@ -64,6 +66,7 @@ from .layout import _H5LayoutMixin
 from .lifecycle import _LifecycleMixin
 from .models import (
     CachedPaperMetadata,
+    CachedPaperRecord,
     CacheInputMetadata,
     CacheNamespacePayloadStats,
     CacheSearchResult,
@@ -76,9 +79,26 @@ from .quantization import (
 )
 from .recovery import _RecoveryMixin
 from .search import _SearchMixin
-from .sql import DecodedPaperRow, _cached_paper_metadata, _decode_paper_row
+from .sql import (
+    DecodedPaperRow,
+    _cached_paper_metadata,
+    _cached_paper_record,
+    _decode_paper_row,
+)
 
 logger = logging.getLogger(__name__)
+_BIBLIOGRAPHY_TOKEN = re.compile(r"[^\W_]+")
+
+
+def _bibliography_text_key(text: str, first_tokens: set[str] | None = None) -> str:
+    """Normalize Unicode words, skipping titles with an unrelated first word."""
+    text = unicodedata.normalize("NFKC", text).casefold()
+    if first_tokens is not None:
+        first = _BIBLIOGRAPHY_TOKEN.search(text)
+        if first is None or first.group() not in first_tokens:
+            return ""
+    return " ".join(_BIBLIOGRAPHY_TOKEN.findall(text))
+
 
 #: Progress reporter injected by the CLI layer: ``progress(values, description)``
 #: returns an iterable over ``values``, optionally rendering a bar as it is consumed.
@@ -514,6 +534,75 @@ class EmbeddingCache(
                 decoded = _decode_paper_row(row, parse_json_lists=True)
                 output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
         return output
+
+    def get_paper_metadata_for_bibliography(
+        self, keys: Sequence[BibliographyKey], *, corpus_size: int | None = None
+    ) -> dict[BibliographyKey, CachedPaperRecord]:
+        """Resolve unique title, first-author and year matches in the active view.
+
+        An arXiv preprint can be one year earlier than the cited publication.
+        If both dates match different rows, the reference remains unresolved.
+        """
+        normalized = {}
+        for key in keys:
+            title = _bibliography_text_key(key.title)
+            author = _bibliography_text_key(key.first_author)
+            if " " in title and " " in author:
+                normalized[key] = BibliographyKey(title, author, key.year)
+        if not normalized or not path_exists(self.db_path):
+            return {}
+
+        wanted = set(normalized.values())
+        titles = {key.title for key in wanted}
+        first_tokens = {title.partition(" ")[0] for title in titles}
+        years = sorted({year for key in wanted for year in (key.year, key.year - 1)})
+
+        def matching_title(title: str | None) -> bool:
+            return (
+                title is not None
+                and _bibliography_text_key(title, first_tokens) in titles
+            )
+
+        matches: dict[BibliographyKey, list[CachedPaperRecord]] = {}
+        with self._locked_connection() as conn:
+            view = self._corpus_view_query_locked(conn, corpus_size)
+            self._recover_pending_replacements_with_connection_locked(conn)
+            # The existing schema has no title index. Scan once for the entire
+            # bibliography and load full metadata only for plausible titles.
+            conn.create_function("matching_bibliography_title", 1, matching_title)
+            placeholders = ",".join("?" for _ in years)
+            paper_ids = [
+                paper_id
+                for (paper_id,) in conn.execute(
+                    f"SELECT paper_id FROM papers WHERE year IN ({placeholders}) "
+                    "AND matching_bibliography_title(title)",
+                    years,
+                )
+            ]
+            for row in self._query_paper_rows(
+                conn, paper_ids, lookup_column="paper_id", corpus_view=view
+            ):
+                record = _cached_paper_record(
+                    _decode_paper_row(row, parse_json_lists=True)
+                )
+                year, authors = record["year"], record["authors"]
+                if year is None or not authors:
+                    continue
+                title = _bibliography_text_key(record["title"])
+                author = _bibliography_text_key(authors[0])
+                is_preprint = (
+                    arxiv_id_chronology_key(record["arxiv_id"] or record["paper_id"])
+                    is not None
+                )
+                for cited_year in (year, year + 1) if is_preprint else (year,):
+                    identity = BibliographyKey(title, author, cited_year)
+                    if identity in wanted:
+                        matches.setdefault(identity, []).append(record)
+        return {
+            key: matches[identity][0]
+            for key, identity in normalized.items()
+            if len(matches.get(identity, [])) == 1
+        }
 
     def get_paper_metadata_alias_candidates(
         self, identifiers: Sequence[str], *, corpus_size: int | None = None

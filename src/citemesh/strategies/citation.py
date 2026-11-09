@@ -8,7 +8,7 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
+    from citemesh.core.paper_ids import BibliographyKey
 
 from citemesh.core import (
     DEFAULT_MAX_PAPERS,
@@ -100,14 +101,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self._abstract_index = AbstractSimilarityIndex()
         self._reference_source_unavailable = False
 
-    def _ensure_paper_references(
-        self, paper: Paper, *, provider_lookup_id: str | None = None
-    ) -> None:
+    def _ensure_paper_references(self, paper: Paper) -> None:
         """Hydrate reference IDs for a paper without clobbering existing payload.
 
         :param Paper paper: Paper record to hydrate in-place.
-        :param Optional[str] provider_lookup_id: Provider-safe request identifier;
-            defaults to the paper's primary identifier.
         :return None: Mutates ``paper.references`` when needed.
         """
         if not self.fetch_references:
@@ -125,11 +122,12 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if cached_refs is not None:
             paper.references = list(cached_refs)
             return
+        provider_id = provider_lookup_identifier(paper_id, paper)
+        if provider_id is None:
+            return
         if self._reference_source_unavailable:
             if not self.refresh_reference_cache:
-                cached_refs = self.client.get_cached_reference_ids(
-                    provider_lookup_id or paper_id
-                )
+                cached_refs = self.client.get_cached_reference_ids(provider_id)
                 if cached_refs is not None:
                     self.reference_cache[paper_id] = cached_refs
                     paper.references = list(cached_refs)
@@ -139,7 +137,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         try:
             paper.references = self._get_references(
-                paper_id, provider_lookup_id=provider_lookup_id
+                paper_id, provider_lookup_id=provider_id
             )
         except SemanticScholarUnavailableError as exc:
             self._reference_source_unavailable = True
@@ -249,11 +247,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if self.fetch_references:
             logger.debug("Hydrating reference lists for %d papers...", len(papers))
 
-        provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
-        if seed.references:
-            self._ensure_paper_references(seed)
-        elif provider_seed_id is not None:
-            self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
+        self._ensure_paper_references(seed)
 
         progress_bar: Generator[tuple[str, Paper], None, None] | None = None
         paper_items: Iterable[tuple[str, Paper]] = papers.items()
@@ -306,6 +300,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         seed_paper: Paper | None = None,
         reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]]
         | None = None,
+        bibliography_metadata_lookup: Callable[
+            [Sequence[BibliographyKey]], dict[BibliographyKey, Paper]
+        ]
+        | None = None,
         reference_selector: ReferenceSelector | None = None,
         **kwargs: Unpack[_CorpusPreparedOption],
     ) -> dict[str, Paper]:
@@ -321,6 +319,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             primary identifier is local, only an external alias is sent upstream.
         :param Callable | None reference_metadata_lookup: Read metadata from an
             already prepared corpus for HTML reference recovery.
+        :param Callable | None bibliography_metadata_lookup: Resolve identifier-free
+            entries against an already prepared corpus.
         :param Callable | None reference_selector: Strategy-specific recovered-reference
             selector.
         :param kwargs: Corpus-preparation option accepted by the shared interface.
@@ -384,6 +384,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 reference_limit,
                 seed_identifier=seed_id,
                 local_lookup=reference_metadata_lookup,
+                local_bibliography_lookup=bibliography_metadata_lookup,
                 reference_selector=reference_selector,
             )
             source_results.extend(reference_results)

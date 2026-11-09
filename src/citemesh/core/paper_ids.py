@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
+
+
+class BibliographyKey(NamedTuple):
+    """Title, full first author, and cited year of an identifier-free reference."""
+
+    title: str
+    first_author: str
+    year: int
 
 
 def strip_arxiv_version(identifier: str) -> str:

@@ -34,7 +34,7 @@ semantic budget remain unchanged.
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
-S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate.
+S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not merge candidate records. The bibliography fallback separately resolves identifier-free entries against a prepared corpus using the exact normalized title, full first author, and publication-year rules described in the [CLI guide](cli.md#missing-semantic-scholar-references).
 
 Combined retrieval retains reconciled S2 IDs so a later recommendation with
 sparser metadata still joins its existing corpus record. Each selected paper's
