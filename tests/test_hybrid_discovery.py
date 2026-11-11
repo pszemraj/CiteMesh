@@ -15,12 +15,14 @@ import pytest
 from numpy.typing import NDArray
 
 from citemesh.core.models import Paper
+from citemesh.services import SemanticScholarUnavailableError
 from citemesh.services.semantic_scholar import SemanticScholarClient
 from citemesh.services.semantic_scholar.endpoints import (
     PAPER_BASE_URL,
     RECOMMENDATION_BASE_URL,
 )
 from citemesh.strategies import hybrid as hybrid_module
+from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from tests._helpers import WordHashEncodeModel, disable_embedding_dep_checks
@@ -465,6 +467,28 @@ def test_indexed_provider_records_use_their_corpus_rows(
     assert sorted(encoded) == sorted(
         member for member, paper in pool.papers.items() if not paper.is_local_corpus
     )
+
+
+def test_candidates_mode_outage_fails_before_the_model_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no corpus to search, a total provider outage stops collection early."""
+    client = MagicMock()
+    client.get_paper.return_value = Paper(
+        paper_id="f" * 40, title="Seed", year=2024, arxiv_id=_SEED_ARXIV
+    )
+    for method in ("get_paper_references", "get_paper_citations"):
+        getattr(client, method).side_effect = SemanticScholarUnavailableError("down")
+    client.get_recommended_papers.side_effect = SemanticScholarUnavailableError("down")
+    builder = HybridGraphBuilder(client=client)
+    load_model = MagicMock()
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", load_model)
+
+    with pytest.raises(CandidateAcquisitionError, match="hybrid candidate"):
+        builder.collect_papers(_SEED_ID)
+
+    load_model.assert_not_called()
+    assert set(builder.candidate_source_status.values()) == {"unavailable"}
 
 
 def test_citers_are_ranked_without_truncation(

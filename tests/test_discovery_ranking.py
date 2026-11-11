@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 
@@ -64,6 +65,27 @@ def test_reciprocal_rank_fusion_sums_reciprocal_ranks_and_breaks_ties_by_id() ->
         ("q", 1.0 / 62),
     ]
     assert reciprocal_rank_fusion({}) == []
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(4))))
+def test_equal_rank_multisets_tie_exactly_in_any_list_order(
+    order: tuple[int, ...],
+) -> None:
+    """Float rounding cannot decide a tie; the paper ID does."""
+    # ``a`` sits at ranks (1, 1, 2, 3) and ``z`` at (2, 3, 1, 1).
+    positions = [(1, 2), (1, 3), (2, 1), (3, 1)]
+    lists = {}
+    for index in order:
+        rank_a, rank_z = positions[index]
+        ranked = [f"filler-{index}-{slot}" for slot in range(max(rank_a, rank_z))]
+        ranked[rank_a - 1], ranked[rank_z - 1] = "a", "z"
+        lists[f"list-{index}"] = ranked
+
+    scores = dict(reciprocal_rank_fusion(lists))
+    fused = [paper_id for paper_id, _ in reciprocal_rank_fusion(lists)]
+
+    assert scores["a"] == scores["z"]
+    assert fused.index("a") < fused.index("z")
 
 
 def test_features_are_cosines_to_both_seed_roles() -> None:

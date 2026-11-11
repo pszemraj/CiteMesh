@@ -282,6 +282,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info("Collecting related papers...")
         results = self._fetch_provider_sources(seed, seed_id)
         timings["provider"] = perf_counter() - started
+        if not self._uses_corpus:
+            # Without a corpus search to wait for, a total outage fails here,
+            # before the model loads.
+            self._require_available_sources(results, seed)
 
         started = perf_counter()
         provider_papers = [paper for result in results for paper in result.papers]
@@ -314,19 +318,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             logger.info("Searching the arXiv corpus...")
             results.append(self._search_corpus(pool, seed_query, seed_document))
             timings["corpus"] += perf_counter() - started
+            self._require_available_sources(results, seed)
 
-        self.candidate_source_status = {
-            result.source: result.state.value for result in results
-        }
-        acquisition = {
-            "both": "combined",
-            "arxiv-corpus": "corpus",
-            "candidates": "candidate",
-        }[self.semantic_source]
-        require_available_candidate_source(
-            results,
-            context=f"hybrid {acquisition} acquisition for {seed.paper_id}",
-        )
         folded = pool.reconcile_publication_versions()
         if folded:
             logger.debug("Folded %d publication records into corpus preprints.", folded)
@@ -374,6 +367,29 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             ", ".join(f"{phase}={seconds:.2f}" for phase, seconds in timings.items()),
         )
         return papers
+
+    def _require_available_sources(
+        self, results: Sequence[CandidateSourceResult], seed: Paper
+    ) -> None:
+        """Record every source outcome and fail when no source could be read.
+
+        :param Sequence[CandidateSourceResult] results: Every attempted source.
+        :param Paper seed: Resolved seed.
+        :return None: Updates ``candidate_source_status``.
+        :raises CandidateAcquisitionError: If every source was unavailable.
+        """
+        self.candidate_source_status = {
+            result.source: result.state.value for result in results
+        }
+        acquisition = {
+            "both": "combined",
+            "arxiv-corpus": "corpus",
+            "candidates": "candidate",
+        }[self.semantic_source]
+        require_available_candidate_source(
+            results,
+            context=f"hybrid {acquisition} acquisition for {seed.paper_id}",
+        )
 
     def _resolve_seed(self, seed_id: str) -> tuple[Paper, bool]:
         """Resolve the seed from the prepared corpus, else from Semantic Scholar.

@@ -25,6 +25,7 @@ are processed in paper-ID order, so it ignores input order.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -224,18 +225,21 @@ def reciprocal_rank_fusion(
 ) -> list[tuple[str, float]]:
     """Fuse ranked lists by summing ``1 / (RRF_K + rank)`` per containing list.
 
-    Scores accumulate in list order, so equal inputs give identical floats.
+    Each score is a correctly rounded sum (:func:`math.fsum`), so papers with
+    the same ranks in any lists, in any list order, score identical floats and
+    the tie-break by paper ID decides between them.
 
     :param Mapping[str, Sequence[str]] lists: Ranked paper IDs per list, best
         first, each ID at most once per list.
     :return list[tuple[str, float]]: ``(paper_id, score)`` by score descending,
         then paper ID.
     """
-    scores: dict[str, float] = {}
+    terms: dict[str, list[float]] = {}
     for ranked in lists.values():
         for rank, paper_id in enumerate(ranked, start=1):
-            scores[paper_id] = scores.get(paper_id, 0.0) + 1.0 / (RRF_K + rank)
-    return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+            terms.setdefault(paper_id, []).append(1.0 / (RRF_K + rank))
+    scores = [(paper_id, math.fsum(values)) for paper_id, values in terms.items()]
+    return sorted(scores, key=lambda item: (-item[1], item[0]))
 
 
 def rank_candidates(
