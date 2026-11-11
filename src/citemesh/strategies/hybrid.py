@@ -48,6 +48,7 @@ from citemesh.strategies.candidates import (
     annotate_verified_seed_references,
     candidate_identifiers_conflict,
     candidate_records_match,
+    corpus_publication_matches,
     fetch_candidate_source,
     merge_paper_metadata,
     merge_seed_relation,
@@ -771,6 +772,60 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.debug("Added %s semantic papers", added_semantic)
         return selected
 
+    def _deduplicate_selected_publications(
+        self,
+        selected_ids: list[str],
+        candidates: dict[str, Paper],
+        candidate_sources: dict[str, set[str]],
+    ) -> list[str]:
+        """Reconcile unique selected preprint/publication pairs without refilling.
+
+        Check both directions against the full pool before merging metadata, so
+        an unselected competing record still makes a bibliography ambiguous.
+        Preserve the first selected position and each source's earliest rank.
+        """
+        selected = set(selected_ids)
+        matches: dict[str, list[str]] = {}
+        for paper_id in selected_ids:
+            matches[paper_id] = [
+                other_id
+                for other_id, other in candidates.items()
+                if corpus_publication_matches(candidates[paper_id], other)
+            ]
+        aliases: dict[str, str] = {}
+        for paper_id in selected_ids:
+            if candidates[paper_id].is_local_corpus or len(matches[paper_id]) != 1:
+                continue
+            corpus_id = matches[paper_id][0]
+            if corpus_id in selected and matches[corpus_id] == [paper_id]:
+                aliases[paper_id] = corpus_id
+        for publication_id, corpus_id in aliases.items():
+            merge_paper_metadata(candidates[corpus_id], candidates[publication_id])
+            candidate_sources[corpus_id].update(candidate_sources[publication_id])
+            for provider_id, target in self._candidate_provider_aliases.items():
+                if target == publication_id:
+                    self._candidate_provider_aliases[provider_id] = corpus_id
+            self._candidate_provider_aliases[publication_id] = corpus_id
+            ranks = self._candidate_source_ranks.setdefault(corpus_id, {})
+            for source, rank in self._candidate_source_ranks.get(
+                publication_id, {}
+            ).items():
+                ranks[source] = min(ranks.get(source, rank), rank)
+            existing_relation = self.seed_relations.get(corpus_id, "")
+            incoming_relation = self.seed_relations.get(publication_id, "")
+            if existing_relation == "citation" and incoming_relation in (
+                "referenced_by_seed",
+                "cites_seed",
+                "overlap",
+            ):
+                existing_relation = ""
+            relation = merge_seed_relation(existing_relation, incoming_relation)
+            if relation:
+                self.seed_relations[corpus_id] = relation
+        return list(
+            dict.fromkeys(aliases.get(paper_id, paper_id) for paper_id in selected_ids)
+        )
+
     @scope_candidate_collection
     def collect_papers(
         self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
@@ -999,18 +1054,22 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         ranked_ids = self._rank_candidates(
             seed_paper, candidate_pool, candidate_sources
         )
-        for paper_id in self._select_candidate_ids(ranked_ids, candidate_sources):
+        annotate_verified_seed_references(
+            candidate_pool,
+            self.citation_builder.candidate_source_results,
+            self.seed_relations,
+        )
+        selected_ids = self._select_candidate_ids(ranked_ids, candidate_sources)
+        selected_ids = self._deduplicate_selected_publications(
+            selected_ids, candidate_pool, candidate_sources
+        )
+        for paper_id in selected_ids:
             papers[paper_id] = candidate_pool[paper_id]
             tags = candidate_sources[paper_id]
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
             if "citation" in tags:
                 self.seed_relations.setdefault(paper_id, "citation")
 
-        annotate_verified_seed_references(
-            candidate_pool,
-            self.citation_builder.candidate_source_results,
-            self.seed_relations,
-        )
         return papers
 
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:

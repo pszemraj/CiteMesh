@@ -34,7 +34,9 @@ semantic budget remain unchanged.
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
-S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not merge candidate records. The bibliography fallback separately resolves identifier-free entries against a prepared corpus using the exact normalized title, full first author, and publication-year rules described in the [CLI guide](cli.md#missing-semantic-scholar-references).
+During candidate collection, S2 records reconcile by exact paper ID or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record uses the same explicit identifier agreement, and the corpus ID remains stable. The bibliography fallback separately resolves identifier-free entries against a prepared corpus using the exact normalized title, full first author, and publication-year rules described in the [CLI guide](cli.md#missing-semantic-scholar-references).
+
+After hybrid selection, a selected corpus preprint and DOI publication can also reconcile by exact normalized title and full first-author name, with publication in the same or following year. Both directions must match uniquely across the full candidate pool, and conflicting identifiers prevent reconciliation. The corpus ID retains the earliest selected position, merged metadata, citation evidence, and earliest rank from each source. Removed duplicate slots are not refilled, so the result can contain fewer papers than the requested maximum.
 
 Combined retrieval retains reconciled S2 IDs so a later recommendation with
 sparser metadata still joins its existing corpus record. Each selected paper's

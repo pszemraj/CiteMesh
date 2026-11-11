@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
 
@@ -13,6 +14,19 @@ class BibliographyKey(NamedTuple):
     title: str
     first_author: str
     year: int
+
+
+_BIBLIOGRAPHY_TOKEN = re.compile(r"[^\W_]+")
+
+
+def bibliography_text_key(text: str, first_tokens: set[str] | None = None) -> str:
+    """Normalize bibliographic words, optionally rejecting unrelated first words."""
+    text = unicodedata.normalize("NFKC", text).casefold()
+    if first_tokens is not None:
+        first = _BIBLIOGRAPHY_TOKEN.search(text)
+        if first is None or first.group() not in first_tokens:
+            return ""
+    return " ".join(_BIBLIOGRAPHY_TOKEN.findall(text))
 
 
 def strip_arxiv_version(identifier: str) -> str:

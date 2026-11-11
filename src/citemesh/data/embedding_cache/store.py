@@ -14,7 +14,6 @@ import hashlib
 import logging
 import re
 import sqlite3
-import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,7 +23,11 @@ import numpy as np
 from filelock import FileLock
 from numpy.typing import NDArray
 
-from citemesh.core.paper_ids import BibliographyKey, arxiv_id_chronology_key
+from citemesh.core.paper_ids import (
+    BibliographyKey,
+    arxiv_id_chronology_key,
+    bibliography_text_key,
+)
 from citemesh.core.text_batching import (
     _TextEncoder,
     l2_normalize_embeddings,
@@ -87,19 +90,6 @@ from .sql import (
 )
 
 logger = logging.getLogger(__name__)
-_BIBLIOGRAPHY_TOKEN = re.compile(r"[^\W_]+")
-
-
-def _bibliography_text_key(text: str, first_tokens: set[str] | None = None) -> str:
-    """Normalize Unicode words, skipping titles with an unrelated first word."""
-    text = unicodedata.normalize("NFKC", text).casefold()
-    if first_tokens is not None:
-        first = _BIBLIOGRAPHY_TOKEN.search(text)
-        if first is None or first.group() not in first_tokens:
-            return ""
-    return " ".join(_BIBLIOGRAPHY_TOKEN.findall(text))
-
-
 #: Progress reporter injected by the CLI layer: ``progress(values, description)``
 #: returns an iterable over ``values``, optionally rendering a bar as it is consumed.
 ProgressWrapper = Callable[[Sequence[PaperRequest], str], Iterable[PaperRequest]]
@@ -545,8 +535,8 @@ class EmbeddingCache(
         """
         normalized = {}
         for key in keys:
-            title = _bibliography_text_key(key.title)
-            author = _bibliography_text_key(key.first_author)
+            title = bibliography_text_key(key.title)
+            author = bibliography_text_key(key.first_author)
             if " " in title and " " in author:
                 normalized[key] = BibliographyKey(title, author, key.year)
         if not normalized or not path_exists(self.db_path):
@@ -560,7 +550,7 @@ class EmbeddingCache(
         def matching_title(title: str | None) -> bool:
             return (
                 title is not None
-                and _bibliography_text_key(title, first_tokens) in titles
+                and bibliography_text_key(title, first_tokens) in titles
             )
 
         matches: dict[BibliographyKey, list[CachedPaperRecord]] = {}
@@ -588,8 +578,8 @@ class EmbeddingCache(
                 year, authors = record["year"], record["authors"]
                 if year is None or not authors:
                     continue
-                title = _bibliography_text_key(record["title"])
-                author = _bibliography_text_key(authors[0])
+                title = bibliography_text_key(record["title"])
+                author = bibliography_text_key(authors[0])
                 is_preprint = (
                     arxiv_id_chronology_key(record["arxiv_id"] or record["paper_id"])
                     is not None

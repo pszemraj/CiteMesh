@@ -28,6 +28,8 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
     CandidatePool,
+    CandidateSourceResult,
+    CandidateSourceState,
     candidate_identifiers_conflict,
     candidate_records_match,
     fetch_candidate_pool,
@@ -3780,6 +3782,187 @@ def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> 
     assert sources[local.paper_id] == {"citation", "semantic"}
     assert sources[refreshed.paper_id] == {"semantic"}
     assert builder.seed_relations[local.paper_id] == "cites_seed"
+
+
+@pytest.fixture
+def unlinked_publication_pair() -> tuple[Paper, Paper]:
+    """A corpus preprint and published record without a shared external ID."""
+    corpus = _paper("arxiv:2503.06378", year=2025, refs=["reference-a"])
+    corpus.is_local_corpus = True
+    corpus.title = "Measuring Model\nCapabilities"
+    corpus.authors = [Author(name="Lexin Zhou")]
+    corpus.doi = "10.48550/arXiv.2503.06378"
+    publication = _paper("f" * 40, year=2026, refs=["reference-b"])
+    publication.title = "Measuring model capabilities"
+    publication.authors = [Author(name="Lexin Zhou")]
+    publication.doi = "10.1000/published"
+    return corpus, publication
+
+
+@pytest.mark.parametrize("publication_first", [False, True])
+def test_hybrid_reconciles_unlinked_corpus_publication(
+    unlinked_publication_pair: tuple[Paper, Paper], publication_first: bool
+) -> None:
+    """Remove a selected duplicate without refilling, reordering, or losing evidence."""
+    corpus, publication = unlinked_publication_pair
+    assert not candidate_records_match(corpus, publication)
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    other, tail = _paper("other"), _paper("unselected-tail")
+    candidates = {p.paper_id: p for p in (corpus, publication, other, tail)}
+    sources = {pid: {"semantic"} for pid in candidates}
+    sources[corpus.paper_id] = {"citation"}
+    builder.seed_relations = {
+        corpus.paper_id: "citation",
+        publication.paper_id: "referenced_by_seed",
+    }
+    builder._candidate_provider_aliases = {"older-provider-alias": publication.paper_id}
+    builder._candidate_source_ranks = {
+        corpus.paper_id: {"arxiv_corpus": 7, "recommendations": 9},
+        publication.paper_id: {"recommendations": 2},
+    }
+    selected = (
+        [publication.paper_id, other.paper_id, corpus.paper_id]
+        if publication_first
+        else [corpus.paper_id, other.paper_id, publication.paper_id]
+    )
+    result = builder._deduplicate_selected_publications(selected, candidates, sources)
+    assert result == [corpus.paper_id, other.paper_id]
+    assert tail.paper_id not in result
+    assert corpus.arxiv_id == "2503.06378"
+    assert corpus.doi == publication.doi
+    assert corpus.references == ["reference-a", "reference-b"]
+    assert sources[corpus.paper_id] == {"citation", "semantic"}
+    assert builder.seed_relations[corpus.paper_id] == "referenced_by_seed"
+    assert builder._candidate_source_ranks[corpus.paper_id] == {
+        "arxiv_corpus": 7,
+        "recommendations": 2,
+    }
+    assert builder._candidate_provider_aliases == {
+        "older-provider-alias": corpus.paper_id,
+        publication.paper_id: corpus.paper_id,
+    }
+    assert candidate_records_match(corpus, publication)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        (1, "title", "Measuring different capabilities"),
+        (1, "authors", [Author(name="Another Researcher")]),
+        (1, "authors", [Author(name="L. Zhou")]),
+        (1, "year", 2024),
+        (1, "year", 2027),
+        (1, "year", None),
+        (1, "doi", ""),
+        (1, "arxiv_id", "2503.06379"),
+        (0, "doi", "10.1000/different-publication"),
+        (0, "is_local_corpus", False),
+        (1, "is_local_corpus", True),
+    ],
+)
+def test_hybrid_preserves_nonmatching_publications(
+    unlinked_publication_pair: tuple[Paper, Paper],
+    target: int,
+    field: str,
+    value: object,
+) -> None:
+    """Metadata fallback cannot override distinct or insufficient identity evidence."""
+    corpus, publication = unlinked_publication_pair
+    setattr(unlinked_publication_pair[target], field, value)
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    candidates = {p.paper_id: p for p in (corpus, publication)}
+    sources = {corpus.paper_id: {"citation"}, publication.paper_id: {"semantic"}}
+    selected = list(candidates)
+    assert (
+        builder._deduplicate_selected_publications(selected, candidates, sources)
+        == selected
+    )
+    assert sources[publication.paper_id] == {"semantic"}
+
+
+@pytest.mark.parametrize("competing_publication", [False, True])
+@pytest.mark.parametrize("competitor_selected", [False, True])
+def test_hybrid_preserves_ambiguous_publication_match(
+    unlinked_publication_pair: tuple[Paper, Paper],
+    competing_publication: bool,
+    competitor_selected: bool,
+) -> None:
+    """An unselected competing record also makes either matching direction ambiguous."""
+    corpus, publication = unlinked_publication_pair
+    other = _paper(
+        "a" * 40 if competing_publication else "arxiv:2503.06379",
+        year=2026 if competing_publication else 2025,
+    )
+    other.is_local_corpus = not competing_publication
+    if competing_publication:
+        other.doi = "10.1000/other-publication"
+    other.title = corpus.title
+    other.authors = list(corpus.authors)
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=0, client=MagicMock())
+    candidates = {p.paper_id: p for p in (corpus, other, publication)}
+    sources = {pid: {"semantic"} for pid in candidates}
+    selected = [publication.paper_id, corpus.paper_id]
+    if competitor_selected:
+        selected.insert(1, other.paper_id)
+    assert (
+        builder._deduplicate_selected_publications(selected, candidates, sources)
+        == selected
+    )
+
+
+@pytest.mark.parametrize("selected_index", [0, 1])
+def test_hybrid_keeps_single_selected_publication_version(
+    unlinked_publication_pair: tuple[Paper, Paper], selected_index: int
+) -> None:
+    """A single selected version does not introduce or replace a scientific work."""
+    candidates = {p.paper_id: p for p in unlinked_publication_pair}
+    sources = {pid: {"semantic"} for pid in candidates}
+    selected = [unlinked_publication_pair[selected_index].paper_id]
+    builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
+    assert (
+        builder._deduplicate_selected_publications(selected, candidates, sources)
+        == selected
+    )
+
+
+def test_hybrid_collection_preserves_reconciled_publication_reference(
+    unlinked_publication_pair: tuple[Paper, Paper],
+) -> None:
+    """Annotate verified references before merging a selected publication alias."""
+    corpus, publication = unlinked_publication_pair
+    seed = _seed_paper()
+    builder = HybridGraphBuilder(
+        max_papers=3, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    builder.citation_builder.collect_papers = MagicMock(
+        return_value={seed.paper_id: seed, corpus.paper_id: corpus}
+    )
+    builder.citation_builder.hydrate_collected_references = MagicMock()
+    builder.citation_builder.candidate_source_results = (
+        CandidateSourceResult(
+            "references",
+            CandidateSourceState.COMPLETE,
+            papers=(),
+            verified_references=(publication,),
+        ),
+    )
+    assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
+    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
+    builder.embedding_builder.collect_papers = MagicMock(
+        return_value={publication.paper_id: publication}
+    )
+    builder._rank_candidates = MagicMock(
+        return_value=[publication.paper_id, corpus.paper_id]
+    )
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert list(papers) == [seed.paper_id, corpus.paper_id]
+    assert papers[corpus.paper_id].doi == publication.doi
+    assert builder.seed_relations[corpus.paper_id] == "referenced_by_seed"
+    assert builder.paper_sources[corpus.paper_id] == "both"
 
 
 def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:

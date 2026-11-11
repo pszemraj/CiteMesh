@@ -28,6 +28,7 @@ from citemesh.core import Paper
 from citemesh.core.choices import SEMANTIC_SOURCE_CHOICES as SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import (
     arxiv_identifier_from_doi,
+    bibliography_text_key,
     external_ids_from_canonical_paper_id,
     is_local_corpus_paper_id,
     normalize_paper_id,
@@ -238,6 +239,42 @@ def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
     :return bool: Whether either record or the pair names different works.
     """
     return _candidate_match_namespaces(left, right) is None
+
+
+def corpus_publication_matches(left: Paper, right: Paper) -> bool:
+    """Match a corpus preprint to a publication with missing cross-identifiers.
+
+    Titles and full first-author names must match after word normalization.
+    The publication can be in the preprint's year or the following year.
+    Conflicting explicit identifiers remain disqualifying. Callers must require
+    a unique candidate match before reconciling records.
+    """
+    if left.is_local_corpus == right.is_local_corpus:
+        return False
+    corpus, publication = (left, right) if left.is_local_corpus else (right, left)
+    corpus_ids = _external_identifiers(corpus)
+    publication_ids = _external_identifiers(publication)
+    if (
+        not corpus_ids
+        or "arxiv" not in corpus_ids
+        or not publication_ids
+        or "doi" not in publication_ids
+        or candidate_identifiers_conflict(corpus, publication)
+        or corpus.year is None
+        or publication.year not in (corpus.year, corpus.year + 1)
+        or not corpus.authors
+        or not publication.authors
+    ):
+        return False
+    title = bibliography_text_key(corpus.title)
+    author = bibliography_text_key(corpus.authors[0].name)
+    return (
+        " " in title
+        and " " in author
+        and len(author.partition(" ")[0]) > 1
+        and title == bibliography_text_key(publication.title)
+        and author == bibliography_text_key(publication.authors[0].name)
+    )
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
