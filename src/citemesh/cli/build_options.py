@@ -293,7 +293,7 @@ def _embedding_export_metadata(
             getattr(cli_args, "cache_overwrite_reason", None)
         ),
     }
-    if cli_args.strategy == "embedding" and payload["semantic_source"] == "candidates":
+    if _candidate_pool_size_applies(cli_args):
         payload["candidate_pool_size"] = int(cli_args.candidate_pool_size)
     if payload["semantic_source"] in _CORPUS_SEMANTIC_SOURCES:
         for key in (
@@ -423,6 +423,21 @@ def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """
     strategy = str(getattr(cli_args, "strategy", "")).strip().lower()
     return strategy in {"embedding", "hybrid"}
+
+
+def _candidate_pool_size_applies(cli_args: argparse.Namespace) -> bool:
+    """Return whether ``--candidate-pool-size`` shapes the active build.
+
+    Only an embedding build sourcing candidates from Semantic Scholar fetches a
+    sized pool: hybrid fetches whole provider lists, corpus modes search the index.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return bool: ``True`` when the pool size is used and belongs in run metadata.
+    """
+    return (
+        str(cli_args.strategy) in _BUILD_STRATEGY_OPTION_SUPPORT["candidate_pool_size"]
+        and str(cli_args.semantic_source) == "candidates"
+    )
 
 
 def _strategy_score_contract(strategy: str) -> ScoreContract:

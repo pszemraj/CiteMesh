@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 from .build_options import (
     _CORPUS_SEMANTIC_SOURCES,
+    _candidate_pool_size_applies,
     _embedding_branch_enabled,
     _normalized_cache_reason,
 )
@@ -158,7 +159,7 @@ def _build_graph_config_payload(
             embedding_config.pop("corpus_size", None)
             embedding_config.pop("all_corpus", None)
             embedding_config.pop("streaming", None)
-        if strategy != "embedding" or cli_args.semantic_source != "candidates":
+        if not _candidate_pool_size_applies(cli_args):
             embedding_config.pop("candidate_pool_size")
         if cli_args.storage_precision != "int8":
             embedding_config.pop("binary_prefilter")

@@ -25,6 +25,7 @@ from .build_options import (
     _STRATEGY_DISPATCH,
     _apply_hybrid_default_overrides,
     _build_option_label,
+    _candidate_pool_size_applies,
     _embedding_branch_enabled,
     _normalized_cache_reason,
 )
@@ -554,7 +555,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             args.device,
             args.semantic_source,
             f" pool={int(args.candidate_pool_size)}"
-            if args.strategy == "embedding"
+            if _candidate_pool_size_applies(args)
             else "",
             args.storage_precision,
             int(args.encode_batch_size),

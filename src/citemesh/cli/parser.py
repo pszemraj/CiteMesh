@@ -904,7 +904,8 @@ def _add_build_runtime_arguments(
         metavar="N",
         default=DEFAULT_CANDIDATE_POOL_SIZE,
         help=(
-            "Maximum S2 candidate pool size for embedding candidates mode "
+            "Embedding strategy only: maximum S2 candidate pool size in "
+            "candidates mode; hybrid always takes whole provider lists "
             "(default: %(default)s)."
         ),
     )
