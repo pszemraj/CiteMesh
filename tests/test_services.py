@@ -195,6 +195,77 @@ def test_payload_conversion_preserves_metadata_quirks() -> None:
     assert paper.references == ["r1", "r2"]
 
 
+def test_arxiv_journal_identity_matches_corpus_and_survives_cache() -> None:
+    """C-Pack's journal identifier joins its otherwise unlinked S2 record."""
+    from citemesh.strategies.candidates import candidate_records_match
+
+    paper = s2.payloads._convert_api_paper(
+        {
+            **_paper_payload("2ff694e20f492a7acf7fd0646c5e1576f0b3c901"),
+            "title": "C-Pack: Packaged Resources To Advance General Chinese Embedding",
+            "externalIds": {"DBLP": "journals/corr/abs-2309-07597"},
+            "journal": {"name": "ArXiv", "volume": "abs/2309.07597"},
+        }
+    )
+    assert paper is not None
+    assert paper.arxiv_id == "2309.07597"
+    assert candidate_records_match(
+        paper, Paper(paper_id="arxiv:2309.07597", title="C-Pack", year=2023)
+    )
+    s2.disk_cache._persist_paper(paper, paper.paper_id)
+    cached = s2.disk_cache._load_cached_paper("arxiv:2309.07597")
+    assert cached is not None
+    assert cached.paper_id == paper.paper_id
+    assert cached.arxiv_id == "2309.07597"
+
+
+@pytest.mark.parametrize(
+    ("journal", "expected"),
+    [
+        ({"name": " arXiv ", "volume": "abs/cs/0101001v2"}, "cs/0101001"),
+        ({"name": "Other journal", "volume": "abs/2309.07597"}, ""),
+        ({"name": "ArXiv", "volume": "42"}, ""),
+        ({"name": "ArXiv", "volume": "abs/not-an-id"}, ""),
+        ({"name": "ArXiv", "volume": "abs/arxiv:not-an-id"}, ""),
+        ({"name": "ArXiv"}, ""),
+    ],
+)
+def test_journal_identity_requires_an_explicit_arxiv_volume(
+    journal: dict[str, str], expected: str
+) -> None:
+    """Only a recognized identifier in an arXiv volume adds an alias."""
+    paper = s2.payloads._convert_recommendation(
+        {**_paper_payload(), "journal": journal}
+    )
+    assert paper is not None
+    assert paper.arxiv_id == expected
+
+
+@pytest.mark.parametrize(
+    ("paper_id", "external_ids", "expected"),
+    [
+        ("s2-id", {"ArXiv": "2401.00001"}, "2401.00001"),
+        ("arxiv:2401.00001", {}, "2401.00001"),
+        ("s2-id", {"DOI": "10.48550/arXiv.2401.00001"}, ""),
+        ("s2-id", {"DOI": "https://doi.org/10.48550/arXiv.2401.00001"}, ""),
+        ("s2-id", {"DOI": "doi:10.48550/arXiv.2401.00001"}, ""),
+    ],
+)
+def test_journal_identity_does_not_override_existing_arxiv_identity(
+    paper_id: str, external_ids: dict[str, str], expected: str
+) -> None:
+    """A journal fallback cannot contradict an explicit arXiv ID or DOI."""
+    paper = s2.payloads._convert_api_paper(
+        {
+            **_paper_payload(paper_id),
+            "externalIds": external_ids,
+            "journal": {"name": "ArXiv", "volume": "abs/2309.07597"},
+        }
+    )
+    assert paper is not None
+    assert paper.arxiv_id == expected
+
+
 @pytest.mark.parametrize(
     "invalid_fields",
     [

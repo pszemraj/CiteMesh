@@ -18,7 +18,12 @@ from citemesh.core.paper_fields import (
     coerce_categories,
     coerce_venue,
 )
-from citemesh.core.paper_ids import external_ids_from_canonical_paper_id
+from citemesh.core.paper_ids import (
+    arxiv_identifier_from_doi,
+    canonicalize_or_none,
+    external_ids_from_canonical_paper_id,
+    recognize_arxiv_identifier,
+)
 from citemesh.data.cache import JSONValue
 
 logger = logging.getLogger(__name__)
@@ -296,6 +301,21 @@ def _extract_authors(raw_authors: object) -> list[Author]:
     return authors
 
 
+def _arxiv_id_from_journal(journal: object) -> str:
+    """Read an explicit arXiv volume when the provider omits its external ID."""
+    name = _payload_get(journal, "name")
+    volume = _payload_get(journal, "volume")
+    if not isinstance(name, str) or name.strip().lower() != "arxiv":
+        return ""
+    if not isinstance(volume, str) or not volume.strip().startswith("abs/"):
+        return ""
+    suffix = volume.strip().removeprefix("abs/")
+    if ":" in suffix:
+        return ""
+    identifier = recognize_arxiv_identifier(suffix, allow_bare=True)
+    return identifier.split(":", 1)[1] if identifier else ""
+
+
 def _extract_categories(*raw_candidates: object) -> list[str]:
     """Return the first usable category list from candidate payload fields.
 
@@ -353,6 +373,11 @@ def _convert_payload_paper(
         _payload_get(payload, "externalIds"),
         paper_id,
     )
+    if (
+        not arxiv_id
+        and arxiv_identifier_from_doi(canonicalize_or_none(doi) or "") is None
+    ):
+        arxiv_id = _arxiv_id_from_journal(_payload_get(payload, "journal"))
     return Paper(
         paper_id=paper_id,
         title=title,
