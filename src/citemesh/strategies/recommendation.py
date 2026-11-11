@@ -25,7 +25,6 @@ from citemesh.strategies.base import (
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
-    candidate_records_match,
     fetch_candidate_source,
     require_available_candidate_source,
     scope_candidate_collection,
@@ -129,21 +128,17 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         # which enrich the original seed object so the graph keeps its seed node.
         pool = DiscoveryPool(seed)
         for paper in recommendation_result.papers:
-            paper_id = str(paper.paper_id).strip()
-            if not paper_id:
+            if not str(paper.paper_id).strip():
                 continue
-            member_id = (
-                paper_id if paper_id in pool.papers else pool.unique_match(paper)
-            )
-            if member_id is not None:
-                if not pool.papers[member_id].references:
-                    self.reference_hydrator.ensure(paper)
-            elif paper_id != seed.paper_id and not candidate_records_match(seed, paper):
+            target_id = pool.resolve(paper)
+            if target_id is None:
                 # A new member needs text for the abstract index and a free slot.
                 if not paper.abstract or not paper.title:
                     continue
                 if len(pool.papers) + 1 >= self.max_papers:
                     continue
+                self.reference_hydrator.ensure(paper)
+            elif target_id != seed.paper_id and not pool.papers[target_id].references:
                 self.reference_hydrator.ensure(paper)
             pool.add(paper, source="recommendation", relation="semantic_only")
         papers.update(pool.papers)

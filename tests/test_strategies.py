@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -30,6 +31,7 @@ from citemesh.strategies.candidates import (
     CandidateSourceState,
     candidate_identifiers_conflict,
     candidate_records_match,
+    merge_seed_relation,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.discovery_pool import DiscoveryPool, fetch_candidate_pool
@@ -1212,6 +1214,59 @@ def test_citation_collect_sizes_relation_requests_to_open_graph_slots() -> None:
     assert set(seed_only_papers) == {"seed-only"}
     seed_only_client.get_paper_references.assert_not_called()
     seed_only_client.get_paper_citations.assert_not_called()
+
+
+def test_citation_record_reaching_a_member_by_alias_merges_into_a_full_graph() -> None:
+    """A row the pool resolves through an alias merges even with no free slot."""
+    seed = _seed_paper("seed")
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    # "b" shares a DOI with "a", so it merges into "a" and becomes an alias.
+    client.get_paper_references.return_value = [
+        replace(_paper("a"), doi="10.1000/d"),
+        replace(_paper("b"), doi="10.1000/d"),
+    ]
+    # "x" fills the last slot; "b" then returns without the DOI.
+    client.get_paper_citations.return_value = [_paper("x"), _paper("b")]
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=25,
+        max_citations=25,
+        fetch_references=False,
+        client=client,
+    )
+
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "a", "x"}
+    assert builder.seed_relations["a"] == merge_seed_relation(
+        "referenced_by_seed", "cites_seed"
+    )
+
+
+def test_recommendation_record_of_the_seed_merges_before_member_lookup() -> None:
+    """A seed record that also matches a member enriches the seed, unfetched."""
+    seed = replace(_seed_paper("seed"), arxiv_id="2001.00001")
+    member = replace(_paper("m"), doi="10.1000/d")
+    # Same arXiv ID as the seed and same DOI as the member.
+    bridge = replace(_paper("r"), arxiv_id="2001.00001", doi="10.1000/d")
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_recommended_papers.return_value = [member, bridge]
+    client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
+        [] if paper_id == "m" else [f"ref-of-{paper_id}"]
+    )
+
+    papers = RecommendationGraphBuilder(max_papers=10, client=client).collect_papers(
+        "seed"
+    )
+
+    assert set(papers) == {"seed", "m"}
+    assert [call.args[0] for call in client.get_reference_ids.call_args_list] == [
+        "seed",
+        "m",
+    ]
+    assert papers["seed"].references == ["ref-of-seed"]
 
 
 def test_citation_collect_preserves_seed_when_relation_reuses_seed_id() -> None:

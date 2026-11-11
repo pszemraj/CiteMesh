@@ -34,7 +34,6 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
     CandidateSourceState,
-    candidate_records_match,
     fetch_candidate_source,
     fetch_seed_references,
     merge_seed_relation,
@@ -133,19 +132,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 )
                 relation_iterator = progress_bar
 
-        seed = pool.seed
         for paper in relation_iterator:
-            raw_paper_id = str(paper.paper_id).strip()
-            if not raw_paper_id:
+            if not str(paper.paper_id).strip():
                 continue
-            is_new = (
-                raw_paper_id not in pool.papers
-                and raw_paper_id != seed.paper_id
-                and not candidate_records_match(seed, paper)
-                and pool.unique_match(paper) is None
-            )
-            # The seed holds one of the max_papers slots.
-            if is_new and len(pool.papers) + 1 >= self.max_papers:
+            # A new work needs a free slot; the seed holds one of max_papers.
+            if pool.resolve(paper) is None and len(pool.papers) + 1 >= self.max_papers:
                 continue
             member_id = pool.add(paper, source="citation", relation="")
             if member_id is not None:

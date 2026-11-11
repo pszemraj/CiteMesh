@@ -75,12 +75,39 @@ class DiscoveryPool:
         self._members_by_key: dict[CandidateIdentityKey, dict[str, None]] = {}
         self._keys_by_member: dict[str, tuple[CandidateIdentityKey, ...]] = {}
 
+    def resolve(self, paper: Paper) -> str | None:
+        """Name what a record joins, in the order :meth:`add` applies.
+
+        A record of the seed (same ID or a matching identifier) joins the seed.
+        Otherwise an exact member ID, then a compatible recorded alias (for
+        provider records), then a unique identifier match selects a member.
+
+        :param Paper paper: Record to reconcile, with a non-empty ID.
+        :return Optional[str]: The seed's ID for a record of the seed, the
+            joined member's ID, or ``None`` for a new work.
+        """
+        paper_id = str(paper.paper_id).strip()
+        if paper_id == self.seed.paper_id or candidate_records_match(paper, self.seed):
+            return self.seed.paper_id
+        if paper_id in self.papers:
+            return paper_id
+        if not paper.is_local_corpus:
+            alias_target = self.provider_aliases.get(paper_id)
+            if (
+                alias_target is not None
+                and alias_target in self.papers
+                and not candidate_identifiers_conflict(self.papers[alias_target], paper)
+            ):
+                return alias_target
+        return self.unique_match(paper)
+
     def add(self, incoming: Paper, *, source: str, relation: str) -> str | None:
         """Add one candidate, reconciling it with the seed and existing members.
 
-        An exact provider ID or a compatible recorded alias selects a member
-        directly. Otherwise a unique identifier match joins that member, and a
-        local-corpus record takes over the matched member's ID and evidence.
+        A record :meth:`resolve` assigns to a member merges into it, and a
+        provider record matched only by identifiers is remembered as an alias.
+        A local-corpus record matched by identifiers takes over the member's ID
+        and evidence instead.
 
         :param Paper incoming: Newly observed candidate payload.
         :param str source: Candidate source tag.
@@ -91,42 +118,27 @@ class DiscoveryPool:
         incoming_id = str(incoming.paper_id).strip()
         if not incoming_id or incoming.is_seed:
             return None
-        if incoming_id == self.seed.paper_id or candidate_records_match(
-            incoming, self.seed
-        ):
+        target_id = self.resolve(incoming)
+        if target_id == self.seed.paper_id:
             merge_paper_metadata(self.seed, incoming)
             return None
 
         canonical_id = incoming_id
-        existing = self.papers.get(incoming_id)
-        if existing is None and not incoming.is_local_corpus:
-            alias_target = self.provider_aliases.get(incoming_id)
-            if (
-                alias_target is not None
-                and alias_target in self.papers
-                and not candidate_identifiers_conflict(
-                    self.papers[alias_target], incoming
-                )
-            ):
-                canonical_id = alias_target
-                existing = self.papers[canonical_id]
-        if existing is not None:
-            self.merge(canonical_id, incoming)
+        if target_id is None:
+            self.papers[canonical_id] = incoming
+            self._index(canonical_id)
+        elif target_id == incoming_id:
+            self.merge(target_id, incoming)
+        elif incoming.is_local_corpus:
+            # The corpus record takes over; later lists can carry the matched
+            # provider ID alone, so absorb keeps it as an alias.
+            self.papers[canonical_id] = incoming
+            self._index(canonical_id)
+            self.absorb(canonical_id, target_id)
         else:
-            matched_id = self.unique_match(incoming)
-            if matched_id is None:
-                self.papers[canonical_id] = incoming
-                self._index(canonical_id)
-            elif incoming.is_local_corpus:
-                # The corpus record takes over; later lists can carry the
-                # matched provider ID alone, so absorb keeps it as an alias.
-                self.papers[canonical_id] = incoming
-                self._index(canonical_id)
-                self.absorb(canonical_id, matched_id)
-            else:
-                canonical_id = matched_id
-                self.merge(matched_id, incoming)
-                self.provider_aliases[incoming_id] = canonical_id
+            canonical_id = target_id
+            self.merge(target_id, incoming)
+            self.provider_aliases[incoming_id] = target_id
 
         self.sources.setdefault(canonical_id, set()).add(source)
         merged_relation = merge_seed_relation(

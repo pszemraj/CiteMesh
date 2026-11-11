@@ -141,6 +141,34 @@ def test_seed_records_enrich_the_seed_and_seed_role_records_are_skipped() -> Non
     assert seed.abstract == "Provider abstract"
 
 
+def test_resolve_names_the_seed_member_alias_or_nothing_in_add_order() -> None:
+    """resolve checks the seed, the exact ID, an alias, then identifiers."""
+    seed = Paper(paper_id="seed", title="Seed", year=2024, arxiv_id="2401.00001")
+    pool = DiscoveryPool(seed)
+    member = Paper(paper_id="a", title="A", year=2020, doi="10.1000/d")
+    pool.add(member, source="reference", relation="referenced_by_seed")
+    pool.add(
+        Paper(paper_id="b", title="B", year=2020, doi="10.1000/d"),
+        source="reference",
+        relation="referenced_by_seed",
+    )
+
+    # A record of the seed that also carries the member's DOI joins the seed.
+    bridge = Paper(
+        paper_id="r", title="R", year=2020, arxiv_id="2401.00001", doi="10.1000/d"
+    )
+    assert pool.resolve(bridge) == "seed"
+    assert pool.resolve(Paper(paper_id="a", title="A", year=2020)) == "a"
+    # "b" merged into "a"; without its DOI it still resolves through the alias.
+    assert pool.resolve(Paper(paper_id="b", title="B", year=2020)) == "a"
+    assert pool.resolve(Paper(paper_id="c", title="C", year=2020, doi="10.1000/D")) == (
+        "a"
+    )
+    assert pool.resolve(Paper(paper_id="n", title="N", year=2020)) is None
+    assert pool.add(bridge, source="citation", relation="cites_seed") is None
+    assert set(pool.papers) == {"a"}
+
+
 def _member(paper_id: str, year: int, refs: list[str]) -> Paper:
     """Build one titled pool member with reference IDs.
 
