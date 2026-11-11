@@ -37,12 +37,12 @@ from citemesh.strategies.candidates import (
     candidate_records_match,
     fetch_candidate_source,
     fetch_seed_references,
-    merge_paper_metadata,
     merge_seed_relation,
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
 )
+from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
@@ -150,16 +150,17 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
     def _ingest_relation_batch(
         self,
-        papers: dict[str, Paper],
-        seed: Paper,
+        pool: DiscoveryPool,
         relation_records: list[Paper],
         progress_enabled: bool,
         progress_description: str,
     ) -> list[str]:
         """Add related papers while respecting graph limits.
 
-        :param Dict[str, Paper] papers: Collected paper mapping updated in-place.
-        :param Paper seed: Canonical seed paper in ``papers``.
+        Records of the seed enrich it, records of a collected paper merge into
+        it, and a new paper joins while the graph has a free slot.
+
+        :param DiscoveryPool pool: Collected papers other than the seed.
         :param list[Paper] relation_records: Reference/citation papers from the API.
         :param bool progress_enabled: Whether to wrap records with a progress bar.
         :param str progress_description: Progress-bar description label.
@@ -180,35 +181,23 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 )
                 relation_iterator = progress_bar
 
+        seed = pool.seed
         for paper in relation_iterator:
             raw_paper_id = str(paper.paper_id).strip()
             if not raw_paper_id:
                 continue
-            if raw_paper_id == seed.paper_id or candidate_records_match(seed, paper):
-                merge_paper_metadata(seed, paper)
+            is_new = (
+                raw_paper_id not in pool.papers
+                and raw_paper_id != seed.paper_id
+                and not candidate_records_match(seed, paper)
+                and pool.unique_match(paper) is None
+            )
+            # The seed holds one of the max_papers slots.
+            if is_new and len(pool.papers) + 1 >= self.max_papers:
                 continue
-            canonical_id = raw_paper_id
-            existing = papers.get(canonical_id)
-            if existing is None:
-                matching_ids = [
-                    paper_id
-                    for paper_id, candidate in papers.items()
-                    if paper_id != seed.paper_id
-                    and candidate_records_match(candidate, paper)
-                ]
-                if len(matching_ids) == 1:
-                    canonical_id = matching_ids[0]
-                    existing = papers[canonical_id]
-            if existing is not None:
-                merge_paper_metadata(existing, paper)
-                processed_ids.append(canonical_id)
-                continue
-
-            if len(papers) >= self.max_papers:
-                continue
-
-            papers[canonical_id] = paper
-            processed_ids.append(canonical_id)
+            member_id = pool.add(paper, source="citation", relation="")
+            if member_id is not None:
+                processed_ids.append(member_id)
 
         if progress_bar is not None:
             progress_bar.close()
@@ -340,6 +329,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
+        pool = DiscoveryPool(seed)
 
         logger.debug("Seed: %s", seed.title)
 
@@ -370,8 +360,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             )
             source_results.extend(reference_results)
             reference_ids = self._ingest_relation_batch(
-                papers,
-                seed,
+                pool,
                 [paper for result in reference_results for paper in result.papers],
                 progress_enabled=show_progress,
                 progress_description="Downloading references",
@@ -391,7 +380,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 seed.references = []
 
         # Step 3: Fetch citations (newer papers)
-        remaining = self.max_papers - len(papers)
+        remaining = self.max_papers - 1 - len(pool.papers)
         citation_limit = min(
             remaining,
             self.max_citations,
@@ -408,14 +397,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             )
             source_results.append(citation_result)
             citation_ids = self._ingest_relation_batch(
-                papers,
-                seed,
+                pool,
                 list(citation_result.papers),
                 progress_enabled=show_progress,
                 progress_description="Downloading citations",
             )
             self._record_seed_relations(citation_ids, "cites_seed")
 
+        papers.update(pool.papers)
         self.candidate_source_status = {
             result.source: result.state.value for result in source_results
         }

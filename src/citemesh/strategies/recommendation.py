@@ -27,10 +27,10 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     candidate_records_match,
     fetch_candidate_source,
-    merge_paper_metadata,
     require_available_candidate_source,
     scope_candidate_collection,
 )
+from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
@@ -157,42 +157,28 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         # enrichment, whose retries share the collection's S2 recovery budget.
         self._hydrate_references(seed)
 
+        # The pool merges records of one work, including records of the seed,
+        # which enrich the original seed object so the graph keeps its seed node.
+        pool = DiscoveryPool(seed)
         for paper in recommendation_result.papers:
-            # Recommendation payloads can include the seed paper itself.
-            # Preserve the original seed object so GraphBuilderStrategy can always
-            # identify a node with ``is_seed=True``.
             paper_id = str(paper.paper_id).strip()
             if not paper_id:
                 continue
-            if paper_id == seed.paper_id or candidate_records_match(seed, paper):
-                merge_paper_metadata(seed, paper)
-                continue
-            canonical_id = paper_id
-            existing = papers.get(canonical_id)
-            if existing is None:
-                matching_ids = [
-                    candidate_id
-                    for candidate_id, candidate in papers.items()
-                    if candidate_id != seed.paper_id
-                    and candidate_records_match(candidate, paper)
-                ]
-                if len(matching_ids) == 1:
-                    canonical_id = matching_ids[0]
-                    existing = papers[canonical_id]
-            if existing is not None:
-                if not existing.references:
+            member_id = (
+                paper_id if paper_id in pool.papers else pool.unique_match(paper)
+            )
+            if member_id is not None:
+                if not pool.papers[member_id].references:
                     self._hydrate_references(paper)
-                merge_paper_metadata(existing, paper)
-                continue
-
-            if not paper.abstract or not paper.title:
-                continue
-
-            if len(papers) >= self.max_papers:
-                continue
-
-            self._hydrate_references(paper)
-            papers[canonical_id] = paper
+            elif paper_id != seed.paper_id and not candidate_records_match(seed, paper):
+                # A new member needs text for the abstract index and a free slot.
+                if not paper.abstract or not paper.title:
+                    continue
+                if len(pool.papers) + 1 >= self.max_papers:
+                    continue
+                self._hydrate_references(paper)
+            pool.add(paper, source="recommendation", relation="semantic_only")
+        papers.update(pool.papers)
 
         self._abstract_index.build(papers)
         self._set_collection_summary(
