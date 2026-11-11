@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from contextlib import nullcontext
 from unittest.mock import MagicMock, call
 
-import numpy as np
 import pytest
 
 from citemesh.core import Paper
@@ -24,13 +22,13 @@ from citemesh.services.semantic_scholar.disk_cache import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
-    annotate_verified_seed_references,
     fetch_candidate_pool,
     fetch_seed_references,
     require_available_candidate_source,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
+from tests._helpers import offline_hybrid_encoder, stub_hybrid_corpus
 
 
 @pytest.fixture
@@ -71,15 +69,13 @@ def paper(identifier: str, **kwargs: object) -> Paper:
 
 
 @pytest.mark.parametrize("limit", [0, 2, 105])
-@pytest.mark.parametrize("semantic", [False, True])
 def test_successful_s2_or_disabled_discovery_never_fetches_html(
-    providers: tuple, limit: int, semantic: bool
+    providers: tuple, limit: int
 ) -> None:
     """Usable S2 references and disabled discovery bypass the fallback.
 
     :param tuple providers: Mock services.
     :param int limit: Disabled or positive source limit.
-    :param bool semantic: Enable selection from a wider provider response.
     :return None: Checks provider calls.
     """
     client, bibliography, metadata = providers
@@ -91,23 +87,20 @@ def test_successful_s2_or_disabled_discovery_never_fetches_html(
         paper("arxiv:2608.27147"),
         limit,
         local_bibliography_lookup=title_lookup,
-        s2_reference_selector=selector if semantic else None,
+        reference_selector=selector,
     )
     title_lookup.assert_not_called()
     bibliography.assert_not_called()
     metadata.assert_not_called()
+    selector.assert_not_called()
     if limit:
         assert results[0].papers[0].paper_id == "reference"
         client.get_paper_references.assert_called_once_with(
-            "arxiv:2608.27147",
-            limit=max(limit, 100) if semantic else limit,
-            raise_on_unavailable=True,
+            "arxiv:2608.27147", limit=limit, raise_on_unavailable=True
         )
-        assert selector.call_count == int(semantic)
     else:
         assert results == ()
         client.get_paper_references.assert_not_called()
-        selector.assert_not_called()
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -133,7 +126,6 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
     ]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
     title_lookup = MagicMock(return_value={})
-    s2_selector = MagicMock()
     with caplog.at_level(logging.DEBUG):
         results = fetch_seed_references(
             client,
@@ -141,11 +133,9 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
             2,
             seed_identifier="arxiv:2608.27147v1",
             local_bibliography_lookup=title_lookup,
-            s2_reference_selector=s2_selector,
         )
         require_available_candidate_source(results, context="test")
     assert title_lookup.call_count == int(not failed)
-    s2_selector.assert_not_called()
     bibliography.assert_called_once_with("2608.27147v1")
     assert [result.state.value for result in results] == [
         "unavailable" if failed else "empty",
@@ -313,7 +303,6 @@ def test_title_recovery_appends_local_matches_before_reference_cap(
     selector.assert_called_once_with(seed, [explicit, first, second], 1)
     assert explicit.citation_count == 99
     assert results[-1].papers == (second,)
-    assert results[-1].verified_references == (explicit, first, second)
     client.get_papers.assert_called_once_with([explicit_id], raise_on_unavailable=True)
     client.get_cached_papers.assert_not_called()
     metadata.assert_not_called()
@@ -337,7 +326,7 @@ def test_title_lookup_does_not_replace_unresolved_explicit_id(providers: tuple) 
     client.get_papers.assert_called_once_with([identifier], raise_on_unavailable=True)
     metadata.assert_called_once_with([identifier])
     title_lookup.assert_not_called()
-    assert not results[-1].verified_references
+    assert results[-1].papers == ()
 
 
 @pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
@@ -354,14 +343,15 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
         max_papers=3,
         max_references=1,
         max_citations=0,
-        max_semantic=1,
         fetch_references=False,
         semantic_source=semantic_source,
         corpus_size=20,
         client=client,
     )
     engine = builder.embedding_builder
-    assert engine is not None
+    stub_hybrid_corpus(builder, seed=seed)
+    offline_hybrid_encoder(monkeypatch, builder)
+    del engine.cached_bibliography_metadata
     engine._cache_selection = MagicMock()
     engine.embedding_cache = MagicMock()
     title_lookup = engine.embedding_cache.get_paper_metadata_for_bibliography
@@ -375,15 +365,6 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
             "arxiv_id": "2210.00001",
         }
     }
-    monkeypatch.setattr(engine, "_corpus_operation_lock", nullcontext)
-    monkeypatch.setattr(engine, "_prepare_corpus_for_build", MagicMock())
-    monkeypatch.setattr(
-        engine, "resolve_cached_corpus_seed", MagicMock(return_value=seed)
-    )
-    monkeypatch.setattr(engine, "enrich_cached_corpus_seed", MagicMock())
-    monkeypatch.setattr(engine, "collect_papers", MagicMock(return_value={}))
-    monkeypatch.setattr(builder, "_rank_candidates", lambda _, papers, __: list(papers))
-
     selected = builder.collect_papers(seed.paper_id)
 
     title_lookup.assert_called_once_with([key], corpus_size=20)
@@ -391,6 +372,10 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
     assert selected[reference_id].is_local_corpus
     assert builder.seed_relations[reference_id] == "referenced_by_seed"
     assert builder.paper_sources[reference_id] == "citation"
+    # Recovery resolved the entry locally; the selected row is enriched afterwards.
+    engine._enrich_corpus_papers.assert_called_once_with(
+        {reference_id: selected[reference_id]}
+    )
     client.get_papers.assert_not_called()
     metadata.assert_not_called()
 
@@ -528,47 +513,10 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
     metadata.assert_called_once()
 
 
-def test_references_beyond_admission_limit_label_existing_candidates(
-    providers: tuple,
-) -> None:
-    """A capped reference can still establish a selected paper's seed relation."""
-    client, bibliography, metadata = providers
-    admitted = paper("arxiv:1706.03762")
-    omitted = paper("arxiv:2303.08774")
-    ambiguous = paper("arxiv:2401.12345")
-    bibliography.return_value = [
-        BibliographyEntry((ref.paper_id,)) for ref in (admitted, omitted, ambiguous)
-    ]
-    metadata.return_value = {
-        ref.paper_id: ref for ref in (admitted, omitted, ambiguous)
-    }
-    results = fetch_seed_references(
-        client,
-        paper("arxiv:2608.27147"),
-        1,
-        reference_selector=lambda _seed, recovered, limit: list(recovered[:limit]),
-    )
-    assert results[-1].papers == (admitted,)
-    assert results[-1].verified_references == (admitted, omitted, ambiguous)
-
-    candidates = {
-        "semantic": paper("semantic", arxiv_id="2303.08774"),
-        "local-a": paper("local-a", arxiv_id="2401.12345", is_local_corpus=True),
-        "local-b": paper("local-b", arxiv_id="2401.12345", is_local_corpus=True),
-    }
-    relations = dict.fromkeys(candidates, "semantic_only")
-    annotate_verified_seed_references(candidates, results, relations)
-    assert relations == {
-        "semantic": "referenced_by_seed",
-        "local-a": "semantic_only",
-        "local-b": "semantic_only",
-    }
-
-
-def test_hybrid_reference_evidence_does_not_consume_a_citation_slot(
+def test_hybrid_recommended_reference_keeps_reference_evidence(
     providers: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A confirmed relation leaves the candidate's semantic budget intact."""
+    """A recommendation of a recovered reference is one member with both tags."""
     client, bibliography, metadata = providers
     seed = paper("arxiv:2608.27147")
     admitted = paper("arxiv:1706.03762")
@@ -585,43 +533,40 @@ def test_hybrid_reference_evidence_does_not_consume_a_citation_slot(
     client.get_recommended_papers.return_value = [rediscovered, unrelated]
     builder = HybridGraphBuilder(
         max_papers=3,
-        max_references=1,
         max_citations=0,
-        max_semantic=1,
         fetch_references=False,
         client=client,
     )
-    assert builder.embedding_builder is not None
     title_lookup = MagicMock()
     monkeypatch.setattr(
         builder.embedding_builder, "cached_bibliography_metadata", title_lookup
     )
-    monkeypatch.setattr(builder.embedding_builder, "_load_model", MagicMock())
-    monkeypatch.setattr(
-        builder,
-        "_select_recovered_references_by_embedding",
-        lambda _seed, recovered, limit: list(recovered[:limit]),
-    )
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda *_: [rediscovered.paper_id, unrelated.paper_id, admitted.paper_id],
-    )
+    offline_hybrid_encoder(monkeypatch, builder)
 
-    assert list(builder.collect_papers(seed.paper_id)) == [
-        seed.paper_id,
-        rediscovered.paper_id,
+    papers = builder.collect_papers(seed.paper_id)
+
+    pool = builder.discovery_pool
+    assert pool is not None
+    assert set(pool.papers) == {
         admitted.paper_id,
-    ]
-    assert builder.paper_sources[rediscovered.paper_id] == "semantic"
-    assert builder.seed_relations[rediscovered.paper_id] == "referenced_by_seed"
+        omitted.paper_id,
+        unrelated.paper_id,
+    }
+    assert len(papers) == 3
+    assert pool.sources[omitted.paper_id] == {"citation", "semantic"}
+    assert pool.provider_aliases == {rediscovered.paper_id: omitted.paper_id}
+    assert pool.source_ranks[omitted.paper_id] == {
+        "arxiv_references": 2,
+        "recommendations": 1,
+    }
+    assert builder.seed_relations[omitted.paper_id] == "referenced_by_seed"
     title_lookup.assert_not_called()
 
 
-def test_hybrid_admits_healthy_references_by_composite_with_provider_ranks(
+def test_hybrid_ranks_every_provider_reference_at_its_first_position(
     providers: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The provider cap, admission cap, and reference evidence remain separate."""
+    """The full provider list joins the pool; duplicates keep their first rank."""
     client, bibliography, _ = providers
     seed = paper("arxiv:2608.27147", references=["shared"])
     seed_alias = paper("seed-alias", arxiv_id="2608.27147")
@@ -641,52 +586,36 @@ def test_hybrid_admits_healthy_references_by_composite_with_provider_ranks(
     client.get_recommended_papers.return_value = [rediscovered]
     builder = HybridGraphBuilder(
         max_papers=3,
-        max_references=1,
-        max_citations=0,
-        max_semantic=1,
         semantic_source="both",
         fetch_references=False,
         client=client,
     )
-    engine = builder.embedding_builder
-    assert engine is not None
-    monkeypatch.setattr(engine, "_corpus_operation_lock", nullcontext)
-    monkeypatch.setattr(engine, "_prepare_corpus_for_build", MagicMock())
-    monkeypatch.setattr(
-        engine, "resolve_cached_corpus_seed", MagicMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        engine,
-        "collect_papers",
-        lambda _, **kwargs: {seed.paper_id: kwargs["seed_paper"]},
-    )
-
-    def embed(seed_paper: Paper, candidates: dict[str, Paper]) -> np.ndarray:
-        vector = np.array([1.0, 0.0], dtype=np.float32)
-        engine.retrieval_embeddings.update(dict.fromkeys(candidates, vector))
-        engine.retrieval_embeddings[seed_paper.paper_id] = vector
-        return vector
-
-    monkeypatch.setattr(builder, "_ensure_candidate_embeddings", embed)
+    stub_hybrid_corpus(builder)
+    offline_hybrid_encoder(monkeypatch, builder)
 
     papers = builder.collect_papers(seed.paper_id)
 
-    assert set(papers) == {seed.paper_id, admitted.paper_id, rediscovered.paper_id}
+    assert set(papers) == {seed.paper_id, skipped.paper_id, admitted.paper_id}
     assert papers[admitted.paper_id].references == ["different"]
-    assert skipped.references == ["shared"]
-    assert builder.paper_sources[rediscovered.paper_id] == "semantic"
-    assert builder.seed_relations[rediscovered.paper_id] == "referenced_by_seed"
+    assert builder.paper_sources == {
+        seed.paper_id: "citation",
+        skipped.paper_id: "both",
+        admitted.paper_id: "citation",
+    }
+    assert builder.seed_relations[skipped.paper_id] == "referenced_by_seed"
     assert builder.discovery_pool is not None
     assert builder.discovery_pool.source_ranks == {
+        skipped.paper_id: {"references": 2, "recommendations": 1},
         admitted.paper_id: {"references": 4},
-        rediscovered.paper_id: {"recommendations": 1},
     }
-    result = builder.citation_builder.candidate_source_results[0]
-    assert result.papers == (admitted,)
-    assert result.verified_references == (skipped, admitted)
-    assert result.source_ranks == {skipped.paper_id: 2, admitted.paper_id: 4}
+    assert builder.candidate_source_status == {
+        "references": "complete",
+        "citations": "empty",
+        "recommendations": "complete",
+        "arxiv_corpus": "empty",
+    }
     client.get_paper_references.assert_called_once_with(
-        seed.paper_id, limit=100, raise_on_unavailable=True
+        seed.paper_id, limit=1000, raise_on_unavailable=True
     )
     client.get_reference_ids.assert_not_called()
     bibliography.assert_not_called()

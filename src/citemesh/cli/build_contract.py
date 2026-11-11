@@ -22,13 +22,11 @@ from .build_options import (
     _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS,
     _CORPUS_ONLY_OPTION_DESTS,
     _CORPUS_SEMANTIC_SOURCES,
-    _HYBRID_EMBEDDING_OPTION_DESTS,
     _STRATEGY_DISPATCH,
     _apply_hybrid_default_overrides,
     _build_option_label,
     _embedding_branch_enabled,
     _normalized_cache_reason,
-    _resolved_hybrid_max_semantic,
 )
 from .cache_ops import _embedding_cache_directory_stats
 from .console import logger
@@ -339,7 +337,7 @@ def _validate_semantic_source_options(
             )
     elif args.semantic_source == "arxiv-corpus" and provided_candidate_flags:
         context.fail(
-            f"--candidate-pool-size requires --semantic-source candidates{combined_choice}.",
+            "--candidate-pool-size requires --semantic-source candidates.",
             related_dests={"semantic_source"},
         )
 
@@ -454,44 +452,6 @@ def _validate_storage_precision_options(context: _BuildContractContext) -> None:
     args.calibration_sample_size = EMBEDDING_STORAGE_CONFIG.calibration_sample_size
 
 
-def _validate_hybrid_semantic_budget(context: _BuildContractContext) -> None:
-    """Check the hybrid semantic budget and reject options it would silently ignore.
-
-    :param _BuildContractContext context: Shared validation inputs.
-    :return None: Returns when the hybrid budget and options agree.
-    """
-    args = context.args
-    if args.max_semantic is not None and int(args.max_semantic) >= int(args.max_papers):
-        context.fail(
-            "--max-semantic must be between 0 and --max-papers - 1 for hybrid.",
-            related_dests={"max_papers", "max_semantic"},
-        )
-    if _resolved_hybrid_max_semantic(args) != 0:
-        return
-
-    ignored_embedding_options = context.provided_labels(_HYBRID_EMBEDDING_OPTION_DESTS)
-    if not ignored_embedding_options:
-        return
-    option_text = ", ".join(ignored_embedding_options)
-    if args.max_semantic is None:
-        message = (
-            "Hybrid semantic branch is disabled (effective --max-semantic "
-            "is 0 from --max-papers defaulting); remove embedding-only "
-            f"option(s): {option_text}."
-        )
-    elif "max_semantic" in context.config_defaults:
-        message = (
-            "Hybrid semantic branch is disabled by defaults.max_semantic=0; "
-            f"remove embedding-only option(s): {option_text}."
-        )
-    else:
-        message = (
-            "Hybrid semantic branch is disabled with --max-semantic 0; "
-            f"remove embedding-only option(s): {option_text}."
-        )
-    context.fail(message, related_dests={"max_semantic", "max_papers"})
-
-
 def _validate_build_cli_contract(
     args: argparse.Namespace,
     build_parser: _ParserErrorSink,
@@ -503,8 +463,7 @@ def _validate_build_cli_contract(
 
     Checks run in a fixed order so the first error reported for any given argv
     is stable: strategy scope, then semantic-source implication and its option
-    gates, then streaming, cache, device, compression, and storage precision,
-    and finally the hybrid budget.
+    gates, then streaming, cache, device, compression, and storage precision.
 
     :param argparse.Namespace args: Parsed build arguments.
     :param _ParserErrorSink build_parser: Parser-like validation error sink.
@@ -539,9 +498,6 @@ def _validate_build_cli_contract(
         _validate_embedding_device(context)
         _normalize_cache_compression(context)
         _validate_storage_precision_options(context)
-
-    if context.strategy == "hybrid":
-        _validate_hybrid_semantic_budget(context)
 
 
 def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
@@ -590,18 +546,16 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             args.storage_precision,
             int(args.encode_batch_size),
         )
-        if args.semantic_source == "both":
-            logger.debug(
-                "Recommendation candidate pool limit: %s.", args.candidate_pool_size
-            )
     else:
         logger.debug(
-            "Embedding config: model=%s@%s device=%s source=%s pool=%s storage=%s encode_batch=%s.",
+            "Embedding config: model=%s@%s device=%s source=%s%s storage=%s encode_batch=%s.",
             args.model,
             revision_label,
             args.device,
             args.semantic_source,
-            int(args.candidate_pool_size),
+            f" pool={int(args.candidate_pool_size)}"
+            if args.strategy == "embedding"
+            else "",
             args.storage_precision,
             int(args.encode_batch_size),
         )

@@ -221,14 +221,17 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
     """
 
     def _search_cache_candidates(
-        self, seed_embedding: NDArray[np.float32]
+        self, seed_embedding: NDArray[np.float32], top_k: int | None = None
     ) -> list[tuple[str, CachedPaperMetadata, NDArray[np.float32]]]:
         """Run cache-native retrieval and map results to candidate tuples.
 
         :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
+        :param int | None top_k: Rows to return; defaults to a multiple of
+            ``max_papers``.
         :return List[Tuple[str, CachedPaperMetadata, NDArray[np.float32]]]: Candidates by score.
         """
-        top_k = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
+        if top_k is None:
+            top_k = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         search_results = self.embedding_cache.search(
             query_embedding=np.asarray(seed_embedding, dtype=np.float32),
             top_k=top_k,

@@ -1,17 +1,23 @@
 """
 Hybrid graph building strategy.
 
-Combines citation relationships with semantic similarity for
-comprehensive paper discovery.
+Discovery pools every reference and citer that Semantic Scholar returns for
+the seed, 200 of its recommendations (``candidates`` and ``both``) and, with a
+local corpus (``arxiv-corpus`` and ``both``), the seed's nearest corpus rows in
+the retrieval-query and retrieval-document roles. The deduplicated pool is
+ranked by reciprocal rank fusion (:mod:`citemesh.strategies.discovery_ranking`)
+and the best ``max_papers - 1`` papers join the seed. Graph edges between them
+combine embedding similarity with bibliographic coupling, weighted by whether
+each paper came from citations, semantic search or both.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from contextlib import nullcontext
 from dataclasses import replace
-from functools import partial
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,7 +34,7 @@ from citemesh.core import (
     Paper,
 )
 from citemesh.core.choices import HYBRID_SEMANTIC_SOURCE_CHOICES
-from citemesh.core.paper_ids import is_local_corpus_paper_id
+from citemesh.core.paper_ids import is_local_corpus_paper_id, normalize_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_contract import ExistingCacheSelection
@@ -37,24 +43,26 @@ from citemesh.strategies.base import (
     GraphBuilderStrategy,
     GraphCollectionOptions,
     build_capped_undirected_graph,
-    deterministic_sort_key,
     validate_embedding_vectors,
 )
 from citemesh.strategies.candidates import (
-    DEFAULT_CANDIDATE_POOL_SIZE,
-    CandidateAcquisitionError,
     CandidateSourceResult,
     CandidateSourceState,
-    annotate_verified_seed_references,
+    candidate_identity_keys,
     candidate_records_match,
     fetch_candidate_source,
+    fetch_seed_references,
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
-    select_recovered_references_by_score,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.discovery_ranking import (
+    DiscoveryCandidate,
+    RankedCandidate,
+    rank_candidates,
+)
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
@@ -70,13 +78,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 HYBRID_DEFAULT_MAX_PAPERS = 45
-HYBRID_DEFAULT_MAX_CITATIONS = 45
-HYBRID_DEFAULT_MAX_REFERENCES = 12
-DEFAULT_MAX_SEMANTIC = 20
-HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER = 3
-HYBRID_SEED_RERANK_WEIGHTS = (0.62, 0.16, 0.14, 0.08)
-HYBRID_SOURCE_OVERLAP_BONUS = 0.10
-HYBRID_CITATION_SOURCE_BONUS = 0.02
+HYBRID_DEFAULT_MAX_CITATIONS = 1000
+HYBRID_DEFAULT_MAX_REFERENCES = 1000
+HYBRID_RECOMMENDATION_LIMIT = 200
+HYBRID_CORPUS_NEIGHBOURS = 180
+_REFERENCE_RELATIONS = frozenset({"referenced_by_seed", "overlap"})
+_CITER_RELATIONS = frozenset({"cites_seed", "overlap"})
+# Provider candidates are encoded references first, then recommendations, then
+# citers; each group in provider order.
+_ENCODING_ORDER = (
+    ("references", "arxiv_references"),
+    ("recommendations",),
+    ("citations",),
+)
 
 
 class EmbeddingInferenceError(RuntimeError):
@@ -89,10 +103,10 @@ def require_complete_embeddings(
     candidate_ids: list[str],
     embeddings: dict[str, NDArray[np.float32]],
 ) -> NDArray[np.float32]:
-    """Validate that hybrid reranking has one usable vector per required paper.
+    """Validate that hybrid ranking has one usable vector per required paper.
 
     :param str seed_id: Seed paper identifier.
-    :param List[str] candidate_ids: Candidate identifiers admitted to reranking.
+    :param List[str] candidate_ids: Candidate identifiers admitted to ranking.
     :param Dict[str, NDArray[np.float32]] embeddings: Materialized float32 vectors.
     :return NDArray[np.float32]: Validated seed embedding.
     :raises EmbeddingInferenceError: If vectors are missing, malformed, non-finite,
@@ -109,14 +123,7 @@ def require_complete_embeddings(
 
 
 class HybridGraphBuilder(GraphBuilderStrategy):
-    """
-    Hybrid strategy combining citations and embeddings.
-
-    This strategy:
-    1. Collects papers via citations (ground truth relationships)
-    2. Enriches with semantically similar papers from corpus
-    3. Uses adaptive similarity computation based on relationship type
-    """
+    """Rank a wide citation and semantic candidate pool, then score edges."""
 
     strategy_name = "hybrid"
 
@@ -127,7 +134,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_references: int = HYBRID_DEFAULT_MAX_REFERENCES,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        max_semantic: int | None = None,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_profile: str = "auto",
         model_revision: str | None = None,
@@ -147,7 +153,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         enable_torch_compile: bool = False,
         device: str | None = None,
         semantic_source: str = "candidates",
-        candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: SemanticScholarClient | None = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
@@ -156,15 +161,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         Initialize hybrid graph builder.
 
-        :param int max_papers: Maximum total papers
-        :param int max_citations: Maximum citing papers from S2
-        :param int max_references: Maximum referenced papers from S2
-        :param bool fetch_references: Whether citation branch fetches reference lists.
-        :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
-        :param Optional[int] max_semantic: Hard cap on semantic-only papers.
-            Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
-            If omitted, the first pass uses ``min(20, max_papers - 1)`` and
-            skipped semantic-only papers can fill vacant slots afterward.
+        :param int max_papers: Maximum total papers, including the seed.
+        :param int max_citations: Provider fetch limit for citing papers.
+        :param int max_references: Provider fetch limit for referenced papers.
+        :param bool fetch_references: Whether selected papers' reference lists are
+            fetched for bibliographic coupling.
+        :param bool refresh_reference_cache: Whether reference lookups bypass
+            persisted cache reads.
         :param str model_name: Embedding model name
         :param str model_profile: Model task/runtime profile override.
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
@@ -179,27 +182,25 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param force_rebuild_reason: Optional message recorded when
             ``force_rebuild_cache`` clears embedding namespace state.
         :param str storage_precision: Persistent cache precision for semantic branch embeddings.
-        :param Optional[bool] binary_prefilter: Whether semantic branch uses binary
+        :param Optional[bool] binary_prefilter: Whether corpus search uses binary
             prefiltering. When ``None``, defaults are selected by embedding precision.
         :param Optional[int] binary_rescore_multiplier: Candidate oversampling factor
-            for semantic branch search. When ``None``, defaults are selected by
+            for corpus search. When ``None``, defaults are selected by
             embedding precision.
         :param int calibration_sample_size: Calibration sample size for int8 storage ranges.
         :param str cache_compression: HDF5 compression filter for semantic branch cache.
         :param int cache_compression_level: HDF5 compression level for semantic branch cache.
-        :param int encode_batch_size: Batch size used for semantic branch embedding encodes.
-        :param bool enable_torch_compile: Whether semantic branch may use
+        :param int encode_batch_size: Batch size used for embedding encodes.
+        :param bool enable_torch_compile: Whether the embedding runtime may use
             best-effort inner-model ``torch.compile`` optimization.
-        :param Optional[str] device: Requested compute device token for the
-            semantic branch (``auto``/``cuda``/``mps``/``cpu``).
-        :param str semantic_source: Semantic candidate sourcing mode:
-            ``candidates`` (default; S2 recommendations, no local corpus) or
-            ``arxiv-corpus`` (hydrated arXiv corpus search), or ``both`` (corpus
-            search plus S2's all-cs recommendations).
-        :param int candidate_pool_size: Maximum S2 recommendation pool size in
-            ``candidates`` and ``both`` modes.
+        :param Optional[str] device: Requested compute device token
+            (``auto``/``cuda``/``mps``/``cpu``).
+        :param str semantic_source: ``candidates`` (default; references, citers
+            and S2 recommendations), ``arxiv-corpus`` (references, citers and
+            local corpus neighbours) or ``both`` (all of them).
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         :param cache_selection: Existing corpus cache selected for semantic retrieval.
+        :raises ValueError: If a fetch limit is negative or the source is unknown.
         """
         normalized_semantic_source = str(semantic_source).strip().lower()
         if cache_selection is not None and normalized_semantic_source != "both":
@@ -207,462 +208,60 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if normalized_semantic_source not in HYBRID_SEMANTIC_SOURCE_CHOICES:
             formatted = ", ".join(HYBRID_SEMANTIC_SOURCE_CHOICES)
             raise ValueError(f"semantic_source must be one of: {formatted}")
-
-        if max_semantic is None:
-            resolved_max_semantic = max(0, min(DEFAULT_MAX_SEMANTIC, max_papers - 1))
-        else:
-            resolved_max_semantic = max_semantic
-
-        if resolved_max_semantic < 0:
-            raise ValueError("max_semantic must be non-negative")
-        if resolved_max_semantic >= max_papers:
-            raise ValueError(
-                "max_semantic must be between 0 and max_papers - 1 "
-                f"(got max_semantic={resolved_max_semantic}, max_papers={max_papers})"
-            )
+        if max_citations < 0 or max_references < 0:
+            raise ValueError("max_citations and max_references must be non-negative")
 
         super().__init__(max_papers)
         self.client = client or get_client()
-        self.max_semantic = resolved_max_semantic
-        self._fill_semantic_vacancies = max_semantic is None
+        self.max_citations = int(max_citations)
+        self.max_references = int(max_references)
         self.semantic_source = normalized_semantic_source
         self._uses_corpus = normalized_semantic_source != "candidates"
-        self._semantic_candidate_cap = 0
 
-        if self.max_semantic > 0:
-            _check_embedding_deps(
-                require_corpus=self._uses_corpus and cache_selection is None
-            )
-            self._semantic_candidate_cap = max(
-                self.max_semantic,
-                min(
-                    max_papers - 1,
-                    self.max_semantic * HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER,
-                ),
-            )
-            self.embedding_builder: EmbeddingGraphBuilder | None = (
-                EmbeddingGraphBuilder(
-                    # Embedding strategy budgets include the seed node; hybrid's
-                    # max_semantic contract counts only added non-seed neighbors.
-                    max_papers=self._semantic_candidate_cap + 1,
-                    model_name=model_name,
-                    model_profile=model_profile,
-                    model_revision=model_revision,
-                    dataset_source=dataset_source,
-                    dataset_split=dataset_split,
-                    corpus_size=corpus_size,
-                    truncate_dim=truncate_dim,
-                    min_semantic_similarity=min_semantic_similarity,
-                    use_streaming=use_streaming,
-                    force_rebuild_cache=force_rebuild_cache,
-                    force_rebuild_reason=force_rebuild_reason,
-                    storage_precision=storage_precision,
-                    binary_prefilter=binary_prefilter,
-                    binary_rescore_multiplier=binary_rescore_multiplier,
-                    calibration_sample_size=calibration_sample_size,
-                    cache_compression=cache_compression,
-                    cache_compression_level=cache_compression_level,
-                    encode_batch_size=encode_batch_size,
-                    enable_torch_compile=enable_torch_compile,
-                    device=device,
-                    semantic_source=(
-                        "arxiv-corpus" if self._uses_corpus else "candidates"
-                    ),
-                    candidate_pool_size=candidate_pool_size,
-                    client=self.client,
-                    cache_selection=cache_selection,
-                )
-            )
-        else:
-            self.embedding_builder = None
-
-        citation_candidates = (
-            max_papers
-            if self.max_semantic <= 0
-            else 1 + int(max_references) + int(max_citations)
+        _check_embedding_deps(
+            require_corpus=self._uses_corpus and cache_selection is None
         )
-
-        self.citation_builder = CitationGraphBuilder(
-            max_papers=citation_candidates,
-            max_citations=max_citations,
-            max_references=max_references,
+        self.embedding_builder = EmbeddingGraphBuilder(
+            max_papers=max_papers,
+            model_name=model_name,
+            model_profile=model_profile,
+            model_revision=model_revision,
+            dataset_source=dataset_source,
+            dataset_split=dataset_split,
+            corpus_size=corpus_size,
+            truncate_dim=truncate_dim,
+            min_semantic_similarity=min_semantic_similarity,
+            use_streaming=use_streaming,
+            force_rebuild_cache=force_rebuild_cache,
+            force_rebuild_reason=force_rebuild_reason,
+            storage_precision=storage_precision,
+            binary_prefilter=binary_prefilter,
+            binary_rescore_multiplier=binary_rescore_multiplier,
+            calibration_sample_size=calibration_sample_size,
+            cache_compression=cache_compression,
+            cache_compression_level=cache_compression_level,
+            encode_batch_size=encode_batch_size,
+            enable_torch_compile=enable_torch_compile,
+            device=device,
+            semantic_source="arxiv-corpus" if self._uses_corpus else "candidates",
+            client=self.client,
+            cache_selection=cache_selection,
+        )
+        # Fetches the selected papers' reference lists for bibliographic coupling.
+        self.reference_hydrator = CitationGraphBuilder(
+            max_papers=max_papers,
+            max_citations=0,
+            max_references=0,
             fetch_references=fetch_references,
             refresh_reference_cache=refresh_reference_cache,
             client=self.client,
         )
 
-        # Track paper sources for adaptive similarity
         self.paper_sources: dict[str, str] = {}  # paper_id -> citation|semantic|both
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self.discovery_pool: DiscoveryPool | None = None
-
-    def _embed_candidates(
-        self,
-        candidate_ids: list[str],
-        candidates: dict[str, Paper],
-        embeddings_map: dict[str, NDArray[np.float32]],
-    ) -> None:
-        """Embed rerank candidates for seed-relevance scoring.
-
-        Candidate mode persists vectors through the embedding cache (its
-        namespace is candidate-scoped). Corpus mode encodes in memory only, so
-        S2 candidate rows never distort corpus-hydration row counts.
-
-        :param List[str] candidate_ids: Candidate IDs needing embeddings.
-        :param Dict[str, Paper] candidates: Candidate paper payloads.
-        :param Dict[str, NDArray[np.float32]] embeddings_map: In-memory float32 vectors to update.
-        :return None: Mutates ``embeddings_map`` in place.
-        :raises EmbeddingInferenceError: If candidate embeddings cannot be completed.
-        """
-        if not candidate_ids or self.embedding_builder is None:
-            return
-
-        if not self._uses_corpus:
-            subset = {
-                paper_id: candidates[paper_id]
-                for paper_id in candidate_ids
-                if paper_id in candidates
-            }
-            if not subset:
-                return
-            try:
-                encoded_map = self.embedding_builder.embed_papers(subset)
-            except Exception as exc:
-                raise EmbeddingInferenceError(
-                    "Hybrid candidate embedding failed during semantic reranking: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-            embeddings_map.update(encoded_map)
-            return
-
-        model_profile = getattr(self.embedding_builder, "model_profile", None)
-        encode_texts = getattr(self.embedding_builder, "_encode_texts", None)
-        if model_profile is None or not callable(
-            getattr(model_profile, "format_document", None)
-        ):
-            raise EmbeddingInferenceError(
-                "Hybrid semantic reranking has no document formatter."
-            )
-        if not callable(encode_texts):
-            raise EmbeddingInferenceError(
-                "Hybrid semantic reranking has no embedding encoder."
-            )
-
-        texts: list[str] = []
-        ordered_candidate_ids: list[str] = []
-        for paper_id in candidate_ids:
-            paper = candidates.get(paper_id)
-            if paper is None:
-                continue
-
-            document_text = format_paper_for_embedding(
-                profile=model_profile,
-                paper=paper,
-                task=EmbeddingTask.RETRIEVAL_DOCUMENT,
-            ).strip()
-            texts.append(document_text)
-            ordered_candidate_ids.append(paper_id)
-
-        if not ordered_candidate_ids:
-            return
-
-        batch_size = min(
-            int(getattr(self.embedding_builder, "encode_batch_size", 32)),
-            len(ordered_candidate_ids),
-        )
-        try:
-            encoded = encode_texts(
-                texts,
-                batch_size=batch_size,
-                show_progress_bar=False,
-            )
-        except Exception as exc:
-            raise EmbeddingInferenceError(
-                "Hybrid in-memory candidate embedding failed during semantic "
-                f"reranking: {type(exc).__name__}: {exc}"
-            ) from exc
-
-        encoded_array = np.asarray(encoded, dtype=np.float32)
-        if encoded_array.ndim == 1:
-            encoded_array = encoded_array.reshape(1, -1)
-        if encoded_array.shape[0] != len(ordered_candidate_ids):
-            raise EmbeddingInferenceError(
-                "Hybrid candidate encoding returned "
-                f"{int(encoded_array.shape[0])} row(s) for "
-                f"{len(ordered_candidate_ids)} candidate(s)."
-            )
-
-        for idx, paper_id in enumerate(ordered_candidate_ids):
-            embeddings_map[paper_id] = encoded_array[idx]
-
-    def _ensure_candidate_embeddings(
-        self, seed_paper: Paper, candidates: dict[str, Paper]
-    ) -> NDArray[np.float32] | None:
-        """Ensure seed/candidate embeddings are materialized for reranking.
-
-        :param Paper seed_paper: Seed paper.
-        :param Dict[str, Paper] candidates: Candidate paper pool.
-        :return Optional[NDArray[np.float32]]: Seed embedding, or ``None`` when semantic
-            reranking is disabled.
-        :raises EmbeddingInferenceError: If required semantic vectors cannot be
-            materialized or validated.
-        """
-        if self.embedding_builder is None:
-            return None
-
-        embeddings_map = getattr(self.embedding_builder, "retrieval_embeddings", None)
-        if not isinstance(embeddings_map, dict):
-            return None
-
-        if embeddings_map.get(seed_paper.paper_id) is None:
-            try:
-                self.embedding_builder._encode_seed_embedding(seed_paper)
-            except Exception as exc:
-                raise EmbeddingInferenceError(
-                    "Hybrid seed embedding failed during semantic reranking: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-
-        missing_ids = [
-            paper_id for paper_id in candidates if paper_id not in embeddings_map
-        ]
-        if missing_ids:
-            self._embed_candidates(
-                candidate_ids=missing_ids,
-                candidates=candidates,
-                embeddings_map=embeddings_map,
-            )
-
-        return require_complete_embeddings(
-            seed_id=seed_paper.paper_id,
-            candidate_ids=list(candidates),
-            embeddings=embeddings_map,
-        )
-
-    def _select_recovered_references_by_embedding(
-        self,
-        seed: Paper,
-        recovered: Sequence[Paper],
-        limit: int,
-    ) -> list[Paper]:
-        """Select fallback references by retrieval-space cosine similarity.
-
-        :param Paper seed: Seed paper encoded in retrieval-query space.
-        :param Sequence[Paper] recovered: References encoded as retrieval documents.
-        :param int limit: Maximum references to retain.
-        :return list[Paper]: Semantically ranked, capped reference records.
-        """
-        if len(recovered) <= limit:
-            return list(recovered)
-
-        assert self.embedding_builder is not None
-        if self.semantic_source == "candidates":
-            # Bibliography recovery can rank papers before semantic enrichment starts.
-            self.embedding_builder._load_model()
-
-        candidates = {paper.paper_id: paper for paper in recovered}
-        seed_embedding = self._ensure_candidate_embeddings(seed, candidates)
-        assert seed_embedding is not None
-        query = l2_normalize_embeddings(seed_embedding)
-        embeddings = self.embedding_builder.retrieval_embeddings
-        return select_recovered_references_by_score(
-            recovered,
-            limit,
-            lambda paper: cosine_similarity_to_query(query, embeddings[paper.paper_id]),
-        )
-
-    def _select_s2_references_by_composite(
-        self, seed: Paper, references: Sequence[Paper], limit: int
-    ) -> list[Paper]:
-        """Rank provider references before optional reference-list hydration."""
-        if len(references) <= limit:
-            return list(references)
-
-        assert self.embedding_builder is not None
-        if self.semantic_source == "candidates":
-            self.embedding_builder._load_model()
-
-        by_id = {paper.paper_id: paper for paper in references}
-        scoring_papers = {
-            paper_id: replace(paper, references=[]) for paper_id, paper in by_id.items()
-        }
-        ranked = self._rank_candidates(
-            seed,
-            scoring_papers,
-            {paper_id: {"citation"} for paper_id in scoring_papers},
-        )
-        return [by_id[paper_id] for paper_id in ranked[:limit]]
-
-    def _seed_relevance_score(
-        self,
-        seed_embedding: NDArray[np.float32] | None,
-        seed_paper: Paper,
-        candidate: Paper,
-        source_tags: set[str],
-        max_citation_count: int,
-    ) -> float:
-        """Score candidate relevance to seed for hybrid adjudication.
-
-        :param Optional[NDArray[np.float32]] seed_embedding: Seed vector when available.
-        :param Paper seed_paper: Seed paper.
-        :param Paper candidate: Candidate paper.
-        :param Set[str] source_tags: Candidate provenance tags.
-        :param int max_citation_count: Max citation count in candidate pool.
-        :return float: Relevance score in ``[0, 1]``.
-        """
-        semantic_score = 0.0
-        if (
-            seed_embedding is not None
-            and self.embedding_builder is not None
-            and isinstance(
-                getattr(self.embedding_builder, "retrieval_embeddings", None), dict
-            )
-            and candidate.paper_id in self.embedding_builder.retrieval_embeddings
-        ):
-            cosine = cosine_similarity_to_query(
-                l2_normalize_embeddings(seed_embedding),
-                self.embedding_builder.retrieval_embeddings[candidate.paper_id],
-            )
-            semantic_score = 0.5 * (cosine + 1.0)
-
-        temporal_score = self.temporal_similarity(seed_paper, candidate)
-        citation_denominator = max(max_citation_count, 1)
-        citation_score = float(
-            np.log1p(max(candidate.citation_count, 0)) / np.log1p(citation_denominator)
-        )
-        biblio_score = self.bibliographic_coupling(seed_paper, candidate)
-
-        semantic_w, temporal_w, citation_w, biblio_w = HYBRID_SEED_RERANK_WEIGHTS
-        score = (
-            semantic_w * semantic_score
-            + temporal_w * temporal_score
-            + citation_w * citation_score
-            + biblio_w * biblio_score
-        )
-        if "citation" in source_tags and "semantic" in source_tags:
-            score += HYBRID_SOURCE_OVERLAP_BONUS
-        elif "citation" in source_tags:
-            score += HYBRID_CITATION_SOURCE_BONUS
-        return float(min(score, 1.0))
-
-    def _rank_candidates(
-        self,
-        seed_paper: Paper,
-        candidates: dict[str, Paper],
-        candidate_sources: dict[str, set[str]],
-    ) -> list[str]:
-        """Return candidate IDs ranked by seed-centric hybrid relevance.
-
-        :param Paper seed_paper: Seed paper.
-        :param Dict[str, Paper] candidates: Candidate paper pool.
-        :param Dict[str, Set[str]] candidate_sources: Candidate provenance mapping.
-        :return List[str]: Ranked candidate IDs.
-        """
-        if not candidates:
-            return []
-
-        seed_embedding = self._ensure_candidate_embeddings(seed_paper, candidates)
-        max_citation_count = max(
-            (paper.citation_count for paper in candidates.values()), default=0
-        )
-        scored: list[tuple[float, str, int]] = []
-        for idx, (paper_id, paper) in enumerate(candidates.items()):
-            score = self._seed_relevance_score(
-                seed_embedding=seed_embedding,
-                seed_paper=seed_paper,
-                candidate=paper,
-                source_tags=candidate_sources.get(paper_id, {"citation"}),
-                max_citation_count=max_citation_count,
-            )
-            scored.append((score, paper_id, idx))
-        scored.sort(
-            key=lambda item: deterministic_sort_key(
-                item[0], item[1], stable_index=item[2]
-            )
-        )
-        return [paper_id for _, paper_id, _ in scored]
-
-    def _record_citation_source_ranks(self, pool: DiscoveryPool) -> None:
-        """Record citation/reference positions on the reconciled paper IDs."""
-        seed = pool.seed
-        for result in self.citation_builder.candidate_source_results:
-            for rank, paper in enumerate(result.papers, start=1):
-                if paper.paper_id == seed.paper_id or candidate_records_match(
-                    paper, seed
-                ):
-                    continue
-                paper_id = paper.paper_id
-                if paper_id not in pool.papers:
-                    matched_id = pool.unique_match(paper)
-                    if matched_id is None:
-                        continue
-                    paper_id = matched_id
-                    if not paper.is_local_corpus:
-                        pool.provider_aliases[paper.paper_id] = paper_id
-                pool.record_rank(
-                    paper_id,
-                    result.source,
-                    result.source_ranks.get(paper.paper_id, rank),
-                )
-
-    def _fetch_recommendations(
-        self, provider_seed_id: str | None, candidate_pool_size: int
-    ) -> CandidateSourceResult:
-        """Fetch one bounded recommendation list through the shared S2 client."""
-        if provider_seed_id is None:
-            return CandidateSourceResult(
-                "recommendations",
-                CandidateSourceState.UNAVAILABLE,
-                error="The corpus seed has no Semantic Scholar lookup identifier.",
-            )
-        fetch = partial(
-            self.client.get_recommended_papers,
-            provider_seed_id,
-            limit=min(100, self._semantic_candidate_cap, candidate_pool_size),
-            raise_on_unavailable=True,
-        )
-        return fetch_candidate_source(
-            "recommendations",
-            lambda: fetch(pool="all-cs") if self.semantic_source == "both" else fetch(),
-        )
-
-    def _ingest_recommendations(
-        self, pool: DiscoveryPool, recommendations: Sequence[Paper]
-    ) -> None:
-        """Add the ordered recommendation list after corpus reconciliation."""
-        for rank, paper in enumerate(recommendations, start=1):
-            if paper.is_seed:
-                continue
-            paper_id = pool.add(paper, source="semantic", relation="semantic_only")
-            if paper_id is not None:
-                pool.record_rank(paper_id, "recommendations", rank)
-
-    def _select_candidate_ids(
-        self,
-        ranked_ids: list[str],
-        candidate_sources: dict[str, set[str]],
-    ) -> list[str]:
-        """Apply the semantic ceiling, then fill vacancies under the default."""
-        max_added = self.max_papers - 1
-        selected: list[str] = []
-        skipped_semantic: list[str] = []
-        added_semantic = 0
-        for paper_id in ranked_ids:
-            if len(selected) >= max_added:
-                break
-            if candidate_sources[paper_id] == {"semantic"}:
-                if added_semantic >= self.max_semantic:
-                    if self._fill_semantic_vacancies:
-                        skipped_semantic.append(paper_id)
-                    continue
-                added_semantic += 1
-            selected.append(paper_id)
-        backfill = skipped_semantic[: max_added - len(selected)]
-        selected.extend(backfill)
-        added_semantic += len(backfill)
-        logger.debug("Added %s semantic papers", added_semantic)
-        return selected
+        self.discovery_ranking: list[RankedCandidate] = []
 
     @scope_candidate_collection
     def collect_papers(
@@ -671,225 +270,543 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """Collect papers while retaining any corpus lifecycle operation lock.
 
         :param str seed_id: Seed paper identifier.
-        :param kwargs: Extra options are passed to collection and ignored.
-        :return Dict[str, Paper]: Combined dictionary of papers.
+        :param kwargs: Extra options are ignored.
+        :return Dict[str, Paper]: The seed and the selected papers.
         """
         operation_lock = (
             self.embedding_builder._corpus_operation_lock()
-            if self.embedding_builder is not None and self._uses_corpus
+            if self._uses_corpus
             else nullcontext()
         )
         with operation_lock:
-            return self._collect_papers_under_operation_lock(seed_id, **kwargs)
+            return self._collect_papers_under_operation_lock(seed_id)
 
-    def _collect_papers_under_operation_lock(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
-    ) -> dict[str, Paper]:
-        """
-        Collect papers from both citation and semantic sources.
+    def _collect_papers_under_operation_lock(self, seed_id: str) -> dict[str, Paper]:
+        """Pool, rank and select candidates, then enrich the selected papers.
 
-        :param str seed_id: Seed paper identifier
-        :param kwargs: Extra options are ignored.
-        :return Dict[str, Paper]: Combined dictionary of papers
+        :param str seed_id: Seed paper identifier.
+        :return Dict[str, Paper]: The seed and the selected papers.
         """
-        papers: dict[str, Paper] = {}
+        embedding = self.embedding_builder
         self.paper_sources = {}
         self.seed_relations = {}
         self.candidate_source_status = {}
         self.discovery_pool = None
-        if self.embedding_builder is not None:
-            self.embedding_builder.retrieval_embeddings = {}
-            self.embedding_builder.embeddings = {}
+        self.discovery_ranking = []
+        embedding.retrieval_embeddings = {}
+        embedding.embeddings = {}
+        self.reference_hydrator.reset_reference_hydration()
+        timings: dict[str, float] = {}
 
-        if self.embedding_builder is None and is_local_corpus_paper_id(seed_id):
-            raise ValueError(
-                f"Local corpus seed ID '{seed_id}' requires semantic enrichment. "
-                "Re-run the hybrid build with --max-semantic above 0, "
-                "--semantic-source arxiv-corpus, and the same embedding settings "
-                "used for local search."
-            )
-
-        cached_corpus_seed: Paper | None = None
-        corpus_prepared = False
-        if self.embedding_builder is not None and self._uses_corpus:
-            try:
-                self.embedding_builder._prepare_corpus_for_build()
-                corpus_prepared = True
-                cached_corpus_seed = self.embedding_builder.resolve_cached_corpus_seed(
-                    seed_id,
-                    _corpus_prepared=True,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-
-        # Step 1: Collect from citations
-        logger.debug("Collecting papers via citations...")
-        reference_embedding_builder = self.embedding_builder
-        if reference_embedding_builder is not None:
-            citation_papers = self.citation_builder.collect_papers(
-                seed_id,
-                validate_source_availability=False,
-                hydrate_references=False,
-                seed_paper=cached_corpus_seed,
-                reference_metadata_lookup=(
-                    (
-                        lambda ids: (
-                            reference_embedding_builder.cached_reference_metadata(ids)
-                        )
-                    )
-                    if corpus_prepared
-                    else None
-                ),
-                bibliography_metadata_lookup=(
-                    reference_embedding_builder.cached_bibliography_metadata
-                    if corpus_prepared
-                    else None
-                ),
-                reference_selector=self._select_recovered_references_by_embedding,
-                s2_reference_selector=self._select_s2_references_by_composite,
-            )
-        else:
-            citation_papers = self.citation_builder.collect_papers(seed_id)
-        citation_source_status = getattr(
-            self.citation_builder, "candidate_source_status", {}
-        )
-        if isinstance(citation_source_status, dict):
-            self.candidate_source_status.update(citation_source_status)
-        seed_paper = next(
-            (paper for paper in citation_papers.values() if paper.is_seed), None
-        )
-        if seed_paper is None:
-            raise RuntimeError(
-                "Hybrid collection failed: citation branch returned no seed"
-            )
-        papers[seed_paper.paper_id] = seed_paper
-        cached_seed_has_provider_identity = (
-            cached_corpus_seed is not None
-            and provider_lookup_identifier(
-                cached_corpus_seed.paper_id, cached_corpus_seed
-            )
-            is not None
-        )
-        self.paper_sources[seed_paper.paper_id] = (
+        started = perf_counter()
+        seed, corpus_seed = self._resolve_seed(seed_id)
+        timings["prepare"] = perf_counter() - started
+        self.seed_relations[seed.paper_id] = "seed"
+        self.paper_sources[seed.paper_id] = (
             "semantic"
-            if cached_corpus_seed is not None and not cached_seed_has_provider_identity
+            if corpus_seed and provider_lookup_identifier(seed.paper_id, seed) is None
             else "citation"
         )
-        self.seed_relations[seed_paper.paper_id] = "seed"
-        citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})
-
-        pool = DiscoveryPool(seed_paper, self.seed_relations)
+        pool = DiscoveryPool(seed, self.seed_relations)
         self.discovery_pool = pool
-        for paper in citation_papers.values():
-            if paper.paper_id == seed_paper.paper_id or paper.is_seed:
-                continue
-            pool.add(
-                paper,
-                source="citation",
-                relation=str(citation_seed_relations.get(paper.paper_id, "citation")),
-            )
 
-        embedding_builder = self.embedding_builder
-        if embedding_builder is None:
-            for paper_id, paper in pool.papers.items():
-                if len(papers) >= self.max_papers:
-                    break
-                papers[paper_id] = paper
-                self.paper_sources[paper_id] = "citation"
-                self.seed_relations.setdefault(paper_id, "citation")
-            return papers
+        started = perf_counter()
+        logger.info("Collecting related papers...")
+        results = self._fetch_provider_sources(seed, seed_id)
+        timings["provider"] = perf_counter() - started
 
-        combined = self.semantic_source == "both"
-        if combined:
-            self._record_citation_source_ranks(pool)
-        logger.info("Collecting semantic candidates...")
+        started = perf_counter()
+        provider_papers = [paper for result in results for paper in result.papers]
+        corpus_rows = self._corpus_rows(provider_papers) if self._uses_corpus else {}
+        for result in results:
+            self._ingest(pool, result, corpus_rows)
+        timings["corpus"] = perf_counter() - started
 
-        from citemesh.services import SemanticScholarUnavailableError
-
-        source_results = list(self.citation_builder.candidate_source_results)
-        recommendations: Sequence[Paper] = ()
+        started = perf_counter()
+        embedding._load_model()
+        timings["model"] = perf_counter() - started
+        started = perf_counter()
         try:
-            if combined or not self._uses_corpus:
-                recommendation_result = self._fetch_recommendations(
-                    provider_lookup_identifier(seed_paper.paper_id, seed_paper)
-                    if combined
-                    else seed_paper.paper_id,
-                    embedding_builder.candidate_pool_size,
-                )
-                recommendations = recommendation_result.papers
-                source_results.append(recommendation_result)
-                self.candidate_source_status["recommendations"] = (
-                    recommendation_result.state.value
-                )
-            if self._uses_corpus:
-                semantic_papers = embedding_builder.collect_papers(
-                    seed_id,
-                    seed_paper=seed_paper,
-                    _corpus_prepared=corpus_prepared,
-                )
-                corpus_state = (
-                    CandidateSourceState.EMPTY
-                    if combined
-                    and not any(not paper.is_seed for paper in semantic_papers.values())
-                    else CandidateSourceState.COMPLETE
-                )
-                source_results.append(
-                    CandidateSourceResult("arxiv_corpus", corpus_state)
-                )
-                if combined:
-                    self.candidate_source_status["arxiv_corpus"] = corpus_state.value
-            acquisition = {
-                "both": "combined",
-                "arxiv-corpus": "corpus",
-                "candidates": "candidate",
-            }
-            require_available_candidate_source(
-                source_results,
-                context=f"hybrid {acquisition[self.semantic_source]} acquisition for {seed_paper.paper_id}",
-            )
-            if not self._uses_corpus:
-                embedding_builder._load_model()
-                semantic_papers = {paper.paper_id: paper for paper in recommendations}
-        except SemanticScholarUnavailableError:
-            raise
-        except CandidateAcquisitionError:
-            raise
+            seed_query = embedding._encode_seed_embedding(seed)
         except Exception as exc:
-            raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-
-        # All required candidate sources have now been attempted. Optional
-        # reference hydration can use the remaining shared recovery budget
-        # without suppressing recommendation discovery.
-        if cached_corpus_seed is not None:
-            embedding_builder.enrich_cached_corpus_seed(seed_paper)
-        self.citation_builder.hydrate_collected_references(citation_papers, seed_paper)
-
-        semantic_candidates = (
-            paper for paper in semantic_papers.values() if not paper.is_seed
+            raise EmbeddingInferenceError(
+                f"Hybrid seed embedding failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        seed_row = self._seed_corpus_row(seed, corpus_seed)
+        seed_vectors = (
+            embedding.cached_corpus_vectors([seed_row]) if seed_row is not None else {}
         )
-        for rank, paper in enumerate(semantic_candidates, start=1):
-            canonical_id = pool.add(paper, source="semantic", relation="semantic_only")
-            if combined and canonical_id is not None:
-                pool.record_rank(canonical_id, "arxiv_corpus", rank)
-        if combined:
-            self._ingest_recommendations(pool, recommendations)
+        seed_document = seed_vectors.get(seed_row or "")
+        if seed_document is None:
+            seed_document = self._encode_documents([seed])[0]
+        timings["encoding"] = perf_counter() - started
 
-        pool.reconcile_publication_versions()
-        ranked_ids = self._rank_candidates(seed_paper, pool.papers, pool.sources)
-        annotate_verified_seed_references(
-            pool.papers,
-            self.citation_builder.candidate_source_results,
-            self.seed_relations,
+        if self._uses_corpus:
+            started = perf_counter()
+            logger.info("Searching the arXiv corpus...")
+            results.append(self._search_corpus(pool, seed_query, seed_document))
+            timings["corpus"] += perf_counter() - started
+
+        self.candidate_source_status = {
+            result.source: result.state.value for result in results
+        }
+        acquisition = {
+            "both": "combined",
+            "arxiv-corpus": "corpus",
+            "candidates": "candidate",
+        }[self.semantic_source]
+        require_available_candidate_source(
+            results,
+            context=f"hybrid {acquisition} acquisition for {seed.paper_id}",
         )
-        selected_ids = self._select_candidate_ids(ranked_ids, pool.sources)
-        for paper_id in selected_ids:
+        folded = pool.reconcile_publication_versions()
+        if folded:
+            logger.debug("Folded %d publication records into corpus preprints.", folded)
+
+        started = perf_counter()
+        vectors = (
+            embedding.cached_corpus_vectors(
+                [
+                    paper_id
+                    for paper_id, paper in pool.papers.items()
+                    if paper.is_local_corpus
+                ]
+            )
+            if self._uses_corpus
+            else {}
+        )
+        timings["corpus"] += perf_counter() - started
+        started = perf_counter()
+        vectors.update(self._encode_pool_documents(pool, set(vectors)))
+        timings["encoding"] += perf_counter() - started
+
+        started = perf_counter()
+        ranked = self._rank_pool(pool, vectors, seed_document, seed_query)
+        timings["ranking"] = perf_counter() - started
+        self.discovery_ranking = ranked
+        selected = [item.paper_id for item in ranked[: self.max_papers - 1]]
+        logger.info(
+            "Ranked %d candidate%s; keeping %d.",
+            len(ranked),
+            "" if len(ranked) == 1 else "s",
+            len(selected),
+        )
+
+        papers: dict[str, Paper] = {seed.paper_id: seed}
+        for paper_id in selected:
             papers[paper_id] = pool.papers[paper_id]
             tags = pool.sources[paper_id]
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
-            if "citation" in tags:
-                self.seed_relations.setdefault(paper_id, "citation")
 
+        started = perf_counter()
+        self._enrich_selected(papers, pool, corpus_seed, results)
+        timings["enrichment"] = perf_counter() - started
+        logger.debug(
+            "Hybrid collection timings (s): %s.",
+            ", ".join(f"{phase}={seconds:.2f}" for phase, seconds in timings.items()),
+        )
         return papers
+
+    def _resolve_seed(self, seed_id: str) -> tuple[Paper, bool]:
+        """Resolve the seed from the prepared corpus, else from Semantic Scholar.
+
+        :param str seed_id: Seed paper identifier.
+        :return tuple[Paper, bool]: Seed carrying the build seed role, and whether
+            it came from the corpus.
+        :raises RuntimeError: If corpus preparation fails.
+        :raises ValueError: If the seed is unknown, or a local corpus ID is used
+            without a corpus.
+        """
+        cached: Paper | None = None
+        if self._uses_corpus:
+            try:
+                self.embedding_builder._prepare_corpus_for_build()
+                cached = self.embedding_builder.resolve_cached_corpus_seed(
+                    seed_id, _corpus_prepared=True
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+        elif is_local_corpus_paper_id(seed_id):
+            raise ValueError(
+                f"Local corpus seed ID '{seed_id}' requires a corpus. Re-run the "
+                "hybrid build with --semantic-source arxiv-corpus or both and the "
+                "same embedding settings used for local search."
+            )
+        seed = cached or self.client.get_paper(seed_id, raise_on_unavailable=True)
+        if seed is None:
+            raise ValueError(
+                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
+                "know this identifier; check the DOI/arXiv/S2 ID)."
+            )
+        # Seed role belongs to this build, not the client-owned metadata record.
+        return replace(seed, is_seed=True), cached is not None
+
+    def _fetch_provider_sources(
+        self, seed: Paper, seed_id: str
+    ) -> list[CandidateSourceResult]:
+        """Fetch references, citers and, outside corpus-only mode, recommendations.
+
+        :param Paper seed: Resolved seed.
+        :param str seed_id: Original input, retaining an arXiv version.
+        :return list[CandidateSourceResult]: One result per attempted source.
+        """
+        provider_id = provider_lookup_identifier(seed.paper_id, seed)
+        results: list[CandidateSourceResult] = []
+        if self.max_references > 0:
+            corpus = self.embedding_builder if self._uses_corpus else None
+            results.extend(
+                fetch_seed_references(
+                    self.client,
+                    seed,
+                    self.max_references,
+                    seed_identifier=seed_id,
+                    local_lookup=corpus.cached_reference_metadata if corpus else None,
+                    local_bibliography_lookup=(
+                        corpus.cached_bibliography_metadata if corpus else None
+                    ),
+                )
+            )
+        if self.max_citations > 0 and provider_id is not None:
+            citer_lookup_id = provider_id
+            results.append(
+                fetch_candidate_source(
+                    "citations",
+                    lambda: self.client.get_paper_citations(
+                        citer_lookup_id,
+                        limit=self.max_citations,
+                        raise_on_unavailable=True,
+                    ),
+                )
+            )
+        if self.semantic_source != "arxiv-corpus":
+            results.append(self._fetch_recommendations(provider_id))
+        logger.debug(
+            "Provider candidates: %s.",
+            ", ".join(f"{result.source}={len(result.papers)}" for result in results),
+        )
+        return results
+
+    def _fetch_recommendations(self, provider_id: str | None) -> CandidateSourceResult:
+        """Fetch the seed's ``all-cs`` recommendations.
+
+        :param Optional[str] provider_id: Provider-safe seed identifier.
+        :return CandidateSourceResult: Recommendations in provider order.
+        """
+        if provider_id is None:
+            return CandidateSourceResult(
+                "recommendations",
+                CandidateSourceState.UNAVAILABLE,
+                error="The corpus seed has no Semantic Scholar lookup identifier.",
+            )
+        return fetch_candidate_source(
+            "recommendations",
+            lambda: self.client.get_recommended_papers(
+                provider_id,
+                limit=HYBRID_RECOMMENDATION_LIMIT,
+                raise_on_unavailable=True,
+                pool="all-cs",
+            ),
+        )
+
+    def _corpus_rows(self, papers: Sequence[Paper]) -> dict[str, Paper]:
+        """Find the corpus row each provider record identifies.
+
+        A row is used only when the record's arXiv and DOI identifiers lead to
+        exactly one row and that row does not contradict the record.
+
+        :param Sequence[Paper] papers: Provider records.
+        :return dict[str, Paper]: Corpus rows keyed by provider record ID.
+        """
+        lookups: dict[str, list[str]] = {}
+        for paper in papers:
+            if paper.is_local_corpus or paper.paper_id in lookups:
+                continue
+            identifiers = [
+                normalize_paper_id(identifier).lower()
+                for _namespace, identifier in candidate_identity_keys(paper)
+            ]
+            if identifiers:
+                lookups[paper.paper_id] = identifiers
+        if not lookups:
+            return {}
+        found = self.embedding_builder.cached_reference_metadata(
+            sorted({identifier for ids in lookups.values() for identifier in ids})
+        )
+        records = {paper.paper_id: paper for paper in papers}
+        rows: dict[str, Paper] = {}
+        for paper_id, identifiers in lookups.items():
+            matches = {
+                found[identifier].paper_id: found[identifier]
+                for identifier in identifiers
+                if identifier in found
+            }
+            if len(matches) == 1:
+                row = next(iter(matches.values()))
+                if candidate_records_match(row, records[paper_id]):
+                    rows[paper_id] = row
+        logger.debug(
+            "Matched %d of %d provider records to corpus rows.",
+            len(rows),
+            len(lookups),
+        )
+        return rows
+
+    def _seed_corpus_row(self, seed: Paper, corpus_seed: bool) -> str | None:
+        """Return the corpus row holding the seed's stored document vector.
+
+        :param Paper seed: Resolved seed.
+        :param bool corpus_seed: Whether the seed was read from the corpus.
+        :return Optional[str]: Corpus row ID, or ``None`` without one.
+        """
+        if not self._uses_corpus:
+            return None
+        if corpus_seed:
+            return seed.paper_id
+        row = self._corpus_rows([seed]).get(seed.paper_id)
+        return row.paper_id if row is not None else None
+
+    @staticmethod
+    def _ingest(
+        pool: DiscoveryPool,
+        result: CandidateSourceResult,
+        corpus_rows: dict[str, Paper],
+    ) -> None:
+        """Add one provider list to the pool in provider order.
+
+        A record's corpus row joins first, so the record merges into it and the
+        member keeps the corpus identity and stored vector.
+
+        :param DiscoveryPool pool: Discovery pool.
+        :param CandidateSourceResult result: Provider list.
+        :param dict[str, Paper] corpus_rows: Corpus rows by provider record ID.
+        :return None: Updates the pool in place.
+        """
+        source, relation = {
+            "references": ("citation", "referenced_by_seed"),
+            "arxiv_references": ("citation", "referenced_by_seed"),
+            "citations": ("citation", "cites_seed"),
+            "recommendations": ("semantic", "semantic_only"),
+        }[result.source]
+        for rank, paper in enumerate(result.papers, start=1):
+            row = corpus_rows.get(paper.paper_id)
+            if row is not None:
+                pool.add(row, source=source, relation=relation)
+            member_id = pool.add(paper, source=source, relation=relation)
+            if member_id is not None:
+                pool.record_rank(member_id, result.source, rank)
+
+    def _search_corpus(
+        self,
+        pool: DiscoveryPool,
+        seed_query: NDArray[np.float32],
+        seed_document: NDArray[np.float32],
+    ) -> CandidateSourceResult:
+        """Add the seed's nearest corpus rows in both retrieval roles.
+
+        :param DiscoveryPool pool: Discovery pool.
+        :param NDArray[np.float32] seed_query: Seed in the retrieval-query role.
+        :param NDArray[np.float32] seed_document: Seed in the retrieval-document role.
+        :return CandidateSourceResult: Corpus outcome, empty without neighbours.
+        :raises RuntimeError: If the corpus search fails.
+        """
+        added = 0
+        for rank_source, vector in (
+            ("arxiv_corpus", seed_query),
+            ("arxiv_corpus_document", seed_document),
+        ):
+            try:
+                neighbours = self.embedding_builder.search_prepared_corpus(
+                    vector, HYBRID_CORPUS_NEIGHBOURS
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+            rank = 0
+            for paper in neighbours:
+                member_id = pool.add(paper, source="semantic", relation="semantic_only")
+                if member_id is None:
+                    continue
+                rank += 1
+                pool.record_rank(member_id, rank_source, rank)
+            added += rank
+        logger.debug("Corpus neighbours: %d across both seed roles.", added)
+        return CandidateSourceResult(
+            "arxiv_corpus",
+            CandidateSourceState.COMPLETE if added else CandidateSourceState.EMPTY,
+        )
+
+    def _encode_documents(self, papers: Sequence[Paper]) -> NDArray[np.float32]:
+        """Encode papers in the retrieval-document role, in memory.
+
+        :param Sequence[Paper] papers: Papers to encode.
+        :return NDArray[np.float32]: One row per paper, in input order.
+        :raises EmbeddingInferenceError: If encoding fails or loses rows.
+        """
+        embedding = self.embedding_builder
+        texts = [
+            format_paper_for_embedding(
+                profile=embedding.model_profile,
+                paper=paper,
+                task=EmbeddingTask.RETRIEVAL_DOCUMENT,
+            ).strip()
+            for paper in papers
+        ]
+        if not texts:
+            return np.empty((0, 0), dtype=np.float32)
+        try:
+            encoded = embedding._encode_texts(
+                texts,
+                batch_size=min(embedding.encode_batch_size, len(texts)),
+                show_progress_bar=False,
+            )
+        except Exception as exc:
+            raise EmbeddingInferenceError(
+                "Hybrid in-memory candidate embedding failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        encoded_array = np.asarray(encoded, dtype=np.float32)
+        if encoded_array.ndim == 1:
+            encoded_array = encoded_array.reshape(1, -1)
+        if encoded_array.shape[0] != len(texts):
+            raise EmbeddingInferenceError(
+                "Hybrid candidate encoding returned "
+                f"{int(encoded_array.shape[0])} row(s) for {len(texts)} candidate(s)."
+            )
+        return encoded_array
+
+    def _encode_pool_documents(
+        self, pool: DiscoveryPool, stored: Collection[str]
+    ) -> dict[str, NDArray[np.float32]]:
+        """Encode every member without a stored corpus vector.
+
+        :param DiscoveryPool pool: Discovery pool.
+        :param Collection[str] stored: Members that have stored vectors.
+        :return dict[str, NDArray[np.float32]]: Vectors keyed by member ID.
+        """
+
+        def encoding_key(paper_id: str) -> tuple[int, int, str]:
+            ranks = pool.source_ranks.get(paper_id, {})
+            for group, sources in enumerate(_ENCODING_ORDER):
+                positions = [ranks[source] for source in sources if source in ranks]
+                if positions:
+                    return group, min(positions), paper_id
+            return len(_ENCODING_ORDER), 0, paper_id
+
+        missing = sorted(
+            (paper_id for paper_id in pool.papers if paper_id not in stored),
+            key=encoding_key,
+        )
+        if not missing:
+            return {}
+        logger.info(
+            "Encoding %d candidate%s in memory...",
+            len(missing),
+            "" if len(missing) == 1 else "s",
+        )
+        encoded = self._encode_documents(
+            [pool.papers[paper_id] for paper_id in missing]
+        )
+        return dict(zip(missing, encoded, strict=True))
+
+    @staticmethod
+    def _rank_pool(
+        pool: DiscoveryPool,
+        vectors: dict[str, NDArray[np.float32]],
+        seed_document: NDArray[np.float32],
+        seed_query: NDArray[np.float32],
+    ) -> list[RankedCandidate]:
+        """Rank every pool member by reciprocal rank fusion.
+
+        :param DiscoveryPool pool: Discovery pool.
+        :param dict[str, NDArray[np.float32]] vectors: Member document vectors.
+        :param NDArray[np.float32] seed_document: Seed document vector.
+        :param NDArray[np.float32] seed_query: Seed query-role vector.
+        :return list[RankedCandidate]: Every member, best first.
+        :raises EmbeddingInferenceError: If a vector is missing or unusable.
+        """
+        seed_id = pool.seed.paper_id
+        require_complete_embeddings(
+            seed_id=seed_id,
+            candidate_ids=list(pool.papers),
+            embeddings={**vectors, seed_id: seed_document},
+        )
+        candidates = []
+        for paper_id in pool.papers:
+            relation = pool.seed_relations.get(paper_id, "")
+            candidates.append(
+                DiscoveryCandidate(
+                    paper_id=paper_id,
+                    vector=vectors[paper_id],
+                    is_reference=relation in _REFERENCE_RELATIONS,
+                    cites_seed=relation in _CITER_RELATIONS,
+                    recommendation_rank=pool.source_ranks.get(paper_id, {}).get(
+                        "recommendations"
+                    ),
+                )
+            )
+        try:
+            ranked = rank_candidates(
+                candidates, seed_document=seed_document, seed_query=seed_query
+            )
+        except ValueError as exc:
+            raise EmbeddingInferenceError(f"Hybrid ranking failed: {exc}") from exc
+        for item in ranked[:10]:
+            logger.debug(
+                "Rank %d %s: score=%.5f lists=%s cos_dd=%.4f.",
+                item.rank,
+                item.paper_id,
+                item.score,
+                dict(item.list_ranks),
+                item.features.cos_dd,
+            )
+        return ranked
+
+    def _enrich_selected(
+        self,
+        papers: dict[str, Paper],
+        pool: DiscoveryPool,
+        corpus_seed: bool,
+        results: Sequence[CandidateSourceResult],
+    ) -> None:
+        """Fill selected papers' provider metadata and citation reference lists.
+
+        :param dict[str, Paper] papers: The seed and the selected papers.
+        :param DiscoveryPool pool: Discovery pool, for provider evidence.
+        :param bool corpus_seed: Whether the seed was read from the corpus.
+        :param Sequence[CandidateSourceResult] results: Attempted sources.
+        :return None: Updates papers in place.
+        """
+        seed = pool.seed
+        embedding = self.embedding_builder
+        if corpus_seed:
+            embedding.enrich_cached_corpus_seed(seed)
+        # Members that absorbed a provider record already carry its metadata.
+        provider_backed = set(pool.provider_aliases.values())
+        corpus_only = {
+            paper_id: paper
+            for paper_id, paper in papers.items()
+            if paper.is_local_corpus
+            and not paper.is_seed
+            and paper_id not in provider_backed
+        }
+        if corpus_only:
+            embedding._enrich_corpus_papers(corpus_only)
+        if any(
+            result.source == "references" and result.state is CandidateSourceState.EMPTY
+            for result in results
+        ):
+            # The provider has no reference list for the seed; a recovered
+            # bibliography must not stand in for one in coupling scores.
+            self.reference_hydrator.reference_cache[seed.paper_id] = []
+            seed.references = []
+        # Reference lists, the coupling input, are fetched for citation-sourced papers.
+        self.reference_hydrator.hydrate_collected_references(
+            {
+                paper_id: paper
+                for paper_id, paper in papers.items()
+                if "citation" in pool.sources.get(paper_id, ())
+            },
+            seed,
+        )
 
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
         """Build the final symmetric vector space used by hybrid graph edges.
@@ -898,8 +815,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return None: Populates the embedding builder's graph-vector map.
         :raises EmbeddingInferenceError: If symmetric inference cannot complete.
         """
-        if self.embedding_builder is None:
-            return
         try:
             self.embedding_builder.materialize_graph_embeddings(papers)
         except Exception as exc:
@@ -915,9 +830,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper
         :return float: Similarity score (0.0 to 1.0)
         """
-        if self.embedding_builder is None:
-            return self.citation_builder.compute_similarity(paper1, paper2)
-
         source1 = self.paper_sources.get(paper1.paper_id, "citation")
         source2 = self.paper_sources.get(paper2.paper_id, "citation")
 
@@ -990,10 +902,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
         graph.graph["strategy"] = self._resolved_strategy_name()
-        if self.embedding_builder is not None:
-            graph.graph["embedding_runtime"] = (
-                self.embedding_builder._embedding_runtime_metadata()
-            )
+        graph.graph["embedding_runtime"] = (
+            self.embedding_builder._embedding_runtime_metadata()
+        )
         graph.graph["paper_sources"] = {
             str(paper_id): str(source)
             for paper_id, source in sorted(
@@ -1053,9 +964,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param float similarity: Computed similarity
         :return bool: True if edge should be created
         """
-        if self.embedding_builder is None:
-            return self.citation_builder.should_create_edge(paper1, paper2, similarity)
-
         # Basic threshold
         if similarity < 0.2:
             return False

@@ -61,6 +61,7 @@ from tests._helpers import (
     ConstantEncodeModel,
     LengthRecordingEncodeModel,
     disable_embedding_dep_checks,
+    offline_hybrid_encoder,
     raise_import_error,
 )
 
@@ -8526,7 +8527,6 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
             max_papers=2,
             max_references=1,
             max_citations=1,
-            max_semantic=1,
             fetch_references=True,
             semantic_source="arxiv-corpus",
             dataset_source=dataset_source,
@@ -8668,7 +8668,6 @@ def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
                 **common_options,
                 max_references=1,
                 max_citations=0,
-                max_semantic=1,
                 fetch_references=fetch_references,
             )
             assert builder.embedding_builder is not None
@@ -8880,7 +8879,6 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
             **common_options,
             max_references=0,
             max_citations=0,
-            max_semantic=1,
             fetch_references=False,
         )
         assert public_builder.embedding_builder is not None
@@ -8947,27 +8945,21 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
             "enrich_cached_corpus_seed",
             lambda _seed: probe.record(events, "enrich"),
         )
+        offline_hybrid_encoder(monkeypatch, hybrid_builder)
         monkeypatch.setattr(
-            hybrid_builder.citation_builder,
-            "collect_papers",
-            lambda *_args, **_kwargs: (
-                probe.record(events, "citations") or {seed.paper_id: seed}
-            ),
+            embedding_builder,
+            "search_prepared_corpus",
+            lambda *_args: probe.record(events, "neighbors") or [seed, neighbor],
         )
         monkeypatch.setattr(
             embedding_builder,
-            "collect_papers",
-            lambda *_args, **_kwargs: (
-                probe.record(events, "neighbors")
-                or {seed.paper_id: seed, neighbor.paper_id: neighbor}
-            ),
+            "cached_corpus_vectors",
+            lambda _ids: probe.record(events, "vectors") or {},
         )
         monkeypatch.setattr(
-            hybrid_builder,
-            "_rank_candidates",
-            lambda _seed, candidates, _sources: (
-                probe.record(events, "rank") or list(candidates)
-            ),
+            embedding_builder,
+            "_enrich_corpus_papers",
+            lambda _papers: probe.record(events, "enrich neighbors"),
         )
 
     papers = public_builder.collect_papers(seed.paper_id)
@@ -9130,7 +9122,6 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
             **common_options,
             max_references=0,
             max_citations=0,
-            max_semantic=1,
             fetch_references=False,
         )
         assert public_builder.embedding_builder is not None
@@ -9313,7 +9304,6 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
                 **common_options,
                 max_references=0,
                 max_citations=0,
-                max_semantic=1,
                 fetch_references=False,
             )
             assert public_builder.embedding_builder is not None
@@ -9452,7 +9442,6 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
                 **common_options,
                 max_references=1,
                 max_citations=1,
-                max_semantic=1,
                 fetch_references=False,
             )
             assert public_builder.embedding_builder is not None

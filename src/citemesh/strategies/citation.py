@@ -8,7 +8,7 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Generator, Iterable, Sequence
+from collections.abc import Generator, Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
-    from citemesh.core.paper_ids import BibliographyKey
 
 from citemesh.core import (
     DEFAULT_MAX_PAPERS,
@@ -35,7 +34,6 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
     CandidateSourceState,
-    ReferenceSelector,
     candidate_records_match,
     fetch_candidate_source,
     fetch_seed_references,
@@ -97,7 +95,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache: dict[str, list[str]] = {}
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
-        self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
         self._abstract_index = AbstractSimilarityIndex()
         self._reference_source_unavailable = False
 
@@ -290,52 +287,36 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache[paper_id] = ref_ids
         return ref_ids
 
+    def reset_reference_hydration(self) -> None:
+        """Forget reference lists and outage state from an earlier collection.
+
+        :return None: Clears the in-memory reference cache and outage flag.
+        """
+        self.reference_cache.clear()
+        self._reference_source_unavailable = False
+
     @scope_candidate_collection
     def collect_papers(
         self,
         seed_id: str,
         *,
-        validate_source_availability: bool = True,
-        hydrate_references: bool = True,
         seed_paper: Paper | None = None,
-        reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]]
-        | None = None,
-        bibliography_metadata_lookup: Callable[
-            [Sequence[BibliographyKey]], dict[BibliographyKey, Paper]
-        ]
-        | None = None,
-        reference_selector: ReferenceSelector | None = None,
-        s2_reference_selector: ReferenceSelector | None = None,
         **kwargs: Unpack[_CorpusPreparedOption],
     ) -> dict[str, Paper]:
         """
         Collect papers via citations and references.
 
         :param str seed_id: Seed paper identifier
-        :param bool validate_source_availability: Whether to fail when every
-            requested relation source is unavailable.
-        :param bool hydrate_references: Whether to perform optional reference-ID
-            enrichment before returning.
         :param Optional[Paper] seed_paper: Pre-resolved seed metadata. When its
             primary identifier is local, only an external alias is sent upstream.
-        :param Callable | None reference_metadata_lookup: Read metadata from an
-            already prepared corpus for HTML reference recovery.
-        :param Callable | None bibliography_metadata_lookup: Resolve identifier-free
-            entries against an already prepared corpus.
-        :param Callable | None reference_selector: Strategy-specific recovered-reference
-            selector.
-        :param Callable | None s2_reference_selector: Strategy-specific provider-reference
-            selector applied before the reference limit.
         :param kwargs: Corpus-preparation option accepted by the shared interface.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         # Scope in-memory references to one collection request so stale entries do
         # not leak across caller boundaries when builders are reused.
-        self.reference_cache.clear()
-        self._reference_source_unavailable = False
+        self.reset_reference_hydration()
         self.seed_relations = {}
         self.candidate_source_status = {}
-        self.candidate_source_results = ()
         papers = {}
         source_results: list[CandidateSourceResult] = []
 
@@ -386,10 +367,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 seed,
                 reference_limit,
                 seed_identifier=seed_id,
-                local_lookup=reference_metadata_lookup,
-                local_bibliography_lookup=bibliography_metadata_lookup,
-                reference_selector=reference_selector,
-                s2_reference_selector=s2_reference_selector,
             )
             source_results.extend(reference_results)
             reference_ids = self._ingest_relation_batch(
@@ -442,18 +419,15 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {
             result.source: result.state.value for result in source_results
         }
-        self.candidate_source_results = tuple(source_results)
-        if validate_source_availability:
-            require_available_candidate_source(
-                source_results,
-                context=f"citation acquisition for {seed.paper_id}",
-            )
+        require_available_candidate_source(
+            source_results,
+            context=f"citation acquisition for {seed.paper_id}",
+        )
 
         # Candidate discovery is required acquisition. Complete every requested
         # source before optional reference enrichment can spend the shared S2
         # recovery budget.
-        if hydrate_references:
-            self.hydrate_collected_references(papers, seed)
+        self.hydrate_collected_references(papers, seed)
 
         reference_lists = sum(
             bool(references) for references in self.reference_cache.values()

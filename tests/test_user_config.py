@@ -925,33 +925,6 @@ def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:
     )
 
 
-def test_config_device_is_inert_when_hybrid_semantic_branch_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disabled hybrid semantic work should not resolve config-only devices.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
-    :return None: Assertions verify the unavailable device is never inspected.
-    """
-    args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "hybrid", "--max-semantic", "0"]
-    )
-    config = UserConfig(path=Path("config.toml"), defaults={"device": "cuda"})
-    applied = build_options_module._apply_user_config_defaults(args, provided, config)
-    resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
-    monkeypatch.setattr(build_contract_module, "resolve_embedding_device", resolver)
-
-    build_contract_module._validate_build_cli_contract(
-        args,
-        build_parser,
-        provided,
-        config_defaults=applied,
-        config_path=config.path,
-    )
-
-    resolver.assert_not_called()
-
-
 def test_config_device_validation_names_the_config_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1060,45 +1033,32 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
         assert build_parser.get_default(dest) == expected
 
 
-@pytest.mark.parametrize(
-    ("max_semantic", "flags", "expected"),
-    [
-        (100, [], "--max-semantic must be between"),
-        (0, ["--torch-compile"], "disabled by defaults.max_semantic=0"),
-        (0, ["--no-torch-compile"], "--no-torch-compile"),
-    ],
-)
-def test_config_max_semantic_validation_names_the_config_source(
-    max_semantic: int, flags: list[str], expected: str
+def test_legacy_max_semantic_config_key_is_ignored(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Hybrid budget failures should identify config-sourced values.
+    """A config written before hybrid ranking replaced the semantic cap still loads.
 
-    :param int max_semantic: Configured semantic budget.
-    :param list[str] flags: Explicit embedding options.
-    :param str expected: Required diagnostic text.
-    :return None: Assertions verify actionable config provenance.
+    :param Path tmp_path: Isolated config directory.
+    :param pytest.LogCaptureFixture caplog: Captured load warnings.
+    :return None: The removed key is dropped with a warning; other keys apply.
     """
-    args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "hybrid", *flags]
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[defaults]\nstrategy = 'hybrid'\nmax_semantic = 5\nmax_papers = 25\n",
+        encoding="utf-8",
     )
-    config = UserConfig(
-        path=Path("cfg-home") / "config.toml", defaults={"max_semantic": max_semantic}
-    )
+
+    with caplog.at_level(logging.WARNING):
+        config = load_user_config(config_path)
+
+    assert config.defaults == {"strategy": "hybrid", "max_papers": 25}
+    assert "Ignoring unknown config key 'defaults.max_semantic'" in caplog.text
+    args, provided, build_parser = _parsed_build_args(["paper-id"])
     applied = build_options_module._apply_user_config_defaults(args, provided, config)
-
-    with pytest.raises(ValueError) as error:
-        build_contract_module._validate_build_cli_contract(
-            args,
-            build_contract_module._ValueErrorParserErrorSink(),
-            provided,
-            config_defaults=applied,
-            config_path=config.path,
-        )
-
-    message = str(error.value)
-    assert expected in message
-    assert "defaults.max_semantic" in message
-    assert str(config.path) in message
+    build_contract_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied
+    )
+    assert (args.strategy, args.max_papers) == ("hybrid", 25)
 
 
 def test_candidate_mode_announces_ignored_corpus_config_defaults(

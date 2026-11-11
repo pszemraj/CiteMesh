@@ -19,7 +19,6 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, EmbeddingGraphBuilder
 from citemesh.strategies.embedding.builder import EmbeddingRuntimeOptions
 from citemesh.strategies.hybrid import (
-    DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
     HYBRID_DEFAULT_MAX_REFERENCES,
@@ -107,8 +106,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: dict[str, set[str]] = {
     "torch_compile": {"embedding", "hybrid"},
     "device": {"embedding", "hybrid"},
     "semantic_source": {"embedding", "hybrid"},
-    "candidate_pool_size": {"embedding", "hybrid"},
-    "max_semantic": {"hybrid"},
+    "candidate_pool_size": {"embedding"},
 }
 _CORPUS_SEMANTIC_SOURCES = frozenset({"arxiv-corpus", "both"})
 # Corpus hydration flags imply arxiv-corpus when no source is explicit.
@@ -158,12 +156,6 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: dict[str, int] = {
     "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
     "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
 }
-# These options belong exclusively to the two embedding-aware strategies.
-_HYBRID_EMBEDDING_OPTION_DESTS = {
-    dest
-    for dest, strategies in _BUILD_STRATEGY_OPTION_SUPPORT.items()
-    if strategies == {"embedding", "hybrid"}
-}
 
 
 def _shared_embedding_builder_kwargs(
@@ -202,7 +194,6 @@ def _shared_embedding_builder_kwargs(
         "enable_torch_compile": cli_args.torch_compile,
         "device": cli_args.device,
         "semantic_source": cli_args.semantic_source,
-        "candidate_pool_size": cli_args.candidate_pool_size,
     }
 
 
@@ -292,7 +283,6 @@ def _embedding_export_metadata(
         "retrieval_representation": retrieval_representation,
         "graph_representation": graph_representation,
         "semantic_source": str(cli_args.semantic_source),
-        "candidate_pool_size": int(cli_args.candidate_pool_size),
         "storage_precision": str(cli_args.storage_precision),
         "binary_prefilter_enabled": binary_prefilter_enabled,
         "binary_prefilter_used_for_query": binary_prefilter_used_for_query,
@@ -303,8 +293,8 @@ def _embedding_export_metadata(
             getattr(cli_args, "cache_overwrite_reason", None)
         ),
     }
-    if payload["semantic_source"] == "arxiv-corpus":
-        payload.pop("candidate_pool_size")
+    if cli_args.strategy == "embedding" and payload["semantic_source"] == "candidates":
+        payload["candidate_pool_size"] = int(cli_args.candidate_pool_size)
     if payload["semantic_source"] in _CORPUS_SEMANTIC_SOURCES:
         for key in (
             "dataset_revision",
@@ -338,17 +328,6 @@ def _plot_overlay_metadata(export_metadata: ExportMetadata) -> PlotOverlayMetada
     if "timestamp" in export_metadata and export_metadata["timestamp"] is not None:
         overlay["timestamp"] = export_metadata["timestamp"]
     return overlay
-
-
-def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
-    """Resolve effective hybrid semantic cap from CLI arguments.
-
-    :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :return int: Effective ``max_semantic`` value.
-    """
-    if cli_args.max_semantic is None:
-        return max(0, min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1))
-    return int(cli_args.max_semantic)
 
 
 def _apply_hybrid_default_overrides(
@@ -436,15 +415,6 @@ def _configured_client_kwargs(args: argparse.Namespace) -> _ConfiguredClientKwar
     return {"client": client}
 
 
-def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
-    """Return whether hybrid semantic branch is effectively enabled.
-
-    :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :return bool: ``True`` when hybrid semantic branch can run.
-    """
-    return _resolved_hybrid_max_semantic(cli_args) > 0
-
-
 def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """Return whether the active build will execute an embedding-backed workflow.
 
@@ -452,11 +422,7 @@ def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
     :return bool: ``True`` when embedding runtime, cache, and corpus work may run.
     """
     strategy = str(getattr(cli_args, "strategy", "")).strip().lower()
-    if strategy == "embedding":
-        return True
-    if strategy == "hybrid":
-        return _hybrid_semantic_branch_enabled(cli_args)
-    return False
+    return strategy in {"embedding", "hybrid"}
 
 
 def _strategy_score_contract(strategy: str) -> ScoreContract:
@@ -480,10 +446,13 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
     elif strategy == "hybrid":
         contract["score_type"] = "hybrid_similarity_composite"
         contract["adjudication_policy"] = (
-            "Citation and semantic candidates are ranked by seed relevance with "
-            "a bonus for overlap. An explicit max_semantic is a hard ceiling. "
-            "The default can add skipped semantic-only papers to vacant slots "
-            "after the first pass."
+            "Every provider reference and citer of the seed, its recommendations "
+            "(candidates, both) and its nearest corpus rows (arxiv-corpus, both) "
+            "are ranked by reciprocal rank fusion (k=60) of document-embedding "
+            "similarity to the seed, similarity to the seed's references, direct "
+            "citation links and recommendation order; the best max_papers - 1 "
+            "are kept, with no per-source quota. Edge scores weight embedding "
+            "similarity and bibliographic coupling by each paper's source."
         )
     return contract
 
@@ -508,6 +477,7 @@ _STRATEGY_DISPATCH: dict[str, StrategyFactory] = {
     "embedding": lambda cli_args: EmbeddingGraphBuilder(
         max_papers=cli_args.max_papers,
         top_k=cli_args.top_k,
+        candidate_pool_size=cli_args.candidate_pool_size,
         **_shared_embedding_builder_kwargs(cli_args),
     ),
     "hybrid": lambda cli_args: HybridGraphBuilder(
@@ -516,7 +486,6 @@ _STRATEGY_DISPATCH: dict[str, StrategyFactory] = {
         max_references=cli_args.max_references,
         fetch_references=not cli_args.no_references,
         refresh_reference_cache=cli_args.refresh_reference_cache,
-        max_semantic=cli_args.max_semantic,
         **_shared_embedding_builder_kwargs(cli_args),
     ),
 }

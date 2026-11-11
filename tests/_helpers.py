@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
+import re
 import threading
 from collections.abc import Callable, Sequence
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import networkx as nx
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from citemesh.core import Paper
+    from citemesh.strategies.hybrid import HybridGraphBuilder
 
 
 def fail_stat_for(
@@ -175,6 +182,105 @@ class LookupEncodeModel:
         """
         del kwargs
         return np.asarray([self.lookup[text] for text in texts], dtype=np.float32)
+
+
+def word_hash_vectors(texts: Sequence[str], dimension: int = 16) -> NDArray[np.float32]:
+    """Embed texts as sums of hashed word directions, one unit row per text.
+
+    Texts sharing words get close vectors, independently of batch composition.
+
+    :param Sequence[str] texts: Input texts.
+    :param int dimension: Vector width.
+    :return NDArray[np.float32]: ``(len(texts), dimension)`` unit rows.
+    """
+    rows = np.zeros((len(texts), dimension), dtype=np.float64)
+    for row, text in enumerate(texts):
+        for word in re.findall(r"[a-z0-9]+", text.lower()) or ["empty"]:
+            seed = int.from_bytes(hashlib.sha256(word.encode()).digest()[:8], "little")
+            rows[row] += np.random.default_rng(seed).normal(size=dimension)
+        rows[row] /= np.linalg.norm(rows[row])
+    return rows.astype(np.float32)
+
+
+class WordHashEncodeModel:
+    """Encode model built on :func:`word_hash_vectors`, logging every text."""
+
+    def __init__(self) -> None:
+        """Start with an empty text log."""
+        self.texts: list[str] = []
+
+    def encode(self, texts: Sequence[str], **kwargs: object) -> NDArray[np.float32]:
+        """Embed texts; ignore encoding options.
+
+        :param Sequence[str] texts: Formatted model inputs.
+        :param object kwargs: Ignored encoder options.
+        :return NDArray[np.float32]: One unit row per text.
+        """
+        del kwargs
+        self.texts.extend(texts)
+        return word_hash_vectors(texts)
+
+
+def stub_hybrid_corpus_operation_lock(builder: HybridGraphBuilder) -> None:
+    """Bind a no-I/O corpus lock for hybrid orchestration unit tests.
+
+    :param HybridGraphBuilder builder: Hybrid builder whose embedding child is active.
+    :return None: Replaces artifact binding with a reentrant no-op lock fixture.
+    """
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    builder.embedding_builder.prepare_embedding_cache = MagicMock(return_value=cache)
+
+
+def stub_hybrid_corpus(
+    builder: HybridGraphBuilder,
+    *,
+    seed: Paper | None = None,
+    neighbours: list[Paper] | None = None,
+) -> MagicMock:
+    """Serve a hybrid builder's prepared corpus from memory.
+
+    Provider records match no corpus row and every member is encoded in memory.
+
+    :param HybridGraphBuilder builder: Corpus-mode hybrid builder.
+    :param Paper | None seed: Corpus seed returned by seed resolution.
+    :param list[Paper] | None neighbours: Rows returned by each corpus search.
+    :return MagicMock: The corpus search stub.
+    """
+    stub_hybrid_corpus_operation_lock(builder)
+    embedding = builder.embedding_builder
+    embedding._prepare_corpus_for_build = MagicMock()
+    embedding.resolve_cached_corpus_seed = MagicMock(return_value=seed)
+    embedding.cached_reference_metadata = MagicMock(return_value={})
+    embedding.cached_bibliography_metadata = MagicMock(return_value={})
+    embedding.cached_corpus_vectors = MagicMock(return_value={})
+    embedding.search_prepared_corpus = MagicMock(return_value=list(neighbours or []))
+    embedding._enrich_corpus_papers = MagicMock()
+    embedding.enrich_cached_corpus_seed = MagicMock()
+    return embedding.search_prepared_corpus
+
+
+def offline_hybrid_encoder(
+    monkeypatch: pytest.MonkeyPatch, builder: HybridGraphBuilder
+) -> list[str]:
+    """Encode a hybrid builder's texts offline with :func:`word_hash_vectors`.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
+    :param HybridGraphBuilder builder: Builder whose embedding child is patched.
+    :return list[str]: Log of every encoded text, in call order.
+    """
+    texts: list[str] = []
+
+    def encode(
+        batch: list[str], batch_size: int | None = None, show_progress_bar: bool = False
+    ) -> NDArray[np.float32]:
+        del batch_size, show_progress_bar
+        texts.extend(batch)
+        return word_hash_vectors(batch)
+
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+    monkeypatch.setattr(builder.embedding_builder, "_encode_texts", encode)
+    return texts
 
 
 def get_paper_id_normalization_cases() -> list[tuple[str, str]]:

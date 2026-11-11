@@ -968,8 +968,6 @@ def test_selected_build_writes_contract_and_runtime_provenance(
         assert args.model == installed_selection.contract.model_id
         assert args.truncate_dim == installed_selection.contract.dimension
         assert args.semantic_source == ("both" if combined else "arxiv-corpus")
-        if combined:
-            assert args.candidate_pool_size == 13
         return graph, "seed"
 
     monkeypatch.setattr(build, "_build_strategy_graph", build_graph)
@@ -985,7 +983,6 @@ def test_selected_build_writes_contract_and_runtime_provenance(
             installed_selection.namespace_id,
             "--all-corpus",
             *(["--semantic-source", "both"] if combined_from == "cli" else []),
-            *(["--candidate-pool-size", "13"] if combined else []),
             "--export",
             "json",
             "--output",
@@ -1016,13 +1013,13 @@ def test_selected_build_writes_contract_and_runtime_provenance(
     assert embedding["all_corpus"] is True
     assert embedding["installed_corpus_selection"] == installed_scope
     assert embedding.get("installed_corpus_limit") == installed_limit
+    assert "candidate_pool_size" not in embedding
+    assert "candidate_pool_size" not in payload["metadata"]["embedding"]
     if combined:
         assert embedding["semantic_source"] == "both"
-        assert embedding["candidate_pool_size"] == 13
         assert embedding["dataset_source"] == installed_selection.source_repo_id
         metadata = payload["metadata"]
         assert metadata["embedding"]["cache_namespace"] == embedding["cache_namespace"]
-        assert metadata["embedding"]["candidate_pool_size"] == 13
 
 
 def test_minimal_selected_finite_corpus_uses_certified_limit(

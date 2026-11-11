@@ -342,13 +342,6 @@ class CitationConfig(TypedDict, total=False):
     similarity_threshold: float
 
 
-class HybridConfig(TypedDict):
-    """Semantic candidate budget recorded for a hybrid graph build."""
-
-    max_semantic: int
-    fill_semantic_vacancies: bool
-
-
 class EmbeddingConfig(TypedDict, total=False):
     """Effective embedding options recorded in a build sidecar."""
 
@@ -417,7 +410,6 @@ class BuildConfig(_BuildConfigRequired, total=False):
     """Build options with settings for the active strategy branches."""
 
     citation: CitationConfig
-    hybrid: HybridConfig
     embedding: EmbeddingConfig
 
 
@@ -464,7 +456,6 @@ __all__ = [
     "DashboardResultEntry",
     "DashboardCollectionPackage",
     "CitationConfig",
-    "HybridConfig",
     "EmbeddingConfig",
     "LayoutConfig",
     "BuildConfig",

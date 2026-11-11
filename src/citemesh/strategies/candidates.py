@@ -76,14 +76,12 @@ class CandidateSourceState(str, Enum):
 
 @dataclass(frozen=True)
 class CandidateSourceResult:
-    """Admitted candidates, availability, and reference evidence before admission."""
+    """Admitted candidates of one attempted source, with its availability."""
 
     source: str
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
     error: str | None = ""
-    verified_references: tuple[Paper, ...] = ()
-    source_ranks: dict[str, int] = field(default_factory=dict)
 
 
 def scope_candidate_collection(
@@ -489,21 +487,21 @@ def _select_recovered_references_by_text(
 
 def _add_verified_reference(
     seed: Paper, references: list[Paper], paper: Paper | None
-) -> Paper | None:
+) -> None:
     """Keep the canonical reference while excluding matches to the seed."""
     if (
         paper is None
         or paper.paper_id == seed.paper_id
         or candidate_records_match(seed, paper)
     ):
-        return None
+        return
     for existing in references:
         if existing.paper_id == paper.paper_id or candidate_records_match(
             existing, paper
         ):
-            return merge_paper_metadata(existing, paper)
+            merge_paper_metadata(existing, paper)
+            return
     references.append(paper)
-    return paper
 
 
 def fetch_seed_references(
@@ -518,7 +516,6 @@ def fetch_seed_references(
     ]
     | None = None,
     reference_selector: ReferenceSelector | None = None,
-    s2_reference_selector: ReferenceSelector | None = None,
 ) -> tuple[CandidateSourceResult, ...]:
     """Collect S2 seed references with an arXiv bibliography fallback.
 
@@ -532,8 +529,6 @@ def fetch_seed_references(
         entries by title, first author, and year after an empty S2 response.
     :param Callable | None reference_selector: Strategy-specific selector applied
         after the complete fallback bibliography is materialized.
-    :param Callable | None s2_reference_selector: Selector for a wider bounded
-        list of provider references, retaining the original admission limit.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
     """
     from citemesh.services import (
@@ -545,37 +540,18 @@ def fetch_seed_references(
     if limit <= 0:
         return ()
     provider_id = provider_lookup_identifier(seed.paper_id, seed)
-    fetch_limit = max(limit, 100) if s2_reference_selector is not None else limit
     original = (
         fetch_candidate_source(
             "references",
             lambda: client.get_paper_references(
-                provider_id, limit=fetch_limit, raise_on_unavailable=True
+                provider_id, limit=limit, raise_on_unavailable=True
             ),
         )
         if provider_id is not None
         else CandidateSourceResult("references", CandidateSourceState.UNAVAILABLE)
     )
     if original.papers:
-        if s2_reference_selector is None:
-            return (original,)
-        references: list[Paper] = []
-        source_ranks: dict[str, int] = {}
-        for rank, paper in enumerate(original.papers, start=1):
-            canonical = _add_verified_reference(seed, references, paper)
-            if canonical is not None:
-                source_ranks.setdefault(canonical.paper_id, rank)
-        if references:
-            return (
-                CandidateSourceResult(
-                    source=original.source,
-                    state=original.state,
-                    papers=tuple(s2_reference_selector(seed, references, limit)),
-                    verified_references=tuple(references),
-                    source_ranks=source_ranks,
-                ),
-            )
-        original = CandidateSourceResult(original.source, CandidateSourceState.EMPTY)
+        return (original,)
     identifier = next(
         (
             value
@@ -683,8 +659,7 @@ def fetch_seed_references(
             for key in keys:
                 _add_verified_reference(seed, recovered, records_by_key.get(key))
 
-    verified_references = tuple(recovered)
-    materialized_count = len(verified_references)
+    materialized_count = len(recovered)
     selector = reference_selector or _select_recovered_references_by_text
     recovered = selector(seed, recovered, limit)
     logger.debug(
@@ -729,7 +704,6 @@ def fetch_seed_references(
             state,
             papers=tuple(recovered),
             error=error,
-            verified_references=verified_references,
         ),
     )
 
@@ -818,30 +792,6 @@ def merge_seed_relation(existing: str, incoming: str) -> str:
     if normalized_incoming == "semantic_only":
         return normalized_existing
     return normalized_existing
-
-
-def annotate_verified_seed_references(
-    candidates: dict[str, Paper],
-    source_results: Sequence[CandidateSourceResult],
-    seed_relations: dict[str, str],
-) -> None:
-    """Label verified references already in the deduplicated candidate pool."""
-    for result in source_results:
-        for reference in result.verified_references:
-            paper_id = reference.paper_id
-            if paper_id not in candidates:
-                matches = [
-                    candidate_id
-                    for candidate_id, candidate in candidates.items()
-                    if candidate_records_match(reference, candidate)
-                ]
-                if len(matches) != 1:
-                    continue
-                paper_id = matches[0]
-            previous = seed_relations.get(paper_id, "")
-            seed_relations[paper_id] = merge_seed_relation(
-                "" if previous == "citation" else previous, "referenced_by_seed"
-            )
 
 
 def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:

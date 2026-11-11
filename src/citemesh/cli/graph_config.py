@@ -25,7 +25,6 @@ from .build_options import (
     _CORPUS_SEMANTIC_SOURCES,
     _embedding_branch_enabled,
     _normalized_cache_reason,
-    _resolved_hybrid_max_semantic,
 )
 
 
@@ -159,7 +158,7 @@ def _build_graph_config_payload(
             embedding_config.pop("corpus_size", None)
             embedding_config.pop("all_corpus", None)
             embedding_config.pop("streaming", None)
-        if cli_args.semantic_source == "arxiv-corpus":
+        if strategy != "embedding" or cli_args.semantic_source != "candidates":
             embedding_config.pop("candidate_pool_size")
         if cli_args.storage_precision != "int8":
             embedding_config.pop("binary_prefilter")
@@ -179,14 +178,6 @@ def _build_graph_config_payload(
             ),
             "s2_retry_budget": s2_retry_budget,
             "citation": _build_citation_config_payload(cli_args, strategy=strategy),
-            "hybrid": (
-                {
-                    "max_semantic": _resolved_hybrid_max_semantic(cli_args),
-                    "fill_semantic_vacancies": cli_args.max_semantic is None,
-                }
-                if strategy == "hybrid"
-                else None
-            ),
             "embedding": embedding_config,
             "layout": {
                 "spring_iterations": int(cli_args.spring_iterations),

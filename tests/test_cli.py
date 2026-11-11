@@ -66,7 +66,6 @@ from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
 )
 from citemesh.strategies.hybrid import (
-    DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
     HYBRID_DEFAULT_MAX_REFERENCES,
@@ -264,6 +263,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     """Build argparse namespace fixture for strategy dispatch tests."""
     values = {
         "paper_id": "seed",
+        "strategy": "embedding",
         "max_papers": 11,
         "max_citations": 25,
         "max_references": 25,
@@ -281,7 +281,6 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "top_k": 4,
         "truncate_dim": None,
         "streaming": False,
-        "max_semantic": None,
         "seed": 7,
         "force_rebuild_cache": False,
         "overwrite_cache": False,
@@ -2655,17 +2654,8 @@ def test_cli_argument_validation_contracts() -> None:
             "--semantic-source both requires --strategy hybrid",
         ),
         (
-            [
-                "build",
-                "seed",
-                "--strategy",
-                "hybrid",
-                "--semantic-source",
-                "both",
-                "--max-semantic",
-                "0",
-            ],
-            "Hybrid semantic branch is disabled with --max-semantic 0",
+            ["build", "seed", "--strategy", "hybrid", "--max-semantic", "0"],
+            "unrecognized arguments: --max-semantic",
         ),
         (
             ["search", "topic", "--semantic-source", "both"],
@@ -2740,10 +2730,21 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
                 "arxiv:1706.03762",
                 "--strategy",
                 "recommendation",
-                "--max-s",
+                "--max-r",
                 "4",
             ],
-            "--max-semantic",
+            "--max-references",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--candidate-pool-size",
+                "100",
+            ],
+            "--candidate-pool-size",
         ),
         (
             [
@@ -2812,19 +2813,6 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "train[:5%]",
             ],
             "Streaming mode does not support sliced --dataset-split",
-        ),
-        (
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "hybrid",
-                "--max-papers",
-                "5",
-                "--max-semantic",
-                "5",
-            ],
-            "--max-semantic must be between 0 and --max-papers - 1",
         ),
         (
             [
@@ -2902,32 +2890,6 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
-                "hybrid",
-                "--max-semantic",
-                "0",
-                "--model",
-                "org/generic-embedding-model",
-            ],
-            "Hybrid semantic branch is disabled with --max-semantic 0",
-        ),
-        (
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "hybrid",
-                "--max-semantic",
-                "0",
-                "--device",
-                "cpu",
-            ],
-            "remove embedding-only option(s): --device",
-        ),
-        (
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
                 "embedding",
                 "--semantic-source",
                 "candidates",
@@ -2959,19 +2921,6 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "100",
             ],
             "--candidate-pool-size requires --semantic-source candidates",
-        ),
-        (
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "hybrid",
-                "--max-semantic",
-                "0",
-                "--model",
-                DEFAULT_EMBEDDING_MODEL_NAME,
-            ],
-            "Hybrid semantic branch is disabled with --max-semantic 0",
         ),
         (
             [
@@ -3077,10 +3026,10 @@ def test_main_without_argv_preserves_explicit_default_valued_flags(
         assert token in result.stderr
 
 
-def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
+def test_hybrid_accepts_embedding_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hybrid should accept embedding options when default semantic budget is non-zero."""
+    """Hybrid always ranks with embeddings, so it accepts embedding options."""
     graph = build_seed_graph("seed")
 
     monkeypatch.setattr(
@@ -3110,9 +3059,6 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
         assert output.exists()
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert (
-        "Hybrid semantic branch is disabled with --max-semantic 0" not in result.stderr
-    )
 
 
 def test_embedding_lzf_compression_level_normalization_contract() -> None:
@@ -3138,9 +3084,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
     assert hybrid_defaults.max_papers == HYBRID_DEFAULT_MAX_PAPERS
     assert hybrid_defaults.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
     assert hybrid_defaults.max_references == HYBRID_DEFAULT_MAX_REFERENCES
-    assert build_options_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
-        DEFAULT_MAX_SEMANTIC, HYBRID_DEFAULT_MAX_PAPERS - 1
-    )
+    assert (HYBRID_DEFAULT_MAX_CITATIONS, HYBRID_DEFAULT_MAX_REFERENCES) == (1000, 1000)
 
     explicit_hybrid = build_parser.parse_args(
         [
@@ -3153,63 +3097,54 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
             "6",
             "--max-references",
             "7",
-            "--max-semantic",
-            "5",
         ]
     )
     build_contract_module._validate_build_cli_contract(
         explicit_hybrid,
         build_parser,
-        provided={"max_papers", "max_citations", "max_references", "max_semantic"},
+        provided={"max_papers", "max_citations", "max_references"},
     )
     assert explicit_hybrid.max_papers == 40
     assert explicit_hybrid.max_citations == 6
     assert explicit_hybrid.max_references == 7
-    assert build_options_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
 
 
-@pytest.mark.parametrize(
-    ("setting_source", "limit"),
-    [("default", None), ("cli", 20), ("config", 20), ("cli", 0), ("config", 0)],
-)
-def test_hybrid_sidecar_distinguishes_default_from_explicit_semantic_cap(
+def test_hybrid_sidecar_records_provider_limits_without_semantic_cap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    setting_source: str,
-    limit: int | None,
 ) -> None:
-    """The sidecar identifies whether to omit max_semantic when repeating a build."""
+    """A hybrid sidecar repeats the build from provider limits and embedding options."""
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         build_options_module,
         "HybridGraphBuilder",
         _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
-    if setting_source == "config":
-        cli_module.set_config_value("defaults.max_semantic", str(limit))
     output = tmp_path / "hybrid.json"
-    args = [
-        "build",
-        "seed",
-        "--strategy",
-        "hybrid",
-        "--export",
-        "json",
-        "--output",
-        str(output),
-    ]
-    if setting_source == "cli":
-        args.extend(["--max-semantic", str(limit)])
 
-    result = run_cli_command(args)
+    result = run_cli_command(
+        [
+            "build",
+            "seed",
+            "--strategy",
+            "hybrid",
+            "--export",
+            "json",
+            "--output",
+            str(output),
+        ]
+    )
 
     assert result.returncode == 0, result.stderr
-    assert captured["max_semantic"] == limit
+    assert "max_semantic" not in captured
+    assert "candidate_pool_size" not in captured
     payload = json.loads(output.with_suffix(".config.json").read_text(encoding="utf-8"))
-    assert payload["build"]["hybrid"] == {
-        "max_semantic": DEFAULT_MAX_SEMANTIC if limit is None else limit,
-        "fill_semantic_vacancies": limit is None,
-    }
+    assert "hybrid" not in payload["build"]
+    assert "candidate_pool_size" not in payload["build"]["embedding"]
+    assert payload["build"]["citation"]["max_citations"] == HYBRID_DEFAULT_MAX_CITATIONS
+    assert payload["build"]["citation"]["max_references"] == (
+        HYBRID_DEFAULT_MAX_REFERENCES
+    )
 
 
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4999,12 +4934,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert metadata["embedding"]["binary_prefilter_enabled"] is True
     assert metadata["embedding"]["binary_prefilter_used_for_query"] is False
-
-    metadata = _capture_metadata(
-        strategy="hybrid",
-        extra_args=["--max-semantic", "0"],
-    )
-    assert "embedding" not in metadata
+    assert "candidate_pool_size" not in hybrid_metadata["embedding"]
 
 
 def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> None:
@@ -5095,61 +5025,6 @@ def test_embedding_build_logs_side_effect_contract(
     assert any("Embedding config:" in msg for msg in debug_messages)
     assert not any("Embedding config:" in msg for msg in info_messages)
     assert any("No embedding cache found" in msg for msg in info_messages)
-    assert not any("No embedding cache found" in msg for msg in warning_messages)
-
-
-def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid runs without semantic enrichment should not advertise embedding work."""
-    graph = build_seed_graph("seed")
-
-    info_mock = MagicMock()
-    warning_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info_mock)
-    monkeypatch.setattr(cli_module.logger, "warning", warning_mock)
-    monkeypatch.setattr(
-        build_contract_module,
-        "_embedding_cache_directory_stats",
-        lambda: (Path("/tmp/cache"), 0, 0),
-    )
-    monkeypatch.setattr(
-        build_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
-    )
-    monkeypatch.setattr(
-        build_module,
-        "GraphExporter",
-        _make_exporter_stub({}, methods=("to_json",)),
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "graph.json"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "hybrid",
-                "--max-semantic",
-                "0",
-                "--export",
-                "json",
-                "-o",
-                str(output),
-            ],
-        )
-        assert output.exists()
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    info_messages = [
-        str(call.args[0]) for call in info_mock.call_args_list if call.args
-    ]
-    warning_messages = [
-        str(call.args[0]) for call in warning_mock.call_args_list if call.args
-    ]
-    assert not any("Embedding config:" in msg for msg in info_messages)
     assert not any("No embedding cache found" in msg for msg in warning_messages)
 
 
@@ -5249,7 +5124,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "max_citations": 9,
                 "max_references": 7,
                 "no_references": True,
-                "max_semantic": 5,
                 "model": "m",
                 "model_profile": "embeddinggemma",
                 "dataset_source": "research/arxiv-snapshot",
@@ -5268,7 +5142,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "max_references": 7,
                 "fetch_references": False,
                 "refresh_reference_cache": False,
-                "max_semantic": 5,
                 "model_name": "m",
                 "model_profile": "embeddinggemma",
                 "model_revision": None,
@@ -5290,7 +5163,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "enable_torch_compile": False,
                 "device": "auto",
                 "semantic_source": "arxiv-corpus",
-                "candidate_pool_size": 400,
             },
         ),
     ]
@@ -6061,9 +5933,14 @@ def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
     candidates_metadata = build_options_module._embedding_export_metadata(
         _dispatch_namespace(semantic_source="candidates", candidate_pool_size=400)
     )
+    hybrid_metadata = build_options_module._embedding_export_metadata(
+        _dispatch_namespace(strategy="hybrid", semantic_source="candidates")
+    )
 
     assert "candidate_pool_size" not in corpus_metadata
     assert candidates_metadata["candidate_pool_size"] == 400
+    # Hybrid never consults the embedding candidate pool.
+    assert "candidate_pool_size" not in hybrid_metadata
 
 
 def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:

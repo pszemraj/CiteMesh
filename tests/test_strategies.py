@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -16,7 +16,6 @@ import requests
 
 from citemesh.core import API_CONFIG, EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
 from citemesh.core.paper_ids import arxiv_identifier_from_doi, normalize_paper_id
-from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
 from citemesh.strategies import hybrid as hybrid_strategy
@@ -40,7 +39,11 @@ from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.strategies.similarity import AbstractSimilarityIndex
-from tests._helpers import disable_embedding_dep_checks
+from tests._helpers import (
+    disable_embedding_dep_checks,
+    offline_hybrid_encoder,
+    stub_hybrid_corpus,
+)
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
 
@@ -86,18 +89,6 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
         abstract="seed abstract",
         is_seed=True,
     )
-
-
-def _stub_hybrid_corpus_operation_lock(builder: HybridGraphBuilder) -> None:
-    """Bind a no-I/O corpus lock for hybrid orchestration unit tests.
-
-    :param HybridGraphBuilder builder: Hybrid builder whose embedding child is active.
-    :return None: Replaces artifact binding with a reentrant no-op lock fixture.
-    """
-    assert builder.embedding_builder is not None
-    cache = MagicMock()
-    cache.hydration_operation_lock.return_value = nullcontext()
-    builder.embedding_builder.prepare_embedding_cache = MagicMock(return_value=cache)
 
 
 def _api_relation_record(paper_id: str) -> SimpleNamespace:
@@ -276,12 +267,7 @@ def test_repeated_collection_preserves_client_owned_seed_role(
     client.get_reference_ids.return_value = []
     builder = builder_type(max_papers=2, client=client)
     if isinstance(builder, HybridGraphBuilder):
-        monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-        monkeypatch.setattr(
-            builder,
-            "_rank_candidates",
-            lambda _seed, candidates, _sources: list(candidates),
-        )
+        offline_hybrid_encoder(monkeypatch, builder)
     elif isinstance(builder, EmbeddingGraphBuilder):
         monkeypatch.setattr(builder, "_load_model", lambda: None)
         monkeypatch.setattr(
@@ -611,17 +597,10 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
             max_papers=3,
             max_references=1,
             max_citations=1,
-            max_semantic=1,
             semantic_source="candidates",
             client=client,
         )
-        assert builder.embedding_builder is not None
-        monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-        monkeypatch.setattr(
-            builder,
-            "_rank_candidates",
-            lambda _seed, candidates, _sources: list(candidates),
-        )
+        offline_hybrid_encoder(monkeypatch, builder)
 
         with patch("time.sleep"):
             papers = builder.collect_papers("hybrid-scope-seed")
@@ -1190,7 +1169,6 @@ def test_citation_collect_keeps_opaque_pre_resolved_local_seed_off_provider() ->
     assert papers[seed.paper_id].is_seed is True
     assert builder.reference_cache == {}
     assert builder.candidate_source_status == {}
-    assert builder.candidate_source_results == ()
 
 
 def test_citation_collect_sizes_relation_requests_to_open_graph_slots() -> None:
@@ -1561,17 +1539,10 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
         max_papers=3,
         max_references=1,
         max_citations=1,
-        max_semantic=1,
         fetch_references=False,
         client=hybrid_client,
     )
-    assert hybrid_builder.embedding_builder is not None
-    monkeypatch.setattr(hybrid_builder.embedding_builder, "_load_model", lambda: None)
-    monkeypatch.setattr(
-        hybrid_builder,
-        "_rank_candidates",
-        lambda _seed, candidates, _sources: list(candidates),
-    )
+    offline_hybrid_encoder(monkeypatch, hybrid_builder)
 
     hybrid_papers = hybrid_builder.collect_papers("seed")
 
@@ -1630,21 +1601,15 @@ def test_hybrid_discovers_recommendations_before_reference_enrichment(
         max_papers=3,
         max_references=1,
         max_citations=1,
-        max_semantic=1,
         fetch_references=True,
         client=client,
     )
-    assert builder.embedding_builder is not None
-    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda _seed, candidates, _sources: list(candidates),
-    )
+    offline_hybrid_encoder(monkeypatch, builder)
 
     papers = builder.collect_papers("seed")
 
     assert set(papers) == {"seed", "rec1"}
+    # A semantic-only recommendation gets no reference list for coupling.
     assert events == [
         "discover references",
         "discover citations",
@@ -1667,52 +1632,46 @@ def test_hybrid_corpus_defers_optional_seed_enrichment(
         is_local_corpus=True,
         is_seed=True,
     )
+    client = MagicMock()
+    client.get_paper_references.side_effect = lambda *_args, **_kwargs: (
+        events.append("reference discovery") or []
+    )
+    client.get_paper_citations.side_effect = lambda *_args, **_kwargs: (
+        events.append("citation discovery") or []
+    )
     builder = HybridGraphBuilder(
         max_papers=3,
         max_references=1,
         max_citations=1,
-        max_semantic=1,
         semantic_source="arxiv-corpus",
         dataset_source="example/arxiv",
         fetch_references=True,
-        client=MagicMock(),
+        client=client,
     )
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=seed)
-    builder.citation_builder.collect_papers = MagicMock(
-        side_effect=lambda *_args, **_kwargs: (
-            events.append("citation discovery") or {seed.paper_id: seed}
-        )
+    search = stub_hybrid_corpus(builder, seed=seed)
+    search.side_effect = lambda *_args: (
+        events.append("corpus discovery") or [_paper("semantic")]
     )
-    builder.embedding_builder.collect_papers = MagicMock(
-        side_effect=lambda *_args, **_kwargs: (
-            events.append("corpus discovery")
-            or {seed.paper_id: seed, "semantic": _paper("semantic")}
-        )
-    )
+    offline_hybrid_encoder(monkeypatch, builder)
     builder.embedding_builder.enrich_cached_corpus_seed = MagicMock(
         side_effect=lambda _seed: events.append("provider seed enrichment")
     )
-    builder.citation_builder.hydrate_collected_references = MagicMock(
+    builder.reference_hydrator.hydrate_collected_references = MagicMock(
         side_effect=lambda _papers, _seed: events.append("reference enrichment")
-    )
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda _seed, candidates, _sources: list(candidates),
     )
 
     papers = builder.collect_papers(seed.paper_id)
 
     assert set(papers) == {seed.paper_id, "semantic"}
     assert events == [
+        "reference discovery",
         "citation discovery",
+        "corpus discovery",
         "corpus discovery",
         "provider seed enrichment",
         "reference enrichment",
     ]
+    client.get_paper.assert_not_called()
 
 
 def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
@@ -1725,32 +1684,18 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
     citation_candidate = _paper("citation")
     semantic_candidate = _paper("semantic")
     client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [citation_candidate]
+    client.get_paper_citations.return_value = []
     client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
     builder = HybridGraphBuilder(
         max_papers=4,
-        max_semantic=1,
         semantic_source="arxiv-corpus",
         fetch_references=True,
         client=client,
     )
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
-    builder.citation_builder.collect_papers = MagicMock(
-        return_value={
-            seed.paper_id: seed,
-            citation_candidate.paper_id: citation_candidate,
-        }
-    )
-    builder.embedding_builder.collect_papers = MagicMock(
-        return_value={semantic_candidate.paper_id: semantic_candidate}
-    )
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda _seed, candidates, _sources: list(candidates),
-    )
+    stub_hybrid_corpus(builder, neighbours=[semantic_candidate])
+    offline_hybrid_encoder(monkeypatch, builder)
 
     with caplog.at_level(logging.WARNING):
         papers = builder.collect_papers(seed.paper_id)
@@ -1811,38 +1756,6 @@ def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
         raise_on_unavailable=True,
     )
     query_client.get_recommended_papers.assert_not_called()
-
-
-def test_hybrid_candidate_recommendation_limit_stays_within_source_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Oversized budgets must not push the recommendation fetch past S2's cap.
-
-    :param pytest.MonkeyPatch monkeypatch: Offline model and ranking stubs.
-    :return None: Assertions pin the per-source recommendation request limit.
-    """
-    client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
-    client.get_paper_references.return_value = []
-    client.get_paper_citations.return_value = []
-    client.get_recommended_papers.return_value = [_paper("rec1")]
-    builder = HybridGraphBuilder(
-        max_papers=800,
-        max_semantic=400,
-        candidate_pool_size=600,
-        fetch_references=False,
-        client=client,
-    )
-    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda _seed, candidates, _sources: list(candidates),
-    )
-
-    builder.collect_papers("seed")
-
-    assert client.get_recommended_papers.call_args.kwargs["limit"] == 100
 
 
 def test_refresh_reference_cache_force_lookup_contracts() -> None:
@@ -1907,28 +1820,14 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
         max_papers=3,
         max_references=1,
         max_citations=1,
-        max_semantic=1,
         semantic_source="arxiv-corpus",
         dataset_source="example/arxiv",
         client=client,
     )
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
     assert builder.embedding_builder.dataset_source == "example/arxiv"
     assert builder.embedding_builder.corpus_size is None
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "resolve_cached_corpus_seed",
-        lambda _seed_id, **_kwargs: None,
-    )
-    collect_corpus = MagicMock(
-        return_value={"seed": seed, "semantic": _paper("semantic")}
-    )
-    monkeypatch.setattr(builder.embedding_builder, "collect_papers", collect_corpus)
-    monkeypatch.setattr(
-        builder, "_rank_candidates", lambda _seed, papers, _sources: list(papers)
-    )
+    search = stub_hybrid_corpus(builder, neighbours=[seed, _paper("semantic")])
+    offline_hybrid_encoder(monkeypatch, builder)
 
     with caplog.at_level(logging.WARNING):
         papers = builder.collect_papers("seed")
@@ -1937,10 +1836,9 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     assert builder.candidate_source_status == {
         "references": "unavailable",
         "citations": "unavailable",
+        "arxiv_corpus": "complete",
     }
-    collect_corpus.assert_called_once_with(
-        "seed", seed_paper=seed, _corpus_prepared=True
-    )
+    assert search.call_count == 2
     client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
     client.get_recommended_papers.assert_not_called()
@@ -2027,64 +1925,46 @@ def test_citation_similarity_uses_reference_and_fallback_branches(
     assert without_refs == pytest.approx(expected_without_refs)
 
 
-def test_hybrid_collection_merges_and_tracks_sources() -> None:
+def test_hybrid_collection_merges_and_tracks_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Hybrid collection should merge citation+semantic papers and source labels."""
-    builder = HybridGraphBuilder(
-        max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
-    )
-
     seed = _paper("seed")
-    seed.is_seed = True
-    citation_papers = {"seed": seed, "c1": _paper("c1")}
-    semantic_papers = {"c1": _paper("c1"), "s1": _paper("s1"), "s2": _paper("s2")}
-
-    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
-    builder.citation_builder.seed_relations = {
-        "seed": "seed",
-        "c1": "referenced_by_seed",
-    }
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
-
-    def _collect_semantic(*_args: object, **_kwargs: object) -> dict[str, Paper]:
-        builder.embedding_builder.retrieval_embeddings = {
-            paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
-            for paper_id in {"seed", "c1", "s1", "s2"}
-        }
-        return semantic_papers
-
-    builder.embedding_builder.collect_papers = MagicMock(side_effect=_collect_semantic)
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [_paper("c1")]
+    client.get_paper_citations.return_value = []
+    builder = HybridGraphBuilder(
+        max_papers=5, semantic_source="arxiv-corpus", client=client
+    )
+    stub_hybrid_corpus(builder, neighbours=[_paper("c1"), _paper("s1"), _paper("s2")])
+    offline_hybrid_encoder(monkeypatch, builder)
 
     papers = builder.collect_papers("seed")
 
     assert set(papers) == {"seed", "c1", "s1", "s2"}
-    builder.embedding_builder.collect_papers.assert_called_once_with(
-        "seed",
-        seed_paper=seed,
-        _corpus_prepared=True,
-    )
-    assert builder.paper_sources["seed"] == "citation"
-    assert builder.paper_sources["s1"] == "semantic"
+    assert builder.paper_sources == {
+        "seed": "citation",
+        "c1": "both",
+        "s1": "semantic",
+        "s2": "semantic",
+    }
     assert builder.seed_relations["seed"] == "seed"
     assert builder.seed_relations["c1"] == "referenced_by_seed"
     assert builder.seed_relations["s1"] == "semantic_only"
 
 
 @pytest.mark.parametrize("seed_id", ["content:local-paper", "arxiv_7"])
-def test_hybrid_without_semantic_enrichment_rejects_local_only_seed(
-    seed_id: str,
-) -> None:
-    """A citation-only hybrid branch must not send local IDs to the provider.
+def test_hybrid_candidates_mode_rejects_local_only_seed(seed_id: str) -> None:
+    """A corpus-free hybrid build must not send local IDs to the provider.
 
     :param str seed_id: Current or legacy local-only corpus identifier.
     :return None: Verifies actionable guidance before any provider request.
     """
     client = MagicMock()
-    builder = HybridGraphBuilder(max_papers=2, max_semantic=0, client=client)
+    builder = HybridGraphBuilder(max_papers=2, client=client)
 
-    with pytest.raises(ValueError, match="--max-semantic above 0"):
+    with pytest.raises(ValueError, match="requires a corpus"):
         builder.collect_papers(seed_id)
 
     client.get_paper.assert_not_called()
@@ -2203,11 +2083,9 @@ def test_graph_nodes_mirror_all_paper_authors(
     assert graph.nodes["seed"]["authors"] == author_names
 
 
-@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
 @pytest.mark.parametrize(("query_scale", "candidate_scale"), [(1, 1), (10, 1), (1, 10)])
 def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
     monkeypatch: pytest.MonkeyPatch,
-    strategy: str,
     query_scale: int,
     candidate_scale: int,
 ) -> None:
@@ -2222,37 +2100,25 @@ def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
         "a-less-aligned": candidate_scale * np.asarray([0.6, 0.8], dtype=np.float32),
         "b-more-aligned": np.asarray([0.8, 0.6], dtype=np.float32),
     }
-    if strategy == "embedding":
-        builder = EmbeddingGraphBuilder(
-            semantic_source="candidates", client=MagicMock()
-        )
-        pool = CandidatePool(seed=seed)
-        for paper in candidates.values():
-            pool.add(paper, source="recommendation", relation="semantic_only")
-        monkeypatch.setattr(
-            "citemesh.strategies.embedding.builder.fetch_candidate_pool",
-            MagicMock(return_value=pool),
-        )
-        monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
-        ranked = [
-            paper_id
-            for paper_id, _, _ in builder._select_candidates_from_pool(query, seed)
-        ]
-    else:
-        builder = HybridGraphBuilder(max_papers=3, max_semantic=2, client=MagicMock())
-        assert builder.embedding_builder is not None
-        builder.embedding_builder.retrieval_embeddings = {"seed": query, **embeddings}
-        ranked = builder._rank_candidates(
-            seed, candidates, {paper_id: {"semantic"} for paper_id in candidates}
-        )
+    builder = EmbeddingGraphBuilder(semantic_source="candidates", client=MagicMock())
+    pool = CandidatePool(seed=seed)
+    for paper in candidates.values():
+        pool.add(paper, source="recommendation", relation="semantic_only")
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding.builder.fetch_candidate_pool",
+        MagicMock(return_value=pool),
+    )
+    monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
+    ranked = [
+        paper_id for paper_id, _, _ in builder._select_candidates_from_pool(query, seed)
+    ]
 
     assert ranked == ["b-more-aligned", "a-less-aligned"]
 
 
-def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() -> None:
-    """Hybrid seed ranking and pairwise topology must consume different spaces."""
-    builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
-    assert builder.embedding_builder is not None
+def test_hybrid_edges_use_graph_vectors_not_retrieval_vectors() -> None:
+    """Hybrid pairwise topology must not read the retrieval space."""
+    builder = HybridGraphBuilder(max_papers=2, client=MagicMock())
     seed = _seed_paper("seed")
     candidate = _paper("candidate", year=seed.year)
     builder.paper_sources = {"seed": "semantic", "candidate": "semantic"}
@@ -2265,25 +2131,15 @@ def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() 
         "candidate": np.asarray([0.0, 1.0], dtype=np.float32),
     }
 
-    seed_vector = builder._ensure_candidate_embeddings(seed, {"candidate": candidate})
-    assert seed_vector is not None
-    assert float(
-        np.dot(seed_vector, builder.embedding_builder.retrieval_embeddings["candidate"])
-    ) == pytest.approx(1.0)
-
-    graph_score = builder.compute_similarity(seed, candidate)
-    assert graph_score == 0.0
+    assert builder.compute_similarity(seed, candidate) == 0.0
 
 
-@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
-def test_embedding_strategies_rank_recovered_references_by_retrieval_cosine(
+def test_embedding_strategy_ranks_recovered_references_by_retrieval_cosine(
     monkeypatch: pytest.MonkeyPatch,
-    strategy: str,
 ) -> None:
     """Embedding-enabled recovery must not fall back to lexical ranking.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces inference with fixed vectors.
-    :param str strategy: Embedding-enabled strategy under test.
     :return None: Checks retrieval cosine wins over order and citation count.
     """
     seed = _seed_paper("seed")
@@ -2297,35 +2153,16 @@ def test_embedding_strategies_rank_recovered_references_by_retrieval_cosine(
         relevant.paper_id: np.asarray([1.0, 0.0], dtype=np.float32),
     }
 
-    if strategy == "embedding":
-        builder = EmbeddingGraphBuilder(
-            max_papers=2,
-            semantic_source="candidates",
-            client=MagicMock(),
-        )
-        builder.retrieval_embeddings[seed.paper_id] = query
-        monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
-        selected = builder._select_recovered_references_by_embedding(
-            seed, [early, relevant], 1
-        )
-    else:
-        builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
-        assert builder.embedding_builder is not None
-        embedding_builder = builder.embedding_builder
-        load_model = MagicMock()
-        monkeypatch.setattr(embedding_builder, "_load_model", load_model)
-
-        def encode_seed(paper: Paper) -> None:
-            load_model.assert_called_once()
-            embedding_builder.retrieval_embeddings[paper.paper_id] = query
-
-        monkeypatch.setattr(embedding_builder, "_encode_seed_embedding", encode_seed)
-        monkeypatch.setattr(
-            embedding_builder, "embed_papers", MagicMock(return_value=embeddings)
-        )
-        selected = builder._select_recovered_references_by_embedding(
-            seed, [early, relevant], 1
-        )
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="candidates",
+        client=MagicMock(),
+    )
+    builder.retrieval_embeddings[seed.paper_id] = query
+    monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
+    selected = builder._select_recovered_references_by_embedding(
+        seed, [early, relevant], 1
+    )
 
     assert selected == [relevant]
 
@@ -2363,76 +2200,9 @@ def test_embedding_candidate_pool_passes_retrieval_reference_selector(
     )
 
 
-def test_hybrid_max_citation_count_receives_full_rerank_weight(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pool-leading citation count should receive the full citation contribution.
-
-    :param pytest.MonkeyPatch monkeypatch: Isolates the citation score component.
-    :return None: Checks citation normalization reaches one at the pool maximum.
-    """
-    builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
-    seed = _seed_paper("seed")
-    candidate = Paper(
-        paper_id="candidate",
-        title="Candidate",
-        year=seed.year,
-        citation_count=7,
-    )
-    monkeypatch.setattr(builder, "temporal_similarity", lambda _left, _right: 0.0)
-    monkeypatch.setattr(builder, "bibliographic_coupling", lambda _left, _right: 0.0)
-
-    score = builder._seed_relevance_score(
-        seed_embedding=None,
-        seed_paper=seed,
-        candidate=candidate,
-        source_tags={"semantic"},
-        max_citation_count=candidate.citation_count,
-    )
-
-    citation_weight = hybrid_strategy.HYBRID_SEED_RERANK_WEIGHTS[2]
-    assert score == pytest.approx(citation_weight)
-
-
-def test_hybrid_citation_weight_breaks_close_semantic_ranking() -> None:
-    """A pool-leading citation count should overcome a small semantic deficit.
-
-    :return None: Checks candidate order at the semantic/citation tradeoff boundary.
-    """
-    builder = HybridGraphBuilder(max_papers=3, max_semantic=2, client=MagicMock())
-    assert builder.embedding_builder is not None
-    seed = _seed_paper("seed")
-    cited = Paper(
-        paper_id="cited",
-        title="Cited candidate",
-        year=seed.year,
-        citation_count=1,
-    )
-    uncited = Paper(
-        paper_id="uncited",
-        title="Uncited candidate",
-        year=seed.year,
-        citation_count=0,
-    )
-    builder.embedding_builder.retrieval_embeddings = {
-        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
-        "cited": np.asarray([0.0, 1.0], dtype=np.float32),
-        "uncited": np.asarray([0.36, np.sqrt(1.0 - 0.36**2)], dtype=np.float32),
-    }
-
-    ranked = builder._rank_candidates(
-        seed_paper=seed,
-        candidates={"cited": cited, "uncited": uncited},
-        candidate_sources={"cited": {"semantic"}, "uncited": {"semantic"}},
-    )
-
-    assert ranked == ["cited", "uncited"]
-
-
 def test_hybrid_graph_preparation_fails_closed_on_sts_inference() -> None:
     """Hybrid should surface graph-space inference failures before edge creation."""
-    builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
-    assert builder.embedding_builder is not None
+    builder = HybridGraphBuilder(max_papers=2, client=MagicMock())
     builder.embedding_builder.materialize_graph_embeddings = MagicMock(
         side_effect=RuntimeError("simulated MPS STS failure")
     )
@@ -2451,30 +2221,19 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
     monkeypatch: pytest.MonkeyPatch, semantic_source: str
 ) -> None:
     """Hybrid collection should fail when semantic enrichment cannot complete."""
+    client = MagicMock()
+    client.get_paper.return_value = _paper("seed")
+    client.get_paper_references.return_value = [_paper("c1")]
+    client.get_paper_citations.return_value = []
+    client.get_recommended_papers.return_value = [_paper("rec")]
     builder = HybridGraphBuilder(
         max_papers=5,
-        max_semantic=2,
         semantic_source=semantic_source,
-        client=MagicMock(),
+        client=client,
     )
-    builder.client.get_recommended_papers = MagicMock(return_value=[_paper("rec")])
-
-    seed = _paper("seed")
-    seed.is_seed = True
-    citation_papers = {"seed": seed, "c1": _paper("c1")}
-
-    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "resolve_cached_corpus_seed",
-        lambda _seed_id, **_kwargs: None,
-    )
-    builder.embedding_builder.collect_papers = MagicMock(
-        side_effect=RuntimeError("semantic backend unavailable")
-    )
+    search = stub_hybrid_corpus(builder)
+    search.side_effect = RuntimeError("semantic backend unavailable")
+    offline_hybrid_encoder(monkeypatch, builder)
 
     with pytest.raises(
         RuntimeError, match="Semantic enrichment failed: semantic backend unavailable"
@@ -2486,57 +2245,45 @@ def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
     """Hybrid API callers should retain the service availability taxonomy."""
     from citemesh.services import SemanticScholarUnavailableError
 
+    client = MagicMock()
+    client.get_paper.side_effect = SemanticScholarUnavailableError("seed outage")
     builder = HybridGraphBuilder(
         max_papers=5,
-        max_semantic=2,
         semantic_source="arxiv-corpus",
-        client=MagicMock(),
+        client=client,
     )
-    seed = _seed_paper()
-    builder.citation_builder.collect_papers = MagicMock(return_value={"seed": seed})
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
-    builder.embedding_builder.collect_papers = MagicMock(
-        side_effect=SemanticScholarUnavailableError("semantic service outage")
-    )
+    stub_hybrid_corpus(builder)
 
-    with pytest.raises(
-        SemanticScholarUnavailableError,
-        match="semantic service outage",
-    ):
+    with pytest.raises(SemanticScholarUnavailableError, match="seed outage"):
         builder.collect_papers("seed")
 
 
-def test_hybrid_rerank_fails_when_seed_embedding_unavailable(
+def _single_reference_client() -> MagicMock:
+    """Return a client whose seed cites one paper and has no other relations."""
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper("seed")
+    client.get_paper_references.return_value = [_paper("c1")]
+    client.get_paper_citations.return_value = []
+    client.get_recommended_papers.return_value = []
+    client.get_reference_ids.return_value = []
+    return client
+
+
+def test_hybrid_collection_fails_when_seed_embedding_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hybrid rerank should surface a batch-wide seed embedding failure."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
-    assert builder.embedding_builder is not None
-
-    seed = _seed_paper("seed")
-    candidate = _paper("c1")
-    builder.embedding_builder.retrieval_embeddings = {
-        candidate.paper_id: np.asarray([0.2, 0.1, 0.3], dtype=np.float32)
-    }
-    builder.embedding_builder.model_profile = MagicMock(
-        format_query=lambda text, _metadata: text
-    )
+    """Hybrid ranking should surface a seed embedding failure."""
+    builder = HybridGraphBuilder(max_papers=4, client=_single_reference_client())
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
     builder.embedding_builder._encode_texts = MagicMock(
         side_effect=RuntimeError("temporary seed encode failure")
     )
 
     with pytest.raises(
         EmbeddingInferenceError,
-        match="Hybrid seed embedding failed during semantic reranking",
+        match="Hybrid seed embedding failed: RuntimeError: temporary seed encode",
     ):
-        builder._rank_candidates(
-            seed,
-            {candidate.paper_id: candidate},
-            {candidate.paper_id: {"semantic"}},
-        )
+        builder.collect_papers("seed")
 
 
 @pytest.mark.parametrize(
@@ -2547,82 +2294,52 @@ def test_hybrid_rerank_fails_when_seed_embedding_unavailable(
         (np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "inconsistent embedding"),
     ],
 )
-def test_hybrid_rerank_rejects_invalid_candidate_embeddings(
+def test_hybrid_ranking_rejects_invalid_candidate_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
     candidate_vector: np.ndarray,
     message: str,
 ) -> None:
-    """Hybrid rerank should reject unusable vectors instead of substituting zero."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
-    assert builder.embedding_builder is not None
-
-    seed = _seed_paper("seed")
-    candidate = _paper("c1")
-    builder.embedding_builder.retrieval_embeddings = {
-        seed.paper_id: np.asarray([1.0, 0.0], dtype=np.float32),
-        candidate.paper_id: candidate_vector,
-    }
+    """Hybrid ranking should reject unusable vectors instead of substituting zero."""
+    builder = HybridGraphBuilder(max_papers=4, client=_single_reference_client())
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+    seed_vector = np.asarray([[1.0, 0.0]], dtype=np.float32)
+    # Seed query, seed document, then the one candidate.
+    builder.embedding_builder._encode_texts = MagicMock(
+        side_effect=[seed_vector, seed_vector, candidate_vector[np.newaxis, :]]
+    )
 
     with pytest.raises(EmbeddingInferenceError, match=message):
-        builder._rank_candidates(
-            seed,
-            {candidate.paper_id: candidate},
-            {candidate.paper_id: {"semantic"}},
-        )
+        builder.collect_papers("seed")
 
 
-@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
-def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
-    semantic_source: str,
+@pytest.mark.parametrize("semantic_source", ["candidates", "arxiv-corpus", "both"])
+def test_hybrid_candidate_vectors_stay_in_memory(
+    monkeypatch: pytest.MonkeyPatch, semantic_source: str
 ) -> None:
-    """Hybrid rerank should not persist citation-candidate embeddings into cache."""
+    """Candidate vectors are encoded in memory and never written to a cache."""
+    client = _single_reference_client()
+    client.get_recommended_papers.return_value = [_paper("rec")]
     builder = HybridGraphBuilder(
-        max_papers=4,
-        max_semantic=1,
-        semantic_source=semantic_source,
-        client=MagicMock(),
+        max_papers=4, semantic_source=semantic_source, client=client
     )
-    assert builder.embedding_builder is not None
-
-    seed = _seed_paper("seed")
-    candidate = _paper("c1")
-    builder.embedding_builder.retrieval_embeddings = {}
-    builder.embedding_builder.model_profile = MagicMock(
-        format_query=lambda text, _metadata: text,
-        format_document=compose_title_abstract_text,
-    )
-    builder.embedding_builder._encode_texts = MagicMock(
-        side_effect=[
-            np.asarray([[0.4, 0.1, 0.2]], dtype=np.float32),
-            np.asarray([[0.3, 0.2, 0.1]], dtype=np.float32),
-        ]
-    )
-    builder.embedding_builder.embedding_cache = MagicMock()
-    builder.embedding_builder.embedding_cache.get_embeddings = MagicMock(
-        side_effect=AssertionError(
-            "Hybrid rerank candidate hydration must not write into persistent cache."
-        )
+    if semantic_source != "candidates":
+        stub_hybrid_corpus(builder, neighbours=[_paper("s1")])
+    texts = offline_hybrid_encoder(monkeypatch, builder)
+    builder.embedding_builder.embed_papers = MagicMock(
+        side_effect=AssertionError("hybrid candidates must not be cached")
     )
 
-    seed_embedding = builder._ensure_candidate_embeddings(
-        seed, {candidate.paper_id: candidate}
-    )
+    papers = builder.collect_papers("seed")
 
-    np.testing.assert_allclose(
-        seed_embedding, np.asarray([0.4, 0.1, 0.2], dtype=np.float32)
-    )
-    np.testing.assert_allclose(
-        builder.embedding_builder.retrieval_embeddings[candidate.paper_id],
-        np.asarray([0.3, 0.2, 0.1], dtype=np.float32),
-    )
-    builder.embedding_builder.embedding_cache.get_embeddings.assert_not_called()
+    assert "c1" in papers
+    builder.embedding_builder.embed_papers.assert_not_called()
+    # Seed query and seed document, then every candidate once.
+    assert len(texts) == 2 + len(builder.discovery_ranking)
 
 
-def test_hybrid_thresholds_and_default_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid should enforce seed/non-seed threshold and semantic budget rules."""
-
-    builder = HybridGraphBuilder(max_papers=3, max_semantic=1, client=MagicMock())
+def test_hybrid_thresholds_and_fetch_limits() -> None:
+    """Hybrid should enforce seed/non-seed thresholds and default provider limits."""
+    builder = HybridGraphBuilder(max_papers=3, client=MagicMock())
     seed = _paper("seed")
     seed.is_seed = True
     other = _paper("other")
@@ -2633,94 +2350,25 @@ def test_hybrid_thresholds_and_default_budget(
     assert not builder.should_create_edge(other, peer, 0.5)
     assert builder.should_create_edge(other, peer, 0.51)
 
-    with pytest.raises(
-        ValueError, match="max_semantic must be between 0 and max_papers - 1"
-    ):
-        HybridGraphBuilder(max_papers=3, max_semantic=3, client=MagicMock())
-
-    small_builder = HybridGraphBuilder(max_papers=5, client=MagicMock())
-    assert small_builder.max_semantic == 4
-
-
-def test_hybrid_semantic_branch_collects_full_citation_candidate_pool(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid semantic mode should fetch full reference+citation candidate pools."""
-    builder = HybridGraphBuilder(
-        max_papers=40,
-        max_semantic=None,
-        max_references=20,
-        max_citations=20,
-        client=MagicMock(),
+    default = HybridGraphBuilder(client=MagicMock())
+    assert (default.max_papers, default.max_citations, default.max_references) == (
+        45,
+        1000,
+        1000,
     )
-
-    assert builder.citation_builder.max_papers == 41
-    assert builder.citation_builder.max_references == 20
-    assert builder.citation_builder.max_citations == 20
+    with pytest.raises(ValueError, match="must be non-negative"):
+        HybridGraphBuilder(max_citations=-1, client=MagicMock())
 
 
-def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid should forward refresh-reference policy to citation builder."""
+def test_hybrid_propagates_refresh_reference_cache_to_reference_hydration() -> None:
+    """Hybrid should forward refresh-reference policy to reference hydration."""
     builder = HybridGraphBuilder(
         max_papers=4,
-        max_semantic=0,
         refresh_reference_cache=True,
         client=MagicMock(),
     )
 
-    assert builder.citation_builder.refresh_reference_cache is True
-
-
-def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid rerank should cap semantic-only additions while preserving overlap papers."""
-    builder = HybridGraphBuilder(
-        max_papers=5, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
-    )
-
-    seed = _paper("seed")
-    seed.is_seed = True
-    citation_papers = {
-        "seed": seed,
-        "c1": _paper("c1"),
-        "c2": _paper("c2"),
-        "o1": _paper("o1"),
-    }
-    semantic_papers = {
-        "seed": seed,
-        "s1": _paper("s1"),
-        "s2": _paper("s2"),
-        "o1": _paper("o1"),
-    }
-    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "resolve_cached_corpus_seed",
-        lambda _seed_id, **_kwargs: None,
-    )
-    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda *_args, **_kwargs: ["o1", "s1", "s2", "c2", "c1"],
-    )
-
-    papers = builder.collect_papers("seed")
-
-    assert list(papers.keys()) == ["seed", "o1", "s1", "c2", "c1"]
-    assert builder.paper_sources["o1"] == "both"
-    assert builder.paper_sources["s1"] == "semantic"
-    assert "s2" not in papers
-    assert (
-        builder.citation_builder.collect_papers.call_args.kwargs["reference_selector"]
-        == builder._select_recovered_references_by_embedding
-    )
+    assert builder.reference_hydrator.refresh_reference_cache is True
 
 
 def test_hybrid_collection_dedupes_semantic_seed_aliases(
@@ -2732,10 +2380,6 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
     :param pytest.MonkeyPatch monkeypatch: Fixture replacing collection internals.
     :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
     """
-    builder = HybridGraphBuilder(
-        max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
-    )
-
     seed = Paper(
         paper_id="ca997f1a733e53ad0fa29041246ff655243e8c1b",
         title="Polynomial Composition Activations: Unleashing the Dynamics of Large Language Models",
@@ -2748,7 +2392,6 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
         arxiv_id="2411.03884",
         is_seed=True,
     )
-    citation_papers = {"seed": seed, "c1": _paper("c1")}
     semantic_seed_alias = Paper(
         paper_id="arXiv:2411.03884v2",
         title=(
@@ -2760,25 +2403,15 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
         authors=[Author(name="Zhijian Zhou"), Author(name="Yitao Zeng")],
         is_local_corpus=True,
     )
-    semantic_papers = {
-        semantic_seed_alias.paper_id: semantic_seed_alias,
-        "s1": _paper("s1"),
-    }
-    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "resolve_cached_corpus_seed",
-        lambda _seed_id, **_kwargs: None,
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [_paper("c1")]
+    client.get_paper_citations.return_value = []
+    builder = HybridGraphBuilder(
+        max_papers=5, semantic_source="arxiv-corpus", client=client
     )
-    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
-    monkeypatch.setattr(
-        builder,
-        "_rank_candidates",
-        lambda *_args, **_kwargs: ["c1", "s1"],
-    )
+    stub_hybrid_corpus(builder, neighbours=[semantic_seed_alias, _paper("s1")])
+    offline_hybrid_encoder(monkeypatch, builder)
 
     with caplog.at_level(logging.DEBUG, logger="citemesh.strategies.candidates"):
         papers = builder.collect_papers("arXiv:2411.03884")
@@ -2799,7 +2432,7 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     """Hybrid build should return parent graph unchanged when pruning disabled."""
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 0)
 
-    builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=3, client=MagicMock())
     builder.paper_sources = {"seed": "citation", "a": "semantic"}
     builder.seed_relations = {
         "seed": "seed",
@@ -2829,7 +2462,7 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
     """Hybrid pruning should log original and filtered edge counts."""
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 1)
 
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     graph = nx.Graph()
     graph.add_node("seed", is_seed=True)
     graph.add_nodes_from(["a", "b", "c"])
@@ -2952,76 +2585,19 @@ def test_max_papers_is_total_node_cap_including_seed(
         assert "seed" in papers
         return
 
-    class FakeCitationBuilder:
-        def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
-            """Initialize the fake citation builder.
-
-            :param int max_papers: Maximum papers returned by the fake collector.
-            :param object _args: Positional constructor arguments not used by the fake.
-            :param object _kwargs: Keyword constructor arguments not used by the fake.
-            """
-            self.max_papers = max_papers
-            self.candidate_source_results: tuple[object, ...] = ()
-
-        def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
-            del seed_id
-            papers = {"seed": _seed_paper(), "c1": _paper("c1"), "c2": _paper("c2")}
-            return dict(list(papers.items())[: self.max_papers])
-
-        def hydrate_collected_references(
-            self, papers: dict[str, Paper], seed: Paper
-        ) -> None:
-            """Match the citation child enrichment hook without external I/O."""
-            del papers, seed
-
-    class FakeEmbeddingBuilder:
-        def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
-            self.max_papers = max_papers
-            self.retrieval_embeddings: dict[str, np.ndarray] = {}
-            self.embeddings: dict[str, np.ndarray] = {}
-            self.cached_bibliography_metadata = MagicMock()
-
-        def _corpus_operation_lock(self) -> AbstractContextManager[None]:
-            """Return the no-I/O operation boundary used by this capacity fake.
-
-            :return Any: No-op context manager standing in for the cache lock.
-            """
-            return nullcontext()
-
-        def _prepare_corpus_for_build(self) -> None:
-            """Represent completed preparation in this capacity-only fake.
-
-            :return None: Performs no I/O.
-            """
-
-        def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
-            del seed_id
-            self.retrieval_embeddings = {
-                paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
-                for paper_id in {"seed", "c1", "c2", "s1", "s2"}
-            }
-            return {"seed": _seed_paper(), "s1": _paper("s1"), "s2": _paper("s2")}
-
-        def resolve_cached_corpus_seed(self, seed_id: str, **_: object) -> None:
-            """Return no pre-resolved seed for this capacity-only fake.
-
-            :param str seed_id: Seed identifier unused by the fake.
-            :return None: Forces the citation fake to own seed resolution.
-            """
-            del seed_id
-            return None
-
-    monkeypatch.setattr(hybrid_strategy, "CitationGraphBuilder", FakeCitationBuilder)
-    monkeypatch.setattr(hybrid_strategy, "EmbeddingGraphBuilder", FakeEmbeddingBuilder)
-
-    papers = HybridGraphBuilder(
-        max_papers=4,
-        max_semantic=1,
-        semantic_source="arxiv-corpus",
-        client=MagicMock(),
-    ).collect_papers("seed")
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+    client.get_paper_references.return_value = [_paper("c1"), _paper("c2")]
+    client.get_paper_citations.return_value = [_paper("c3")]
+    hybrid = HybridGraphBuilder(
+        max_papers=4, semantic_source="arxiv-corpus", client=client
+    )
+    stub_hybrid_corpus(hybrid, neighbours=[_paper("s1"), _paper("s2")])
+    offline_hybrid_encoder(monkeypatch, hybrid)
+    papers = hybrid.collect_papers("seed")
     assert len(papers) == 4
     assert "seed" in papers
+    assert len(hybrid.discovery_ranking) == 5
 
 
 @pytest.mark.parametrize(
@@ -3163,9 +2739,7 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
             "embedding",
         ),
         (
-            lambda: HybridGraphBuilder(
-                max_papers=4, max_semantic=0, client=MagicMock()
-            ),
+            lambda: HybridGraphBuilder(max_papers=4, client=MagicMock()),
             "hybrid",
         ),
     ],
@@ -3647,7 +3221,7 @@ def test_identity_arxiv_issued_doi_respects_conflicts_and_local_rows() -> None:
 
 def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
     """DOI-only and arXiv-only provider records join the same local work."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     seed = _seed_paper()
     pool = DiscoveryPool(seed, builder.seed_relations)
     candidates, sources = pool.papers, pool.sources
@@ -3666,7 +3240,12 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
     pool.add(arxiv_only, source="citation", relation="cites_seed")
     pool.source_ranks[arxiv_only.paper_id] = {"citations": 5}
     pool.add(local, source="semantic", relation="semantic_only")
-    builder._ingest_recommendations(pool, [doi_only, arxiv_only])
+    recommendations = CandidateSourceResult(
+        "recommendations",
+        CandidateSourceState.COMPLETE,
+        papers=(doi_only, arxiv_only),
+    )
+    builder._ingest(pool, recommendations, {})
 
     assert set(candidates) == {local.paper_id}
     assert sources[local.paper_id] == {"citation", "semantic"}
@@ -3676,7 +3255,7 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
 
 def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
     """Hybrid false twins should remain separate source classes without a bonus."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     seed = _seed_paper()
     pool = DiscoveryPool(seed, builder.seed_relations)
     candidates, sources = pool.papers, pool.sources
@@ -3703,7 +3282,7 @@ def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> No
 
 def test_hybrid_ingest_merges_s2_duplicates_with_shared_external_id() -> None:
     """Hybrid ingestion keeps one canonical S2 record for matching DOI metadata."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     seed = _seed_paper()
     pool = DiscoveryPool(seed, builder.seed_relations)
     candidates, sources = pool.papers, pool.sources
@@ -3722,7 +3301,7 @@ def test_hybrid_ingest_merges_s2_duplicates_with_shared_external_id() -> None:
 
 def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> None:
     """A changed provider payload cannot overwrite a reconciled corpus identity."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     seed = _seed_paper()
     pool = DiscoveryPool(seed, builder.seed_relations)
     candidates, sources = pool.papers, pool.sources
@@ -3765,41 +3344,27 @@ def unlinked_publication_pair() -> tuple[Paper, Paper]:
 
 
 def test_hybrid_collection_preserves_reconciled_publication_reference(
+    monkeypatch: pytest.MonkeyPatch,
     unlinked_publication_pair: tuple[Paper, Paper],
 ) -> None:
-    """Annotate verified references before merging a selected publication alias."""
+    """A cited publication folds into its corpus preprint before ranking."""
     corpus, publication = unlinked_publication_pair
     seed = _seed_paper()
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [publication]
+    client.get_paper_citations.return_value = []
     builder = HybridGraphBuilder(
-        max_papers=3, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
+        max_papers=3, semantic_source="arxiv-corpus", client=client
     )
-    builder.citation_builder.collect_papers = MagicMock(
-        return_value={seed.paper_id: seed, corpus.paper_id: corpus}
-    )
-    builder.citation_builder.hydrate_collected_references = MagicMock()
-    builder.citation_builder.candidate_source_results = (
-        CandidateSourceResult(
-            "references",
-            CandidateSourceState.COMPLETE,
-            papers=(),
-            verified_references=(publication,),
-        ),
-    )
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
-    builder.embedding_builder.collect_papers = MagicMock(
-        return_value={publication.paper_id: publication}
-    )
-    builder._rank_candidates = MagicMock(
-        side_effect=lambda _seed, candidates, _sources: list(candidates)
-    )
+    stub_hybrid_corpus(builder, neighbours=[corpus])
+    offline_hybrid_encoder(monkeypatch, builder)
+    builder.reference_hydrator.hydrate_collected_references = MagicMock()
 
     papers = builder.collect_papers(seed.paper_id)
 
     # The version pair is one member before ranking.
-    assert list(builder._rank_candidates.call_args.args[1]) == [corpus.paper_id]
+    assert [item.paper_id for item in builder.discovery_ranking] == [corpus.paper_id]
     assert list(papers) == [seed.paper_id, corpus.paper_id]
     assert papers[corpus.paper_id].doi == publication.doi
     assert builder.seed_relations[corpus.paper_id] == "referenced_by_seed"
@@ -3808,7 +3373,7 @@ def test_hybrid_collection_preserves_reconciled_publication_reference(
 
 def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:
     """An S2 paper must not collapse two matching local-corpus records."""
-    builder = HybridGraphBuilder(max_papers=5, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=5, client=MagicMock())
     seed = _seed_paper()
     pool = DiscoveryPool(seed, builder.seed_relations)
     candidates, sources = pool.papers, pool.sources
@@ -4265,72 +3830,46 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid candidate mode should source semantics from S2 recommendations."""
-    from tests._helpers import SeededRandomEncodeModel
-
     client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+    client.get_paper_references.return_value = [_paper("c1"), _paper("c2")]
+    client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
+    client.get_reference_ids.return_value = []
 
-    builder = HybridGraphBuilder(
-        max_papers=6,
-        max_semantic=2,
-        candidate_pool_size=1,
-        client=client,
-    )
+    builder = HybridGraphBuilder(max_papers=6, client=client)
     assert builder.semantic_source == "candidates"
-    assert builder.embedding_builder is not None
     assert builder.embedding_builder.truncate_dim == 512
 
-    citation_papers = {
-        "seed": _seed_paper(),
-        "c1": _paper("c1"),
-        "c2": _paper("c2"),
-    }
-    monkeypatch.setattr(
-        builder.citation_builder,
-        "collect_papers",
-        lambda _seed_id, **_kwargs: dict(citation_papers),
-    )
+    def _raise_corpus(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("corpus work must not run in candidate mode")
 
-    def _raise_hydration(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("corpus hydration must not run in candidate mode")
-
-    monkeypatch.setattr(
-        builder.embedding_builder, "_ensure_cache_hydrated", _raise_hydration
-    )
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "collect_papers",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("corpus collect_papers must not run in candidate mode")
-        ),
-    )
-    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "_resolve_model_fingerprint",
-        lambda: "test::immutable-artifact",
-    )
-    builder.embedding_builder.model = SeededRandomEncodeModel(embedding_dim=4)
+    for name in (
+        "_ensure_cache_hydrated",
+        "_prepare_corpus_for_build",
+        "search_prepared_corpus",
+        "cached_corpus_vectors",
+    ):
+        monkeypatch.setattr(builder.embedding_builder, name, _raise_corpus)
+    offline_hybrid_encoder(monkeypatch, builder)
 
     papers = builder.collect_papers("seed")
 
-    assert "seed" in papers
+    assert set(papers) == {"seed", "c1", "c2", "rec1", "rec2"}
     client.get_recommended_papers.assert_called_once_with(
         "seed",
-        limit=1,
+        limit=200,
         raise_on_unavailable=True,
+        pool="all-cs",
     )
-    assert builder.candidate_source_status == {"recommendations": "complete"}
-    semantic_added = [
-        paper_id
-        for paper_id, source in builder.paper_sources.items()
-        if source == "semantic"
-    ]
-    assert semantic_added
-    for paper_id in semantic_added:
+    assert builder.candidate_source_status == {
+        "references": "complete",
+        "citations": "empty",
+        "recommendations": "complete",
+    }
+    for paper_id in ("rec1", "rec2"):
+        assert builder.paper_sources[paper_id] == "semantic"
         assert builder.seed_relations[paper_id] == "semantic_only"
-    # Candidate vectors flow through the persistent cache namespace.
-    assert "mode=candidates" in builder.embedding_builder.embedding_cache.model_name
 
 
 @pytest.mark.parametrize("recommendation_id", ["reference", "citation"])
@@ -4362,11 +3901,9 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
         events.append("recommendations")
         return [semantic_alias, recommendation_only, recommendation]
 
-    def corpus(*_args: object, **_kwargs: object) -> dict[str, Paper]:
+    def corpus(*_args: object) -> list[Paper]:
         events.append("corpus")
-        return {
-            paper.paper_id: paper for paper in (seed, corpus_overlap, corpus_semantic)
-        }
+        return [seed, corpus_overlap, corpus_semantic]
 
     client = MagicMock()
     client.get_paper_references.return_value = [reference]
@@ -4377,28 +3914,21 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
         max_papers=5,
         max_references=1,
         max_citations=1,
-        max_semantic=3,
-        candidate_pool_size=3,
         fetch_references=False,
         client=client,
     )
-    assert builder.embedding_builder is not None
     assert builder.embedding_builder.semantic_source == "arxiv-corpus"
-    assert builder.embedding_builder.max_papers == 5
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=seed)
-    builder.embedding_builder.enrich_cached_corpus_seed = MagicMock()
-    builder.embedding_builder.collect_papers = MagicMock(side_effect=corpus)
+    search = stub_hybrid_corpus(builder, seed=seed)
+    search.side_effect = corpus
+    offline_hybrid_encoder(monkeypatch, builder)
     builder.embedding_builder._embedding_runtime_metadata = MagicMock(return_value={})
-    monkeypatch.setattr(builder, "_rank_candidates", lambda _, pool, __: list(pool))
     monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _: None)
 
     graph, _ = builder.build_graph(seed.paper_id)
 
-    assert events == ["recommendations", "corpus"]
+    assert events == ["recommendations", "corpus", "corpus"]
     client.get_recommended_papers.assert_called_once_with(
-        "arxiv:2501.00001", limit=3, raise_on_unavailable=True, pool="all-cs"
+        "arxiv:2501.00001", limit=200, raise_on_unavailable=True, pool="all-cs"
     )
     assert set(graph) == {
         seed.paper_id,
@@ -4412,8 +3942,13 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
             "citations": 1,
             "recommendations": 3,
             "arxiv_corpus": 1,
+            "arxiv_corpus_document": 1,
         },
-        corpus_semantic.paper_id: {"arxiv_corpus": 2, "recommendations": 1},
+        corpus_semantic.paper_id: {
+            "arxiv_corpus": 2,
+            "arxiv_corpus_document": 2,
+            "recommendations": 1,
+        },
         recommendation_only.paper_id: {"recommendations": 2},
     }
     assert builder.paper_sources[corpus_overlap.paper_id] == "both"
@@ -4459,15 +3994,8 @@ def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_sourc
         max_citations=0,
         client=client,
     )
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=seed)
-    builder.embedding_builder.enrich_cached_corpus_seed = MagicMock()
-    builder.embedding_builder.collect_papers = MagicMock(
-        return_value={seed.paper_id: seed, "local-result": _paper("local-result")}
-    )
-    monkeypatch.setattr(builder, "_rank_candidates", lambda _, pool, __: list(pool))
+    stub_hybrid_corpus(builder, seed=seed, neighbours=[seed, _paper("local-result")])
+    offline_hybrid_encoder(monkeypatch, builder)
 
     assert set(builder.collect_papers(seed.paper_id)) == {seed.paper_id, "local-result"}
     assert builder.candidate_source_status == {
@@ -4475,55 +4003,6 @@ def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_sourc
         "arxiv_corpus": "complete",
     }
     assert client.get_recommended_papers.call_count == int(lookup_available)
-
-
-def test_hybrid_adjudication_keeps_a_ceiling_on_semantic_only_papers() -> None:
-    """Selection respects both budgets when either source could fill the graph."""
-    builder = HybridGraphBuilder(max_papers=5, max_semantic=3, client=MagicMock())
-    citations = ["c1", "c2", "overlap", "c3", "c4"]
-    semantics = ["s1", "s2", "s3", "s4", "s5"]
-    sources = {paper_id: {"citation"} for paper_id in citations}
-    sources["overlap"].add("semantic")
-    sources.update({paper_id: {"semantic"} for paper_id in semantics})
-    assert (
-        builder._select_candidate_ids(citations + semantics, sources) == citations[:4]
-    )
-    assert builder._select_candidate_ids(semantics + citations, sources) == [
-        *semantics[:3],
-        "c1",
-    ]
-    assert builder._select_candidate_ids(semantics + ["overlap"], sources) == [
-        *semantics[:3],
-        "overlap",
-    ]
-
-
-def test_hybrid_default_fills_only_vacant_semantic_slots() -> None:
-    """Preserve first-pass papers and honor an explicit ceiling at the default value."""
-    cap = hybrid_strategy.DEFAULT_MAX_SEMANTIC
-    max_papers = cap + 4
-    default = HybridGraphBuilder(max_papers=max_papers, client=MagicMock())
-    explicit = HybridGraphBuilder(
-        max_papers=max_papers, max_semantic=cap, client=MagicMock()
-    )
-    semantics = [f"s{i}" for i in range(cap + 3)]
-    sources = {paper_id: {"semantic"} for paper_id in semantics}
-    sources.update({"c1": {"citation"}, "overlap": {"citation", "semantic"}})
-    ranked = [*semantics, "c1", "overlap"]
-    first_pass = [*semantics[:cap], "c1", "overlap"]
-
-    assert explicit._select_candidate_ids(ranked, sources) == first_pass
-    assert default._select_candidate_ids(ranked, sources) == [
-        *first_pass,
-        semantics[cap],
-    ]
-
-    sources["c2"] = {"citation"}
-    full_ranked = [*ranked, "c2"]
-    assert default._select_candidate_ids(full_ranked, sources) == [
-        *first_pass,
-        "c2",
-    ]
 
 
 @pytest.mark.parametrize(
@@ -4559,40 +4038,6 @@ def test_hybrid_edges_require_semantic_or_bibliographic_evidence(
     assert not builder.should_create_edge(a, b, score)
     a.references = b.references = ["shared"]
     assert builder.compute_similarity(a, b) > 0.0
-
-
-def test_hybrid_without_embeddings_keeps_citation_topical_scoring() -> None:
-    """Disabling embeddings retains lexical evidence and citation edge eligibility.
-
-    :return None: Verifies a complete build and a bibliographic-only edge.
-    """
-    seed = Paper("seed", "Quantum field theory", 2024, citation_count=100)
-    related = Paper("related", "Quantum field interactions", 2024, citation_count=100)
-    unrelated = Paper("unrelated", "Medieval pottery", 2024, citation_count=100)
-    client = MagicMock()
-    client.get_paper.return_value = seed
-    client.get_paper_references.return_value = [related, unrelated]
-    builder = HybridGraphBuilder(
-        max_papers=3,
-        max_semantic=0,
-        max_references=2,
-        max_citations=0,
-        fetch_references=False,
-        client=client,
-    )
-    graph, _ = builder.build_graph("seed")
-    assert graph.has_edge("seed", "related")
-    assert graph.degree("unrelated") == 0
-    assert builder.compute_similarity(seed, related) == pytest.approx(
-        builder.citation_builder.compute_similarity(seed, related)
-    )
-    builder.citation_builder.fetch_references = True
-    seed.references = unrelated.references = ["shared"]
-    unrelated.year = 2000
-    seed.is_seed = False
-    score = builder.compute_similarity(seed, unrelated)
-    assert 0.2 < score < 0.5
-    assert builder.should_create_edge(seed, unrelated, score)
 
 
 @pytest.mark.parametrize("prebuilt", [False, True])
