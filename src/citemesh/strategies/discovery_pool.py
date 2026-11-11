@@ -14,16 +14,24 @@ the same pool as comparing every pair.
 
 Member identifiers change only through the pool: every metadata merge
 re-indexes the member it enriched.
+
+A publication and its corpus preprint often share no identifier. Before
+ranking, :meth:`DiscoveryPool.reconcile_publication_versions` folds such pairs
+under :func:`~citemesh.strategies.candidates.corpus_publication_matches`, which
+requires equal normalized titles, so members are grouped by that title and the
+rule runs only within a group.
 """
 
 from __future__ import annotations
 
 from citemesh.core import Paper
+from citemesh.core.paper_ids import bibliography_text_key
 from citemesh.strategies.candidates import (
     CandidateIdentityKey,
     candidate_identifiers_conflict,
     candidate_identity_keys,
     candidate_records_match,
+    corpus_publication_matches,
     merge_paper_metadata,
     merge_seed_relation,
 )
@@ -145,6 +153,76 @@ class DiscoveryPool:
         :return None: Leaves an earlier rank for the same source unchanged.
         """
         self.source_ranks.setdefault(member_id, {}).setdefault(source, rank)
+
+    def absorb(self, target_id: str, absorbed_id: str) -> None:
+        """Fold one member into another member that records the same work.
+
+        The target keeps its ID and gains the absorbed member's metadata, tags,
+        earliest rank per source and relation. The absorbed ID, and every alias
+        that pointed at it, resolve to the target afterwards.
+
+        :param str target_id: Member that survives.
+        :param str absorbed_id: Member removed from the pool.
+        :return None: Updates papers, tags, ranks, aliases, relations, and index.
+        """
+        absorbed = self.papers.pop(absorbed_id)
+        self._unindex(absorbed_id)
+        self.merge(target_id, absorbed)
+        self.sources.setdefault(target_id, set()).update(
+            self.sources.pop(absorbed_id, set())
+        )
+        for provider_id, target in self.provider_aliases.items():
+            if target == absorbed_id:
+                self.provider_aliases[provider_id] = target_id
+        self.provider_aliases[absorbed_id] = target_id
+        absorbed_ranks = self.source_ranks.pop(absorbed_id, {})
+        if absorbed_ranks:
+            ranks = self.source_ranks.setdefault(target_id, {})
+            for source, rank in absorbed_ranks.items():
+                ranks[source] = min(ranks.get(source, rank), rank)
+        relation = merge_seed_relation(
+            self.seed_relations.get(target_id, ""),
+            self.seed_relations.pop(absorbed_id, ""),
+        )
+        if relation:
+            self.seed_relations[target_id] = relation
+
+    def reconcile_publication_versions(self) -> int:
+        """Fold each publication record into its corpus preprint.
+
+        A pair is folded only when each side is the other's only match in the
+        whole pool, so a competing record leaves both versions in place.
+
+        :return int: Number of publication records folded.
+        """
+        groups: dict[str, list[str]] = {}
+        for member_id, paper in self.papers.items():
+            title = bibliography_text_key(paper.title)
+            # corpus_publication_matches requires a multi-word normalized title.
+            if " " in title:
+                groups.setdefault(title, []).append(member_id)
+        matches: dict[str, list[str]] = {}
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            for member_id in members:
+                matches[member_id] = [
+                    other_id
+                    for other_id in members
+                    if corpus_publication_matches(
+                        self.papers[member_id], self.papers[other_id]
+                    )
+                ]
+        folds = [
+            (found[0], publication_id)
+            for publication_id, found in matches.items()
+            if not self.papers[publication_id].is_local_corpus
+            and len(found) == 1
+            and matches[found[0]] == [publication_id]
+        ]
+        for corpus_id, publication_id in folds:
+            self.absorb(corpus_id, publication_id)
+        return len(folds)
 
     def _replace_member(
         self, matched_id: str, incoming_id: str, incoming: Paper

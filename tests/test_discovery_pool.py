@@ -338,3 +338,159 @@ def test_random_ingest_checks_only_members_sharing_an_identifier(
     assert all(member_checks)
     # An all-pairs scan of the same sequence compares each record with every member.
     assert len(member_checks) < len(scenario.records) * len(pool.papers) // 4
+
+
+def _member(paper_id: str, year: int, refs: list[str]) -> Paper:
+    """Build one titled pool member with reference IDs.
+
+    :param str paper_id: Member ID.
+    :param int year: Publication year.
+    :param list[str] refs: Reference IDs carried by the record.
+    :return Paper: Record authored by the shared first author.
+    """
+    return Paper(
+        paper_id=paper_id,
+        title="Measuring model capabilities",
+        year=year,
+        authors=[Author(name="Lexin Zhou")],
+        references=refs,
+    )
+
+
+@pytest.fixture
+def publication_pair() -> tuple[Paper, Paper]:
+    """A corpus preprint and its publication without a shared external ID."""
+    corpus = _member("arxiv:2503.06378", 2025, ["reference-a"])
+    corpus.is_local_corpus = True
+    corpus.title = "Measuring Model\nCapabilities"
+    corpus.doi = "10.48550/arXiv.2503.06378"
+    publication = _member("f" * 40, 2026, ["reference-b"])
+    publication.doi = "10.1000/published"
+    return corpus, publication
+
+
+@pytest.mark.parametrize("publication_first", [False, True])
+def test_publication_versions_fold_into_the_corpus_preprint(
+    publication_pair: tuple[Paper, Paper], publication_first: bool
+) -> None:
+    """One work keeps one member, with the evidence of both versions."""
+    corpus, publication = publication_pair
+    assert not candidate_records_match(corpus, publication)
+    seed = Paper(paper_id="seed", title="Seed", year=2024, is_seed=True)
+    pool = DiscoveryPool(seed, {seed.paper_id: "seed"})
+    order = (publication, corpus) if publication_first else (corpus, publication)
+    for paper in order:
+        if paper is corpus:
+            pool.add(paper, source="semantic", relation="semantic_only")
+            pool.record_rank(paper.paper_id, "arxiv_corpus_query", 7)
+            pool.record_rank(paper.paper_id, "recommendations", 9)
+        else:
+            pool.add(paper, source="citation", relation="referenced_by_seed")
+            pool.record_rank(paper.paper_id, "recommendations", 2)
+    pool.add(_member("other", 2020, []), source="semantic", relation="semantic_only")
+    pool.provider_aliases["older-provider-alias"] = publication.paper_id
+
+    assert pool.reconcile_publication_versions() == 1
+
+    assert set(pool.papers) == {corpus.paper_id, "other"}
+    assert corpus.arxiv_id == "2503.06378"
+    assert corpus.doi == publication.doi
+    assert corpus.references == ["reference-a", "reference-b"]
+    assert pool.sources[corpus.paper_id] == {"citation", "semantic"}
+    assert pool.seed_relations[corpus.paper_id] == "referenced_by_seed"
+    assert publication.paper_id not in pool.seed_relations
+    assert pool.source_ranks[corpus.paper_id] == {
+        "arxiv_corpus_query": 7,
+        "recommendations": 2,
+    }
+    assert pool.provider_aliases == {
+        "older-provider-alias": corpus.paper_id,
+        publication.paper_id: corpus.paper_id,
+    }
+    # A later record of the publication joins the surviving member.
+    again = _member(publication.paper_id, 2026, [])
+    assert pool.add(again, source="semantic", relation="semantic_only") == (
+        corpus.paper_id
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "field_name", "value"),
+    [
+        (1, "title", "Measuring different capabilities"),
+        (1, "authors", [Author(name="Another Researcher")]),
+        (1, "authors", [Author(name="L. Zhou")]),
+        (1, "year", 2024),
+        (1, "year", 2027),
+        (1, "year", None),
+        (1, "doi", ""),
+        (1, "arxiv_id", "2503.06379"),
+        (0, "doi", "10.1000/different-publication"),
+        (0, "is_local_corpus", False),
+        (1, "is_local_corpus", True),
+    ],
+)
+def test_publication_versions_need_matching_metadata(
+    publication_pair: tuple[Paper, Paper],
+    target: int,
+    field_name: str,
+    value: object,
+) -> None:
+    """Metadata fallback cannot override distinct or insufficient identity evidence."""
+    setattr(publication_pair[target], field_name, value)
+    pool = DiscoveryPool(Paper(paper_id="seed", title="Seed", year=2024), {})
+    for paper in publication_pair:
+        pool.add(paper, source="semantic", relation="semantic_only")
+
+    assert pool.reconcile_publication_versions() == 0
+    assert set(pool.papers) == {paper.paper_id for paper in publication_pair}
+
+
+@pytest.mark.parametrize("competing_publication", [False, True])
+def test_ambiguous_publication_versions_stay_separate(
+    publication_pair: tuple[Paper, Paper], competing_publication: bool
+) -> None:
+    """A second matching record anywhere in the pool makes the pair ambiguous."""
+    corpus, publication = publication_pair
+    other = _member(
+        "a" * 40 if competing_publication else "arxiv:2503.06379",
+        2026 if competing_publication else 2025,
+        [],
+    )
+    other.is_local_corpus = not competing_publication
+    if competing_publication:
+        other.doi = "10.1000/other-publication"
+    pool = DiscoveryPool(Paper(paper_id="seed", title="Seed", year=2024), {})
+    for paper in (corpus, other, publication):
+        pool.add(paper, source="semantic", relation="semantic_only")
+
+    assert pool.reconcile_publication_versions() == 0
+    assert len(pool.papers) == 3
+
+
+def test_publication_reconciliation_checks_only_shared_titles(
+    publication_pair: tuple[Paper, Paper], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The version rule runs within normalized-title groups, not over all pairs."""
+    calls: list[tuple[str, str]] = []
+    original = discovery_pool.corpus_publication_matches
+
+    def counting_match(left: Paper, right: Paper) -> bool:
+        calls.append((left.paper_id, right.paper_id))
+        return original(left, right)
+
+    monkeypatch.setattr(discovery_pool, "corpus_publication_matches", counting_match)
+    pool = DiscoveryPool(Paper(paper_id="seed", title="Seed", year=2024), {})
+    for number in range(2000):
+        pool.add(
+            Paper(
+                paper_id=f"{number:040x}", title=f"Distinct work {number}", year=2024
+            ),
+            source="semantic",
+            relation="semantic_only",
+        )
+    for paper in publication_pair:
+        pool.add(paper, source="semantic", relation="semantic_only")
+
+    assert pool.reconcile_publication_versions() == 1
+    assert len(calls) == 4

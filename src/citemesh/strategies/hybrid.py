@@ -47,9 +47,7 @@ from citemesh.strategies.candidates import (
     CandidateSourceState,
     annotate_verified_seed_references,
     candidate_records_match,
-    corpus_publication_matches,
     fetch_candidate_source,
-    merge_seed_relation,
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
@@ -666,56 +664,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.debug("Added %s semantic papers", added_semantic)
         return selected
 
-    def _deduplicate_selected_publications(
-        self, selected_ids: list[str], pool: DiscoveryPool
-    ) -> list[str]:
-        """Reconcile unique selected preprint/publication pairs without refilling.
-
-        Check both directions against the full pool before merging metadata, so
-        an unselected competing record still makes a bibliography ambiguous.
-        Preserve the first selected position and each source's earliest rank.
-        """
-        candidates = pool.papers
-        selected = set(selected_ids)
-        matches: dict[str, list[str]] = {}
-        for paper_id in selected_ids:
-            matches[paper_id] = [
-                other_id
-                for other_id, other in candidates.items()
-                if corpus_publication_matches(candidates[paper_id], other)
-            ]
-        aliases: dict[str, str] = {}
-        for paper_id in selected_ids:
-            if candidates[paper_id].is_local_corpus or len(matches[paper_id]) != 1:
-                continue
-            corpus_id = matches[paper_id][0]
-            if corpus_id in selected and matches[corpus_id] == [paper_id]:
-                aliases[paper_id] = corpus_id
-        for publication_id, corpus_id in aliases.items():
-            pool.merge(corpus_id, candidates[publication_id])
-            pool.sources[corpus_id].update(pool.sources[publication_id])
-            for provider_id, target in pool.provider_aliases.items():
-                if target == publication_id:
-                    pool.provider_aliases[provider_id] = corpus_id
-            pool.provider_aliases[publication_id] = corpus_id
-            ranks = pool.source_ranks.setdefault(corpus_id, {})
-            for source, rank in pool.source_ranks.get(publication_id, {}).items():
-                ranks[source] = min(ranks.get(source, rank), rank)
-            existing_relation = pool.seed_relations.get(corpus_id, "")
-            incoming_relation = pool.seed_relations.get(publication_id, "")
-            if existing_relation == "citation" and incoming_relation in (
-                "referenced_by_seed",
-                "cites_seed",
-                "overlap",
-            ):
-                existing_relation = ""
-            relation = merge_seed_relation(existing_relation, incoming_relation)
-            if relation:
-                pool.seed_relations[corpus_id] = relation
-        return list(
-            dict.fromkeys(aliases.get(paper_id, paper_id) for paper_id in selected_ids)
-        )
-
     @scope_candidate_collection
     def collect_papers(
         self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
@@ -926,6 +874,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if combined:
             self._ingest_recommendations(pool, recommendations)
 
+        pool.reconcile_publication_versions()
         ranked_ids = self._rank_candidates(seed_paper, pool.papers, pool.sources)
         annotate_verified_seed_references(
             pool.papers,
@@ -933,7 +882,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             self.seed_relations,
         )
         selected_ids = self._select_candidate_ids(ranked_ids, pool.sources)
-        selected_ids = self._deduplicate_selected_publications(selected_ids, pool)
         for paper_id in selected_ids:
             papers[paper_id] = pool.papers[paper_id]
             tags = pool.sources[paper_id]
