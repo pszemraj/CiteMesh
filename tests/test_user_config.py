@@ -148,6 +148,26 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
     assert reloaded.defaults["dataset_source"] == "research/arxiv-snapshot"
 
 
+def test_unset_removes_an_unknown_key_present_in_the_file(tmp_path: Path) -> None:
+    """A key left by a removed option can be unset; an absent unknown key cannot.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate removal and the unknown-key error.
+    """
+    config_path = tmp_path / "config.toml"
+    with pytest.raises(ConfigKeyError, match="Unknown config key"):
+        unset_config_value("defaults.max_semantic", path=config_path)
+    assert not config_path.exists()
+
+    config_path.write_text(
+        '[defaults]\nmax_semantic = 30\ntheme = "dark"\n', encoding="utf-8"
+    )
+    assert unset_config_value("defaults.max_semantic", path=config_path) is True
+    assert config_path.read_text(encoding="utf-8") == '[defaults]\ntheme = "dark"\n'
+    with pytest.raises(ConfigKeyError, match="Unknown config key"):
+        unset_config_value("defaults.max_semantic", path=config_path)
+
+
 def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
     """config.toml must stay owner-only on POSIX because it can hold an API key.
 

@@ -489,16 +489,29 @@ def set_config_value(
 def unset_config_value(dotted_key: str, *, path: Path | None = None) -> bool:
     """Remove one config value if present.
 
+    A key this version does not know, such as one a removed option left in the
+    file, is still removed when the file holds it.
+
     :param str dotted_key: Dotted key such as ``defaults.semantic_source``.
     :param Optional[Path] path: Optional explicit config file path override.
     :return bool: ``True`` when a value was removed, ``False`` if unset.
+    :raises ConfigKeyError: If the key is unknown and absent from the file.
     """
-    table, key, _spec = parse_config_key(dotted_key)
+    unknown_key: ConfigKeyError | None = None
+    try:
+        table, key, _spec = parse_config_key(dotted_key)
+    except ConfigKeyError as exc:
+        table, _separator, key = str(dotted_key).strip().partition(".")
+        unknown_key = exc
     config_path = path if path is not None else user_config_path()
+    if unknown_key is not None and not config_path.is_file():
+        raise unknown_key
     with config_lock(config_path):
         document = _read_raw_document(config_path)
         section = document.get(table)
         if not isinstance(section, dict) or key not in section:
+            if unknown_key is not None:
+                raise unknown_key
             return False
         del section[key]
         if not section:
