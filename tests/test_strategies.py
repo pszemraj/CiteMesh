@@ -2297,31 +2297,54 @@ def test_hybrid_ranking_rejects_invalid_candidate_embeddings(
     """Hybrid ranking should reject unusable vectors instead of substituting zero."""
     builder = HybridGraphBuilder(max_papers=4, client=_single_reference_client())
     monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-    seed_vector = np.asarray([[1.0, 0.0]], dtype=np.float32)
-    # Seed query, seed document, then the one candidate.
+    seed_vector = np.asarray([1.0, 0.0], dtype=np.float32)
     builder.embedding_builder._encode_texts = MagicMock(
-        side_effect=[seed_vector, seed_vector, candidate_vector[np.newaxis, :]]
+        return_value=seed_vector[np.newaxis, :]
+    )
+    # The seed document, then the one candidate.
+    builder.embedding_builder.embed_papers = MagicMock(
+        side_effect=[{"seed": seed_vector}, {"c1": candidate_vector}]
     )
 
     with pytest.raises(EmbeddingInferenceError, match=message):
         builder.collect_papers("seed")
 
 
-@pytest.mark.parametrize("semantic_source", ["candidates", "arxiv-corpus", "both"])
-def test_hybrid_candidate_vectors_stay_in_memory(
+def test_hybrid_candidates_mode_rebuild_encodes_no_candidate_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate document vectors persist in the candidate embedding cache."""
+    client = _single_reference_client()
+    client.get_recommended_papers.return_value = [_paper("rec")]
+    encoded = []
+    for _ in range(2):
+        builder = HybridGraphBuilder(
+            max_papers=4, semantic_source="candidates", client=client
+        )
+        texts = offline_hybrid_encoder(monkeypatch, builder)
+        papers = builder.collect_papers("seed")
+        encoded.append(list(texts))
+
+    assert {"c1", "rec"} <= set(papers)
+    # Seed query, seed document and both candidates; then the seed query only.
+    assert [len(texts) for texts in encoded] == [4, 1]
+    assert encoded[1] == encoded[0][:1]
+
+
+@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
+def test_hybrid_corpus_modes_encode_provider_rows_in_memory(
     monkeypatch: pytest.MonkeyPatch, semantic_source: str
 ) -> None:
-    """Candidate vectors are encoded in memory and never written to a cache."""
+    """The corpus cache takes no provider rows, so corpus modes encode in memory."""
     client = _single_reference_client()
     client.get_recommended_papers.return_value = [_paper("rec")]
     builder = HybridGraphBuilder(
         max_papers=4, semantic_source=semantic_source, client=client
     )
-    if semantic_source != "candidates":
-        stub_hybrid_corpus(builder, neighbours=[_paper("s1")])
+    stub_hybrid_corpus(builder, neighbours=[_paper("s1")])
     texts = offline_hybrid_encoder(monkeypatch, builder)
     builder.embedding_builder.embed_papers = MagicMock(
-        side_effect=AssertionError("hybrid candidates must not be cached")
+        side_effect=AssertionError("provider rows must not enter the corpus cache")
     )
 
     papers = builder.collect_papers("seed")

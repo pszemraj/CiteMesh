@@ -441,13 +441,15 @@ def test_indexed_provider_records_use_their_corpus_rows(
             scenario.corpus,
         )
         encoded: list[str] = []
-        encode_documents = builder._encode_documents
+        embed_documents = builder._embed_documents
 
-        def record_encoding(papers: Sequence[Paper]) -> NDArray[np.float32]:
-            encoded.extend(paper.paper_id for paper in papers)
-            return encode_documents(papers)
+        def record_encoding(
+            papers: dict[str, Paper],
+        ) -> dict[str, NDArray[np.float32]]:
+            encoded.extend(papers)
+            return embed_documents(papers)
 
-        monkeypatch.setattr(builder, "_encode_documents", record_encoding)
+        monkeypatch.setattr(builder, "_embed_documents", record_encoding)
         builder.collect_papers(_SEED_ID)
 
     pool = builder.discovery_pool
@@ -635,14 +637,50 @@ def test_provider_requests_per_build(
     scenario = _scenario()
     model = WordHashEncodeModel()
     counts = []
+    encoded = []
     with fake_client(scenario.world) as client:
         for _ in range(2):
             scenario.world.requests.clear()
+            model.texts.clear()
             builder = _builder(client, scenario, mode)
             install_runtime(
                 monkeypatch, builder.embedding_builder, model, scenario.corpus
             )
             builder.build_graph(_SEED_ID)
             counts.append(dict(scenario.world.requests))
+            encoded.append(dict(Counter(map(_encoding_role, model.texts))))
 
     assert counts == [cold, warm]
+    assert encoded == _ENCODED_TEXTS[mode]
+
+
+# Texts encoded per build by role: the seed query, retrieval documents and the
+# graph-similarity vectors of the 45 selected papers, which are cached. Candidates
+# mode keeps the seed's and its 130 members' documents in the candidate cache, so
+# a rebuild encodes only the query. Corpus modes hydrate the 111-row corpus once
+# and encode the members without a corpus row (60 citers, plus 20 unindexed
+# recommendations in both mode) in memory on every build.
+_ENCODED_TEXTS = {
+    "candidates": [{"query": 1, "document": 131, "graph": 45}, {"query": 1}],
+    "arxiv-corpus": [
+        {"query": 1, "document": 171, "graph": 45},
+        {"query": 1, "document": 60},
+    ],
+    "both": [
+        {"query": 1, "document": 191, "graph": 45},
+        {"query": 1, "document": 80},
+    ],
+}
+
+
+def _encoding_role(text: str) -> str:
+    """Name the embedding role of one EmbeddingGemma model input.
+
+    :param str text: Formatted model input.
+    :return str: ``query``, ``graph`` or ``document``.
+    """
+    if text.startswith("task: search result"):
+        return "query"
+    if text.startswith("task: sentence similarity"):
+        return "graph"
+    return "document"

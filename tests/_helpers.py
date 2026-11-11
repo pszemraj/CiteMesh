@@ -257,22 +257,22 @@ def offline_hybrid_encoder(
 ) -> list[str]:
     """Encode a hybrid builder's texts offline with :func:`word_hash_vectors`.
 
+    The fake model and a pinned fingerprint serve in-memory encoding and the
+    candidate embedding cache alike.
+
     :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
     :param HybridGraphBuilder builder: Builder whose embedding child is patched.
     :return list[str]: Log of every encoded text, in call order.
     """
-    texts: list[str] = []
+    embedding = builder.embedding_builder
+    model = WordHashEncodeModel()
 
-    def encode(
-        batch: list[str], batch_size: int | None = None, show_progress_bar: bool = False
-    ) -> NDArray[np.float32]:
-        del batch_size, show_progress_bar
-        texts.extend(batch)
-        return word_hash_vectors(batch)
+    def load_model() -> None:
+        embedding.model = model
 
-    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-    monkeypatch.setattr(builder.embedding_builder, "_encode_texts", encode)
-    return texts
+    monkeypatch.setattr(embedding, "_load_model", load_model)
+    monkeypatch.setattr(embedding, "_resolve_model_fingerprint", lambda: "word-hash")
+    return model.texts
 
 
 def get_paper_id_normalization_cases() -> list[tuple[str, str]]:

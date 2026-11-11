@@ -307,7 +307,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         seed_document = seed_vectors.get(seed_row or "")
         if seed_document is None:
-            seed_document = self._encode_documents([seed])[0]
+            seed_document = self._embed_documents({seed.paper_id: seed})[seed.paper_id]
         timings["encoding"] = perf_counter() - started
 
         if self._uses_corpus:
@@ -335,7 +335,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         timings["corpus"] += perf_counter() - started
         started = perf_counter()
-        vectors.update(self._encode_pool_documents(pool, set(vectors)))
+        vectors.update(self._embed_pool_documents(pool, set(vectors)))
         timings["encoding"] += perf_counter() - started
 
         started = perf_counter()
@@ -610,66 +610,60 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             CandidateSourceState.COMPLETE if added else CandidateSourceState.EMPTY,
         )
 
-    def _encode_documents(self, papers: Sequence[Paper]) -> NDArray[np.float32]:
-        """Encode papers in the retrieval-document role, in memory.
+    def _embed_documents(
+        self, papers: dict[str, Paper]
+    ) -> dict[str, NDArray[np.float32]]:
+        """Return retrieval-document vectors for papers without a corpus vector.
 
-        :param Sequence[Paper] papers: Papers to encode.
-        :return NDArray[np.float32]: One row per paper, in input order.
-        :raises EmbeddingInferenceError: If encoding fails or loses rows.
+        Candidates mode reads and fills the candidate embedding cache, so a
+        rebuild of the same seed encodes no candidate again. A corpus mode's cache
+        is the corpus itself, which must not take provider rows, so those modes
+        encode in memory, with the same document text.
+
+        :param Dict[str, Paper] papers: Papers keyed by member ID.
+        :return dict[str, NDArray[np.float32]]: One vector per paper.
+        :raises EmbeddingInferenceError: If encoding or the cache fails.
         """
+        if not papers:
+            return {}
         embedding = self.embedding_builder
-        texts = [
-            format_paper_for_embedding(
-                profile=embedding.model_profile,
-                paper=paper,
-                task=EmbeddingTask.RETRIEVAL_DOCUMENT,
-            ).strip()
-            for paper in papers
-        ]
-        if not texts:
-            return np.empty((0, 0), dtype=np.float32)
         try:
+            if not self._uses_corpus:
+                return embedding.embed_papers(papers)
+            texts = [
+                format_paper_for_embedding(
+                    profile=embedding.model_profile,
+                    paper=paper,
+                    task=EmbeddingTask.RETRIEVAL_DOCUMENT,
+                )
+                for paper in papers.values()
+            ]
             encoded = embedding._encode_texts(
                 texts,
                 batch_size=min(embedding.encode_batch_size, len(texts)),
                 show_progress_bar=False,
             )
+            return dict(zip(papers, encoded, strict=True))
         except Exception as exc:
             raise EmbeddingInferenceError(
-                "Hybrid in-memory candidate embedding failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"Hybrid candidate embedding failed: {type(exc).__name__}: {exc}"
             ) from exc
-        encoded_array = np.asarray(encoded, dtype=np.float32)
-        if encoded_array.ndim == 1:
-            encoded_array = encoded_array.reshape(1, -1)
-        if encoded_array.shape[0] != len(texts):
-            raise EmbeddingInferenceError(
-                "Hybrid candidate encoding returned "
-                f"{int(encoded_array.shape[0])} row(s) for {len(texts)} candidate(s)."
-            )
-        return encoded_array
 
-    def _encode_pool_documents(
+    def _embed_pool_documents(
         self, pool: DiscoveryPool, stored: Collection[str]
     ) -> dict[str, NDArray[np.float32]]:
-        """Encode every member without a stored corpus vector.
+        """Embed every member without a stored corpus vector.
 
         :param DiscoveryPool pool: Discovery pool.
-        :param Collection[str] stored: Members that have stored vectors.
+        :param Collection[str] stored: Members that have stored corpus vectors.
         :return dict[str, NDArray[np.float32]]: Vectors keyed by member ID.
         """
         missing = sorted(paper_id for paper_id in pool.papers if paper_id not in stored)
-        if not missing:
-            return {}
-        logger.info(
-            "Encoding %d candidate%s in memory...",
-            len(missing),
-            "" if len(missing) == 1 else "s",
+        if missing:
+            logger.debug("Embedding %d candidate documents.", len(missing))
+        return self._embed_documents(
+            {paper_id: pool.papers[paper_id] for paper_id in missing}
         )
-        encoded = self._encode_documents(
-            [pool.papers[paper_id] for paper_id in missing]
-        )
-        return dict(zip(missing, encoded, strict=True))
 
     @staticmethod
     def _rank_pool(
