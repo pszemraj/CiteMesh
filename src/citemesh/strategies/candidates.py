@@ -255,40 +255,58 @@ def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
     return _candidate_match_namespaces(left, right) is None
 
 
-def corpus_publication_matches(left: Paper, right: Paper) -> bool:
-    """Match a corpus preprint to a publication with missing cross-identifiers.
+def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
+    """Return the preprint when two records are a preprint and its publication.
 
-    Titles and full first-author names must match after word normalization.
-    The publication can be in the preprint's year or the following year.
-    Conflicting explicit identifiers remain disqualifying. Callers must require
-    a unique candidate match before reconciling records.
+    Such records often share no identifier. The preprint is the corpus row when
+    exactly one record is one (two corpus rows never match), and otherwise the
+    only record with an arXiv ID; it must carry an arXiv ID and the publication
+    a DOI, and conflicting
+    explicit identifiers remain disqualifying. Titles and full first-author
+    names must match after word normalization, and the publication can be in
+    the preprint's year or the following year. Callers must require a unique
+    match on both sides before reconciling records.
+
+    :param Paper left: One record.
+    :param Paper right: The other record.
+    :return Optional[Paper]: The preprint record, or ``None`` when the records
+        are not a preprint and a publication of one work.
     """
-    if left.is_local_corpus == right.is_local_corpus:
-        return False
-    corpus, publication = (left, right) if left.is_local_corpus else (right, left)
-    corpus_ids = _external_identifiers(corpus)
+    if left.is_local_corpus and right.is_local_corpus:
+        # Two corpus rows are two indexed works.
+        return None
+    if left.is_local_corpus != right.is_local_corpus:
+        preprint, publication = (left, right) if left.is_local_corpus else (right, left)
+    else:
+        left_ids = _external_identifiers(left) or {}
+        right_ids = _external_identifiers(right) or {}
+        if ("arxiv" in left_ids) == ("arxiv" in right_ids):
+            return None
+        preprint, publication = (left, right) if "arxiv" in left_ids else (right, left)
+    preprint_ids = _external_identifiers(preprint)
     publication_ids = _external_identifiers(publication)
     if (
-        not corpus_ids
-        or "arxiv" not in corpus_ids
+        not preprint_ids
+        or "arxiv" not in preprint_ids
         or not publication_ids
         or "doi" not in publication_ids
-        or candidate_identifiers_conflict(corpus, publication)
-        or corpus.year is None
-        or publication.year not in (corpus.year, corpus.year + 1)
-        or not corpus.authors
+        or candidate_identifiers_conflict(preprint, publication)
+        or preprint.year is None
+        or publication.year not in (preprint.year, preprint.year + 1)
+        or not preprint.authors
         or not publication.authors
     ):
-        return False
-    title = bibliography_text_key(corpus.title)
-    author = bibliography_text_key(corpus.authors[0].name)
-    return (
+        return None
+    title = bibliography_text_key(preprint.title)
+    author = bibliography_text_key(preprint.authors[0].name)
+    matches = (
         " " in title
         and " " in author
         and len(author.partition(" ")[0]) > 1
         and title == bibliography_text_key(publication.title)
         and author == bibliography_text_key(publication.authors[0].name)
     )
+    return preprint if matches else None
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:

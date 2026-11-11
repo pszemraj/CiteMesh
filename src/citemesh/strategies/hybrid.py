@@ -321,7 +321,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         folded = pool.reconcile_publication_versions()
         if folded:
-            logger.debug("Folded %d publication records into corpus preprints.", folded)
+            logger.debug("Folded %d publication records into their preprints.", folded)
 
         started = perf_counter()
         vectors = (

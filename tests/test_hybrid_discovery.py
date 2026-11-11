@@ -548,6 +548,40 @@ def test_publication_version_takes_one_slot(
     assert list(papers)[1:] == ranked_ids[:3]
 
 
+@pytest.mark.parametrize("mode", _MODES)
+def test_publication_version_without_a_corpus_row_takes_one_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory, mode: str
+) -> None:
+    """A provider preprint absent from the corpus and its publication fold in every mode."""
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
+    scenario = _scenario(citers=0)
+    title = "learning rate schedules seed revisited"
+    preprint = scenario.world.add("d" * 40, title, arxiv_id="2402.00002", year=2024)
+    publication = scenario.world.add(
+        "e" * 40, title, doi="10.1000/revisited", year=2025
+    )
+    scenario.world.citations["f" * 40] = [preprint, publication]
+    scenario.world.references["f" * 40] = []
+    with fake_client(scenario.world) as client:
+        builder = _builder(client, scenario, mode, max_papers=4)
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        papers = builder.collect_papers(_SEED_ID)
+
+    pool = builder.discovery_pool
+    assert pool is not None
+    assert pool.provider_aliases[publication] == preprint
+    assert publication not in pool.papers
+    assert builder.seed_relations[preprint] == "cites_seed"
+    ranked_ids = [item.paper_id for item in builder.discovery_ranking]
+    assert preprint in ranked_ids and publication not in ranked_ids
+    assert publication not in papers
+
+
 def _graph_signature(
     graph: nx.Graph,
 ) -> tuple[list[str], list[tuple[str, str, float]]]:

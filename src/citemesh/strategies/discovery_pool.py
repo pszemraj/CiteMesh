@@ -17,9 +17,10 @@ comparing every pair.
 Member identifiers change only through the pool: every metadata merge
 re-indexes the member it enriched.
 
-A publication and its corpus preprint often share no identifier. Before
-ranking, :meth:`DiscoveryPool.reconcile_publication_versions` folds such pairs
-under :func:`~citemesh.strategies.candidates.corpus_publication_matches`, which
+A publication and its preprint often share no identifier. Before ranking,
+:meth:`DiscoveryPool.reconcile_publication_versions` folds such pairs, whether
+or not the preprint is a corpus row, under
+:func:`~citemesh.strategies.candidates.publication_version_preprint`, which
 requires equal normalized titles, so members are grouped by that title and the
 rule runs only within a group.
 """
@@ -39,11 +40,11 @@ from citemesh.strategies.candidates import (
     candidate_identifiers_conflict,
     candidate_identity_keys,
     candidate_records_match,
-    corpus_publication_matches,
     fetch_candidate_source,
     fetch_seed_references,
     merge_paper_metadata,
     merge_seed_relation,
+    publication_version_preprint,
     require_available_candidate_source,
 )
 
@@ -222,17 +223,18 @@ class DiscoveryPool:
             self.seed_relations[target_id] = relation
 
     def reconcile_publication_versions(self) -> int:
-        """Fold each publication record into its corpus preprint.
+        """Fold each publication record into its preprint, corpus row or not.
 
         A pair is folded only when each side is the other's only match in the
-        whole pool, so a competing record leaves both versions in place.
+        whole pool, so a competing record leaves both versions in place. The
+        preprint survives, a corpus row whenever one of the two is.
 
         :return int: Number of publication records folded.
         """
         groups: dict[str, list[str]] = {}
         for member_id, paper in self.papers.items():
             title = bibliography_text_key(paper.title)
-            # corpus_publication_matches requires a multi-word normalized title.
+            # publication_version_preprint requires a multi-word normalized title.
             if " " in title:
                 groups.setdefault(title, []).append(member_id)
         matches: dict[str, list[str]] = {}
@@ -243,19 +245,25 @@ class DiscoveryPool:
                 matches[member_id] = [
                     other_id
                     for other_id in members
-                    if corpus_publication_matches(
+                    if other_id != member_id
+                    and publication_version_preprint(
                         self.papers[member_id], self.papers[other_id]
                     )
+                    is not None
                 ]
-        folds = [
-            (found[0], publication_id)
-            for publication_id, found in matches.items()
-            if not self.papers[publication_id].is_local_corpus
-            and len(found) == 1
-            and matches[found[0]] == [publication_id]
-        ]
-        for corpus_id, publication_id in folds:
-            self.absorb(corpus_id, publication_id)
+        folds: list[tuple[str, str]] = []
+        for member_id, found in matches.items():
+            if len(found) != 1 or matches[found[0]] != [member_id]:
+                continue
+            other_id = found[0]
+            preprint = publication_version_preprint(
+                self.papers[member_id], self.papers[other_id]
+            )
+            # Each mutual pair appears twice; fold it from the publication's side.
+            if preprint is self.papers[other_id]:
+                folds.append((other_id, member_id))
+        for preprint_id, publication_id in folds:
+            self.absorb(preprint_id, publication_id)
         return len(folds)
 
     def _index(self, member_id: str) -> None:

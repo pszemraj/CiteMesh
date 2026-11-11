@@ -251,7 +251,6 @@ def test_publication_versions_fold_into_the_corpus_preprint(
         (1, "doi", ""),
         (1, "arxiv_id", "2503.06379"),
         (0, "doi", "10.1000/different-publication"),
-        (0, "is_local_corpus", False),
         (1, "is_local_corpus", True),
     ],
 )
@@ -298,13 +297,13 @@ def test_publication_reconciliation_checks_only_shared_titles(
 ) -> None:
     """The version rule runs within normalized-title groups, not over all pairs."""
     calls: list[tuple[str, str]] = []
-    original = discovery_pool.corpus_publication_matches
+    original = discovery_pool.publication_version_preprint
 
-    def counting_match(left: Paper, right: Paper) -> bool:
+    def counting_match(left: Paper, right: Paper) -> Paper | None:
         calls.append((left.paper_id, right.paper_id))
         return original(left, right)
 
-    monkeypatch.setattr(discovery_pool, "corpus_publication_matches", counting_match)
+    monkeypatch.setattr(discovery_pool, "publication_version_preprint", counting_match)
     pool = DiscoveryPool(Paper(paper_id="seed", title="Seed", year=2024))
     for number in range(2000):
         pool.add(
@@ -318,4 +317,91 @@ def test_publication_reconciliation_checks_only_shared_titles(
         pool.add(paper, source="semantic", relation="semantic_only")
 
     assert pool.reconcile_publication_versions() == 1
+    # Each side against the other, then the fold's orientation from each side.
     assert len(calls) == 4
+    assert {frozenset(call) for call in calls} == {
+        frozenset(paper.paper_id for paper in publication_pair)
+    }
+
+
+def _nature_pair() -> tuple[Paper, Paper]:
+    """The arXiv record and the Nature record of one work, from a live build.
+
+    Neither is a corpus row and they share no identifier. A later author's name
+    differs only in how its accent is encoded; the rule reads the first author.
+    """
+    names = ["Lexin Zhou", "Lorenzo Pacchiardi"]
+    preprint = Paper(
+        paper_id="cdf2297d1988564f5cb5a9dcd3258683826578c8",
+        title="General Scales Unlock AI Evaluation with Explanatory and Predictive Power",
+        year=2025,
+        arxiv_id="2503.06378",
+        doi="10.48550/arXiv.2503.06378",
+        venue="arXiv.org",
+        authors=[Author(name=name) for name in [*names, "Fernando Mart'inez-Plumed"]],
+    )
+    publication = Paper(
+        paper_id="fac69c9ed2f3f3a59de24146f937f8ff7d5d5861",
+        title="General scales unlock AI evaluation with explanatory and predictive power",
+        year=2026,
+        doi="10.1038/s41586-026-10303-2",
+        venue="Nature",
+        authors=[Author(name=name) for name in [*names, "Fernando Martínez-Plumed"]],
+    )
+    return preprint, publication
+
+
+@pytest.mark.parametrize("publication_first", [False, True])
+def test_provider_publication_versions_fold_into_the_provider_preprint(
+    publication_first: bool,
+) -> None:
+    """Without a corpus row, the record with the arXiv ID survives the fold."""
+    preprint, publication = _nature_pair()
+    assert not candidate_records_match(preprint, publication)
+    pool = DiscoveryPool(_seed())
+    order = (publication, preprint) if publication_first else (preprint, publication)
+    for paper in order:
+        if paper is preprint:
+            pool.add(paper, source="citation", relation="referenced_by_seed")
+        else:
+            pool.add(paper, source="recommendation", relation="semantic_only")
+            pool.record_recommendation(paper.paper_id, 7)
+
+    assert pool.reconcile_publication_versions() == 1
+
+    assert set(pool.papers) == {preprint.paper_id}
+    assert pool.papers[preprint.paper_id].arxiv_id == "2503.06378"
+    assert pool.sources[preprint.paper_id] == {"citation", "recommendation"}
+    assert pool.seed_relations[preprint.paper_id] == "referenced_by_seed"
+    assert pool.recommendation_ranks == {preprint.paper_id: 7}
+    assert pool.provider_aliases == {publication.paper_id: preprint.paper_id}
+
+
+def test_provider_publication_versions_need_the_same_first_author() -> None:
+    """Equal titles alone never fold two records."""
+    preprint, publication = _nature_pair()
+    publication.authors = [Author(name="Another Researcher"), *publication.authors]
+    pool = DiscoveryPool(_seed())
+    for paper in (preprint, publication):
+        pool.add(paper, source="semantic", relation="semantic_only")
+
+    assert pool.reconcile_publication_versions() == 0
+    assert len(pool.papers) == 2
+
+
+def test_two_publications_of_one_provider_preprint_stay_separate() -> None:
+    """A preprint matching two publications folds neither."""
+    preprint, publication = _nature_pair()
+    journal = Paper(
+        paper_id="b" * 40,
+        title=publication.title,
+        year=2026,
+        doi="10.1000/another-venue",
+        authors=list(publication.authors),
+    )
+    pool = DiscoveryPool(_seed())
+    for paper in (preprint, publication, journal):
+        pool.add(paper, source="semantic", relation="semantic_only")
+
+    assert pool.reconcile_publication_versions() == 0
+    assert len(pool.papers) == 3
