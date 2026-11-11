@@ -22,11 +22,11 @@ from citemesh.services.semantic_scholar.disk_cache import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
-    fetch_candidate_pool,
     fetch_seed_references,
     require_available_candidate_source,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.discovery_pool import fetch_candidate_pool
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from tests._helpers import offline_hybrid_encoder, stub_hybrid_corpus
 

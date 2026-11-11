@@ -83,13 +83,13 @@ from citemesh.strategies.candidates import (
     SEMANTIC_SOURCE_CHOICES,
     candidate_identifiers_conflict,
     corpus_matches_s2,
-    fetch_candidate_pool,
     merge_paper_metadata,
     paper_embedding_metadata,
     provider_lookup_identifier,
     scope_candidate_collection,
     select_recovered_references_by_score,
 )
+from citemesh.strategies.discovery_pool import fetch_candidate_pool
 from citemesh.strategies.similarity import cosine_similarity_to_query
 
 from . import deps

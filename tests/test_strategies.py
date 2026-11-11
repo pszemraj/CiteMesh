@@ -26,15 +26,13 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
-    CandidatePool,
     CandidateSourceResult,
     CandidateSourceState,
     candidate_identifiers_conflict,
     candidate_records_match,
-    fetch_candidate_pool,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.discovery_pool import DiscoveryPool, fetch_candidate_pool
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
@@ -2101,7 +2099,7 @@ def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
         "b-more-aligned": np.asarray([0.8, 0.6], dtype=np.float32),
     }
     builder = EmbeddingGraphBuilder(semantic_source="candidates", client=MagicMock())
-    pool = CandidatePool(seed=seed)
+    pool = DiscoveryPool(seed)
     for paper in candidates.values():
         pool.add(paper, source="recommendation", relation="semantic_only")
     monkeypatch.setattr(
@@ -2178,7 +2176,7 @@ def test_embedding_candidate_pool_passes_retrieval_reference_selector(
     )
     seed = _seed_paper("seed")
     candidate = _paper("candidate")
-    pool = CandidatePool(seed=seed)
+    pool = DiscoveryPool(seed)
     pool.add(candidate, source="reference", relation="referenced_by_seed")
     fetch = MagicMock(return_value=pool)
     monkeypatch.setattr(
@@ -2910,11 +2908,9 @@ def test_bibliographic_coupling_delegates_to_paper(
 
 
 def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
-    """CandidatePool should merge repeated Semantic Scholar paper IDs."""
-    from citemesh.strategies.candidates import CandidatePool
-
+    """The candidate pool should merge repeated Semantic Scholar paper IDs."""
     seed = _seed_paper()
-    pool = CandidatePool(seed=seed)
+    pool = DiscoveryPool(seed)
     first = Paper(
         paper_id="b" * 40,
         title="Same Paper",
@@ -2966,7 +2962,7 @@ def test_candidate_pool_merges_s2_ids_with_shared_external_ids(
 
     :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
     """
-    pool = CandidatePool(seed=_seed_paper())
+    pool = DiscoveryPool(_seed_paper())
     first = Paper(paper_id="1" * 40, title="Same", year=2025, doi="10.1000/shared")
     second = Paper(paper_id="2" * 40, title="Same", year=2025, doi="10.1000/shared")
 
@@ -2990,7 +2986,7 @@ def test_candidate_pool_merges_legacy_arxiv_case_variants(primary_id: str) -> No
     :param str primary_id: Opaque S2 ID or an arXiv primary with mixed field casing.
     :return None: Verifies normalized identity and merged relation metadata.
     """
-    pool = CandidatePool(seed=_seed_paper())
+    pool = DiscoveryPool(_seed_paper())
     first = Paper(
         paper_id=primary_id,
         title="Same work",
@@ -3046,7 +3042,7 @@ def test_identity_reconciliation_rejects_conflicting_strong_ids(
         abstract="Shared abstract",
         is_seed=True,
     )
-    pool = CandidatePool(seed=seed)
+    pool = DiscoveryPool(seed)
 
     pool.add(first, source="reference", relation="referenced_by_seed")
     pool.add(second, source="recommendation", relation="semantic_only")
@@ -3073,7 +3069,7 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
     """Same-primary refreshes must not assign a contradictory DOI to that class."""
     primary_a = "a" * 40
     primary_b = "b" * 40
-    pool = CandidatePool(seed=_seed_paper())
+    pool = DiscoveryPool(_seed_paper())
     canonical = Paper(
         paper_id=primary_a,
         title="Canonical",
@@ -3104,7 +3100,7 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
 def test_identity_shared_external_identifier_merges_compatible_records() -> None:
     """An agreed DOI merges compatible records without touching other classes."""
     authors = [Author(name="Grace Hopper")]
-    pool = CandidatePool(seed=_seed_paper())
+    pool = DiscoveryPool(_seed_paper())
     left = Paper(
         paper_id="c" * 40,
         title="Shared",
@@ -3158,7 +3154,7 @@ def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
     publication_in_primary: bool,
 ) -> None:
     """A compatible publication DOI remains available for later conflict checks."""
-    pool = CandidatePool(seed=_seed_paper())
+    pool = DiscoveryPool(_seed_paper())
     preprint = _paper("1" * 40)
     preprint.doi = "https://doi.org/10.48550/arXiv.2310.03262V2"
     publication_doi = "10.1000/published"
@@ -3182,7 +3178,7 @@ def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
 
 def test_identity_publication_merge_keeps_incoming_primary_arxiv_doi_alias() -> None:
     """A shared publication DOI can introduce a compatible arXiv identity."""
-    pool = CandidatePool(seed=_seed_paper())
+    pool = DiscoveryPool(_seed_paper())
     published = _paper("1" * 40)
     published.doi = "10.1000/published"
     cross_link = _paper("doi:10.48550/arXiv.2310.03262v2")

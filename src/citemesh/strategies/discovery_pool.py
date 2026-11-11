@@ -1,16 +1,17 @@
 """
-Hybrid discovery pool with indexed candidate identity.
+Candidate pool with indexed paper identity.
 
-The pool holds one hybrid collection's pre-ranking candidates, their source
-tags, per-source provider ranks, seed relations, and the provider-ID aliases
-that later lists resolve through. A record joins a member when it carries the
-member's provider ID or a recorded alias of it, or when it matches exactly one
-member under :func:`~citemesh.strategies.candidates.candidate_records_match`.
-That rule holds only for records sharing a normalized arXiv or DOI
-identifier, so the pool indexes members by those identifiers and runs the
-exact check only on index hits. Ingest therefore costs time in proportion to
-the members a record shares an identifier with, not the pool size, and yields
-the same pool as comparing every pair.
+The pool holds one collection's pre-ranking candidates, their source tags,
+seed relations, and the provider-ID aliases that later lists resolve through.
+Hybrid discovery and the embedding strategy's candidates mode both collect
+into it. A record joins a member when it carries the member's provider ID or a
+recorded alias of it, or when it matches exactly one member under
+:func:`~citemesh.strategies.candidates.candidate_records_match`. That rule
+holds only for records sharing a normalized arXiv or DOI identifier, so the
+pool indexes members by those identifiers and runs the exact check only on
+index hits. Ingest therefore costs time in proportion to the members a record
+shares an identifier with, not the pool size, and yields the same pool as
+comparing every pair.
 
 Member identifiers change only through the pool: every metadata merge
 re-indexes the member it enriched.
@@ -24,35 +25,52 @@ rule runs only within a group.
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 from citemesh.core import Paper
 from citemesh.core.paper_ids import bibliography_text_key
 from citemesh.strategies.candidates import (
+    QUERY_SEED_SEARCH_LIMIT,
     CandidateIdentityKey,
+    CandidateSourceResult,
+    ReferenceSelector,
     candidate_identifiers_conflict,
     candidate_identity_keys,
     candidate_records_match,
     corpus_publication_matches,
+    fetch_candidate_source,
+    fetch_seed_references,
     merge_paper_metadata,
     merge_seed_relation,
+    require_available_candidate_source,
 )
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
+
+logger = logging.getLogger(__name__)
 
 
 class DiscoveryPool:
-    """Deduplicated hybrid candidates keyed by their surviving paper IDs."""
+    """Deduplicated candidates keyed by their surviving paper IDs."""
 
-    def __init__(self, seed: Paper, seed_relations: dict[str, str]) -> None:
+    def __init__(
+        self, seed: Paper, seed_relations: dict[str, str] | None = None
+    ) -> None:
         """Start an empty pool for one seed.
 
         :param Paper seed: Canonical seed; records matching it enrich it instead.
-        :param Dict[str, str] seed_relations: Relation labels by paper ID, shared
-            with the caller, which keeps the seed's own label there.
+        :param Optional[Dict[str, str]] seed_relations: Relation labels by paper
+            ID, shared with a caller that keeps the seed's own label there.
         """
         self.seed = seed
-        self.seed_relations = seed_relations
+        self.seed_relations = {} if seed_relations is None else seed_relations
         self.papers: dict[str, Paper] = {}
         self.sources: dict[str, set[str]] = {}
         self.source_ranks: dict[str, dict[str, int]] = {}
         self.provider_aliases: dict[str, str] = {}
+        self.source_status: dict[str, str] = {}
         self._members_by_key: dict[CandidateIdentityKey, dict[str, None]] = {}
         self._keys_by_member: dict[str, tuple[CandidateIdentityKey, ...]] = {}
 
@@ -67,10 +85,10 @@ class DiscoveryPool:
         :param str source: Candidate source tag.
         :param str relation: Relation-to-seed label.
         :return Optional[str]: Surviving member ID, or ``None`` for a record with
-            an empty ID or one matching the seed.
+            an empty ID, a seed-role record, or one matching the seed.
         """
         incoming_id = str(incoming.paper_id).strip()
-        if not incoming_id:
+        if not incoming_id or incoming.is_seed:
             return None
         if incoming_id == self.seed.paper_id or candidate_records_match(
             incoming, self.seed
@@ -99,7 +117,11 @@ class DiscoveryPool:
                 self.papers[canonical_id] = incoming
                 self._index(canonical_id)
             elif incoming.is_local_corpus:
-                self._replace_member(matched_id, canonical_id, incoming)
+                # The corpus record takes over; later lists can carry the
+                # matched provider ID alone, so absorb keeps it as an alias.
+                self.papers[canonical_id] = incoming
+                self._index(canonical_id)
+                self.absorb(canonical_id, matched_id)
             else:
                 canonical_id = matched_id
                 self.merge(matched_id, incoming)
@@ -224,35 +246,6 @@ class DiscoveryPool:
             self.absorb(corpus_id, publication_id)
         return len(folds)
 
-    def _replace_member(
-        self, matched_id: str, incoming_id: str, incoming: Paper
-    ) -> None:
-        """Move a matched member's evidence onto an incoming local-corpus record.
-
-        Later lists can carry the matched provider ID without the external IDs
-        that established the corpus match, so that ID becomes an alias.
-
-        :param str matched_id: Provider-record member being replaced.
-        :param str incoming_id: Local-corpus ID that becomes the member ID.
-        :param Paper incoming: Local-corpus record that absorbs the member.
-        :return None: Updates papers, tags, ranks, aliases, relations, and index.
-        """
-        existing = self.papers.pop(matched_id)
-        self._unindex(matched_id)
-        self.papers[incoming_id] = merge_paper_metadata(incoming, existing)
-        self._index(incoming_id)
-        self.sources[incoming_id] = self.sources.pop(matched_id, set())
-        for provider_id, target in self.provider_aliases.items():
-            if target == matched_id:
-                self.provider_aliases[provider_id] = incoming_id
-        self.provider_aliases[matched_id] = incoming_id
-        previous_ranks = self.source_ranks.pop(matched_id, None)
-        if previous_ranks is not None:
-            self.source_ranks[incoming_id] = previous_ranks
-        previous_relation = self.seed_relations.pop(matched_id, "")
-        if previous_relation:
-            self.seed_relations[incoming_id] = previous_relation
-
     def _index(self, member_id: str) -> None:
         """Register a member under its current identifiers, replacing older keys.
 
@@ -276,3 +269,150 @@ class DiscoveryPool:
             del members[member_id]
             if not members:
                 del self._members_by_key[key]
+
+
+def fetch_candidate_pool(
+    client: SemanticScholarClient,
+    seed_paper: Paper,
+    *,
+    max_references: int = 0,
+    max_citations: int = 0,
+    max_recommendations: int = 0,
+    seed_identifier: str | None = None,
+    reference_selector: ReferenceSelector | None = None,
+) -> DiscoveryPool:
+    """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
+
+    Free-text query seeds (``query:`` IDs) have no S2 neighbors; they are proxied
+    through paper search on the query text before recommendation expansion.
+
+    :param SemanticScholarClient client: Semantic Scholar client.
+    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
+    :param int max_references: Maximum seed references to fetch (0 disables).
+    :param int max_citations: Maximum citing papers to fetch (0 disables).
+    :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param Callable | None reference_selector: Strategy-specific recovered-reference
+        selector.
+    :return DiscoveryPool: Deduplicated candidate pool with provenance tags.
+    """
+    with client.candidate_operation_scope():
+        return _fetch_candidate_pool(
+            client,
+            seed_paper,
+            max_references=max_references,
+            max_citations=max_citations,
+            max_recommendations=max_recommendations,
+            seed_identifier=seed_identifier,
+            reference_selector=reference_selector,
+        )
+
+
+def _fetch_candidate_pool(
+    client: SemanticScholarClient,
+    seed_paper: Paper,
+    *,
+    max_references: int = 0,
+    max_citations: int = 0,
+    max_recommendations: int = 0,
+    seed_identifier: str | None = None,
+    reference_selector: ReferenceSelector | None = None,
+) -> DiscoveryPool:
+    """Fetch candidates while an outer operation scope is active.
+
+    :param SemanticScholarClient client: Semantic Scholar client.
+    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
+    :param int max_references: Maximum seed references to fetch (0 disables).
+    :param int max_citations: Maximum citing papers to fetch (0 disables).
+    :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param Callable | None reference_selector: Strategy-specific recovered-reference
+        selector.
+    :return DiscoveryPool: Deduplicated candidate pool with provenance tags.
+    """
+    pool = DiscoveryPool(seed_paper)
+    source_results: list[CandidateSourceResult] = []
+    seed_id = str(seed_paper.paper_id)
+    is_query_seed = seed_id.startswith("query:")
+    query_candidate_budget = (
+        max_references + max_citations + max_recommendations if is_query_seed else 0
+    )
+    recommendation_limit = max_recommendations
+
+    if is_query_seed:
+        query_text = (seed_paper.title or "").strip() or seed_id
+        search_limit = min(QUERY_SEED_SEARCH_LIMIT, query_candidate_budget)
+        if search_limit > 0:
+            search_result = fetch_candidate_source(
+                "search",
+                lambda: client.search_papers(
+                    query_text,
+                    limit=search_limit,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(search_result)
+            for paper in search_result.papers:
+                pool.add(paper, source="recommendation", relation="semantic_only")
+        anchor_ids = list(pool.papers)[:1]
+        recommendation_limit = min(
+            max_recommendations,
+            max(0, query_candidate_budget - len(pool.papers)),
+        )
+    else:
+        anchor_ids = [seed_id]
+        if max_references > 0:
+            reference_results = fetch_seed_references(
+                client,
+                seed_paper,
+                max_references,
+                seed_identifier=seed_identifier,
+                reference_selector=reference_selector,
+            )
+            source_results.extend(reference_results)
+            for result in reference_results:
+                for paper in result.papers:
+                    pool.add(paper, source="reference", relation="referenced_by_seed")
+        if max_citations > 0:
+            citation_result = fetch_candidate_source(
+                "citations",
+                lambda: client.get_paper_citations(
+                    seed_id,
+                    limit=max_citations,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(citation_result)
+            for paper in citation_result.papers:
+                pool.add(paper, source="citation", relation="cites_seed")
+
+    if recommendation_limit > 0 and anchor_ids:
+        recommendation_result = fetch_candidate_source(
+            "recommendations",
+            lambda: client.get_recommended_papers(
+                anchor_ids[0],
+                limit=recommendation_limit,
+                raise_on_unavailable=True,
+            ),
+        )
+        source_results.append(recommendation_result)
+        for paper in recommendation_result.papers:
+            pool.add(paper, source="recommendation", relation="semantic_only")
+
+    pool.source_status = {
+        result.source: result.state.value for result in source_results
+    }
+    require_available_candidate_source(
+        source_results,
+        context=f"candidate acquisition for {seed_id}",
+    )
+
+    logger.debug(
+        "Candidate pool for %s: %d papers (refs<=%d cites<=%d recs<=%d).",
+        seed_id,
+        len(pool.papers),
+        max_references,
+        max_citations,
+        max_recommendations,
+    )
+    return pool
