@@ -56,7 +56,6 @@ from citemesh.strategies.candidates import (
     require_available_candidate_source,
     scope_candidate_collection,
 )
-from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.discovery_ranking import (
     DiscoveryCandidate,
@@ -71,6 +70,7 @@ from citemesh.strategies.embedding import (
     _check_embedding_deps,
     format_paper_for_embedding,
 )
+from citemesh.strategies.reference_hydration import ReferenceHydrator
 from citemesh.strategies.similarity import cosine_similarity_to_query
 
 if TYPE_CHECKING:
@@ -216,13 +216,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             cache_selection=cache_selection,
         )
         # Fetches the selected papers' reference lists for bibliographic coupling.
-        self.reference_hydrator = CitationGraphBuilder(
-            max_papers=max_papers,
-            max_citations=0,
-            max_references=0,
+        self.reference_hydrator = ReferenceHydrator(
+            self.client,
             fetch_references=fetch_references,
             refresh_reference_cache=refresh_reference_cache,
-            client=self.client,
         )
 
         self.paper_sources: dict[str, str] = {}  # paper_id -> citation|semantic|both
@@ -263,7 +260,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.discovery_ranking = []
         embedding.retrieval_embeddings = {}
         embedding.embeddings = {}
-        self.reference_hydrator.reset_reference_hydration()
+        self.reference_hydrator.reset()
         timings: dict[str, float] = {}
 
         started = perf_counter()
@@ -765,12 +762,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             result.source == "references" and result.state is CandidateSourceState.EMPTY
             for result in results
         ):
-            # The provider has no reference list for the seed; a recovered
-            # bibliography must not stand in for one in coupling scores.
-            self.reference_hydrator.reference_cache[seed.paper_id] = []
-            seed.references = []
+            self.reference_hydrator.withhold_seed_references(seed)
         # Reference lists, the coupling input, are fetched for citation-sourced papers.
-        self.reference_hydrator.hydrate_collected_references(
+        self.reference_hydrator.hydrate(
             {
                 paper_id: paper
                 for paper_id, paper in papers.items()

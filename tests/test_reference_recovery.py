@@ -393,13 +393,13 @@ def test_hydration_uses_provider_aliases_for_recovered_corpus_references(
     client.get_reference_ids.side_effect = [["arxiv-reference"], ["doi-reference"]]
     builder = CitationGraphBuilder(client=client)
 
-    builder.hydrate_collected_references(papers, seed)
+    builder.reference_hydrator.hydrate(papers, seed)
 
     assert client.get_reference_ids.call_args_list == [
         call("arxiv:2210.00001", force_refresh=False),
         call("10.1000/test", force_refresh=False),
     ]
-    assert builder.reference_cache == {
+    assert builder.reference_hydrator.reference_cache == {
         local_arxiv.paper_id: ["arxiv-reference"],
         local_doi.paper_id: ["doi-reference"],
     }

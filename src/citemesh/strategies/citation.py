@@ -43,6 +43,7 @@ from citemesh.strategies.candidates import (
     scope_candidate_collection,
 )
 from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.reference_hydration import ReferenceHydrator
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
@@ -89,64 +90,15 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.max_citations = max_citations
         self.max_references = max_references
         self.similarity_threshold = similarity_threshold
-        self.fetch_references = fetch_references
-        self.refresh_reference_cache = bool(refresh_reference_cache)
         self.client: SemanticScholarClient = client or get_client()
-        self.reference_cache: dict[str, list[str]] = {}
+        self.reference_hydrator = ReferenceHydrator(
+            self.client,
+            fetch_references=fetch_references,
+            refresh_reference_cache=refresh_reference_cache,
+        )
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self._abstract_index = AbstractSimilarityIndex()
-        self._reference_source_unavailable = False
-
-    def _ensure_paper_references(self, paper: Paper) -> None:
-        """Hydrate reference IDs for a paper without clobbering existing payload.
-
-        :param Paper paper: Paper record to hydrate in-place.
-        :return None: Mutates ``paper.references`` when needed.
-        """
-        if not self.fetch_references:
-            return
-
-        paper_id = str(paper.paper_id).strip()
-        if not paper_id:
-            return
-
-        if paper.references:
-            self.reference_cache.setdefault(paper_id, list(paper.references))
-            return
-
-        cached_refs = self.reference_cache.get(paper_id)
-        if cached_refs is not None:
-            paper.references = list(cached_refs)
-            return
-        provider_id = provider_lookup_identifier(paper_id, paper)
-        if provider_id is None:
-            return
-        if self._reference_source_unavailable:
-            if not self.refresh_reference_cache:
-                cached_refs = self.client.get_cached_reference_ids(provider_id)
-                if cached_refs is not None:
-                    self.reference_cache[paper_id] = cached_refs
-                    paper.references = list(cached_refs)
-            return
-
-        from citemesh.services import SemanticScholarUnavailableError
-
-        try:
-            paper.references = self._get_references(
-                paper_id, provider_lookup_id=provider_id
-            )
-        except SemanticScholarUnavailableError as exc:
-            self._reference_source_unavailable = True
-            logger.warning(
-                "Reference hydration unavailable; continuing with available "
-                "reference data."
-            )
-            logger.debug(
-                "Reference hydration failed for related paper %s: %s",
-                paper_id,
-                exc,
-            )
 
     def _ingest_relation_batch(
         self,
@@ -221,69 +173,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             if merged_relation:
                 self.seed_relations[normalized_id] = merged_relation
 
-    def hydrate_collected_references(
-        self, papers: dict[str, Paper], seed: Paper
-    ) -> None:
-        """Hydrate optional reference IDs after required candidate acquisition.
-
-        :param Dict[str, Paper] papers: Collected citation papers.
-        :param Paper seed: Canonical seed paper in ``papers``.
-        :return None: Updates paper records and the in-memory reference cache.
-        """
-        if self.fetch_references:
-            logger.debug("Hydrating reference lists for %d papers...", len(papers))
-
-        self._ensure_paper_references(seed)
-
-        progress_bar: Generator[tuple[str, Paper], None, None] | None = None
-        paper_items: Iterable[tuple[str, Paper]] = papers.items()
-        if self.fetch_references and progress_enabled() and len(papers) > 25:
-            progress_bar = progress_iterator(
-                paper_items,
-                description="Hydrating reference lists",
-                unit="papers",
-            )
-            paper_items = progress_bar
-
-        try:
-            for paper_id, paper in paper_items:
-                if paper_id != seed.paper_id:
-                    self._ensure_paper_references(paper)
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
-
-    def _get_references(
-        self, paper_id: str, *, provider_lookup_id: str | None = None
-    ) -> list[str]:
-        """
-        Get reference IDs for a paper with caching.
-
-        :param str paper_id: Local cache key for the paper.
-        :param Optional[str] provider_lookup_id: Provider-safe request identifier;
-            defaults to ``paper_id``.
-        :return list[str]: Referenced paper IDs.
-        """
-        if not self.refresh_reference_cache and paper_id in self.reference_cache:
-            return self.reference_cache[paper_id]
-        if self.refresh_reference_cache:
-            self.reference_cache.pop(paper_id, None)
-
-        ref_ids = self.client.get_reference_ids(
-            provider_lookup_id or paper_id,
-            force_refresh=self.refresh_reference_cache,
-        )
-        self.reference_cache[paper_id] = ref_ids
-        return ref_ids
-
-    def reset_reference_hydration(self) -> None:
-        """Forget reference lists and outage state from an earlier collection.
-
-        :return None: Clears the in-memory reference cache and outage flag.
-        """
-        self.reference_cache.clear()
-        self._reference_source_unavailable = False
-
     @scope_candidate_collection
     def collect_papers(
         self,
@@ -303,7 +192,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         # Scope in-memory references to one collection request so stale entries do
         # not leak across caller boundaries when builders are reused.
-        self.reset_reference_hydration()
+        self.reference_hydrator.reset()
         self.seed_relations = {}
         self.candidate_source_status = {}
         papers = {}
@@ -376,8 +265,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 # as the complete S2 bibliography or repeat the empty discovery.
                 # Candidate relations remain available, but this capped subset
                 # must not drive shared-reference coupling as a full bibliography.
-                self.reference_cache[seed.paper_id] = []
-                seed.references = []
+                self.reference_hydrator.withhold_seed_references(seed)
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - 1 - len(pool.papers)
@@ -416,11 +304,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # Candidate discovery is required acquisition. Complete every requested
         # source before optional reference enrichment can spend the shared S2
         # recovery budget.
-        self.hydrate_collected_references(papers, seed)
+        self.reference_hydrator.hydrate(papers, seed)
 
-        reference_lists = sum(
-            bool(references) for references in self.reference_cache.values()
-        )
+        reference_lists = sum(bool(paper.references) for paper in papers.values())
         summary = f"Collected {len(papers)} papers"
         logger.debug(
             "Collected-paper reference hydration: %d of %d papers have reference lists.",
@@ -474,6 +360,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             paper1,
             paper2,
             abstract_index=self._abstract_index,
+            reference_coupling=self.reference_hydrator.fetch_references,
             with_references_weights=(0.40, 0.20, 0.00, 0.40),
             without_references_weights=(0.65, 0.20, 0.15, 0.00),
         )

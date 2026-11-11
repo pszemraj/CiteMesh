@@ -1026,10 +1026,13 @@ def test_citation_reference_hydration_reports_interactive_progress() -> None:
     builder = CitationGraphBuilder(fetch_references=True, client=client)
 
     with (
-        patch("citemesh.strategies.citation.progress_enabled", return_value=True),
-        patch("citemesh.strategies.citation.progress_iterator", progress),
+        patch(
+            "citemesh.strategies.reference_hydration.progress_enabled",
+            return_value=True,
+        ),
+        patch("citemesh.strategies.reference_hydration.progress_iterator", progress),
     ):
-        builder.hydrate_collected_references(papers, seed)
+        builder.reference_hydrator.hydrate(papers, seed)
 
     progress.assert_called_once_with(
         papers.items(),
@@ -1114,7 +1117,9 @@ def test_citation_collect_uses_external_alias_for_pre_resolved_local_seed(
 
     assert set(papers) == {seed.paper_id, "reference", "citation"}
     assert papers[seed.paper_id].is_seed is True
-    assert builder.reference_cache[seed.paper_id] == ["seed-reference"]
+    assert builder.reference_hydrator.reference_cache[seed.paper_id] == [
+        "seed-reference"
+    ]
     client.get_paper.assert_not_called()
     client.get_reference_ids.assert_any_call(provider_id, force_refresh=False)
     client.get_paper_references.assert_called_once_with(
@@ -1156,7 +1161,7 @@ def test_citation_collect_keeps_opaque_pre_resolved_local_seed_off_provider() ->
 
     assert set(papers) == {seed.paper_id}
     assert papers[seed.paper_id].is_seed is True
-    assert builder.reference_cache == {}
+    assert builder.reference_hydrator.reference_cache == {}
     assert builder.candidate_source_status == {}
 
 
@@ -1645,7 +1650,7 @@ def test_hybrid_corpus_defers_optional_seed_enrichment(
     builder.embedding_builder.enrich_cached_corpus_seed = MagicMock(
         side_effect=lambda _seed: events.append("provider seed enrichment")
     )
-    builder.reference_hydrator.hydrate_collected_references = MagicMock(
+    builder.reference_hydrator.hydrate = MagicMock(
         side_effect=lambda _papers, _seed: events.append("reference enrichment")
     )
 
@@ -1756,15 +1761,16 @@ def test_refresh_reference_cache_force_lookup_contracts() -> None:
         refresh_reference_cache=True,
         client=citation_client,
     )
-    citation_builder.reference_cache["paper-1"] = ["stale-ref"]
+    hydrator = citation_builder.reference_hydrator
+    hydrator.reference_cache["paper-1"] = ["stale-ref"]
 
-    refs = citation_builder._get_references("paper-1")
+    refs = hydrator._fetch("paper-1")
 
     assert refs == ["fresh-ref"]
     citation_client.get_reference_ids.assert_called_once_with(
         "paper-1", force_refresh=True
     )
-    assert citation_builder.reference_cache["paper-1"] == ["fresh-ref"]
+    assert hydrator.reference_cache["paper-1"] == ["fresh-ref"]
 
     recommendation_client = MagicMock()
     recommendation_client.get_reference_ids.return_value = ["r2"]
@@ -1780,7 +1786,7 @@ def test_refresh_reference_cache_force_lookup_contracts() -> None:
         abstract="paper two",
     )
 
-    recommendation_builder._hydrate_references(paper)
+    recommendation_builder.reference_hydrator.ensure(paper)
 
     assert paper.references == ["r2"]
     recommendation_client.get_reference_ids.assert_called_once_with(
@@ -1848,10 +1854,10 @@ def test_citation_related_paper_reference_failure_remains_uncached() -> None:
     builder = CitationGraphBuilder(fetch_references=True, client=client)
     paper = _paper("related-paper")
 
-    builder._ensure_paper_references(paper)
+    builder.reference_hydrator.ensure(paper)
 
     assert paper.references == []
-    assert paper.paper_id not in builder.reference_cache
+    assert paper.paper_id not in builder.reference_hydrator.reference_cache
     client.get_reference_ids.assert_called_once_with(
         paper.paper_id,
         force_refresh=False,
@@ -1860,7 +1866,7 @@ def test_citation_related_paper_reference_failure_remains_uncached() -> None:
     client.get_reference_ids.side_effect = RuntimeError("local hydration bug")
     builder = CitationGraphBuilder(fetch_references=True, client=client)
     with pytest.raises(RuntimeError, match="local hydration bug"):
-        builder._ensure_paper_references(_paper("broken-paper"))
+        builder.reference_hydrator.ensure(_paper("broken-paper"))
 
 
 def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:
@@ -1876,11 +1882,11 @@ def test_citation_collect_clears_in_memory_reference_cache_between_requests() ->
         fetch_references=False,
         client=client,
     )
-    builder.reference_cache["stale"] = ["stale-ref"]
+    builder.reference_hydrator.reference_cache["stale"] = ["stale-ref"]
 
     builder.collect_papers("seed")
 
-    assert builder.reference_cache == {}
+    assert builder.reference_hydrator.reference_cache == {}
 
 
 def test_citation_similarity_uses_reference_and_fallback_branches(
@@ -3346,7 +3352,7 @@ def test_hybrid_collection_preserves_reconciled_publication_reference(
     )
     stub_hybrid_corpus(builder, neighbours=[corpus])
     offline_hybrid_encoder(monkeypatch, builder)
-    builder.reference_hydrator.hydrate_collected_references = MagicMock()
+    builder.reference_hydrator.hydrate = MagicMock()
 
     papers = builder.collect_papers(seed.paper_id)
 
