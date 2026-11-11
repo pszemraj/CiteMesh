@@ -46,11 +46,9 @@ from citemesh.strategies.candidates import (
     CandidateSourceResult,
     CandidateSourceState,
     annotate_verified_seed_references,
-    candidate_identifiers_conflict,
     candidate_records_match,
     corpus_publication_matches,
     fetch_candidate_source,
-    merge_paper_metadata,
     merge_seed_relation,
     provider_lookup_identifier,
     require_available_candidate_source,
@@ -58,6 +56,7 @@ from citemesh.strategies.candidates import (
     select_recovered_references_by_score,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
@@ -298,96 +297,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources: dict[str, str] = {}  # paper_id -> citation|semantic|both
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
-        self._candidate_source_ranks: dict[str, dict[str, int]] = {}
-        self._candidate_provider_aliases: dict[str, str] = {}
-
-    def _ingest_candidate(
-        self,
-        seed: Paper,
-        candidates: dict[str, Paper],
-        candidate_sources: dict[str, set[str]],
-        incoming: Paper,
-        *,
-        source: str,
-        relation: str,
-    ) -> str | None:
-        """Add one pre-ranking candidate with bounded identity matching.
-
-        :param Paper seed: Canonical seed paper.
-        :param Dict[str, Paper] candidates: Pre-ranking candidate map.
-        :param Dict[str, Set[str]] candidate_sources: Candidate provenance map.
-        :param Paper incoming: Newly observed candidate payload.
-        :param str source: Candidate source tag.
-        :param str relation: Relation-to-seed label.
-        :return Optional[str]: Candidate survivor, or ``None`` for a seed match.
-        """
-        incoming_id = str(incoming.paper_id).strip()
-        if not incoming_id:
-            return None
-        if incoming_id == seed.paper_id:
-            merge_paper_metadata(seed, incoming)
-            return None
-        if candidate_records_match(incoming, seed):
-            merge_paper_metadata(seed, incoming)
-            return None
-
-        canonical_id = incoming_id
-        existing = candidates.get(incoming_id)
-        if existing is None and not incoming.is_local_corpus:
-            alias_target = self._candidate_provider_aliases.get(incoming_id)
-            if (
-                alias_target is not None
-                and alias_target in candidates
-                and not candidate_identifiers_conflict(
-                    candidates[alias_target], incoming
-                )
-            ):
-                canonical_id = alias_target
-                existing = candidates[canonical_id]
-        if existing is not None:
-            merge_paper_metadata(existing, incoming)
-        else:
-            matching_ids = [
-                paper_id
-                for paper_id, candidate in candidates.items()
-                if candidate_records_match(incoming, candidate)
-            ]
-            if len(matching_ids) == 1:
-                matched_id = matching_ids[0]
-                existing = candidates[matched_id]
-                if incoming.is_local_corpus:
-                    canonical_id = incoming_id
-                    candidates.pop(matched_id)
-                    candidates[canonical_id] = merge_paper_metadata(incoming, existing)
-                    candidate_sources[canonical_id] = candidate_sources.pop(
-                        matched_id, set()
-                    )
-                    # Later lists can carry the same provider ID without the
-                    # external IDs that established the corpus match.
-                    for provider_id, target in self._candidate_provider_aliases.items():
-                        if target == matched_id:
-                            self._candidate_provider_aliases[provider_id] = canonical_id
-                    self._candidate_provider_aliases[matched_id] = canonical_id
-                    previous_ranks = self._candidate_source_ranks.pop(matched_id, None)
-                    if previous_ranks is not None:
-                        self._candidate_source_ranks[canonical_id] = previous_ranks
-                    previous_relation = self.seed_relations.pop(matched_id, "")
-                    if previous_relation:
-                        self.seed_relations[canonical_id] = previous_relation
-                else:
-                    canonical_id = matched_id
-                    merge_paper_metadata(existing, incoming)
-                    self._candidate_provider_aliases[incoming_id] = canonical_id
-            else:
-                candidates[canonical_id] = incoming
-
-        candidate_sources.setdefault(canonical_id, set()).add(source)
-        merged_relation = merge_seed_relation(
-            self.seed_relations.get(canonical_id, ""), relation
-        )
-        if merged_relation:
-            self.seed_relations[canonical_id] = merged_relation
-        return canonical_id
+        self.discovery_pool: DiscoveryPool | None = None
 
     def _embed_candidates(
         self,
@@ -675,10 +585,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         return [paper_id for _, paper_id, _ in scored]
 
-    def _record_citation_source_ranks(
-        self, seed: Paper, candidates: dict[str, Paper]
-    ) -> None:
+    def _record_citation_source_ranks(self, pool: DiscoveryPool) -> None:
         """Record citation/reference positions on the reconciled paper IDs."""
+        seed = pool.seed
         for result in self.citation_builder.candidate_source_results:
             for rank, paper in enumerate(result.papers, start=1):
                 if paper.paper_id == seed.paper_id or candidate_records_match(
@@ -686,19 +595,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 ):
                     continue
                 paper_id = paper.paper_id
-                if paper_id not in candidates:
-                    matches = [
-                        candidate_id
-                        for candidate_id, candidate in candidates.items()
-                        if candidate_records_match(paper, candidate)
-                    ]
-                    if len(matches) != 1:
+                if paper_id not in pool.papers:
+                    matched_id = pool.unique_match(paper)
+                    if matched_id is None:
                         continue
-                    paper_id = matches[0]
+                    paper_id = matched_id
                     if not paper.is_local_corpus:
-                        self._candidate_provider_aliases[paper.paper_id] = paper_id
-                self._candidate_source_ranks.setdefault(paper_id, {}).setdefault(
-                    result.source, result.source_ranks.get(paper.paper_id, rank)
+                        pool.provider_aliases[paper.paper_id] = paper_id
+                pool.record_rank(
+                    paper_id,
+                    result.source,
+                    result.source_ranks.get(paper.paper_id, rank),
                 )
 
     def _fetch_recommendations(
@@ -723,28 +630,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
 
     def _ingest_recommendations(
-        self,
-        seed: Paper,
-        candidates: dict[str, Paper],
-        candidate_sources: dict[str, set[str]],
-        recommendations: Sequence[Paper],
+        self, pool: DiscoveryPool, recommendations: Sequence[Paper]
     ) -> None:
         """Add the ordered recommendation list after corpus reconciliation."""
         for rank, paper in enumerate(recommendations, start=1):
             if paper.is_seed:
                 continue
-            paper_id = self._ingest_candidate(
-                seed,
-                candidates,
-                candidate_sources,
-                paper,
-                source="semantic",
-                relation="semantic_only",
-            )
+            paper_id = pool.add(paper, source="semantic", relation="semantic_only")
             if paper_id is not None:
-                self._candidate_source_ranks.setdefault(paper_id, {}).setdefault(
-                    "recommendations", rank
-                )
+                pool.record_rank(paper_id, "recommendations", rank)
 
     def _select_candidate_ids(
         self,
@@ -773,10 +667,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return selected
 
     def _deduplicate_selected_publications(
-        self,
-        selected_ids: list[str],
-        candidates: dict[str, Paper],
-        candidate_sources: dict[str, set[str]],
+        self, selected_ids: list[str], pool: DiscoveryPool
     ) -> list[str]:
         """Reconcile unique selected preprint/publication pairs without refilling.
 
@@ -784,6 +675,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         an unselected competing record still makes a bibliography ambiguous.
         Preserve the first selected position and each source's earliest rank.
         """
+        candidates = pool.papers
         selected = set(selected_ids)
         matches: dict[str, list[str]] = {}
         for paper_id in selected_ids:
@@ -800,19 +692,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if corpus_id in selected and matches[corpus_id] == [paper_id]:
                 aliases[paper_id] = corpus_id
         for publication_id, corpus_id in aliases.items():
-            merge_paper_metadata(candidates[corpus_id], candidates[publication_id])
-            candidate_sources[corpus_id].update(candidate_sources[publication_id])
-            for provider_id, target in self._candidate_provider_aliases.items():
+            pool.merge(corpus_id, candidates[publication_id])
+            pool.sources[corpus_id].update(pool.sources[publication_id])
+            for provider_id, target in pool.provider_aliases.items():
                 if target == publication_id:
-                    self._candidate_provider_aliases[provider_id] = corpus_id
-            self._candidate_provider_aliases[publication_id] = corpus_id
-            ranks = self._candidate_source_ranks.setdefault(corpus_id, {})
-            for source, rank in self._candidate_source_ranks.get(
-                publication_id, {}
-            ).items():
+                    pool.provider_aliases[provider_id] = corpus_id
+            pool.provider_aliases[publication_id] = corpus_id
+            ranks = pool.source_ranks.setdefault(corpus_id, {})
+            for source, rank in pool.source_ranks.get(publication_id, {}).items():
                 ranks[source] = min(ranks.get(source, rank), rank)
-            existing_relation = self.seed_relations.get(corpus_id, "")
-            incoming_relation = self.seed_relations.get(publication_id, "")
+            existing_relation = pool.seed_relations.get(corpus_id, "")
+            incoming_relation = pool.seed_relations.get(publication_id, "")
             if existing_relation == "citation" and incoming_relation in (
                 "referenced_by_seed",
                 "cites_seed",
@@ -821,7 +711,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 existing_relation = ""
             relation = merge_seed_relation(existing_relation, incoming_relation)
             if relation:
-                self.seed_relations[corpus_id] = relation
+                pool.seed_relations[corpus_id] = relation
         return list(
             dict.fromkeys(aliases.get(paper_id, paper_id) for paper_id in selected_ids)
         )
@@ -858,8 +748,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources = {}
         self.seed_relations = {}
         self.candidate_source_status = {}
-        self._candidate_source_ranks = {}
-        self._candidate_provider_aliases = {}
+        self.discovery_pool = None
         if self.embedding_builder is not None:
             self.embedding_builder.retrieval_embeddings = {}
             self.embedding_builder.embeddings = {}
@@ -941,15 +830,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.seed_relations[seed_paper.paper_id] = "seed"
         citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})
 
-        candidate_pool: dict[str, Paper] = {}
-        candidate_sources: dict[str, set[str]] = {}
+        pool = DiscoveryPool(seed_paper, self.seed_relations)
+        self.discovery_pool = pool
         for paper in citation_papers.values():
             if paper.paper_id == seed_paper.paper_id or paper.is_seed:
                 continue
-            self._ingest_candidate(
-                seed_paper,
-                candidate_pool,
-                candidate_sources,
+            pool.add(
                 paper,
                 source="citation",
                 relation=str(citation_seed_relations.get(paper.paper_id, "citation")),
@@ -957,7 +843,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         embedding_builder = self.embedding_builder
         if embedding_builder is None:
-            for paper_id, paper in candidate_pool.items():
+            for paper_id, paper in pool.papers.items():
                 if len(papers) >= self.max_papers:
                     break
                 papers[paper_id] = paper
@@ -967,7 +853,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         combined = self.semantic_source == "both"
         if combined:
-            self._record_citation_source_ranks(seed_paper, candidate_pool)
+            self._record_citation_source_ranks(pool)
         logger.info("Collecting semantic candidates...")
 
         from citemesh.services import SemanticScholarUnavailableError
@@ -1034,38 +920,23 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             paper for paper in semantic_papers.values() if not paper.is_seed
         )
         for rank, paper in enumerate(semantic_candidates, start=1):
-            canonical_id = self._ingest_candidate(
-                seed_paper,
-                candidate_pool,
-                candidate_sources,
-                paper,
-                source="semantic",
-                relation="semantic_only",
-            )
+            canonical_id = pool.add(paper, source="semantic", relation="semantic_only")
             if combined and canonical_id is not None:
-                self._candidate_source_ranks.setdefault(canonical_id, {}).setdefault(
-                    "arxiv_corpus", rank
-                )
+                pool.record_rank(canonical_id, "arxiv_corpus", rank)
         if combined:
-            self._ingest_recommendations(
-                seed_paper, candidate_pool, candidate_sources, recommendations
-            )
+            self._ingest_recommendations(pool, recommendations)
 
-        ranked_ids = self._rank_candidates(
-            seed_paper, candidate_pool, candidate_sources
-        )
+        ranked_ids = self._rank_candidates(seed_paper, pool.papers, pool.sources)
         annotate_verified_seed_references(
-            candidate_pool,
+            pool.papers,
             self.citation_builder.candidate_source_results,
             self.seed_relations,
         )
-        selected_ids = self._select_candidate_ids(ranked_ids, candidate_sources)
-        selected_ids = self._deduplicate_selected_publications(
-            selected_ids, candidate_pool, candidate_sources
-        )
+        selected_ids = self._select_candidate_ids(ranked_ids, pool.sources)
+        selected_ids = self._deduplicate_selected_publications(selected_ids, pool)
         for paper_id in selected_ids:
-            papers[paper_id] = candidate_pool[paper_id]
-            tags = candidate_sources[paper_id]
+            papers[paper_id] = pool.papers[paper_id]
+            tags = pool.sources[paper_id]
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
             if "citation" in tags:
                 self.seed_relations.setdefault(paper_id, "citation")
@@ -1191,10 +1062,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        if self._candidate_source_ranks:
+        if self.discovery_pool is not None and self.discovery_pool.source_ranks:
             graph.graph["candidate_source_ranks"] = {
                 paper_id: ranks.copy()
-                for paper_id, ranks in self._candidate_source_ranks.items()
+                for paper_id, ranks in self.discovery_pool.source_ranks.items()
                 if paper_id in graph
             }
 

@@ -35,6 +35,7 @@ from citemesh.strategies.candidates import (
     fetch_candidate_pool,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
@@ -3648,8 +3649,8 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
     """DOI-only and arXiv-only provider records join the same local work."""
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
     seed = _seed_paper()
-    candidates: dict[str, Paper] = {}
-    sources: dict[str, set[str]] = {}
+    pool = DiscoveryPool(seed, builder.seed_relations)
+    candidates, sources = pool.papers, pool.sources
     doi_only = _paper("45cbff3a7e803dd949628a91bedef52b28bd63c7")
     doi_only.title = "Unlock Predictable Scaling from Emergent Abilities"
     doi_only.doi = "10.48550/arXiv.2310.03262"
@@ -3662,29 +3663,23 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
     local.is_local_corpus = True
     local.title = arxiv_only.title
 
-    builder._ingest_candidate(
-        seed, candidates, sources, arxiv_only, source="citation", relation="cites_seed"
-    )
-    builder._candidate_source_ranks[arxiv_only.paper_id] = {"citations": 5}
-    builder._ingest_candidate(
-        seed, candidates, sources, local, source="semantic", relation="semantic_only"
-    )
-    builder._ingest_recommendations(seed, candidates, sources, [doi_only, arxiv_only])
+    pool.add(arxiv_only, source="citation", relation="cites_seed")
+    pool.source_ranks[arxiv_only.paper_id] = {"citations": 5}
+    pool.add(local, source="semantic", relation="semantic_only")
+    builder._ingest_recommendations(pool, [doi_only, arxiv_only])
 
     assert set(candidates) == {local.paper_id}
     assert sources[local.paper_id] == {"citation", "semantic"}
     assert builder.seed_relations[local.paper_id] == "cites_seed"
-    assert builder._candidate_source_ranks == {
-        local.paper_id: {"citations": 5, "recommendations": 1}
-    }
+    assert pool.source_ranks == {local.paper_id: {"citations": 5, "recommendations": 1}}
 
 
 def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
     """Hybrid false twins should remain separate source classes without a bonus."""
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
     seed = _seed_paper()
-    candidates: dict[str, Paper] = {}
-    sources: dict[str, set[str]] = {}
+    pool = DiscoveryPool(seed, builder.seed_relations)
+    candidates, sources = pool.papers, pool.sources
     authors = [Author(name="Katherine Johnson")]
     citation_twin = Paper(
         paper_id="e" * 40,
@@ -3698,22 +3693,8 @@ def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> No
         year=2022,
         authors=authors,
     )
-    builder._ingest_candidate(
-        seed,
-        candidates,
-        sources,
-        citation_twin,
-        source="citation",
-        relation="cites_seed",
-    )
-    builder._ingest_candidate(
-        seed,
-        candidates,
-        sources,
-        semantic_twin,
-        source="semantic",
-        relation="semantic_only",
-    )
+    pool.add(citation_twin, source="citation", relation="cites_seed")
+    pool.add(semantic_twin, source="semantic", relation="semantic_only")
 
     assert set(candidates) == {citation_twin.paper_id, semantic_twin.paper_id}
     assert sources[citation_twin.paper_id] == {"citation"}
@@ -3724,29 +3705,15 @@ def test_hybrid_ingest_merges_s2_duplicates_with_shared_external_id() -> None:
     """Hybrid ingestion keeps one canonical S2 record for matching DOI metadata."""
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
     seed = _seed_paper()
-    candidates: dict[str, Paper] = {}
-    sources: dict[str, set[str]] = {}
+    pool = DiscoveryPool(seed, builder.seed_relations)
+    candidates, sources = pool.papers, pool.sources
     first = _paper("1" * 40)
     first.doi = "10.1000/shared"
     second = _paper("2" * 40)
     second.doi = "10.1000/shared"
 
-    builder._ingest_candidate(
-        seed,
-        candidates,
-        sources,
-        first,
-        source="citation",
-        relation="cites_seed",
-    )
-    builder._ingest_candidate(
-        seed,
-        candidates,
-        sources,
-        second,
-        source="semantic",
-        relation="semantic_only",
-    )
+    pool.add(first, source="citation", relation="cites_seed")
+    pool.add(second, source="semantic", relation="semantic_only")
 
     assert set(candidates) == {first.paper_id}
     assert sources[first.paper_id] == {"citation", "semantic"}
@@ -3757,8 +3724,8 @@ def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> 
     """A changed provider payload cannot overwrite a reconciled corpus identity."""
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
     seed = _seed_paper()
-    candidates: dict[str, Paper] = {}
-    sources: dict[str, set[str]] = {}
+    pool = DiscoveryPool(seed, builder.seed_relations)
+    candidates, sources = pool.papers, pool.sources
     cited = _paper("1" * 40)
     cited.arxiv_id = "2401.00001"
     local = _paper(f"arxiv:{cited.arxiv_id}")
@@ -3772,9 +3739,7 @@ def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> 
         (local, "semantic", "semantic_only"),
         (refreshed, "semantic", "semantic_only"),
     ):
-        builder._ingest_candidate(
-            seed, candidates, sources, paper, source=source, relation=relation
-        )
+        pool.add(paper, source=source, relation=relation)
 
     assert candidates == {local.paper_id: local, refreshed.paper_id: refreshed}
     assert candidates[refreshed.paper_id] is refreshed
@@ -3782,6 +3747,15 @@ def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> 
     assert sources[local.paper_id] == {"citation", "semantic"}
     assert sources[refreshed.paper_id] == {"semantic"}
     assert builder.seed_relations[local.paper_id] == "cites_seed"
+
+
+def _publication_pool(
+    candidates: dict[str, Paper], sources: dict[str, set[str]]
+) -> DiscoveryPool:
+    """Wrap a prepared candidate map for post-selection publication dedup."""
+    pool = DiscoveryPool(_seed_paper(), {})
+    pool.papers, pool.sources = candidates, sources
+    return pool
 
 
 @pytest.fixture
@@ -3815,8 +3789,10 @@ def test_hybrid_reconciles_unlinked_corpus_publication(
         corpus.paper_id: "citation",
         publication.paper_id: "referenced_by_seed",
     }
-    builder._candidate_provider_aliases = {"older-provider-alias": publication.paper_id}
-    builder._candidate_source_ranks = {
+    pool = DiscoveryPool(_seed_paper(), builder.seed_relations)
+    pool.papers, pool.sources = candidates, sources
+    pool.provider_aliases = {"older-provider-alias": publication.paper_id}
+    pool.source_ranks = {
         corpus.paper_id: {"arxiv_corpus": 7, "recommendations": 9},
         publication.paper_id: {"recommendations": 2},
     }
@@ -3825,7 +3801,7 @@ def test_hybrid_reconciles_unlinked_corpus_publication(
         if publication_first
         else [corpus.paper_id, other.paper_id, publication.paper_id]
     )
-    result = builder._deduplicate_selected_publications(selected, candidates, sources)
+    result = builder._deduplicate_selected_publications(selected, pool)
     assert result == [corpus.paper_id, other.paper_id]
     assert tail.paper_id not in result
     assert corpus.arxiv_id == "2503.06378"
@@ -3833,11 +3809,11 @@ def test_hybrid_reconciles_unlinked_corpus_publication(
     assert corpus.references == ["reference-a", "reference-b"]
     assert sources[corpus.paper_id] == {"citation", "semantic"}
     assert builder.seed_relations[corpus.paper_id] == "referenced_by_seed"
-    assert builder._candidate_source_ranks[corpus.paper_id] == {
+    assert pool.source_ranks[corpus.paper_id] == {
         "arxiv_corpus": 7,
         "recommendations": 2,
     }
-    assert builder._candidate_provider_aliases == {
+    assert pool.provider_aliases == {
         "older-provider-alias": corpus.paper_id,
         publication.paper_id: corpus.paper_id,
     }
@@ -3874,7 +3850,9 @@ def test_hybrid_preserves_nonmatching_publications(
     sources = {corpus.paper_id: {"citation"}, publication.paper_id: {"semantic"}}
     selected = list(candidates)
     assert (
-        builder._deduplicate_selected_publications(selected, candidates, sources)
+        builder._deduplicate_selected_publications(
+            selected, _publication_pool(candidates, sources)
+        )
         == selected
     )
     assert sources[publication.paper_id] == {"semantic"}
@@ -3905,7 +3883,9 @@ def test_hybrid_preserves_ambiguous_publication_match(
     if competitor_selected:
         selected.insert(1, other.paper_id)
     assert (
-        builder._deduplicate_selected_publications(selected, candidates, sources)
+        builder._deduplicate_selected_publications(
+            selected, _publication_pool(candidates, sources)
+        )
         == selected
     )
 
@@ -3920,7 +3900,9 @@ def test_hybrid_keeps_single_selected_publication_version(
     selected = [unlinked_publication_pair[selected_index].paper_id]
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
     assert (
-        builder._deduplicate_selected_publications(selected, candidates, sources)
+        builder._deduplicate_selected_publications(
+            selected, _publication_pool(candidates, sources)
+        )
         == selected
     )
 
@@ -3969,8 +3951,8 @@ def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:
     """An S2 paper must not collapse two matching local-corpus records."""
     builder = HybridGraphBuilder(max_papers=5, max_semantic=0, client=MagicMock())
     seed = _seed_paper()
-    candidates: dict[str, Paper] = {}
-    sources: dict[str, set[str]] = {}
+    pool = DiscoveryPool(seed, builder.seed_relations)
+    candidates, sources = pool.papers, pool.sources
     corpus_first = _paper("local-first")
     corpus_first.is_local_corpus = True
     corpus_first.doi = "10.1000/shared"
@@ -3985,14 +3967,7 @@ def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:
         (corpus_second, "citation"),
         (s2_candidate, "semantic"),
     ):
-        builder._ingest_candidate(
-            seed,
-            candidates,
-            sources,
-            paper,
-            source=source,
-            relation="semantic_only",
-        )
+        pool.add(paper, source=source, relation="semantic_only")
 
     assert set(candidates) == {
         corpus_first.paper_id,

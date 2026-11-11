@@ -676,7 +676,8 @@ def test_hybrid_admits_healthy_references_by_composite_with_provider_ranks(
     assert skipped.references == ["shared"]
     assert builder.paper_sources[rediscovered.paper_id] == "semantic"
     assert builder.seed_relations[rediscovered.paper_id] == "referenced_by_seed"
-    assert builder._candidate_source_ranks == {
+    assert builder.discovery_pool is not None
+    assert builder.discovery_pool.source_ranks == {
         admitted.paper_id: {"references": 4},
         rediscovered.paper_id: {"recommendations": 1},
     }

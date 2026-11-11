@@ -49,6 +49,7 @@ QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
 ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
+CandidateIdentityKey = tuple[str, str]
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _BuilderT = TypeVar("_BuilderT", bound="_CandidateCollectionOwner")
@@ -214,6 +215,21 @@ def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...] | 
     if left.is_local_corpus and right.is_local_corpus:
         return ()
     return tuple(sorted(shared_namespaces))
+
+
+def candidate_identity_keys(paper: Paper) -> tuple[CandidateIdentityKey, ...]:
+    """Return the normalized identifiers through which a record can match.
+
+    :func:`candidate_records_match` holds only for records that share one of
+    these ``(namespace, identifier)`` pairs, so an index on them finds every
+    possible match. A record whose own identifiers conflict matches nothing and
+    has no keys.
+
+    :param Paper paper: Candidate record.
+    :return tuple[CandidateIdentityKey, ...]: Normalized arXiv and DOI keys.
+    """
+    identifiers = _external_identifiers(paper)
+    return tuple(identifiers.items()) if identifiers else ()
 
 
 def candidate_records_match(left: Paper, right: Paper) -> bool:
