@@ -850,7 +850,9 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
 def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() -> None:
     """Warm recommendation builds must honor live same-count membership changes.
 
-    :return None: Verifies live ID order, metadata batches, and reference reuse.
+    Recommendation rows carry their metadata, so no build sends a batch request.
+
+    :return None: Verifies live ID order, inline metadata, and reference reuse.
     """
     seed = _seed_paper()
     first = _paper("first")
@@ -883,31 +885,23 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
             if url.endswith("/references"):
                 raise AssertionError("warm reference enrichment must stay cached")
             calls.append((url, params, None))
-            assert params == {"fields": "paperId", "limit": 6}
+            assert params == {
+                "fields": ",".join(s2.payloads.DEFAULT_PAPER_FIELDS),
+                "limit": 6,
+            }
             return _http_response(
                 {
                     "recommendedPapers": [
-                        {"paperId": paper_id} for paper_id in next(recommendation_ids)
+                        _recommendation_payload(paper_id)
+                        for paper_id in next(recommendation_ids)
                     ]
                 }
             )
 
-        def post(
-            url: str,
-            *,
-            json: dict[str, object],
-            params: dict[str, object],
-            timeout: float,
-        ) -> MagicMock:
-            """Serve the one uncached metadata batch through HTTP transport."""
-            del timeout
-            calls.append((url, params, json))
-            assert url.endswith("/batch")
-            assert json == {"ids": ["third"]}
-            return _http_response([_recommendation_payload("third")])
-
         client._session.get = MagicMock(side_effect=get)
-        client._session.post = MagicMock(side_effect=post)
+        client._session.post = MagicMock(
+            side_effect=AssertionError("recommendation metadata arrives inline")
+        )
         builder = RecommendationGraphBuilder(max_papers=3, client=client)
 
         first_run = builder.collect_papers("seed")
@@ -915,10 +909,7 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
 
     assert list(first_run) == ["seed", "first", "second"]
     assert list(second_run) == ["seed", "second", "third"]
-    discovery_calls = [call for call in calls if not call[0].endswith("/batch")]
-    batch_calls = [call for call in calls if call[0].endswith("/batch")]
-    assert len(discovery_calls) == 2
-    assert len(batch_calls) == 1
+    assert len(calls) == 2
 
 
 def test_recommendation_fetches_primary_discovery_before_seed_references() -> None:

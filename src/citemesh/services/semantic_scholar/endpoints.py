@@ -72,6 +72,36 @@ def _warn_skipped_recommendations(paper_id: str, skipped_records: int) -> None:
         )
 
 
+def _inline_recommendations(records: Sequence[JSONValue]) -> tuple[list[Paper], int]:
+    """Parse recommendation rows that carry default paper metadata.
+
+    Rows are parsed like relation rows and kept at their first appearance.
+
+    :param Sequence[JSONValue] records: Decoded recommendation rows.
+    :return tuple[list[Paper], int]: Papers in provider order, and the number of
+        rows without an ID or with unconvertible metadata.
+    """
+    papers: list[Paper] = []
+    seen_ids: set[str] = set()
+    skipped = 0
+    for record in records:
+        raw_id = payloads._payload_get(record, "paperId")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            skipped += 1
+            logger.debug("Skipping malformed recommendation row.")
+            continue
+        normalized_id = normalize_paper_id(raw_id)
+        if normalized_id in seen_ids:
+            continue
+        seen_ids.add(normalized_id)
+        paper = payloads._convert_api_paper(record)
+        if paper is None:
+            skipped += 1
+            continue
+        papers.append(paper)
+    return papers, skipped
+
+
 class _ScopedClient(Protocol):
     """Client state required by the collection-scope endpoint wrapper."""
 
@@ -641,15 +671,19 @@ class _EndpointsMixin:
         raise_on_unavailable: bool = False,
         pool: str = "recent",
     ) -> list[Paper]:
-        """Freshly fetch recommendation IDs and materialize available papers.
+        """Freshly fetch recommendations with their metadata in one request.
+
+        Without a projection the response carries the default paper fields
+        inline, parsed like relation rows: no batch request is made and nothing
+        is written to the paper cache.
 
         :param str paper_id: Seed identifier.
         :param int limit: Maximum results, up to 500.
         :param list[str] | None fields: Optional direct-response projection.
-        :param bool raise_on_unavailable: Raise on discovery/enrichment failure.
+        :param bool raise_on_unavailable: Raise on discovery failure.
         :param str pool: Start with ``recent`` and fall back to ``all-cs`` if no
-            papers are materialized, or query ``all-cs`` directly.
-        :return list[Paper]: Ordered recommendations.
+            papers are returned, or query ``all-cs`` directly.
+        :return list[Paper]: Ordered recommendations, first row per paper.
         """
         if pool not in ("recent", "all-cs"):
             raise ValueError("Recommendation pool must be 'recent' or 'all-cs'.")
@@ -672,9 +706,7 @@ class _EndpointsMixin:
         pools = ("recent", "all-cs") if pool == "recent" else ("all-cs",)
         for active_pool in pools:
             params: dict[str, str | int] = {
-                "fields": ",".join(requested_fields)
-                if custom_projection
-                else "paperId",
+                "fields": ",".join(requested_fields),
                 "limit": parsed_limit,
             }
             if active_pool == "all-cs":
@@ -707,35 +739,9 @@ class _EndpointsMixin:
                 papers, malformed_records = self._papers_from_records(
                     records, cache_full_metadata=cache_full_metadata
                 )
-                skipped_records += malformed_records
-                if papers:
-                    _warn_skipped_recommendations(normalized_id, skipped_records)
-                    return papers[:parsed_limit]
-                continue
-
-            paper_ids: list[str] = []
-            seen_ids: set[str] = set()
-            for record in records:
-                raw_id = payloads._payload_get(record, "paperId")
-                if not isinstance(raw_id, str) or not raw_id.strip():
-                    skipped_records += 1
-                    logger.debug("Skipping malformed recommendation row.")
-                    continue
-                candidate = normalize_paper_id(raw_id)
-                if candidate not in seen_ids:
-                    seen_ids.add(candidate)
-                    paper_ids.append(candidate)
-            if not paper_ids:
-                continue
-            materialized = self.get_papers(
-                paper_ids, raise_on_unavailable=raise_on_unavailable
-            )
-            papers = [
-                materialized[paper_id]
-                for paper_id in paper_ids
-                if paper_id in materialized
-            ]
-            skipped_records += len(paper_ids) - len(papers)
+            else:
+                papers, malformed_records = _inline_recommendations(records)
+            skipped_records += malformed_records
             if papers:
                 _warn_skipped_recommendations(normalized_id, skipped_records)
                 return papers[:parsed_limit]

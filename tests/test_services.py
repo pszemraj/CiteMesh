@@ -839,31 +839,65 @@ def test_get_paper_with_references_raises_when_reference_fetch_is_unavailable(
             client.get_paper("seed-with-unavailable-references", fetch_references=True)
 
 
-def test_recommendations_fallback_when_recent_cannot_materialize() -> None:
-    """An unresolvable recent pool falls back to all-cs in provider order.
+@pytest.mark.parametrize(
+    "recent_rows",
+    [[], [{**_paper_payload("unconvertible"), "year": "unknown"}, {"paperId": None}]],
+)
+def test_recommendations_fallback_when_recent_returns_no_papers(
+    recent_rows: list[dict[str, Any]],
+) -> None:
+    """A recent pool without usable rows falls back to all-cs in provider order.
 
-    :return None: Verifies recommendation fallback.
+    :param list[dict[str, Any]] recent_rows: Recent-pool rows yielding no paper.
+    :return None: Verifies recommendation fallback without a batch request.
     """
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
             side_effect=[
-                _MockResponse(200, {"recommendedPapers": [{"paperId": "unknown"}]}),
+                _MockResponse(200, {"recommendedPapers": recent_rows}),
                 _MockResponse(
-                    200, {"recommendedPapers": [{"paperId": "b"}, {"paperId": "a"}]}
+                    200,
+                    {"recommendedPapers": [_paper_payload("b"), _paper_payload("a")]},
                 ),
             ]
         )
-        client._session.post = MagicMock(
-            side_effect=[
-                _MockResponse(400, {"error": "No valid paper ids given"}),
-                _MockResponse(200, [_paper_payload("b"), _paper_payload("a")]),
-            ]
-        )
+        client._session.post = MagicMock()
         papers = client.get_recommended_papers("seed", raise_on_unavailable=True)
     assert [paper.paper_id for paper in papers] == ["b", "a"]
     assert "from" not in client._session.get.call_args_list[0].kwargs["params"]
     assert client._session.get.call_args_list[1].kwargs["params"]["from"] == "all-cs"
+    client._session.post.assert_not_called()
+
+
+def test_recommendations_parse_inline_metadata_without_batch_or_cache() -> None:
+    """Default recommendations carry their metadata and leave the paper cache alone.
+
+    :return None: Verifies requested fields, order, deduplication and caching.
+    """
+    rows = [
+        _paper_payload("b", title="Second"),
+        _paper_payload("a", title="First"),
+        _paper_payload("b", title="Repeated"),
+    ]
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        fetch = MagicMock(return_value=_MockResponse(200, {"recommendedPapers": rows}))
+        client._session.get = fetch
+        client._session.post = MagicMock()
+        papers = client.get_recommended_papers(
+            "seed", limit=200, raise_on_unavailable=True, pool="all-cs"
+        )
+
+    assert [(paper.paper_id, paper.title) for paper in papers] == [
+        ("b", "Second"),
+        ("a", "First"),
+    ]
+    assert fetch.call_args.kwargs["params"]["fields"] == ",".join(
+        s2.payloads.DEFAULT_PAPER_FIELDS
+    )
+    client._session.post.assert_not_called()
+    assert s2.disk_cache._load_cached_paper("a") is None
 
 
 @pytest.mark.parametrize(
@@ -883,12 +917,11 @@ def test_recommendations_can_query_all_cs_directly(
         _disable_pacing(client)
         client._session.get = MagicMock(
             return_value=_MockResponse(
-                status, {"recommendedPapers": [{"paperId": pid} for pid in paper_ids]}
+                status,
+                {"recommendedPapers": [_paper_payload(pid) for pid in paper_ids]},
             )
         )
-        client._session.post = MagicMock(
-            return_value=_MockResponse(200, [_paper_payload(pid) for pid in paper_ids])
-        )
+        client._session.post = MagicMock()
         if expected_error is None:
             papers = client.get_recommended_papers(
                 "seed", limit=2, raise_on_unavailable=True, pool="all-cs"
@@ -902,11 +935,11 @@ def test_recommendations_can_query_all_cs_directly(
 
     client._session.get.assert_called_once()
     assert client._session.get.call_args.kwargs["params"] == {
-        "fields": "paperId",
+        "fields": ",".join(s2.payloads.DEFAULT_PAPER_FIELDS),
         "limit": 2,
         "from": "all-cs",
     }
-    assert client._session.post.call_count == int(bool(paper_ids))
+    client._session.post.assert_not_called()
 
 
 def test_custom_projection_adds_paper_id_and_never_overwrites_complete_cache() -> None:
@@ -1604,40 +1637,6 @@ def test_interrupting_recovery_releases_collection_scope(
         assert client.get_paper("p1", raise_on_unavailable=True) is not None
 
 
-def test_fresh_recommendations_reuse_warm_metadata_without_batch_refetch() -> None:
-    """Recommendations revalidate upstream while reusing complete cached metadata.
-
-    :return None: Verifies the warm call repeats discovery but not metadata hydration.
-    """
-    raw_id = "a" * 40
-    canonical_id = raw_id
-
-    with SemanticScholarClient(api_key="") as client:
-        _disable_pacing(client)
-        fetch = MagicMock(
-            return_value=_MockResponse(
-                200, {"recommendedPapers": [{"paperId": raw_id}]}
-            )
-        )
-        client._session.get = fetch
-        client._session.post = MagicMock(
-            return_value=_MockResponse(200, [_paper_payload(canonical_id)])
-        )
-        for _ in range(2):
-            assert [
-                paper.paper_id
-                for paper in client.get_recommended_papers(
-                    "seed", limit=1, raise_on_unavailable=True
-                )
-            ] == [canonical_id]
-
-    assert fetch.call_count == 2
-    assert [
-        call.kwargs["json"]["ids"] for call in client._session.post.call_args_list
-    ] == [[canonical_id]]
-    assert s2.disk_cache._load_cached_paper(canonical_id) is not None
-
-
 @pytest.mark.parametrize(
     ("method", "nested_key"),
     [
@@ -1862,34 +1861,6 @@ def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None
 
     client._session.post.assert_not_called()
     assert client.get_cached_reference_ids(seed) == ["old-a", "old-b", "old-c"]
-
-
-def test_recommendations_accept_exact_all_unknown_batch_response() -> None:
-    """The exact provider unknown-ID response is successful empty discovery.
-
-    :return None: Verifies normal discovery, not bare bulk lookup, handles all unknown IDs.
-    """
-    with SemanticScholarClient(api_key="") as client:
-        _disable_pacing(client)
-        client._session.get = MagicMock(
-            side_effect=[
-                _MockResponse(
-                    200, {"recommendedPapers": [{"paperId": "recent-missing"}]}
-                ),
-                _MockResponse(200, {"recommendedPapers": [{"paperId": "all-missing"}]}),
-            ]
-        )
-        client._session.post = MagicMock(
-            return_value=_MockResponse(400, {"error": "No valid paper ids given"})
-        )
-        assert (
-            client.get_recommended_papers("seed", limit=1, raise_on_unavailable=True)
-            == []
-        )
-
-    assert client._session.get.call_count == 2
-    assert client._session.post.call_count == 2
-    assert client._session.get.call_args_list[1].kwargs["params"]["from"] == "all-cs"
 
 
 @pytest.mark.parametrize(

@@ -589,10 +589,9 @@ def test_builds_are_deterministic(
     [
         (
             "candidates",
-            # The seed lookup, its three lists, one metadata batch, and the
-            # reference lists of the selected citation-sourced papers.
+            # The seed lookup, its three lists (each carrying its metadata), and
+            # the reference lists of the selected citation-sourced papers.
             {
-                "batch": 1,
                 "citations": 1,
                 "paper": 1,
                 "recommendations": 1,
@@ -603,13 +602,14 @@ def test_builds_are_deterministic(
         ),
         (
             "arxiv-corpus",
+            # The batch enriches selected corpus rows that no provider list named.
             {"batch": 1, "citations": 1, "reference_ids": 44, "references": 1},
             {"citations": 1, "references": 1},
         ),
         (
             "both",
             {
-                "batch": 2,
+                "batch": 1,
                 "citations": 1,
                 "recommendations": 1,
                 "reference_ids": 37,
