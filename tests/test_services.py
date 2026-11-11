@@ -1799,6 +1799,39 @@ def test_complete_reference_listing_populates_reference_cache(
             client._session.get.assert_not_called()
 
 
+@pytest.mark.parametrize(("malformed", "level"), [(1, "DEBUG"), (3, "WARNING")])
+def test_unconvertible_relation_rows_warn_only_when_most_are_dropped(
+    caplog: pytest.LogCaptureFixture, malformed: int, level: str
+) -> None:
+    """A few unconvertible rows in a listing are routine; most of them are not.
+
+    :param pytest.LogCaptureFixture caplog: Captured client logs.
+    :param int malformed: Rows of five whose metadata cannot be converted.
+    :param str level: Expected level of the skip message.
+    :return None: Verifies the kept papers and the message level.
+    """
+    rows = [
+        {**_paper_payload(f"p{index}"), "year": "unknown"}
+        if index < malformed
+        else _paper_payload(f"p{index}")
+        for index in range(5)
+    ]
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, _relation_page(rows, "citingPaper"))
+        )
+        with caplog.at_level(logging.DEBUG):
+            papers = client.get_paper_citations("seed", limit=10)
+
+    assert len(papers) == 5 - malformed
+    [record] = [
+        record for record in caplog.records if "without resolvable" in record.message
+    ]
+    assert record.levelname == level
+    assert f"skipping {malformed} of 5 IDs" in record.message
+
+
 def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None:
     """A complete reference cache must not suppress a bounded current discovery call.
 

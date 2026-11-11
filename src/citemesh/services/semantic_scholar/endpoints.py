@@ -513,12 +513,19 @@ class _EndpointsMixin:
                 )
                 continue
             papers.append(paper)
-        if len(papers) < len(listing.records):
-            logger.warning(
-                "%s discovery for %s: skipping %d IDs without resolvable metadata.",
+        skipped = len(listing.records) - len(papers)
+        if skipped:
+            # A few unconvertible rows in a long listing are routine.
+            logger.log(
+                logging.WARNING
+                if skipped > len(listing.records) / 2
+                else logging.DEBUG,
+                "%s discovery for %s: skipping %d of %d IDs without resolvable "
+                "metadata.",
                 relation,
                 normalized_id,
-                len(listing.records) - len(papers),
+                skipped,
+                len(listing.records),
             )
         return papers
 
