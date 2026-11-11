@@ -7,7 +7,7 @@ Choose based on the evidence you want to explore and the cost of collecting it.
 | `recommendation` | Semantic Scholar recommendations | no | quick topical exploration from a known paper |
 | `citation` | references and citations | no | a bibliographic neighborhood |
 | `embedding` | S2 candidates or an arXiv corpus | yes | conceptual similarity and free-text queries |
-| `hybrid` | citation-derived and semantic candidates | when enrichment is enabled | discovery combining citation evidence and semantic relevance |
+| `hybrid` | seed references and citers, plus S2 recommendations or corpus neighbors | yes | discovery combining citation evidence and semantic relevance |
 
 ## Recommendation and citation
 
@@ -23,32 +23,28 @@ Embedding is the only strategy that accepts [free-text seeds](how-it-works.md#1-
 
 ## Hybrid
 
-Hybrid combines citation and semantic candidates, with adaptive reranking and edge scoring. See [ranking](how-it-works.md#5-ranking-and-selection) and [edge scoring](how-it-works.md#6-edge-scoring) for how each source affects selection and connections.
+Hybrid pools every reference and every citer that Semantic Scholar returns for the seed (up to `--max-references` and `--max-citations`, 1000 each by default), adds candidates from the source chosen by `--semantic-source`, and ranks the whole pool by reciprocal rank fusion. It always needs the embeddings extra and the embedding model; `--strategy citation` is the citation-only option. See [candidate acquisition](how-it-works.md#2-candidate-acquisition), [ranking](how-it-works.md#5-ranking-and-selection), and [edge scoring](how-it-works.md#6-edge-scoring) for the details.
 
-Use `--semantic-source both` to add Semantic Scholar's `all-cs` recommendations
-to local corpus retrieval. It requires the same embeddings and corpus setup as
-`arxiv-corpus` and makes additional S2 requests. For an installed index:
+- `candidates` (default) adds 200 of Semantic Scholar's `all-cs` recommendations.
+- `arxiv-corpus` adds the 180 nearest corpus rows to the seed in each of two embedding roles, the seed as a retrieval query and as a retrieval document. References and citers still come from Semantic Scholar.
+- `both` adds both sets. It requires the same embeddings and corpus setup as `arxiv-corpus` and makes the additional recommendation request.
+
+For an installed index:
 
 ```bash
 citemesh build arxiv:2410.05192 --strategy hybrid --semantic-source both \
   --cache-namespace NAMESPACE --max-papers 45
 ```
 
-The combined mode searches beyond S2's default `recent` recommendation pool.
-It keeps the existing relevance ranking, paper budget, and edge criteria.
-`--candidate-pool-size` bounds its recommendation fetch; `--max-semantic` caps
-the combined semantic-only selections from both sources. Source positions
-survive deduplication and are available in [graph JSON](../reference/output-artifacts.md#graph-json-strategyjson).
-Unavailable recommendations are recorded in source status while usable corpus
-results can continue; a failed corpus load still stops the build.
+Every candidate gets a retrieval-document vector: its stored corpus vector when it is a corpus row, otherwise an in-memory encoding of its title and abstract. Publication and preprint versions of one work are reconciled across the whole pool before ranking, so a duplicate never takes two slots. Up to four ranked lists are then fused, each candidate scoring the sum of `1 / (60 + rank)` over the lists that contain it:
 
-A heavily cited seed can fill the graph before semantic-only papers qualify.
-By default, the first pass admits up to 20 semantic-only papers. If slots
-remain, the highest-ranked skipped semantic-only papers can fill them while
-keeping the first-pass selections. A value supplied through `--max-semantic`
-or configuration is a hard ceiling. For a 45-paper graph, `--max-semantic 44`
-lets semantic-only papers compete for every non-seed slot and can displace
-citation-derived papers. Lowering the citation budget instead changes which
-candidates reach ranking.
+- similarity to the seed, from the document-role cosine
+- similarity to the seed's bibliography: the mean of the candidate's five highest cosines to the seed's references, excluding itself, absent for a candidate when fewer than five other references exist
+- the directly linked candidates (cited by the seed or citing it), ordered by similarity to the seed
+- the recommended candidates in provider order, only in modes that fetch recommendations
 
-The [hybrid tuning study](../reference/defaults-tuning-study.md#hybrid-defaults-february-2026) explains the discovery tradeoff behind its defaults. For overrides, see the [CLI controls](cli.md#option-reference).
+The best `max_papers - 1` candidates join the seed. There is no year term, no citation-count term, no source quota and no cap on semantic-only papers: every candidate competes on the same fused score, whatever its source. Reference lists are fetched after selection, for the selected citation-sourced papers only, and feed bibliographic coupling in edge scoring, which is unchanged.
+
+`--max-semantic` and the `max_semantic` configuration key no longer exist, and `--candidate-pool-size` applies only to the embedding strategy's `candidates` mode. Each related paper's ranking evidence (its rank, fused score, seed and bibliography similarity, direct-citation flag, recommendation rank, and rank in each fused list) is exported in [graph JSON](../reference/output-artifacts.md#graph-json-strategyjson) and shown in the dashboard; it is separate from `seed_relevance`, which is centrality over the final edges. An unavailable source is recorded in source status while the others continue; a failed corpus load, or an outage of every source, still stops the build, in `candidates` mode before the model loads.
+
+The [hybrid tuning study](../reference/defaults-tuning-study.md#hybrid-defaults-february-2026) records the earlier budget sweep and is historical. The [hybrid discovery status note](../internals/hybrid-discovery-status.md) summarizes how the current ranking was evaluated. For overrides, see the [CLI controls](cli.md#option-reference).

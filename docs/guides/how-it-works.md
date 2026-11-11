@@ -11,7 +11,7 @@ A build resolves its seed, collects candidates, scores papers and edges, compute
   8. Export ← 7. Layout ← 6. Edge scoring ← 5. Ranking & selection ◄──┘
 ```
 
-The embedding and vector-cache stages run for `--strategy embedding` and for hybrid with semantic enrichment enabled. Recommendation, citation, and hybrid with enrichment disabled use TF-IDF scoring. All strategies can reuse paper metadata.
+The embedding and vector-cache stages run for `--strategy embedding` and `--strategy hybrid`. Recommendation and citation use TF-IDF scoring. All strategies can reuse paper metadata.
 
 ## 1. Seed resolution
 
@@ -23,34 +23,27 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
 ## 2. Candidate acquisition
 
-S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid keeps separate S2 citation budgets. Its semantic branch fetches recommendations in `candidates` mode, capped at the smallest of 100, `candidate_pool_size`, and `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, or searches the corpus in `arxiv-corpus` mode. Hybrid's opt-in `both` mode uses the same bounded corpus search and recommendation limit together, requesting S2's `all-cs` pool directly. Corpus and recommendation overlap receives one semantic-source contribution; it does not receive the citation/semantic overlap bonus unless citation discovery also found that paper.
+S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid takes no pool size and applies no quota. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests 200 of S2's `all-cs` recommendations, and in `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the seed in each of two roles: the seed encoded as a retrieval query and as a retrieval document. Each paper joins the pool once and carries a citation tag (references, citers), a semantic tag (recommendations, corpus neighbors), or both; the tags set its provenance and its edge-scoring weights.
 
-When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references).
-
-Hybrid retains verified fallback-reference relationships beyond the reference
-admission cap. If semantic retrieval independently selects one of those papers,
-its seed relation records the citation evidence while its admission source and
-semantic budget remain unchanged.
+When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references). Recovered references enter the pool like provider references, with the same seed relation, up to the reference limit; a bibliography that recovers more references than the limit is cut by title and abstract similarity to the seed, then citation count.
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
 During candidate collection, S2 records reconcile by exact paper ID or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record uses the same explicit identifier agreement, and the corpus ID remains stable. The bibliography fallback separately resolves identifier-free entries against a prepared corpus using the exact normalized title, full first author, and publication-year rules described in the [CLI guide](cli.md#missing-semantic-scholar-references).
 
-After hybrid selection, a selected corpus preprint and DOI publication can also reconcile by exact normalized title and full first-author name, with publication in the same or following year. Both directions must match uniquely across the full candidate pool, and conflicting identifiers prevent reconciliation. The corpus ID retains the earliest selected position, merged metadata, citation evidence, and earliest rank from each source. Removed duplicate slots are not refilled, so the result can contain fewer papers than the requested maximum.
+Before hybrid ranking, a corpus preprint and a DOI publication of one work also reconcile by exact normalized title and full first-author name, with publication in the same or following year. Both directions must match uniquely across the whole pool, and conflicting identifiers prevent reconciliation. The corpus ID survives with merged metadata, merged source tags and seed relation, and the earlier recommendation position. Because this happens before ranking, a duplicate never takes a second slot.
 
-Combined retrieval retains reconciled S2 IDs so a later recommendation with
-sparser metadata still joins its existing corpus record. Each selected paper's
-original positions in the materialized citation, reference, corpus, and
-recommendation lists are retained for inspection; they do not replace the
-relevance score.
+The pool retains reconciled S2 IDs as aliases, so a later list with sparser metadata still joins its existing member. Only the recommendation order is kept as a position, because it is the one source order that feeds the ranking. What the ranker saw for each selected paper is exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson), not as source positions.
 
 Acquisition follows the [source-failure and retry policy](cli.md#troubleshooting), recording availability in exported metadata.
 
-Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py).
+Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py) and [discovery_pool.py](../../src/citemesh/strategies/discovery_pool.py), the identity-indexed pool that hybrid, the citation and recommendation strategies, and the embedding strategy's candidates mode collect into.
 
 ## 3. Embedding
 
 CiteMesh ranks candidates in a retrieval space and scores selected pairs in a symmetric space, using [task-specific prompts](../reference/embedding-runtime.md#task-specific-vector-spaces).
+
+Hybrid ranks every pool member by a retrieval-document vector: the stored corpus vector when the member is a corpus row, otherwise an encoding of its title and abstract. In `candidates` mode those encodings are stored in the embedding cache, so a warm rebuild encodes no candidate again. In the corpus modes the cache is the corpus itself, which takes no provider rows, so each build encodes the provider candidates that are not corpus rows in memory. The seed also gets a retrieval-query vector, which is encoded on every build.
 
 Implementation: [precision.py](../../src/citemesh/strategies/embedding/precision.py) and [model_runtime.py](../../src/citemesh/strategies/embedding/model_runtime.py).
 
@@ -66,23 +59,22 @@ Selection cuts the pool to `--max-papers`, seed included.
 
 The embedding strategy encodes the seed as a retrieval query and ranks by raw cosine - over the encoded pool in candidates mode, through the cache's top-k search in corpus mode - admitting candidates in order until the budget is full. Ties break on `(-score, paper_id, insertion_index)`, so the same inputs always produce the same graph.
 
-Hybrid collects two pools, citation-derived and semantic, and reranks the union against the seed:
+Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each candidate has a document-role vector, and up to four ranked lists are built from it:
+
+- **similarity to the seed**: every candidate, by the cosine between its vector and the seed's document vector, with ties broken on the cosine with the seed's query vector, then paper ID
+- **similarity to the seed's bibliography**: candidates with at least five seed references other than themselves, by the mean of their five highest cosines to those references, with the same tie-breaks
+- **direct links**: candidates the seed cites or that cite the seed, by the same cosine as the first list
+- **recommendations**: the provider's recommended candidates in provider order, present only in `candidates` and `both` modes
 
 ```text
-score = 0.62 · semantic + 0.16 · temporal + 0.14 · citation + 0.08 · bibliographic
+score = Σ 1 / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
 ```
 
-where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(max(citations, 0)) / log1p(max(max_citations_in_pool, 1))` compresses the long tail. Add **0.10** when both branches found the candidate, or **0.02** for a citation-derived candidate without semantic overlap; cap the final score at `1.0`.
-
-The first selection pass follows score order and counts only semantic-only
-papers against the semantic ceiling. With the default budget, a second pass
-appends skipped semantic-only papers in score order until the graph fills or
-the candidate pool runs out. See [Hybrid](strategies.md#hybrid) for ceiling
-overrides.
+Candidates sort by score, then paper ID, and the first `max_papers - 1` join the seed. Nothing is fitted: there is no year term, no citation-count term, no source quota and no semantic-only ceiling, and a candidate absent from a list simply adds nothing for it. Ranking uses only embedding cosines, seed links and recommendation order, so it runs before any selected paper's reference list is fetched; those lists come afterwards, for the selected citation-sourced papers only, and feed the bibliographic-coupling term of [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and rank in every list are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson); it is separate from `seed_relevance`, which is computed later over the final graph.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
-Implementation: [hybrid.py](../../src/citemesh/strategies/hybrid.py), `_rank_candidates` and `_seed_relevance_score`.
+Implementation: [discovery_ranking.py](../../src/citemesh/strategies/discovery_ranking.py) (`rank_candidates`), [discovery_pool.py](../../src/citemesh/strategies/discovery_pool.py) (`DiscoveryPool`), and `HybridGraphBuilder._rank_pool` in [hybrid.py](../../src/citemesh/strategies/hybrid.py).
 
 ## 6. Edge scoring
 
@@ -103,7 +95,7 @@ Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction
 
 Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's strongest neighbors are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
 
-Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py).
+Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py); the reference lists that bibliographic coupling compares come from `ReferenceHydrator` in [reference_hydration.py](../../src/citemesh/strategies/reference_hydration.py), shared by the citation, recommendation, and hybrid strategies.
 
 ## 7. Layout and rendering
 

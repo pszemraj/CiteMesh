@@ -58,7 +58,7 @@ A malformed, unsupported, or inaccessible existing package stops the build befor
 The graph payload requires its `seed_id` to identify a node present in the graph. It contains:
 
 - `kind` (`"citemesh-graph"`), `schema_version` (`1`), `seed_id`
-- `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources. Combined hybrid builds also include `candidate_source_ranks`, mapping each selected paper ID to its one-based positions in the materialized source lists (`references`, `arxiv_references`, `citations`, `arxiv_corpus`, `recommendations`). The `references` rank is the position in the materialized provider list before hybrid deduplication and reference selection.
+- `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources. Hybrid builds also include `discovery_ranker`, which describes how the papers were ranked: `{"method": "reciprocal_rank_fusion", "k": 60, "lists": [...]}`, where `lists` names the fused lists that held at least one candidate (`semantic`, `reference_context`, `direct`, `recommended`).
 - `summary` - `nodes`, `edges`
 - `nodes` - enriched per-paper objects
 - `dashboard` - render metadata and stored layout geometry, always present
@@ -69,6 +69,18 @@ Each node carries:
 - core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
 - analysis fields `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), and [`seed_relevance`](../guides/how-it-works.md#8-exports-and-the-dashboard-collection)
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
+- discovery evidence on every related paper of a hybrid build (never on the seed or on other strategies' papers): `discovery_rank` (one-based position in the fused order of the whole candidate pool), `discovery_score` (the fused score), `discovery_features`, and `discovery_list_ranks`
+
+`discovery_features` holds `seed_similarity` (the document-role cosine with the seed), `bibliography_similarity` (`null` when fewer than five other seed references exist), `direct_citation` (the seed cites the paper or it cites the seed), and `recommendation_rank` (`null` when the provider did not recommend it). `discovery_list_ranks` gives the paper's one-based rank in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The values below are illustrative:
+
+```json
+"discovery_rank": 3,
+"discovery_score": 0.0479,
+"discovery_features": {"seed_similarity": 0.71, "bibliography_similarity": 0.66, "direct_citation": true, "recommendation_rank": null},
+"discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
+```
+
+`seed_relevance` is unchanged and measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and the "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
@@ -121,17 +133,15 @@ Node color is a publication-year gradient shared with the legend and year timeli
 
 The sidecar records `schema_version`, `build`, `outputs` (resolved artifact paths), and `metadata`.
 
-`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record citation-expansion budgets), `hybrid` for the first-pass semantic ceiling and vacancy policy, `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus-only runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. Combined hybrid runs record both corpus settings and the recommendation pool budget. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` disables the elapsed cap (see the [API request policy](../guides/cli.md#troubleshooting)).
+`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record `max_citations` and `max_references`, which for hybrid are provider fetch limits), `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus-only runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. Hybrid runs never record a candidate-pool budget, since no such budget sizes their pool; `arxiv-corpus` and `both` runs record the corpus settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` disables the elapsed cap (see the [API request policy](../guides/cli.md#troubleshooting)).
 
-When `build.hybrid.fill_semantic_vacancies` is true, leave `max_semantic` unset
-when repeating the build. The saved integer gives the first-pass ceiling.
-When the field is false or absent, use the saved integer as a hard ceiling.
+A sidecar written by an earlier hybrid build cannot be replayed verbatim: its `build.hybrid` section records a `max_semantic` value for a flag that no longer exists, and the meaning of its citation and reference limits changed, since every record those limits fetch is now ranked rather than a quota-selected subset.
 
 `metadata` carries:
 
 - run metadata `paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`
-- `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence
-- `candidate_source_status` - per requested candidate source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); combined hybrid also records `arxiv_corpus`. See [source-failure handling](../guides/cli.md#troubleshooting).
+- `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence describing the rank fusion
+- `candidate_source_status` - per requested candidate source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); hybrid runs that search the corpus (`arxiv-corpus` and `both`) also record `arxiv_corpus`. See [source-failure handling](../guides/cli.md#troubleshooting).
 - embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
 - selected corpus provenance when available - `cache_namespace`, completed upstream `dataset_revision`, `installed_corpus_selection` (`all` or `newest`), `installed_corpus_limit` for a capped index, and `index_origin` identifying the imported `bucket_id`, `config_name`, and `snapshot_id`. Coverage and requested views follow the [installed-index selection rules](../guides/caching.md#import-and-selection). Explicit refresh advances the dataset revision while preserving the original import origin.
 

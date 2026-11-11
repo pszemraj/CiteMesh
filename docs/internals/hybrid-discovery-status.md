@@ -1,59 +1,45 @@
 # Hybrid discovery status
 
-The `feat/hybrid-discovery` branch improves candidate admission and paper
-identity handling. It does **not** establish a general discovery-precision
-improvement or superiority over hosted literature-mapping tools. The precision investigation
-was stopped at the user's request without promoting an experimental ranker or
-relevance filter.
+This note records what the `hybrid` strategy does after the discovery rework and the evidence behind the design. It addresses the discovery-precision concern raised in issues #14, #16 and #29.
 
-## Retained implementation
+## What hybrid does now
 
-- Opt-in `semantic_source="both"` combines corpus retrieval and Semantic Scholar
-  recommendations, preserving source positions and availability through
-  reconciliation and export.
-- Healthy provider references are ranked before their admission cap. Verified
-  reference evidence survives admission limits; empty-provider arXiv fallback
-  can recover unambiguous bibliography identities from the prepared corpus.
-- Omitted `max_semantic` allows skipped semantic candidates to fill vacancies;
-  an explicit value remains a hard ceiling. This can increase reading volume
-  and should not be interpreted as improved precision.
-- Identifier reconciliation recognizes arXiv DOIs and explicit arXiv journal
-  volumes. Selected publication/preprint duplicates can reconcile through
-  mutually unique title, first-author and publication-year matches. Both
-  versions must already be selected; cleanup preserves the earlier position
-  and evidence without filling the freed slot.
+Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the seed in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the seed, similarity to the seed's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term, citation-count term, source quota or semantic-only ceiling, and edge scoring is unchanged.
 
-The final ranking weights and designated embedding model remain unchanged. No
-additional inference model, experimental filter, graph ranker, wider reference
-cap or density correction is included. See [strategies](../guides/strategies.md)
-and [how it works](../guides/how-it-works.md) for supported behavior.
+## How it was evaluated
 
-## Evidence and remaining work
+Related papers were graded 0 (tangent), 1 (useful) or 2 (important) from title and abstract by a blind LLM judge that did not see which system produced a paper. The same judge graded every arm, 2,306 seed and paper pairs in all. Regrading hidden duplicates gave the identical grade about 85 to 96 percent of the time and never differed by two grades, and two judge models agreed on 91.5 percent of 200 pairs. An earlier set of grades from primary-source reading was about one grade more lenient and is not used for these numbers. The evaluation data lives in the ignored `local-scratch/hybrid-discovery/v2/` directory: it is machine-local and not part of the repository.
 
-Saved-pool experiments examined filtering, native-score calibration, citation
-neighborhoods, candidate expansion, bibliography recovery, representation
-changes and query-density effects. Some improved individual seeds while losing
-useful or important papers elsewhere; conservative filters left outputs
-unchanged. None supplied sufficient evidence to replace the retained policy.
-These failures apply to the tested rules, not to every possible use of those
-signals.
+## Results on the development seeds
 
-The comparison used source-blinded, model-assisted reading of abstracts and
-pertinent primary contents, with unresolved evidence preserved. Individual
-connections generally have one primary judgment, not reviewer consensus.
-Corrected judgments supersede earlier claims of perfect useful-paper retention,
-an overall CiteMesh lead, or a general advantage on recent papers. Re-scoring
-saved outputs is not a software improvement. The frozen inputs also mix live
-captures and admission replays; they are not all fresh outputs of this branch.
+Five development seeds, at the list sizes of a hosted literature-mapping tool's exports for the same seeds (194 slots in total). Useful counts papers graded 1 or 2; important counts papers graded 2. The ranking design was chosen on these seeds.
 
-The detailed machine-local handoff is
-`local-scratch/hybrid-discovery/HANDOFF.md`. It identifies the retained commits,
-corrected per-seed comparisons, failed experiments, evidence files and unfinished
-checks. That directory is ignored: generated outputs and review packets are not
-part of the repository. The handoff is needed to continue the local research;
-this note alone does not reproduce its empirical results.
+| System | Useful | Important |
+| --- | ---: | ---: |
+| Hosted literature-mapping tool | 62 | 27 |
+| Previous hybrid | 92 | 47 |
+| Current hybrid, local corpus index (`both`) | 143 | 68 |
+| Current hybrid, default `candidates` mode | 135 | 64 |
 
-Issues #14, the semantic-slot portion of #16, and #29 motivated this work.
-Discovery precision and important omissions remain unresolved; #29 should stay
-open. No release, push, model replacement or further experiment is implied by
-this status note.
+## Results on held-out seeds
+
+Eleven held-out seeds that played no part in the design, 44 related papers each.
+
+| System | Useful | Important | Papers graded |
+| --- | ---: | ---: | ---: |
+| Previous hybrid | 263 | 140 | 483 |
+| Current hybrid, `both` | 345 | 182 | 484 |
+| Current hybrid, `candidates` | 347 | 177 | 484 |
+
+Nine seeds improved, one tied and one was one paper lower, within the judge's repeat noise. Precision falls with rank, so the first twenty papers are the most reliable.
+
+## Limits
+
+- One judge family, reading abstracts only.
+- The development seeds are not independent evidence, because the ranking design was chosen on them.
+- Recall against the whole literature is not measured.
+- For seeds with more than 1,000 citers the provider returns only the most recent 1,000, so older follow-up work reaches the list only through recommendations or corpus neighbors.
+- Edges and their scoring were not evaluated.
+- These numbers come from an offline replay of the policy; a live build matched the replayed list on 43 of 44 papers for the one seed checked so far.
+
+The supported behavior is described in [strategies](../guides/strategies.md#hybrid) and [how it works](../guides/how-it-works.md#5-ranking-and-selection).
