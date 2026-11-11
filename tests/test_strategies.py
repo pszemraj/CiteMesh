@@ -43,6 +43,7 @@ from tests._helpers import (
     disable_embedding_dep_checks,
     offline_hybrid_encoder,
     stub_hybrid_corpus,
+    word_hash_vectors,
 )
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
@@ -2357,7 +2358,7 @@ def test_hybrid_ranking_rejects_invalid_candidate_embeddings(
         return_value=seed_vector[np.newaxis, :]
     )
     # The seed document, then the one candidate.
-    builder.embedding_builder.embed_papers = MagicMock(
+    builder.embedding_builder.document_vectors = MagicMock(
         side_effect=[{"seed": seed_vector}, {"c1": candidate_vector}]
     )
 
@@ -2384,6 +2385,10 @@ def test_hybrid_candidates_mode_rebuild_encodes_no_candidate_again(
     # Seed query, seed document and both candidates; then the seed query only.
     assert [len(texts) for texts in encoded] == [4, 1]
     assert encoded[1] == encoded[0][:1]
+    # Cached document vectors leave the seed's query-role slot alone.
+    retrieval = builder.embedding_builder.retrieval_embeddings
+    assert list(retrieval) == ["seed"]
+    assert np.allclose(retrieval["seed"], word_hash_vectors(encoded[1])[0])
 
 
 @pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
@@ -2398,14 +2403,14 @@ def test_hybrid_corpus_modes_encode_provider_rows_in_memory(
     )
     stub_hybrid_corpus(builder, neighbours=[_paper("s1")])
     texts = offline_hybrid_encoder(monkeypatch, builder)
-    builder.embedding_builder.embed_papers = MagicMock(
+    builder.embedding_builder.document_vectors = MagicMock(
         side_effect=AssertionError("provider rows must not enter the corpus cache")
     )
 
     papers = builder.collect_papers("seed")
 
     assert "c1" in papers
-    builder.embedding_builder.embed_papers.assert_not_called()
+    builder.embedding_builder.document_vectors.assert_not_called()
     # Seed query and seed document, then every candidate once.
     assert len(texts) == 2 + len(builder.discovery_ranking)
 

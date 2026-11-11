@@ -631,7 +631,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         embedding = self.embedding_builder
         try:
             if not self._uses_corpus:
-                return embedding.embed_papers(papers)
+                return embedding.document_vectors(papers)
             texts = [
                 format_paper_for_embedding(
                     profile=embedding.model_profile,

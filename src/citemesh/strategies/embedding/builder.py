@@ -1607,7 +1607,23 @@ class EmbeddingGraphBuilder(
         return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
 
     def embed_papers(self, papers: dict[str, Paper]) -> dict[str, NDArray[np.float32]]:
-        """Embed retrieval documents through cache, encoding only missing ones.
+        """Embed retrieval documents and record them in ``retrieval_embeddings``.
+
+        :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
+        :return Dict[str, NDArray[np.float32]]: Float32 vectors keyed by paper ID.
+        """
+        embeddings = self.document_vectors(papers)
+        self.retrieval_embeddings.update(embeddings)
+        return embeddings
+
+    def document_vectors(
+        self, papers: dict[str, Paper]
+    ) -> dict[str, NDArray[np.float32]]:
+        """Return retrieval-document vectors through cache, encoding only missing ones.
+
+        Unlike :meth:`embed_papers`, this leaves ``retrieval_embeddings`` alone.
+        A ready installed corpus is read but never written; other caches store
+        what is encoded.
 
         :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
         :return Dict[str, NDArray[np.float32]]: Float32 vectors keyed by paper ID.
@@ -1647,17 +1663,14 @@ class EmbeddingGraphBuilder(
                     batch_size=self.encode_batch_size,
                 )
                 embeddings.update(zip(missing, vectors, strict=True))
-            self.retrieval_embeddings.update(embeddings)
             return embeddings
-        embeddings = self.embedding_cache.get_embeddings(
+        return self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
             show_progress=False,
             text_builder=self._format_retrieval_document_metadata,
         )
-        self.retrieval_embeddings.update(embeddings)
-        return embeddings
 
     def _format_retrieval_document_metadata(
         self, metadata: CacheInputMetadata | CachedPaperMetadata
