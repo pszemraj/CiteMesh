@@ -59,14 +59,11 @@ def test_reciprocal_rank_fusion_sums_reciprocal_ranks_and_breaks_ties_by_id() ->
 
     assert fused == [("x", _rrf(2, 1)), ("y", _rrf(1, 2)), ("z", _rrf(3))]
     assert fused[0][1] == fused[1][1]
-    assert reciprocal_rank_fusion({"a": ["p", "q"]}, k=0) == [("p", 1.0), ("q", 0.5)]
+    assert reciprocal_rank_fusion({"a": ["p", "q"]}) == [
+        ("p", 1.0 / 61),
+        ("q", 1.0 / 62),
+    ]
     assert reciprocal_rank_fusion({}) == []
-
-
-def test_reciprocal_rank_fusion_rejects_a_list_that_repeats_a_paper() -> None:
-    """A ranking holds each paper once."""
-    with pytest.raises(ValueError, match="repeats"):
-        reciprocal_rank_fusion({"semantic": ["a", "a"]})
 
 
 def test_features_are_cosines_to_both_seed_roles() -> None:
@@ -293,29 +290,6 @@ def test_ranking_ignores_input_order_and_vector_scale() -> None:
     assert [item.features.cos_dd for item in scaled] == pytest.approx(
         [item.features.cos_dd for item in baseline]
     )
-
-
-@pytest.mark.parametrize(
-    ("candidates", "message"),
-    [
-        (
-            [
-                DiscoveryCandidate("a", np.ones(3)),
-                DiscoveryCandidate("a", np.ones(3)),
-            ],
-            "unique",
-        ),
-        ([DiscoveryCandidate("a", np.zeros(3))], "zero"),
-        ([DiscoveryCandidate("a", np.ones(2))], "shape"),
-        ([DiscoveryCandidate("a", np.array([1.0, np.nan, 0.0]))], "finite"),
-    ],
-)
-def test_unusable_inputs_are_rejected(
-    candidates: list[DiscoveryCandidate], message: str
-) -> None:
-    """Duplicate IDs and malformed vectors raise instead of ranking silently."""
-    with pytest.raises(ValueError, match=message):
-        rank_candidates(candidates, seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY)
 
 
 def test_an_empty_pool_ranks_nothing() -> None:

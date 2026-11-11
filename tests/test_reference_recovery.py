@@ -555,18 +555,15 @@ def test_hybrid_recommended_reference_keeps_reference_evidence(
     assert len(papers) == 3
     assert pool.sources[omitted.paper_id] == {"citation", "semantic"}
     assert pool.provider_aliases == {rediscovered.paper_id: omitted.paper_id}
-    assert pool.source_ranks[omitted.paper_id] == {
-        "arxiv_references": 2,
-        "recommendations": 1,
-    }
+    assert pool.recommendation_ranks == {omitted.paper_id: 1, unrelated.paper_id: 2}
     assert builder.seed_relations[omitted.paper_id] == "referenced_by_seed"
     title_lookup.assert_not_called()
 
 
-def test_hybrid_ranks_every_provider_reference_at_its_first_position(
+def test_hybrid_pools_every_provider_reference_once(
     providers: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The full provider list joins the pool; duplicates keep their first rank."""
+    """The full provider list joins the pool, one member per work."""
     client, bibliography, _ = providers
     seed = paper("arxiv:2608.27147", references=["shared"])
     seed_alias = paper("seed-alias", arxiv_id="2608.27147")
@@ -604,10 +601,8 @@ def test_hybrid_ranks_every_provider_reference_at_its_first_position(
     }
     assert builder.seed_relations[skipped.paper_id] == "referenced_by_seed"
     assert builder.discovery_pool is not None
-    assert builder.discovery_pool.source_ranks == {
-        skipped.paper_id: {"references": 2, "recommendations": 1},
-        admitted.paper_id: {"references": 4},
-    }
+    assert set(builder.discovery_pool.papers) == {skipped.paper_id, admitted.paper_id}
+    assert builder.discovery_pool.recommendation_ranks == {skipped.paper_id: 1}
     assert builder.candidate_source_status == {
         "references": "complete",
         "citations": "empty",

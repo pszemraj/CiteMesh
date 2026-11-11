@@ -225,7 +225,6 @@ class PortableGraphMetadata(_PortableGraphMetadataRequired, total=False):
     """Strategy and chronology fields attached to a graph payload."""
 
     candidate_source_status: dict[str, str]
-    candidate_source_ranks: dict[str, dict[str, int]]
 
 
 class GraphPayloadDashboard(TypedDict):

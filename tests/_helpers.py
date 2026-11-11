@@ -221,17 +221,6 @@ class WordHashEncodeModel:
         return word_hash_vectors(texts)
 
 
-def stub_hybrid_corpus_operation_lock(builder: HybridGraphBuilder) -> None:
-    """Bind a no-I/O corpus lock for hybrid orchestration unit tests.
-
-    :param HybridGraphBuilder builder: Hybrid builder whose embedding child is active.
-    :return None: Replaces artifact binding with a reentrant no-op lock fixture.
-    """
-    cache = MagicMock()
-    cache.hydration_operation_lock.return_value = nullcontext()
-    builder.embedding_builder.prepare_embedding_cache = MagicMock(return_value=cache)
-
-
 def stub_hybrid_corpus(
     builder: HybridGraphBuilder,
     *,
@@ -247,8 +236,11 @@ def stub_hybrid_corpus(
     :param list[Paper] | None neighbours: Rows returned by each corpus search.
     :return MagicMock: The corpus search stub.
     """
-    stub_hybrid_corpus_operation_lock(builder)
     embedding = builder.embedding_builder
+    # A no-I/O corpus whose operation lock is a reentrant no-op.
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    embedding.prepare_embedding_cache = MagicMock(return_value=cache)
     embedding._prepare_corpus_for_build = MagicMock()
     embedding.resolve_cached_corpus_seed = MagicMock(return_value=seed)
     embedding.cached_reference_metadata = MagicMock(return_value={})

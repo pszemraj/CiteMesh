@@ -3215,7 +3215,7 @@ def test_identity_arxiv_issued_doi_respects_conflicts_and_local_rows() -> None:
     assert candidate_identifiers_conflict(local, different)
 
 
-def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
+def test_hybrid_merges_passuntil_doi_alias_and_retains_recommendation_rank() -> None:
     """DOI-only and arXiv-only provider records join the same local work."""
     builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     seed = _seed_paper()
@@ -3234,7 +3234,6 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
     local.title = arxiv_only.title
 
     pool.add(arxiv_only, source="citation", relation="cites_seed")
-    pool.source_ranks[arxiv_only.paper_id] = {"citations": 5}
     pool.add(local, source="semantic", relation="semantic_only")
     recommendations = CandidateSourceResult(
         "recommendations",
@@ -3246,7 +3245,8 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_source_ranks() -> None:
     assert set(candidates) == {local.paper_id}
     assert sources[local.paper_id] == {"citation", "semantic"}
     assert builder.seed_relations[local.paper_id] == "cites_seed"
-    assert pool.source_ranks == {local.paper_id: {"citations": 5, "recommendations": 1}}
+    # Both recommendation records name the corpus work; the first position counts.
+    assert pool.recommendation_ranks == {local.paper_id: 1}
 
 
 def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
@@ -3932,20 +3932,11 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
         corpus_semantic.paper_id,
         recommendation_only.paper_id,
     }
-    assert graph.graph["candidate_source_ranks"] == {
-        corpus_overlap.paper_id: {
-            "references": 1,
-            "citations": 1,
-            "recommendations": 3,
-            "arxiv_corpus": 1,
-            "arxiv_corpus_document": 1,
-        },
-        corpus_semantic.paper_id: {
-            "arxiv_corpus": 2,
-            "arxiv_corpus_document": 2,
-            "recommendations": 1,
-        },
-        recommendation_only.paper_id: {"recommendations": 2},
+    assert builder.discovery_pool is not None
+    assert builder.discovery_pool.recommendation_ranks == {
+        corpus_overlap.paper_id: 3,
+        corpus_semantic.paper_id: 1,
+        recommendation_only.paper_id: 2,
     }
     assert builder.paper_sources[corpus_overlap.paper_id] == "both"
     assert builder.seed_relations[corpus_overlap.paper_id] == "overlap"

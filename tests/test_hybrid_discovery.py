@@ -403,26 +403,14 @@ def test_pool_holds_every_list_of_its_mode(
     assert set(pool.papers) == expected
     assert len(builder.discovery_ranking) == len(expected)
     assert len(papers) == 45
-    rank_sources = {source for ranks in pool.source_ranks.values() for source in ranks}
-    assert (
-        rank_sources
-        == {
-            "candidates": {"references", "citations", "recommendations"},
-            "arxiv-corpus": {
-                "references",
-                "citations",
-                "arxiv_corpus",
-                "arxiv_corpus_document",
-            },
-            "both": {
-                "references",
-                "citations",
-                "recommendations",
-                "arxiv_corpus",
-                "arxiv_corpus_document",
-            },
-        }[mode]
+    recommended = (
+        []
+        if mode == "arxiv-corpus"
+        else [pool.provider_aliases.get(s2, s2) for s2 in scenario.recommendations]
     )
+    assert pool.recommendation_ranks == {
+        member: rank for rank, member in enumerate(recommended, start=1)
+    }
     assert scenario.world.requests["recommendations"] == int(mode != "arxiv-corpus")
     if mode != "arxiv-corpus":
         assert scenario.world.recommendation_params == [

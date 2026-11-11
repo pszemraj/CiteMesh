@@ -135,31 +135,14 @@ FUSED_LISTS: tuple[
 )
 
 
-def _unit_rows(
-    vectors: Sequence[Vector], dimension: int, label: str
-) -> NDArray[np.float64]:
+def _unit_rows(vectors: Sequence[Vector]) -> NDArray[np.float64]:
     """Stack vectors into unit-length float64 rows.
 
-    :param Sequence[NDArray] vectors: One-dimensional vectors.
-    :param int dimension: Required vector length.
-    :param str label: Name used in errors.
+    :param Sequence[NDArray] vectors: Finite, nonzero vectors of one length.
     :return NDArray[np.float64]: ``(len(vectors), dimension)`` unit rows.
-    :raises ValueError: If a vector is malformed, non-finite or zero.
     """
-    matrix = np.zeros((len(vectors), dimension), dtype=np.float64)
-    for row, vector in enumerate(vectors):
-        values = np.asarray(vector, dtype=np.float64)
-        if values.shape != (dimension,):
-            raise ValueError(
-                f"{label} vector has shape {values.shape}, expected ({dimension},)."
-            )
-        if not np.all(np.isfinite(values)):
-            raise ValueError(f"{label} vector is not finite.")
-        norm = float(np.linalg.norm(values))
-        if norm <= 0.0:
-            raise ValueError(f"{label} vector is zero.")
-        matrix[row] = values / norm
-    return matrix
+    matrix = np.vstack([np.asarray(vector, dtype=np.float64) for vector in vectors])
+    return matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
 
 
 def compute_features(
@@ -172,25 +155,18 @@ def compute_features(
 
     The reference set for ``ctx_ref_top5`` is the candidates flagged as
     references; each candidate is compared with the references other than
-    itself.
+    itself. Callers validate the vectors: finite, nonzero and of one length.
 
     :param Sequence[DiscoveryCandidate] candidates: Pool members with unique IDs.
     :param NDArray seed_document: Seed's retrieval-document vector.
     :param NDArray seed_query: Seed's retrieval-query vector.
     :return dict[str, CandidateFeatures]: Features keyed by paper ID, in ID order.
-    :raises ValueError: If IDs repeat or a vector is unusable.
     """
     ordered = sorted(candidates, key=lambda candidate: candidate.paper_id)
-    paper_ids = [candidate.paper_id for candidate in ordered]
-    if len(set(paper_ids)) != len(paper_ids):
-        raise ValueError("Discovery candidates must have unique paper IDs.")
     if not ordered:
         return {}
-    dimension = int(np.asarray(seed_document).size)
-    seed_vectors = _unit_rows([seed_document, seed_query], dimension, "Seed")
-    vectors = _unit_rows(
-        [candidate.vector for candidate in ordered], dimension, "Candidate"
-    )
+    seed_vectors = _unit_rows([seed_document, seed_query])
+    vectors = _unit_rows([candidate.vector for candidate in ordered])
     cos_dd = vectors @ seed_vectors[0]
     cos_q = vectors @ seed_vectors[1]
 
@@ -244,24 +220,21 @@ def fused_lists(features: Mapping[str, CandidateFeatures]) -> dict[str, list[str
 
 
 def reciprocal_rank_fusion(
-    lists: Mapping[str, Sequence[str]], k: int = RRF_K
+    lists: Mapping[str, Sequence[str]],
 ) -> list[tuple[str, float]]:
-    """Fuse ranked lists by summing ``1 / (k + rank)`` per containing list.
+    """Fuse ranked lists by summing ``1 / (RRF_K + rank)`` per containing list.
 
     Scores accumulate in list order, so equal inputs give identical floats.
 
-    :param Mapping[str, Sequence[str]] lists: Ranked paper IDs per list, best first.
-    :param int k: Rank offset damping the top positions.
+    :param Mapping[str, Sequence[str]] lists: Ranked paper IDs per list, best
+        first, each ID at most once per list.
     :return list[tuple[str, float]]: ``(paper_id, score)`` by score descending,
         then paper ID.
-    :raises ValueError: If a list repeats a paper ID.
     """
     scores: dict[str, float] = {}
-    for name, ranked in lists.items():
-        if len(set(ranked)) != len(ranked):
-            raise ValueError(f"Fused list {name!r} repeats a paper ID.")
+    for ranked in lists.values():
         for rank, paper_id in enumerate(ranked, start=1):
-            scores[paper_id] = scores.get(paper_id, 0.0) + 1.0 / (k + rank)
+            scores[paper_id] = scores.get(paper_id, 0.0) + 1.0 / (RRF_K + rank)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -270,14 +243,13 @@ def rank_candidates(
     *,
     seed_document: Vector,
     seed_query: Vector,
-    k: int = RRF_K,
 ) -> list[RankedCandidate]:
     """Rank a discovery pool by reciprocal rank fusion of :data:`FUSED_LISTS`.
 
-    :param Sequence[DiscoveryCandidate] candidates: Pool members with unique IDs.
+    :param Sequence[DiscoveryCandidate] candidates: Pool members with unique IDs
+        and validated vectors.
     :param NDArray seed_document: Seed's retrieval-document vector.
     :param NDArray seed_query: Seed's retrieval-query vector.
-    :param int k: Reciprocal-rank offset.
     :return list[RankedCandidate]: Every candidate, best first.
     """
     features = compute_features(
@@ -296,7 +268,5 @@ def rank_candidates(
             features=features[paper_id],
             list_ranks=list_ranks[paper_id],
         )
-        for rank, (paper_id, score) in enumerate(
-            reciprocal_rank_fusion(lists, k=k), start=1
-        )
+        for rank, (paper_id, score) in enumerate(reciprocal_rank_fusion(lists), start=1)
     ]

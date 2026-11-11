@@ -604,13 +604,11 @@ def test_json_payload_without_layout_passes_dashboard_import_contract() -> None:
 
 
 @pytest.mark.parametrize("override_status", [False, True])
-def test_graph_json_preserves_candidate_source_ranks_and_status(
+def test_graph_json_preserves_candidate_source_status(
     tmp_path: Path, override_status: bool
 ) -> None:
-    """Portable JSON carries source ranks and status for direct Python exports."""
+    """Portable JSON carries source status for direct Python exports."""
     graph, seed_id = _build_graph()
-    ranks = {"related": {"citations": 7, "arxiv_corpus": 4, "recommendations": 11}}
-    graph.graph["candidate_source_ranks"] = ranks
     graph.graph["candidate_source_status"] = {
         "arxiv_corpus": "complete",
         "recommendations": "unavailable",
@@ -631,7 +629,6 @@ def test_graph_json_preserves_candidate_source_ranks_and_status(
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:seed")
-    assert validated["meta"]["candidate_source_ranks"] == ranks
     assert validated["meta"]["candidate_source_status"] == status
     assert payload["dashboard"]["meta"]["candidate_source_status"] == status
 

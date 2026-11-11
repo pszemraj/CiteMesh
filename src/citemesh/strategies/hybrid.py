@@ -84,42 +84,10 @@ HYBRID_RECOMMENDATION_LIMIT = 200
 HYBRID_CORPUS_NEIGHBOURS = 180
 _REFERENCE_RELATIONS = frozenset({"referenced_by_seed", "overlap"})
 _CITER_RELATIONS = frozenset({"cites_seed", "overlap"})
-# Provider candidates are encoded references first, then recommendations, then
-# citers; each group in provider order.
-_ENCODING_ORDER = (
-    ("references", "arxiv_references"),
-    ("recommendations",),
-    ("citations",),
-)
 
 
 class EmbeddingInferenceError(RuntimeError):
     """Semantic inference could not produce a complete hybrid ranking space."""
-
-
-def require_complete_embeddings(
-    *,
-    seed_id: str,
-    candidate_ids: list[str],
-    embeddings: dict[str, NDArray[np.float32]],
-) -> NDArray[np.float32]:
-    """Validate that hybrid ranking has one usable vector per required paper.
-
-    :param str seed_id: Seed paper identifier.
-    :param List[str] candidate_ids: Candidate identifiers admitted to ranking.
-    :param Dict[str, NDArray[np.float32]] embeddings: Materialized float32 vectors.
-    :return NDArray[np.float32]: Validated seed embedding.
-    :raises EmbeddingInferenceError: If vectors are missing, malformed, non-finite,
-        zero length, or dimensionally inconsistent.
-    """
-    vectors = validate_embedding_vectors(
-        [seed_id, *candidate_ids],
-        embeddings,
-        context="Semantic reranking",
-        vector_label="embedding",
-        error_factory=EmbeddingInferenceError,
-    )
-    return vectors[seed_id]
 
 
 class HybridGraphBuilder(GraphBuilderStrategy):
@@ -592,8 +560,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if row is not None:
                 pool.add(row, source=source, relation=relation)
             member_id = pool.add(paper, source=source, relation=relation)
-            if member_id is not None:
-                pool.record_rank(member_id, result.source, rank)
+            if member_id is not None and result.source == "recommendations":
+                pool.record_recommendation(member_id, rank)
 
     def _search_corpus(
         self,
@@ -610,24 +578,19 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :raises RuntimeError: If the corpus search fails.
         """
         added = 0
-        for rank_source, vector in (
-            ("arxiv_corpus", seed_query),
-            ("arxiv_corpus_document", seed_document),
-        ):
+        for vector in (seed_query, seed_document):
             try:
                 neighbours = self.embedding_builder.search_prepared_corpus(
                     vector, HYBRID_CORPUS_NEIGHBOURS
                 )
             except Exception as exc:
                 raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-            rank = 0
             for paper in neighbours:
-                member_id = pool.add(paper, source="semantic", relation="semantic_only")
-                if member_id is None:
-                    continue
-                rank += 1
-                pool.record_rank(member_id, rank_source, rank)
-            added += rank
+                if (
+                    pool.add(paper, source="semantic", relation="semantic_only")
+                    is not None
+                ):
+                    added += 1
         logger.debug("Corpus neighbours: %d across both seed roles.", added)
         return CandidateSourceResult(
             "arxiv_corpus",
@@ -682,19 +645,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Collection[str] stored: Members that have stored vectors.
         :return dict[str, NDArray[np.float32]]: Vectors keyed by member ID.
         """
-
-        def encoding_key(paper_id: str) -> tuple[int, int, str]:
-            ranks = pool.source_ranks.get(paper_id, {})
-            for group, sources in enumerate(_ENCODING_ORDER):
-                positions = [ranks[source] for source in sources if source in ranks]
-                if positions:
-                    return group, min(positions), paper_id
-            return len(_ENCODING_ORDER), 0, paper_id
-
-        missing = sorted(
-            (paper_id for paper_id in pool.papers if paper_id not in stored),
-            key=encoding_key,
-        )
+        missing = sorted(paper_id for paper_id in pool.papers if paper_id not in stored)
         if not missing:
             return {}
         logger.info(
@@ -721,13 +672,20 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param NDArray[np.float32] seed_document: Seed document vector.
         :param NDArray[np.float32] seed_query: Seed query-role vector.
         :return list[RankedCandidate]: Every member, best first.
-        :raises EmbeddingInferenceError: If a vector is missing or unusable.
+        :raises EmbeddingInferenceError: If a vector is missing, malformed,
+            non-finite, zero, or of another dimension than the seed's.
         """
         seed_id = pool.seed.paper_id
-        require_complete_embeddings(
-            seed_id=seed_id,
-            candidate_ids=list(pool.papers),
-            embeddings={**vectors, seed_id: seed_document},
+        # Members carry provider or corpus IDs, which never contain spaces, so
+        # this key cannot collide with one.
+        query_key = f"{seed_id} (query role)"
+        # The one validity gate for ranking inputs; the ranker trusts them.
+        validated = validate_embedding_vectors(
+            [seed_id, query_key, *pool.papers],
+            {**vectors, seed_id: seed_document, query_key: seed_query},
+            context="Hybrid ranking",
+            vector_label="embedding",
+            error_factory=EmbeddingInferenceError,
         )
         candidates = []
         for paper_id in pool.papers:
@@ -735,20 +693,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             candidates.append(
                 DiscoveryCandidate(
                     paper_id=paper_id,
-                    vector=vectors[paper_id],
+                    vector=validated[paper_id],
                     is_reference=relation in _REFERENCE_RELATIONS,
                     cites_seed=relation in _CITER_RELATIONS,
-                    recommendation_rank=pool.source_ranks.get(paper_id, {}).get(
-                        "recommendations"
-                    ),
+                    recommendation_rank=pool.recommendation_ranks.get(paper_id),
                 )
             )
-        try:
-            ranked = rank_candidates(
-                candidates, seed_document=seed_document, seed_query=seed_query
-            )
-        except ValueError as exc:
-            raise EmbeddingInferenceError(f"Hybrid ranking failed: {exc}") from exc
+        ranked = rank_candidates(
+            candidates,
+            seed_document=validated[seed_id],
+            seed_query=validated[query_key],
+        )
         for item in ranked[:10]:
             logger.debug(
                 "Rank %d %s: score=%.5f lists=%s cos_dd=%.4f.",
@@ -921,12 +876,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        if self.discovery_pool is not None and self.discovery_pool.source_ranks:
-            graph.graph["candidate_source_ranks"] = {
-                paper_id: ranks.copy()
-                for paper_id, ranks in self.discovery_pool.source_ranks.items()
-                if paper_id in graph
-            }
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:

@@ -2,7 +2,8 @@
 Candidate pool with indexed paper identity.
 
 The pool holds one collection's pre-ranking candidates, their source tags,
-seed relations, and the provider-ID aliases that later lists resolve through.
+seed relations, recommendation positions, and the provider-ID aliases that
+later lists resolve through.
 Hybrid discovery and the embedding strategy's candidates mode both collect
 into it. A record joins a member when it carries the member's provider ID or a
 recorded alias of it, or when it matches exactly one member under
@@ -68,7 +69,7 @@ class DiscoveryPool:
         self.seed_relations = {} if seed_relations is None else seed_relations
         self.papers: dict[str, Paper] = {}
         self.sources: dict[str, set[str]] = {}
-        self.source_ranks: dict[str, dict[str, int]] = {}
+        self.recommendation_ranks: dict[str, int] = {}
         self.provider_aliases: dict[str, str] = {}
         self.source_status: dict[str, str] = {}
         self._members_by_key: dict[CandidateIdentityKey, dict[str, None]] = {}
@@ -166,22 +167,21 @@ class DiscoveryPool:
         self._index(member_id)
         return member
 
-    def record_rank(self, member_id: str, source: str, rank: int) -> None:
-        """Keep the first provider rank observed for a member in one source.
+    def record_recommendation(self, member_id: str, rank: int) -> None:
+        """Keep a member's first position among the provider recommendations.
 
         :param str member_id: Member ID.
-        :param str source: Ranked provider list.
-        :param int rank: One-based position in that list.
-        :return None: Leaves an earlier rank for the same source unchanged.
+        :param int rank: One-based position in the recommendation list.
+        :return None: Leaves an earlier position unchanged.
         """
-        self.source_ranks.setdefault(member_id, {}).setdefault(source, rank)
+        self.recommendation_ranks.setdefault(member_id, rank)
 
     def absorb(self, target_id: str, absorbed_id: str) -> None:
         """Fold one member into another member that records the same work.
 
         The target keeps its ID and gains the absorbed member's metadata, tags,
-        earliest rank per source and relation. The absorbed ID, and every alias
-        that pointed at it, resolve to the target afterwards.
+        earlier recommendation position and relation. The absorbed ID, and every
+        alias that pointed at it, resolve to the target afterwards.
 
         :param str target_id: Member that survives.
         :param str absorbed_id: Member removed from the pool.
@@ -197,11 +197,11 @@ class DiscoveryPool:
             if target == absorbed_id:
                 self.provider_aliases[provider_id] = target_id
         self.provider_aliases[absorbed_id] = target_id
-        absorbed_ranks = self.source_ranks.pop(absorbed_id, {})
-        if absorbed_ranks:
-            ranks = self.source_ranks.setdefault(target_id, {})
-            for source, rank in absorbed_ranks.items():
-                ranks[source] = min(ranks.get(source, rank), rank)
+        absorbed_rank = self.recommendation_ranks.pop(absorbed_id, None)
+        if absorbed_rank is not None:
+            self.recommendation_ranks[target_id] = min(
+                self.recommendation_ranks.get(target_id, absorbed_rank), absorbed_rank
+            )
         relation = merge_seed_relation(
             self.seed_relations.get(target_id, ""),
             self.seed_relations.pop(absorbed_id, ""),
