@@ -633,6 +633,44 @@ def test_graph_json_preserves_candidate_source_status(
     assert payload["dashboard"]["meta"]["candidate_source_status"] == status
 
 
+def test_graph_json_carries_discovery_evidence_and_rejects_malformed_evidence(
+    tmp_path: Path,
+) -> None:
+    """Hybrid discovery evidence reaches related nodes; a malformed entry fails."""
+    graph, seed_id = _build_graph()
+    ranker = {"method": "reciprocal_rank_fusion", "k": 60, "lists": ["semantic"]}
+    evidence = {
+        "discovery_rank": 1,
+        "discovery_score": 1 / 61,
+        "discovery_features": {
+            "seed_similarity": 0.8,
+            "bibliography_similarity": None,
+            "direct_citation": False,
+            "recommendation_rank": None,
+        },
+        "discovery_list_ranks": {"semantic": 1},
+    }
+    graph.graph["discovery_ranker"] = ranker
+    graph.graph["discovery_ranking"] = {"related": evidence}
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)}
+    )
+    output = tmp_path / "graph.json"
+    exporter.to_json(output)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:seed")
+    assert validated["meta"]["discovery_ranker"] == ranker
+    assert payload["dashboard"]["meta"]["discovery_ranker"] == ranker
+    nodes = {node["id"]: node for node in payload["nodes"]}
+    assert {key: nodes["related"][key] for key in evidence} == evidence
+    assert "discovery_rank" not in nodes["seed"]
+
+    graph.graph["discovery_ranking"] = {"related": {**evidence, "discovery_rank": "1"}}
+    with pytest.raises(ValueError, match="Discovery evidence expects an integer"):
+        GraphExporter(graph, seed_id).graph_payload()
+
+
 def test_graph_payload_rejects_absent_seed_before_replacing_json(
     tmp_path: Path,
 ) -> None:

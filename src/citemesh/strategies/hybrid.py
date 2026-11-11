@@ -58,6 +58,8 @@ from citemesh.strategies.candidates import (
 )
 from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.discovery_ranking import (
+    FUSED_LISTS,
+    RRF_K,
     DiscoveryCandidate,
     RankedCandidate,
     rank_candidates,
@@ -849,6 +851,37 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         return min(similarity, 1.0)  # Cap at 1.0
 
+    def _record_discovery_evidence(self, graph: PaperGraph) -> None:
+        """Attach the ranker and each graph paper's ranking evidence for export.
+
+        :param PaperGraph graph: Built graph.
+        :return None: Sets ``discovery_ranker`` and ``discovery_ranking``.
+        """
+        used = {name for item in self.discovery_ranking for name in item.list_ranks}
+        lists = [name for name, _sort_key in FUSED_LISTS if name in used]
+        graph.graph["discovery_ranker"] = {
+            "method": "reciprocal_rank_fusion",
+            "k": RRF_K,
+            "lists": lists,
+        }
+        graph.graph["discovery_ranking"] = {
+            item.paper_id: {
+                "discovery_rank": item.rank,
+                "discovery_score": item.score,
+                "discovery_features": {
+                    "seed_similarity": item.features.cos_dd,
+                    "bibliography_similarity": item.features.ctx_ref_top5,
+                    "direct_citation": item.features.direct,
+                    "recommendation_rank": item.features.recommendation_rank,
+                },
+                "discovery_list_ranks": {
+                    name: item.list_ranks.get(name) for name in lists
+                },
+            }
+            for item in self.discovery_ranking
+            if item.paper_id in graph
+        }
+
     def build_graph(
         self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> tuple[PaperGraph, str]:
@@ -880,6 +913,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
+        self._record_discovery_evidence(graph)
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:

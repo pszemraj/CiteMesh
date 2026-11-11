@@ -13,7 +13,11 @@ from numpy.typing import NDArray
 
 from citemesh.core.values import coerce_citation_count, coerce_float, parse_float
 
-from ..dashboard.contracts import EnrichedNodePayload
+from ..dashboard.contracts import (
+    DiscoveryEvidence,
+    DiscoveryRanker,
+    EnrichedNodePayload,
+)
 from ..node_data import effective_node_metadata as _serialize_node
 from ..node_data import validate_canonical_node_ids
 from ..ordering import ordered_edges_with_data, ordered_nodes
@@ -237,6 +241,112 @@ def _seed_relation_map(graph: PaperGraph) -> dict[str, str]:
     return _graph_class_map(graph, "seed_relations", _SEED_RELATION_CLASSES)
 
 
+def _int_or_none(value: object) -> int | None:
+    """Pass an integer or ``None`` through, rejecting anything else.
+
+    :param object value: Raw evidence value.
+    :return Optional[int]: The value.
+    :raises ValueError: If the value is neither an integer nor ``None``.
+    """
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+        return value
+    raise ValueError(f"Discovery evidence expects an integer or null, not {value!r}.")
+
+
+def _float_or_none(value: object) -> float | None:
+    """Pass a float or ``None`` through, rejecting anything else.
+
+    :param object value: Raw evidence value.
+    :return Optional[float]: The value.
+    :raises ValueError: If the value is neither a float nor ``None``.
+    """
+    if value is None or isinstance(value, float):
+        return value
+    raise ValueError(f"Discovery evidence expects a number or null, not {value!r}.")
+
+
+def _discovery_ranker(graph: PaperGraph) -> DiscoveryRanker | None:
+    """Read the description of the ranker that ordered a hybrid graph's papers.
+
+    :param PaperGraph graph: Graph possibly carrying ``discovery_ranker``.
+    :return Optional[DiscoveryRanker]: The description, or ``None`` without one.
+    :raises ValueError: If the description is malformed.
+    """
+    raw = graph.graph.get("discovery_ranker")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        method, lists = raw.get("method"), raw.get("lists")
+        k = _int_or_none(raw.get("k"))
+        if (
+            isinstance(method, str)
+            and k is not None
+            and isinstance(lists, list)
+            and all(isinstance(name, str) for name in lists)
+        ):
+            return {"method": method, "k": k, "lists": [str(name) for name in lists]}
+    raise ValueError(f"Malformed discovery_ranker graph metadata: {raw!r}.")
+
+
+def _discovery_evidence(raw: object) -> DiscoveryEvidence:
+    """Validate one related paper's discovery evidence.
+
+    :param object raw: Evidence recorded by the hybrid strategy.
+    :return DiscoveryEvidence: Typed evidence.
+    :raises ValueError: If a field is missing or has the wrong type.
+    """
+    if isinstance(raw, dict):
+        features, list_ranks = (
+            raw.get("discovery_features"),
+            raw.get("discovery_list_ranks"),
+        )
+        if isinstance(features, dict) and isinstance(list_ranks, dict):
+            rank = _int_or_none(raw.get("discovery_rank"))
+            score = _float_or_none(raw.get("discovery_score"))
+            similarity = _float_or_none(features.get("seed_similarity"))
+            direct = features.get("direct_citation")
+            if (
+                rank is not None
+                and score is not None
+                and similarity is not None
+                and isinstance(direct, bool)
+            ):
+                return {
+                    "discovery_rank": rank,
+                    "discovery_score": score,
+                    "discovery_features": {
+                        "seed_similarity": similarity,
+                        "bibliography_similarity": _float_or_none(
+                            features.get("bibliography_similarity")
+                        ),
+                        "direct_citation": direct,
+                        "recommendation_rank": _int_or_none(
+                            features.get("recommendation_rank")
+                        ),
+                    },
+                    "discovery_list_ranks": {
+                        str(name): _int_or_none(value)
+                        for name, value in list_ranks.items()
+                    },
+                }
+    raise ValueError(f"Malformed discovery evidence: {raw!r}.")
+
+
+def _discovery_evidence_map(graph: PaperGraph) -> dict[str, DiscoveryEvidence]:
+    """Read the per-paper discovery evidence a hybrid graph carries.
+
+    :param PaperGraph graph: Graph possibly carrying ``discovery_ranking``.
+    :return Dict[str, DiscoveryEvidence]: Evidence keyed by node ID.
+    :raises ValueError: If the mapping or an entry is malformed.
+    """
+    raw_map = graph.graph.get("discovery_ranking")
+    if raw_map is None:
+        return {}
+    if not isinstance(raw_map, dict):
+        raise ValueError("Graph discovery_ranking must map node IDs to evidence.")
+    return {str(node_id): _discovery_evidence(raw) for node_id, raw in raw_map.items()}
+
+
 class NodesMixin:
     """Exporter-state node helpers: enrichment, layout, size, and color caches."""
 
@@ -265,6 +375,7 @@ class NodesMixin:
         """
         provenance = _provenance_map(self.graph)
         seed_relations = _seed_relation_map(self.graph)
+        discovery = _discovery_evidence_map(self.graph)
         relevance = self._seed_relevance_scores()
         sorted_nodes = _sorted_nodes(self.graph)
         strategy = _strategy(self.graph, self.metadata)
@@ -314,6 +425,12 @@ class NodesMixin:
                 "links": {},
                 "bibtex": "",
             }
+            evidence = None if is_seed else discovery.get(node_str)
+            if evidence is not None:
+                node_payload["discovery_rank"] = evidence["discovery_rank"]
+                node_payload["discovery_score"] = evidence["discovery_score"]
+                node_payload["discovery_features"] = evidence["discovery_features"]
+                node_payload["discovery_list_ranks"] = evidence["discovery_list_ranks"]
             links = _derive_links(node_str, node_payload=node_payload)
             node_payload["links"] = links
             node_payload["bibtex"] = _node_bibtex(node_payload, links=links)

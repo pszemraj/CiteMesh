@@ -138,8 +138,43 @@ class EffectiveNodeMetadata(TypedDict):
     is_local_corpus: bool
 
 
-class EnrichedNodePayload(TypedDict):
-    """Bibliographic and relationship fields exported for one graph node."""
+class DiscoveryFeatures(TypedDict):
+    """Seed-relative evidence the hybrid discovery ranker ordered a paper by.
+
+    ``bibliography_similarity`` is ``None`` when the seed has fewer than five
+    references other than the paper, and ``recommendation_rank`` is ``None``
+    when the provider did not recommend it.
+    """
+
+    seed_similarity: float
+    bibliography_similarity: float | None
+    direct_citation: bool
+    recommendation_rank: int | None
+
+
+class DiscoveryRanker(TypedDict):
+    """The fusion method, its constant and the lists fused for one build."""
+
+    method: str
+    k: int
+    lists: list[str]
+
+
+class DiscoveryEvidence(TypedDict):
+    """One related paper's place in the hybrid discovery ranking.
+
+    ``discovery_list_ranks`` holds the paper's 1-based rank in each fused list,
+    or ``None`` for a list that does not contain it.
+    """
+
+    discovery_rank: int
+    discovery_score: float
+    discovery_features: DiscoveryFeatures
+    discovery_list_ranks: dict[str, int | None]
+
+
+class _EnrichedNodePayloadRequired(TypedDict):
+    """Bibliographic and relationship fields exported for every graph node."""
 
     id: str
     title: object
@@ -159,6 +194,15 @@ class EnrichedNodePayload(TypedDict):
     seed_relevance: float
     links: dict[str, str | None]
     bibtex: str
+
+
+class EnrichedNodePayload(_EnrichedNodePayloadRequired, total=False):
+    """Exported node fields, with discovery evidence on hybrid related papers."""
+
+    discovery_rank: int
+    discovery_score: float
+    discovery_features: DiscoveryFeatures
+    discovery_list_ranks: dict[str, int | None]
 
 
 class GraphSummary(TypedDict):
@@ -189,6 +233,7 @@ class DashboardMetadata(_DashboardMetadataRequired, total=False):
     """Dashboard summary and optional geometry aligned with node order."""
 
     candidate_source_status: dict[str, str]
+    discovery_ranker: DiscoveryRanker
     plotly_node_order: list[str]
     plotly_positions: list[list[float]]
     plotly_node_sizes: list[float]
@@ -225,6 +270,7 @@ class PortableGraphMetadata(_PortableGraphMetadataRequired, total=False):
     """Strategy and chronology fields attached to a graph payload."""
 
     candidate_source_status: dict[str, str]
+    discovery_ranker: DiscoveryRanker
 
 
 class GraphPayloadDashboard(TypedDict):

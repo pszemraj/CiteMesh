@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ from citemesh.strategies import hybrid as hybrid_module
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
+from citemesh.visualization.export import GraphExporter
 from tests._helpers import WordHashEncodeModel, disable_embedding_dep_checks
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
@@ -684,3 +686,53 @@ def _encoding_role(text: str) -> str:
     if text.startswith("task: sentence similarity"):
         return "graph"
     return "document"
+
+
+@pytest.mark.parametrize("mode", ["arxiv-corpus", "both"])
+def test_json_export_carries_each_related_papers_discovery_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory, mode: str
+) -> None:
+    """Related nodes export their fused rank, score, features and list ranks."""
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
+    scenario = _scenario()
+    with fake_client(scenario.world) as client:
+        builder = _builder(client, scenario, mode)
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        graph, seed_id = builder.build_graph(_SEED_ID)
+    payload = GraphExporter(graph, seed_id).graph_payload()
+    json.dumps(payload, allow_nan=False)
+
+    # Corpus-only mode fetches no recommendations, so it fuses three lists.
+    lists = ["semantic", "reference_context", "direct"]
+    if mode == "both":
+        lists.append("recommended")
+    ranker = {"method": "reciprocal_rank_fusion", "k": 60, "lists": lists}
+    assert payload["meta"]["discovery_ranker"] == ranker
+    assert payload["dashboard"]["meta"]["discovery_ranker"] == ranker
+    ranking = {item.paper_id: item for item in builder.discovery_ranking}
+    seed, *related = sorted(payload["nodes"], key=lambda node: not node["is_seed"])
+    assert "discovery_rank" not in seed
+    assert sorted(node["discovery_rank"] for node in related) == list(range(1, 45))
+    for node in related:
+        item = ranking[node["id"]]
+        assert node["discovery_rank"] == item.rank
+        assert node["discovery_score"] == item.score
+        assert node["discovery_features"] == {
+            "seed_similarity": item.features.cos_dd,
+            "bibliography_similarity": item.features.ctx_ref_top5,
+            "direct_citation": item.features.direct,
+            "recommendation_rank": item.features.recommendation_rank,
+        }
+        assert node["discovery_list_ranks"] == {
+            name: item.list_ranks.get(name) for name in lists
+        }
+    features = [node["discovery_features"] for node in related]
+    assert any(entry["direct_citation"] for entry in features)
+    assert (mode == "both") == any(
+        entry["recommendation_rank"] is not None for entry in features
+    )
