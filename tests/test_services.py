@@ -844,11 +844,11 @@ def test_get_paper_with_references_raises_when_reference_fetch_is_unavailable(
     [[], [{**_paper_payload("unconvertible"), "year": "unknown"}, {"paperId": None}]],
 )
 def test_recommendations_fallback_when_recent_returns_no_papers(
-    recent_rows: list[dict[str, Any]],
+    recent_rows: list[dict[str, object]],
 ) -> None:
     """A recent pool without usable rows falls back to all-cs in provider order.
 
-    :param list[dict[str, Any]] recent_rows: Recent-pool rows yielding no paper.
+    :param list[dict[str, object]] recent_rows: Recent-pool rows yielding no paper.
     :return None: Verifies recommendation fallback without a batch request.
     """
     with SemanticScholarClient(api_key="") as client:
@@ -1828,7 +1828,39 @@ def test_unconvertible_relation_rows_warn_only_when_most_are_dropped(
         record for record in caplog.records if "without resolvable" in record.message
     ]
     assert record.levelname == level
-    assert f"skipping {malformed} of 5 IDs" in record.message
+    assert f"skipping {malformed} of 5 rows" in record.message
+
+
+@pytest.mark.parametrize(("malformed", "level"), [(1, "DEBUG"), (2, "WARNING")])
+def test_unusable_recommendation_rows_warn_only_when_most_are_dropped(
+    caplog: pytest.LogCaptureFixture, malformed: int, level: str
+) -> None:
+    """Recommendations apply the relation listings' skip-warning rule.
+
+    :param pytest.LogCaptureFixture caplog: Captured client logs.
+    :param int malformed: Rows of three without a usable record.
+    :param str level: Expected level of the skip message.
+    :return None: Verifies the kept papers and the message level.
+    """
+    unusable: list[dict[str, object]] = [
+        {**_paper_payload("p0"), "year": "unknown"},
+        {"paperId": None},
+    ]
+    rows = [*unusable[:malformed], _paper_payload("p2")]
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, {"recommendedPapers": rows})
+        )
+        with caplog.at_level(logging.DEBUG):
+            papers = client.get_recommended_papers("seed", pool="all-cs")
+
+    assert [paper.paper_id for paper in papers] == ["p2"]
+    [record] = [
+        record for record in caplog.records if "without resolvable" in record.message
+    ]
+    assert record.levelname == level
+    assert f"skipping {malformed} of {malformed + 1} rows" in record.message
 
 
 def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None:

@@ -57,18 +57,26 @@ class _RelationListing(NamedTuple):
     complete: bool
 
 
-def _warn_skipped_recommendations(paper_id: str, skipped_records: int) -> None:
-    """Report malformed or unresolved recommendation rows once.
+def _log_skipped_rows(listing: str, paper_id: str, skipped: int, total: int) -> None:
+    """Report the rows a discovery listing dropped, warning only when most were.
 
+    A few rows without an ID or with unconvertible metadata in a long listing
+    are routine, so they are logged at debug level.
+
+    :param str listing: Listing name, such as ``citations discovery``.
     :param str paper_id: Normalized seed identifier.
-    :param int skipped_records: Number of unusable response rows.
-    :return None: Emits a warning only when rows were skipped.
+    :param int skipped: Rows dropped.
+    :param int total: Rows the provider returned.
+    :return None: Logs only when rows were dropped.
     """
-    if skipped_records:
-        logger.warning(
-            "Recommendations for %s skipped %d malformed or unresolved records.",
+    if skipped:
+        logger.log(
+            logging.WARNING if skipped > total / 2 else logging.DEBUG,
+            "%s for %s: skipping %d of %d rows without resolvable metadata.",
+            listing,
             paper_id,
-            skipped_records,
+            skipped,
+            total,
         )
 
 
@@ -543,20 +551,12 @@ class _EndpointsMixin:
                 )
                 continue
             papers.append(paper)
-        skipped = len(listing.records) - len(papers)
-        if skipped:
-            # A few unconvertible rows in a long listing are routine.
-            logger.log(
-                logging.WARNING
-                if skipped > len(listing.records) / 2
-                else logging.DEBUG,
-                "%s discovery for %s: skipping %d of %d IDs without resolvable "
-                "metadata.",
-                relation,
-                normalized_id,
-                skipped,
-                len(listing.records),
-            )
+        _log_skipped_rows(
+            f"{relation} discovery",
+            normalized_id,
+            len(listing.records) - len(papers),
+            len(listing.records),
+        )
         return papers
 
     @_scoped_endpoint
@@ -703,6 +703,7 @@ class _EndpointsMixin:
             requested_fields.append("paperId")
 
         skipped_records = 0
+        total_records = 0
         pools = ("recent", "all-cs") if pool == "recent" else ("all-cs",)
         for active_pool in pools:
             params: dict[str, str | int] = {
@@ -742,10 +743,15 @@ class _EndpointsMixin:
             else:
                 papers, malformed_records = _inline_recommendations(records)
             skipped_records += malformed_records
+            total_records += len(records)
             if papers:
-                _warn_skipped_recommendations(normalized_id, skipped_records)
+                _log_skipped_rows(
+                    "recommendations", normalized_id, skipped_records, total_records
+                )
                 return papers[:parsed_limit]
-        _warn_skipped_recommendations(normalized_id, skipped_records)
+        _log_skipped_rows(
+            "recommendations", normalized_id, skipped_records, total_records
+        )
         return []
 
     @_scoped_endpoint
