@@ -135,22 +135,41 @@ def _paper_payload(
     }
 
 
-def _relation_payload(
-    ids: list[str | None], nested_key: str, *, next_offset: int | None = None
+def _relation_page(
+    records: list[dict[str, Any]], nested_key: str, *, next_offset: int | None = None
 ) -> dict[str, Any]:
-    """Build one relation page.
+    """Build one relation page from nested paper records.
 
-    :param list[str | None] ids: Related paper identifiers.
+    :param list[dict[str, Any]] records: Nested related-paper payloads.
     :param str nested_key: Relation paper key.
     :param int | None next_offset: Optional next-page offset.
     :return dict[str, Any]: Relation response payload.
     """
-    payload: dict[str, Any] = {
-        "data": [{nested_key: {"paperId": paper_id}} for paper_id in ids]
-    }
+    payload: dict[str, Any] = {"data": [{nested_key: record} for record in records]}
     if next_offset is not None:
         payload["next"] = next_offset
     return payload
+
+
+def _relation_payload(
+    ids: list[str | None], nested_key: str, *, next_offset: int | None = None
+) -> dict[str, Any]:
+    """Build one relation page whose rows carry full paper metadata.
+
+    :param list[str | None] ids: Related paper identifiers; ``None`` is an
+        unresolved row.
+    :param str nested_key: Relation paper key.
+    :param int | None next_offset: Optional next-page offset.
+    :return dict[str, Any]: Relation response payload.
+    """
+    return _relation_page(
+        [
+            {"paperId": None} if paper_id is None else _paper_payload(paper_id)
+            for paper_id in ids
+        ],
+        nested_key,
+        next_offset=next_offset,
+    )
 
 
 def _disable_pacing(client: SemanticScholarClient) -> None:
@@ -664,17 +683,17 @@ def test_get_papers_aggregates_malformed_rows_into_one_warning(
         ("get_paper_citations", "citations", "citingPaper"),
     ],
 )
-def test_relation_discovery_uses_fresh_rest_pages_and_complete_batch_enrichment(
+def test_relation_discovery_pages_inline_metadata_without_batch(
     method: str, relation: str, nested: str, paper_id: str, url_id: str
 ) -> None:
-    """Relation discovery pages, deduplicates, and bulk-loads full records.
+    """Relation discovery pages and deduplicates rows that carry full metadata.
 
     :param str method: Public relation method.
     :param str relation: Relation endpoint segment.
     :param str nested: Nested response paper key.
     :param str paper_id: Seed identifier, including slash-bearing DOI/arXiv IDs.
     :param str url_id: Expected normalized and quoted identifier in the URL.
-    :return None: Verifies discovery and enrichment.
+    :return None: Verifies paging, inline fields, and the absent batch request.
     """
     pages = [
         _MockResponse(200, _relation_payload(["a", "a"], nested, next_offset=2)),
@@ -683,16 +702,19 @@ def test_relation_discovery_uses_fresh_rest_pages_and_complete_batch_enrichment(
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(side_effect=pages)
-        client._session.post = MagicMock(
-            return_value=_MockResponse(200, [_paper_payload("a"), _paper_payload("b")])
-        )
+        client._session.post = MagicMock()
         papers = getattr(client, method)(paper_id, limit=2, raise_on_unavailable=True)
-    assert [paper.paper_id for paper in papers] == ["a", "b"]
+    assert papers == [
+        s2.payloads._convert_api_paper(_paper_payload(related_id))
+        for related_id in ("a", "b")
+    ]
     assert client._session.get.call_count == 2
     for call in client._session.get.call_args_list:
         assert call.args[0] == f"{s2.endpoints.PAPER_BASE_URL}/{url_id}/{relation}"
-        assert call.kwargs["params"]["fields"] == "paperId"
-    assert client._session.post.call_args.kwargs["json"] == {"ids": ["a", "b"]}
+        assert call.kwargs["params"]["fields"] == ",".join(
+            s2.payloads.DEFAULT_PAPER_FIELDS
+        )
+    client._session.post.assert_not_called()
     assert client._session.get.call_args_list[1].kwargs["params"]["offset"] == 2
 
 
@@ -714,9 +736,6 @@ def test_relation_retries_only_failed_page_and_every_invocation_is_fresh(
     with SemanticScholarClient(api_key="", retry_budget_seconds=0) as client:
         _disable_pacing(client)
         client._session.get = MagicMock(side_effect=responses)
-        client._session.post = MagicMock(
-            return_value=_MockResponse(200, [_paper_payload("a"), _paper_payload("b")])
-        )
         assert [p.paper_id for p in client.get_paper_references("seed", limit=2)] == [
             "a",
             "b",
@@ -1377,28 +1396,32 @@ def test_batch_404_does_not_restart_retry_budget_after_other_failures(
     assert client._session.post.call_count == 4
 
 
-def test_tolerant_metadata_failure_keeps_warm_discovery_records(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A tolerant relation keeps warm records when cold metadata fails.
+def test_relation_records_bypass_and_never_write_paper_cache() -> None:
+    """Inline relation rows replace warm cache reads and leave the paper cache alone.
 
-    :param pytest.MonkeyPatch monkeypatch: Makes retry wait unaffordable.
-    :return None: Verifies partial warm results.
+    :return None: Verifies inline metadata wins and nothing is persisted.
     """
-    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
     s2.disk_cache._persist_paper(
         Paper(paper_id="warm", title="Warm", year=2020), "warm"
     )
-    with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
+    with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
             return_value=_MockResponse(
                 200, _relation_payload(["warm", "cold"], "citedPaper")
             )
         )
-        client._session.post = MagicMock(return_value=_MockResponse(503))
+        client._session.post = MagicMock()
         papers = client.get_paper_references("seed")
-    assert [paper.paper_id for paper in papers] == ["warm"]
+    client._session.post.assert_not_called()
+    assert [(paper.paper_id, paper.title) for paper in papers] == [
+        ("warm", "Paper"),
+        ("cold", "Paper"),
+    ]
+    cached = s2.disk_cache._load_cached_paper("warm")
+    assert cached is not None
+    assert cached.title == "Warm"
+    assert s2.disk_cache._load_cached_paper("cold") is None
 
 
 def test_cache_operation_scope_uses_outer_lock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1581,22 +1604,9 @@ def test_interrupting_recovery_releases_collection_scope(
         assert client.get_paper("p1", raise_on_unavailable=True) is not None
 
 
-@pytest.mark.parametrize(
-    ("endpoint", "relation", "nested_key"),
-    [
-        ("recommendations", None, None),
-        ("references", "references", "citedPaper"),
-        ("citations", "citations", "citingPaper"),
-    ],
-)
-def test_fresh_discovery_reuses_warm_metadata_without_batch_refetch(
-    endpoint: str, relation: str | None, nested_key: str | None
-) -> None:
-    """Normal discovery must revalidate upstream while reusing complete metadata.
+def test_fresh_recommendations_reuse_warm_metadata_without_batch_refetch() -> None:
+    """Recommendations revalidate upstream while reusing complete cached metadata.
 
-    :param str endpoint: Recommendation or relation discovery endpoint.
-    :param str | None relation: REST relation suffix when testing a relation.
-    :param str | None nested_key: Relation payload key when testing a relation.
     :return None: Verifies the warm call repeats discovery but not metadata hydration.
     """
     raw_id = "a" * 40
@@ -1604,45 +1614,22 @@ def test_fresh_discovery_reuses_warm_metadata_without_batch_refetch(
 
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
-        if endpoint == "recommendations":
-            fetch = MagicMock(
-                return_value=_MockResponse(
-                    200, {"recommendedPapers": [{"paperId": raw_id}]}
-                )
+        fetch = MagicMock(
+            return_value=_MockResponse(
+                200, {"recommendedPapers": [{"paperId": raw_id}]}
             )
-            client._session.get = fetch
-
-            def discover() -> list[Paper]:
-                """Run the recommendation endpoint under test.
-
-                :return list[Paper]: Materialized recommendation papers.
-                """
-                return client.get_recommended_papers(
-                    "seed", limit=1, raise_on_unavailable=True
-                )
-
-        else:
-            assert relation is not None
-            assert nested_key is not None
-            fetch = MagicMock(
-                return_value=_MockResponse(200, _relation_payload([raw_id], nested_key))
-            )
-            client._session.get = fetch
-
-            def discover() -> list[Paper]:
-                """Run the selected relation endpoint under test.
-
-                :return list[Paper]: Materialized relation papers.
-                """
-                return getattr(client, f"get_paper_{relation}")(
-                    "seed", limit=1, raise_on_unavailable=True
-                )
-
+        )
+        client._session.get = fetch
         client._session.post = MagicMock(
             return_value=_MockResponse(200, [_paper_payload(canonical_id)])
         )
-        assert [paper.paper_id for paper in discover()] == [canonical_id]
-        assert [paper.paper_id for paper in discover()] == [canonical_id]
+        for _ in range(2):
+            assert [
+                paper.paper_id
+                for paper in client.get_recommended_papers(
+                    "seed", limit=1, raise_on_unavailable=True
+                )
+            ] == [canonical_id]
 
     assert fetch.call_count == 2
     assert [
@@ -1652,70 +1639,164 @@ def test_fresh_discovery_reuses_warm_metadata_without_batch_refetch(
 
 
 @pytest.mark.parametrize(
-    ("initial_ids", "current_ids", "new_ids"),
+    ("method", "nested_key"),
     [
-        (["first", "second"], ["second", "first"], []),
-        (["keep"], ["keep", "added"], ["added"]),
-        (["keep", "removed"], ["keep"], []),
-        (["old-one", "old-two"], ["new-one", "new-two"], ["new-one", "new-two"]),
+        ("get_paper_references", "citedPaper"),
+        ("get_paper_citations", "citingPaper"),
     ],
 )
-def test_changed_relation_discovery_fetches_only_new_canonical_metadata(
-    initial_ids: list[str], current_ids: list[str], new_ids: list[str]
+def test_repeated_relation_discovery_refetches_pages_only(
+    method: str, nested_key: str
 ) -> None:
-    """Changing membership or order must never refetch retained complete records.
+    """Every relation call reads fresh pages and never hydrates through a batch.
 
-    :param list[str] initial_ids: Canonical IDs returned by the cold discovery call.
-    :param list[str] current_ids: Canonical IDs returned by the revalidation call.
-    :param list[str] new_ids: IDs expected in the second metadata batch.
-    :return None: Verifies additions, removals, reorder, and replacement handling.
+    :param str method: Public relation method.
+    :param str nested_key: Relation payload key.
+    :return None: Verifies one GET per call and no batch or paper-cache write.
     """
-    batches: list[list[str]] = []
-
-    def batch(_url: str, **kwargs: Any) -> _MockResponse:
-        """Return full metadata for only the IDs sent to the batch endpoint.
-
-        :param str _url: Ignored batch endpoint URL.
-        :param Any kwargs: Requests arguments carrying the submitted IDs.
-        :return _MockResponse: Positional full metadata response.
-        """
-        ids = list(kwargs["json"]["ids"])
-        batches.append(ids)
-        return _MockResponse(
-            200,
-            [
-                _paper_payload(paper_id=paper_id, title=f"Metadata {paper_id}")
-                for paper_id in ids
-            ],
-        )
-
+    raw_id = "a" * 40
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
-            side_effect=[
-                _MockResponse(200, _relation_payload(initial_ids, "citedPaper")),
-                _MockResponse(200, _relation_payload(current_ids, "citedPaper")),
-            ]
+            return_value=_MockResponse(200, _relation_payload([raw_id], nested_key))
         )
-        client._session.post = MagicMock(side_effect=batch)
-        assert [
-            paper.paper_id
-            for paper in client.get_paper_references(
-                "seed", limit=len(initial_ids), raise_on_unavailable=True
-            )
-        ] == initial_ids
-        assert [
-            paper.paper_id
-            for paper in client.get_paper_references(
-                "seed", limit=len(current_ids), raise_on_unavailable=True
-            )
-        ] == current_ids
+        client._session.post = MagicMock()
+        for _ in range(2):
+            assert [
+                paper.paper_id
+                for paper in getattr(client, method)(
+                    "seed", limit=1, raise_on_unavailable=True
+                )
+            ] == [raw_id]
 
-    assert batches == [initial_ids, *([new_ids] if new_ids else [])]
-    for paper_id in initial_ids:
-        cached = s2.disk_cache._load_cached_paper(paper_id)
-        assert cached is not None
-        assert cached.title == f"Metadata {paper_id}"
+    assert client._session.get.call_count == 2
+    client._session.post.assert_not_called()
+    assert s2.disk_cache._load_cached_paper(raw_id) is None
+
+
+@pytest.mark.parametrize(
+    ("method", "nested_key"),
+    [
+        ("get_paper_references", "citedPaper"),
+        ("get_paper_citations", "citingPaper"),
+    ],
+)
+def test_relation_records_equal_batch_records_for_the_same_payload(
+    method: str, nested_key: str
+) -> None:
+    """Inline relation rows convert exactly as batch hydration of the same records.
+
+    :param str method: Public relation method.
+    :param str nested_key: Relation payload key.
+    :return None: Verifies identical records, order, and malformed-row skipping.
+    """
+    records: list[dict[str, Any]] = [
+        _paper_payload("a", doi="10.1000/A", arxiv_id="2401.00001v2"),
+        {
+            **_paper_payload("b", doi="10.48550/arXiv.2401.00002"),
+            "journal": {"name": "Nature", "volume": "1"},
+        },
+        {
+            **_paper_payload("c"),
+            "journal": {"name": "arXiv", "volume": "abs/2401.00003"},
+            "publicationVenue": {"name": "NeurIPS"},
+            "venue": "",
+        },
+        {
+            **_paper_payload("d"),
+            "title": None,
+            "abstract": None,
+            "year": None,
+            "authors": [{"name": "Grace"}],
+            "citationCount": None,
+            "fieldsOfStudy": None,
+        },
+        {**_paper_payload("e"), "year": "2020"},
+    ]
+    ids = ["a", "b", "c", "d", "e"]
+    pages = [
+        _MockResponse(200, _relation_page(records[:3], nested_key, next_offset=3)),
+        _MockResponse(
+            200,
+            _relation_page(
+                [
+                    _paper_payload("a", title="Duplicate row"),
+                    *records[3:],
+                    {"paperId": None},
+                ],
+                nested_key,
+            ),
+        ),
+    ]
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(side_effect=pages)
+        client._session.post = MagicMock()
+        papers = getattr(client, method)("seed", limit=10, raise_on_unavailable=True)
+    client._session.post.assert_not_called()
+    assert all(s2.disk_cache._load_cached_paper(paper_id) is None for paper_id in ids)
+
+    with SemanticScholarClient(api_key="", refresh_paper_cache=True) as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(return_value=_MockResponse(200, records))
+        batch = client.get_papers(ids)
+
+    assert [paper.paper_id for paper in papers] == ["a", "b", "c", "d"]
+    assert papers == [batch[paper_id] for paper_id in ids if paper_id in batch]
+
+
+@pytest.mark.parametrize(
+    ("relation", "limit", "pages", "complete"),
+    [
+        ("references", 10, [(["a", "b"], 2), (["c", None, "a"], None)], True),
+        ("references", 10, [([], None)], True),
+        ("references", 3, [(["a", "b"], 2), (["c"], None)], False),
+        ("references", 2, [(["a", "b"], 2), (["c"], None)], False),
+        ("citations", 10, [(["a", "b"], None)], False),
+    ],
+)
+def test_complete_reference_listing_populates_reference_cache(
+    relation: str,
+    limit: int,
+    pages: list[tuple[list[str | None], int | None]],
+    complete: bool,
+) -> None:
+    """Only an exhausted reference listing stores what a reference-ID fetch would.
+
+    A listing that fills its limit may have stopped before the provider's last
+    row, so it leaves the cache untouched, as citations always do.
+
+    :param str relation: Relation endpoint under test.
+    :param int limit: Discovery limit.
+    :param list pages: Page IDs and next offsets returned by the provider.
+    :param bool complete: Whether the listing is known to be exhaustive.
+    :return None: Verifies the persisted list and the absent follow-up request.
+    """
+    nested_key = {"references": "citedPaper", "citations": "citingPaper"}[relation]
+
+    def responses(key: str) -> list[_MockResponse]:
+        return [
+            _MockResponse(200, _relation_payload(ids, key, next_offset=next_offset))
+            for ids, next_offset in pages
+        ]
+
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(side_effect=responses("citedPaper"))
+        reference_ids = client.get_reference_ids("seed", force_refresh=True)
+        s2.disk_cache._reference_cache_path("seed").unlink()
+
+        client._session.get = MagicMock(side_effect=responses(nested_key))
+        getattr(client, f"get_paper_{relation}")(
+            "seed", limit=limit, raise_on_unavailable=True
+        )
+        assert client.get_cached_reference_ids("seed") == (
+            reference_ids if complete else None
+        )
+        if complete:
+            client._session.get = MagicMock()
+            assert client.get_reference_ids("seed") == reference_ids
+            client._session.get.assert_not_called()
 
 
 def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None:
@@ -1734,9 +1815,7 @@ def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None
                 200, _relation_payload(["current"], "citedPaper")
             )
         )
-        client._session.post = MagicMock(
-            return_value=_MockResponse(200, [_paper_payload("current")])
-        )
+        client._session.post = MagicMock()
 
         assert client.get_reference_ids(seed) == ["old-a", "old-b", "old-c"]
         client._session.get.assert_not_called()
@@ -1748,93 +1827,41 @@ def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None
         ] == ["current"]
         assert client._session.get.call_args.kwargs["params"]["limit"] == 1
 
-    assert client._session.post.call_args.kwargs["json"] == {"ids": ["current"]}
+    client._session.post.assert_not_called()
     assert client.get_cached_reference_ids(seed) == ["old-a", "old-b", "old-c"]
 
 
-@pytest.mark.parametrize(
-    ("endpoint", "relation", "nested_key", "expected_get_calls"),
-    [
-        ("recommendations", None, None, 2),
-        ("references", "references", "citedPaper", 1),
-        ("citations", "citations", "citingPaper", 1),
-    ],
-)
-def test_normal_discovery_accepts_exact_all_unknown_batch_response(
-    endpoint: str,
-    relation: str | None,
-    nested_key: str | None,
-    expected_get_calls: int,
-) -> None:
+def test_recommendations_accept_exact_all_unknown_batch_response() -> None:
     """The exact provider unknown-ID response is successful empty discovery.
 
-    :param str endpoint: Recommendation or relation endpoint under test.
-    :param str | None relation: REST relation suffix when testing a relation.
-    :param str | None nested_key: Relation payload key when testing a relation.
-    :param int expected_get_calls: Discovery requests including recommendation fallback.
     :return None: Verifies normal discovery, not bare bulk lookup, handles all unknown IDs.
     """
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
-        if endpoint == "recommendations":
-            client._session.get = MagicMock(
-                side_effect=[
-                    _MockResponse(
-                        200,
-                        {"recommendedPapers": [{"paperId": "recent-missing"}]},
-                    ),
-                    _MockResponse(
-                        200,
-                        {"recommendedPapers": [{"paperId": "all-missing"}]},
-                    ),
-                ]
-            )
-
-            def discover() -> list[Paper]:
-                """Run both recommendation pools through normal discovery.
-
-                :return list[Paper]: Materialized recommendation papers.
-                """
-                return client.get_recommended_papers(
-                    "seed", limit=1, raise_on_unavailable=True
-                )
-
-        else:
-            assert relation is not None
-            assert nested_key is not None
-            client._session.get = MagicMock(
-                return_value=_MockResponse(
-                    200, _relation_payload(["missing"], nested_key)
-                )
-            )
-
-            def discover() -> list[Paper]:
-                """Run the selected relation through normal discovery.
-
-                :return list[Paper]: Materialized relation papers.
-                """
-                return getattr(client, f"get_paper_{relation}")(
-                    "seed", limit=1, raise_on_unavailable=True
-                )
-
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(
+                    200, {"recommendedPapers": [{"paperId": "recent-missing"}]}
+                ),
+                _MockResponse(200, {"recommendedPapers": [{"paperId": "all-missing"}]}),
+            ]
+        )
         client._session.post = MagicMock(
             return_value=_MockResponse(400, {"error": "No valid paper ids given"})
         )
-        assert discover() == []
-
-    assert client._session.get.call_count == expected_get_calls
-    assert client._session.post.call_count == expected_get_calls
-    if endpoint == "recommendations":
         assert (
-            client._session.get.call_args_list[1].kwargs["params"]["from"] == "all-cs"
+            client.get_recommended_papers("seed", limit=1, raise_on_unavailable=True)
+            == []
         )
+
+    assert client._session.get.call_count == 2
+    assert client._session.post.call_count == 2
+    assert client._session.get.call_args_list[1].kwargs["params"]["from"] == "all-cs"
 
 
 @pytest.mark.parametrize(
     ("failure", "raise_on_unavailable", "expected_ids"),
     [
-        ("metadata", False, ["warm"]),
-        ("metadata", True, None),
         ("fallback", False, []),
         ("fallback", True, None),
         ("later_page", False, []),
@@ -1846,7 +1873,7 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
 ) -> None:
     """Required acquisition failures cannot replace previously successful persistent data.
 
-    :param str failure: Failed metadata batch, recommendation fallback, or later page.
+    :param str failure: Failed recommendation fallback or later relation page.
     :param bool raise_on_unavailable: Whether the caller requires an exception.
     :param list[str] | None expected_ids: Tolerant materialized IDs, if any.
     :return None: Verifies strict exceptions, tolerant empties, and cache preservation.
@@ -1860,26 +1887,7 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
             s2.disk_cache._reference_cache_path("seed"), "seed", ["old-reference"]
         )
 
-        if failure == "metadata":
-            client._session.get = MagicMock(
-                return_value=_MockResponse(
-                    200, _relation_payload(["warm", "cold"], "citedPaper")
-                )
-            )
-            client._session.post = MagicMock(
-                return_value=_MockResponse(503, headers={"Retry-After": "120"})
-            )
-
-            def discover() -> list[Paper]:
-                """Fetch a relation whose required missing metadata cannot recover.
-
-                :return list[Paper]: Materialized warm records for tolerant callers.
-                """
-                return client.get_paper_references(
-                    "seed", limit=2, raise_on_unavailable=raise_on_unavailable
-                )
-
-        elif failure == "fallback":
+        if failure == "fallback":
             client._session.get = MagicMock(
                 side_effect=[
                     _MockResponse(200, {"recommendedPapers": []}),
@@ -1935,7 +1943,4 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
         assert cached.title == "Warm metadata"
         assert client.get_cached_reference_ids("seed") == ["old-reference"]
 
-    if failure == "metadata":
-        client._session.post.assert_called_once()
-    else:
-        client._session.post.assert_not_called()
+    client._session.post.assert_not_called()
