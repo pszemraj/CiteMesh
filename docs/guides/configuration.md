@@ -32,8 +32,6 @@ Config defaults, including ignored corpus-only settings, are logged at DEBUG wit
 
 The [config reference](../reference/config/config_reference.toml) lists every `[defaults]` and `[api]` key. It is a loadable TOML file: uncommented keys hold their built-in defaults, so copy only the keys you want to change.
 
-The former `max_semantic` key was removed along with `--max-semantic`. A config file that still contains it loads, and the key is ignored with an unknown-key warning; `citemesh config unset defaults.max_semantic` removes the stale key from the file.
-
 ## API key
 
 ```bash
