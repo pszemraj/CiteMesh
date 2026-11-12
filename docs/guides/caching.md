@@ -125,9 +125,14 @@ A new refresh resolves its source revision once, compares full normalized record
 - Metadata-only changes retain their vectors and need no encoder.
 - Existing int8 calibration ranges stay fixed.
 - Removed source papers keep their physical vectors but leave active membership, retrieval, and export.
-- Refresh scans source metadata; it does not promise a delta download.
 
-Repeated source IDs are resolved before calibration, encoding, or newest-N selection:
+How refresh reads the source depends on what the namespace holds:
+
+- Reconciling a complete corpus with a newer revision, such as an index imported from a bucket, streams the source once. It still reads every row; only the encoding is incremental.
+- Every pass that has to process the whole source downloads the pinned revision instead: a namespace without a complete corpus, a pending or resumed refresh, first int8 calibration, and `--adopt`. `datasets` prepares the revision as Arrow in its own cache, and CiteMesh normalizes the rows in parallel on half the logical CPUs once a source has 50,000 rows. For the full arXiv snapshot, expect about 5 GB of prepared Arrow per revision in the `datasets` cache, which later passes reuse. The normalized rows, about 5 GB more, go to a temporary directory under the CiteMesh cache root that is removed when the pass ends, so every pass normalizes with the running code.
+- One pass serves calibration and encoding: the int8 calibration sample is drawn from the prepared rows with the same seeded reservoir build hydration uses.
+
+Repeated source IDs are resolved the same way whether the source is streamed or downloaded, before calibration, encoding, or newest-N selection:
 
 - The most recent valid `update_date` wins, followed by the highest arXiv version number and its creation time.
 - When conflicting records have equal or unavailable revision information, a stable ordering of their normalized content breaks the tie and CiteMesh warns once with the number of ambiguous comparisons. This tie-break is deterministic; it does not establish freshness.
@@ -142,6 +147,7 @@ An interrupted import or refresh remains unavailable to consumers.
 - Complete bucket downloads remain in the Hugging Face cache, so native import can resume from that copy even after the publisher retires the remote snapshot. An unfinished transfer may need to restart from the current snapshot if its files have been retired.
 - Resume refresh against its recorded source target; a moving upstream branch cannot change that pending target.
 - The cache recovers committed vector writes and reuses them on retry.
+- A resumed refresh keeps the membership it recorded and skips those papers without re-checking their text. A member is processed again only when its source position no longer holds the selected row for that paper, or when recovery found its vector missing.
 
 Import accepts a fresh destination, the same incomplete import, or an identical completed import. An occupied incompatible destination is preserved and refused, including a bootstrap snapshot whose local copy has since been refreshed. Use another cache root for a different source or calibration lineage that would otherwise share a native address. Existing legacy caches need an explicit reconciliation before they can be exported with certified coverage:
 
