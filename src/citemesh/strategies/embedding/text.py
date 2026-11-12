@@ -16,10 +16,7 @@ from citemesh.data.embedding_cache.models import (
     CacheInputMetadata,
     EmbeddingInputMetadata,
 )
-from citemesh.data.model_profiles import (
-    EmbeddingModelProfile,
-    compose_title_abstract_text,
-)
+from citemesh.data.model_profiles import EmbeddingModelProfile, join_title_abstract
 
 _RETRIEVAL_DOCUMENT_REPRESENTATION = "retrieval-document-v1"
 _GRAPH_SIMILARITY_REPRESENTATION = "graph-similarity-v1"
@@ -98,14 +95,18 @@ def format_embedding_metadata(
     text_metadata = _embedding_text_metadata(
         metadata.get("title"), metadata.get("abstract")
     )
+    title = text_metadata.get("title") or ""
+    abstract = text_metadata.get("abstract") or ""
     metadata_paper_id = metadata.get("paper_id", "") if "paper_id" in metadata else ""
     fallback_id = str(paper_id or metadata_paper_id or "unknown-paper")
-    content = compose_title_abstract_text(text_metadata) or fallback_id
+    # Each field is normalized once here; normalization is idempotent, so joining
+    # the normalized fields equals composing the raw ones.
+    content = join_title_abstract(title, abstract) or fallback_id
     if task is EmbeddingTask.RETRIEVAL_QUERY:
         return str(profile.format_query(content, text_metadata))
     if task is EmbeddingTask.RETRIEVAL_DOCUMENT:
         document_metadata = text_metadata
-        if not compose_title_abstract_text(document_metadata):
+        if not (title or abstract):
             document_metadata["title"] = fallback_id
         return str(profile.format_document(document_metadata)) or content
     if task is EmbeddingTask.GRAPH_SIMILARITY:

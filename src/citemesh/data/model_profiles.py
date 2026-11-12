@@ -46,8 +46,19 @@ def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
     """
     raw_title = metadata.get("title", "")
     raw_abstract = metadata.get("abstract", "")
-    title = normalize_text(str(raw_title)) if raw_title is not None else ""
-    abstract = normalize_text(str(raw_abstract)) if raw_abstract is not None else ""
+    return join_title_abstract(
+        normalize_text(str(raw_title)) if raw_title is not None else "",
+        normalize_text(str(raw_abstract)) if raw_abstract is not None else "",
+    )
+
+
+def join_title_abstract(title: str, abstract: str) -> str:
+    """Join already-normalized title and abstract text as ``"title. abstract"``.
+
+    :param str title: Normalized title, or an empty string.
+    :param str abstract: Normalized abstract, or an empty string.
+    :return str: Both joined, whichever one is present, or an empty string.
+    """
     if title and abstract:
         return f"{title}. {abstract}"
     if title:
