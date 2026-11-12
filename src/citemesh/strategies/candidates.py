@@ -855,7 +855,7 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     )
     supplemental_doi = incoming.doi or incoming_doi
     doi = preferred.doi or preferred_doi or supplemental_doi
-    preprint_alias = arxiv_identifier_from_doi(_normalized_doi(doi))
+    preprint_alias = arxiv_identifier_from_doi(doi)
     if preprint_alias:
         arxiv_suffix = preprint_alias.removeprefix("arxiv:")
         if preferred.doi or preferred_doi:
@@ -873,8 +873,8 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     )
     if not arxiv_id:
         incoming_alias = arxiv_identifier_from_doi(
-            _normalized_doi(supplemental_doi)
-        ) or arxiv_identifier_from_doi(_normalized_doi(incoming_doi))
+            supplemental_doi
+        ) or arxiv_identifier_from_doi(incoming_doi)
         if incoming_alias and not candidate_identifiers_conflict(preferred, incoming):
             arxiv_id = incoming_alias.removeprefix("arxiv:")
     preferred.arxiv_id = arxiv_id

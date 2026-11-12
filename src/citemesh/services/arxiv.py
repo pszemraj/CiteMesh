@@ -13,7 +13,11 @@ from urllib.parse import unquote, urlparse
 import requests
 
 from citemesh.core import Author, Paper
-from citemesh.core.paper_ids import BibliographyKey, strip_arxiv_version
+from citemesh.core.paper_ids import (
+    BibliographyKey,
+    arxiv_identifier_from_doi,
+    strip_arxiv_version,
+)
 
 logger = logging.getLogger(__name__)
 _ARXIV_LEGACY_ARCHIVE = (
@@ -110,6 +114,8 @@ def arxiv_identifier(value: str) -> str | None:
 def _identifiers(text: str, links: list[str]) -> tuple[str, ...]:
     """Extract explicit identifiers from one bibliography entry.
 
+    An arXiv-issued DOI also yields its arXiv ID.
+
     :param str text: Visible entry text.
     :param list[str] links: Entry hyperlink targets.
     :return tuple[str, ...]: Unique canonical aliases, arXiv before DOI.
@@ -124,15 +130,21 @@ def _identifiers(text: str, links: list[str]) -> tuple[str, ...]:
         identifier = arxiv_identifier(link)
         if identifier:
             arxiv_ids.append(identifier)
-    identifiers = [f"arxiv:{_canonical_arxiv_suffix(value)}" for value in arxiv_ids]
+    dois: list[str] = []
     for source in [text, *(unquote(link) for link in links)]:
         for match in _DOI.finditer(source):
             doi = match[0].rstrip(".,;:")
             # Sentence punctuation is not part of a DOI; balanced suffixes can be.
             while doi.endswith(")") and doi.count(")") > doi.count("("):
                 doi = doi[:-1]
-            identifiers.append(doi.lower())
-    return tuple(dict.fromkeys(identifiers))
+            dois.append(doi.lower())
+    arxiv_ids.extend(
+        alias.removeprefix("arxiv:")
+        for doi in dois
+        if (alias := arxiv_identifier_from_doi(doi))
+    )
+    identifiers = [f"arxiv:{_canonical_arxiv_suffix(value)}" for value in arxiv_ids]
+    return tuple(dict.fromkeys([*identifiers, *dois]))
 
 
 @dataclass(frozen=True)

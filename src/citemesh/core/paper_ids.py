@@ -103,12 +103,12 @@ def recognize_arxiv_identifier(
 
 
 def arxiv_identifier_from_doi(doi: str) -> str | None:
-    """Return a versionless arXiv ID for a normalized arXiv-issued DOI.
+    """Return a versionless arXiv ID for an arXiv-issued DOI.
 
-    :param str doi: DOI suffix without a ``doi:`` prefix or URL wrapper.
-    :return str | None: Canonical arXiv ID, or ``None`` for other DOI forms.
+    :param str doi: DOI in any case, bare, ``doi:``-prefixed, or a ``doi.org`` URL.
+    :return str | None: Canonical arXiv ID, or ``None`` for other identifiers.
     """
-    normalized = doi.lower()
+    normalized = (canonicalize_or_none(doi) or "").lower()
     if not normalized.startswith(_ARXIV_DOI_PREFIX):
         return None
     suffix = normalized.removeprefix(_ARXIV_DOI_PREFIX)

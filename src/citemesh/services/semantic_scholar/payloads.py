@@ -20,7 +20,6 @@ from citemesh.core.paper_fields import (
 )
 from citemesh.core.paper_ids import (
     arxiv_identifier_from_doi,
-    canonicalize_or_none,
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
 )
@@ -373,10 +372,7 @@ def _convert_payload_paper(
         _payload_get(payload, "externalIds"),
         paper_id,
     )
-    if (
-        not arxiv_id
-        and arxiv_identifier_from_doi(canonicalize_or_none(doi) or "") is None
-    ):
+    if not arxiv_id and arxiv_identifier_from_doi(doi) is None:
         arxiv_id = _arxiv_id_from_journal(_payload_get(payload, "journal"))
     return Paper(
         paper_id=paper_id,

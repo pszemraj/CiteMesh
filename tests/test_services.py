@@ -1003,6 +1003,40 @@ def test_complete_explicit_projection_is_cacheable_and_recommendations_filter_re
     assert s2.disk_cache._load_cached_paper("p1") is not None
 
 
+@pytest.mark.parametrize("complete_projection", [False, True])
+def test_custom_projection_recommendations_keep_first_row_per_paper(
+    complete_projection: bool,
+) -> None:
+    """Projected recommendations keep, and cache, only a paper's first row.
+
+    :param bool complete_projection: Whether the projection is cacheable.
+    :return None: Verifies order, deduplication and the cached row.
+    """
+    fields = (
+        list(s2.payloads.DEFAULT_PAPER_FIELDS) if complete_projection else ["title"]
+    )
+    rows = [
+        _paper_payload("b", title="Second"),
+        _paper_payload("a", title="First"),
+        _paper_payload("b", title="Repeated"),
+    ]
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, {"recommendedPapers": rows})
+        )
+        papers = client.get_recommended_papers("seed", fields=fields, pool="all-cs")
+
+    assert [(paper.paper_id, paper.title) for paper in papers] == [
+        ("b", "Second"),
+        ("a", "First"),
+    ]
+    cached = s2.disk_cache._load_cached_paper("b")
+    assert (cached.title if cached else None) == (
+        "Second" if complete_projection else None
+    )
+
+
 def test_search_paginates_deduplicates_and_validates_query_offsets() -> None:
     """Search follows offsets, honors limits, and rejects invalid inputs.
 

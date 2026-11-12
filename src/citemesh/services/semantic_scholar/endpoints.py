@@ -646,9 +646,11 @@ class _EndpointsMixin:
 
         :param Iterable[JSONValue] records: Decoded API paper records.
         :param bool cache_full_metadata: Whether records carry default full metadata.
-        :return tuple[list[Paper], int]: Converted records and malformed-row count.
+        :return tuple[list[Paper], int]: First converted record per paper, in
+            order, and the malformed-row count.
         """
         papers: list[Paper] = []
+        seen_ids: set[str] = set()
         malformed_records = 0
         for record in records:
             paper = payloads._convert_recommendation(record)
@@ -656,6 +658,9 @@ class _EndpointsMixin:
                 malformed_records += 1
                 logger.debug("Skipping malformed Semantic Scholar paper row.")
                 continue
+            if paper.paper_id in seen_ids:
+                continue
+            seen_ids.add(paper.paper_id)
             papers.append(paper)
             if cache_full_metadata:
                 disk_cache._persist_paper(paper, paper.paper_id)

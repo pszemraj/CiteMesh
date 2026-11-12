@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from citemesh.core import Paper
 from citemesh.core.paper_ids import BibliographyKey
 from citemesh.services import arxiv as arxiv_module
 from citemesh.services.arxiv import (
@@ -16,6 +17,7 @@ from citemesh.services.arxiv import (
     arxiv_identifier,
     extract_reference_identifiers,
 )
+from citemesh.strategies.candidates import fetch_seed_references
 
 
 class _Response:
@@ -198,6 +200,94 @@ def test_extract_bibliography_recognizes_bare_legacy_ids_and_implicit_items() ->
         (),
         ("arxiv:math/0309136", "arxiv:cond-mat/0301123"),
     ]
+
+
+_ARXIV_DOI_ALIASES = ("arxiv:2410.05192", "10.48550/arxiv.2410.05192")
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ("2410.05192v2", ()),
+        ("arXiv:2410.05192V2", ("arxiv:2410.05192",)),
+        ("10.48550/arXiv.2410.05192", _ARXIV_DOI_ALIASES),
+        (
+            '<a href="https://doi.org/10.48550/arXiv.2410.05192">DOI</a>',
+            _ARXIV_DOI_ALIASES,
+        ),
+        ("DOI:10.48550/ARXIV.2410.05192", _ARXIV_DOI_ALIASES),
+        ('<a href="https://doi.org/10.1000/ABC.Def">DOI</a>', ("10.1000/abc.def",)),
+        ("", ()),
+        (
+            "arXiv:2410.05192v2, doi:10.1000/Pub, 10.48550/arXiv.2410.05192.",
+            ("arxiv:2410.05192", "10.1000/pub", "10.48550/arxiv.2410.05192"),
+        ),
+    ],
+)
+def test_extract_bibliography_aliases_an_arxiv_issued_doi_to_its_arxiv_id(
+    entry: str, expected: tuple[str, ...]
+) -> None:
+    """An arXiv-issued DOI also yields its arXiv ID, ahead of every DOI.
+
+    :param str entry: Bibliography entry markup.
+    :param tuple[str, ...] expected: Canonical aliases of the entry.
+    :return None: Checks the arXiv alias, its order, and deduplication.
+    """
+    html = (
+        '<section class="ltx_bibliography">'
+        f'<li class="ltx_bibitem">{entry}</li>'
+        "</section>"
+    )
+    assert extract_reference_identifiers(html) == [expected]
+
+
+def test_arxiv_doi_only_entry_resolves_to_local_arxiv_record_without_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reference cited only by its arXiv DOI reuses the indexed arXiv record.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture that replaces the arXiv reads.
+    :return None: Checks local resolution without Semantic Scholar or arXiv lookups.
+    """
+    html = """
+    <section class="ltx_bibliography">
+      <li class="ltx_bibitem">Cited only as doi:10.48550/arXiv.2410.05192.</li>
+    </section>
+    """
+    arxiv_metadata = MagicMock(return_value={})
+    monkeypatch.setattr(
+        ArxivClient,
+        "get_bibliography",
+        MagicMock(return_value=_extract_bibliography(html)),
+    )
+    monkeypatch.setattr(ArxivClient, "get_papers", arxiv_metadata)
+    local = Paper(
+        paper_id="arxiv:2410.05192",
+        title="Indexed",
+        year=2024,
+        arxiv_id="2410.05192",
+        is_local_corpus=True,
+    )
+    client = MagicMock()
+    client.refresh_paper_cache = False
+    client.get_paper_references.return_value = []
+    client.get_cached_papers.return_value = {}
+    client.get_papers.return_value = {}
+
+    results = fetch_seed_references(
+        client,
+        Paper(paper_id="arxiv:2608.27147", title="Seed", year=2024),
+        5,
+        local_lookup=lambda identifiers: {
+            identifier: local
+            for identifier in identifiers
+            if identifier == "arxiv:2410.05192"
+        },
+    )
+
+    assert results[-1].papers == (local,)
+    client.get_papers.assert_not_called()
+    arxiv_metadata.assert_not_called()
 
 
 def test_extract_bibliography_canonicalizes_prefixed_legacy_subject_class() -> None:
