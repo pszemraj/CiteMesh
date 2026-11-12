@@ -19,8 +19,10 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from citemesh.core import Author, Paper
+
 if TYPE_CHECKING:
-    from citemesh.core import Paper
+    from citemesh.strategies.embedding import EmbeddingGraphBuilder
     from citemesh.strategies.hybrid import HybridGraphBuilder
 
 
@@ -219,6 +221,77 @@ class WordHashEncodeModel:
         del kwargs
         self.texts.extend(texts)
         return word_hash_vectors(texts)
+
+
+def install_deterministic_builder_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    builder: EmbeddingGraphBuilder,
+    *,
+    fingerprint: str,
+    model: object | None = None,
+) -> None:
+    """Install a tiny encoder while preserving lazy artifact binding.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
+    :param EmbeddingGraphBuilder builder: Fresh builder receiving the fake runtime.
+    :param str fingerprint: Artifact identity shared by lifecycle operations.
+    :param object | None model: Deterministic encoder; defaults to a constant one.
+    :return None: Installs the deterministic runtime in-place.
+    """
+    runtime_model = ConstantEncodeModel() if model is None else model
+
+    def load_model() -> None:
+        """Mimic a fresh load whose immutable artifact is not resolved yet.
+
+        :return None: Binds the fake model and clears provisional cache handles.
+        """
+        if builder.model is not None:
+            return
+        builder.model = runtime_model
+        builder._active_model_name = builder.model_name
+        builder._bind_embedding_cache_to_active_model()
+
+    monkeypatch.setattr(builder, "_load_model", load_model)
+    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+
+
+def http_response(payload: object) -> MagicMock:
+    """Wrap a JSON payload as a successful transport response.
+
+    :param object payload: Decoded JSON body.
+    :return MagicMock: Response with status 200.
+    """
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = {}
+    response.json.return_value = payload
+    response.raise_for_status.return_value = None
+    return response
+
+
+def build_publication_pair() -> tuple[Paper, Paper]:
+    """Build a corpus preprint and its publication without a shared external ID.
+
+    :return tuple[Paper, Paper]: Fresh preprint (a corpus row) and publication.
+    """
+    corpus = Paper(
+        paper_id="arxiv:2503.06378",
+        title="Measuring Model\nCapabilities",
+        year=2025,
+        authors=[Author(name="Lexin Zhou")],
+        references=["reference-a"],
+        doi="10.48550/arXiv.2503.06378",
+        is_local_corpus=True,
+    )
+    publication = Paper(
+        paper_id="f" * 40,
+        title="Measuring model capabilities",
+        year=2026,
+        authors=[Author(name="Lexin Zhou")],
+        references=["reference-b"],
+        doi="10.1000/published",
+    )
+    return corpus, publication
 
 
 def stub_hybrid_corpus(

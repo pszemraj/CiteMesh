@@ -8,6 +8,7 @@ from citemesh.core import Author, Paper
 from citemesh.strategies import discovery_pool
 from citemesh.strategies.candidates import candidate_records_match
 from citemesh.strategies.discovery_pool import DiscoveryPool
+from tests._helpers import build_publication_pair
 
 
 def _seed() -> Paper:
@@ -189,13 +190,7 @@ def _member(paper_id: str, year: int, refs: list[str]) -> Paper:
 @pytest.fixture
 def publication_pair() -> tuple[Paper, Paper]:
     """A corpus preprint and its publication without a shared external ID."""
-    corpus = _member("arxiv:2503.06378", 2025, ["reference-a"])
-    corpus.is_local_corpus = True
-    corpus.title = "Measuring Model\nCapabilities"
-    corpus.doi = "10.48550/arXiv.2503.06378"
-    publication = _member("f" * 40, 2026, ["reference-b"])
-    publication.doi = "10.1000/published"
-    return corpus, publication
+    return build_publication_pair()
 
 
 @pytest.mark.parametrize("publication_first", [False, True])

@@ -883,4 +883,4 @@ def test_s2_lookup_alias_preserves_metadata_without_external_ids(
     results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
     assert results[-1].papers[0].paper_id == "s2-id"
     assert results[-1].papers[0].citation_count == 77
-    assert all(not call.args[0] for call in metadata.call_args_list)
+    metadata.assert_not_called()

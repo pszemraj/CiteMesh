@@ -27,7 +27,12 @@ from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from citemesh.visualization.export import GraphExporter
-from tests._helpers import WordHashEncodeModel, disable_embedding_dep_checks
+from tests._helpers import (
+    WordHashEncodeModel,
+    disable_embedding_dep_checks,
+    http_response,
+    install_deterministic_builder_runtime,
+)
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
 
@@ -60,17 +65,9 @@ def install_runtime(
     :param Sequence[CorpusRow] corpus_rows: Dataset rows for hydration.
     :return None: Patches the builder in place.
     """
-
-    def load_model() -> None:
-        """Bind the fake model as a fresh load would."""
-        if builder.model is not None:
-            return
-        builder.model = model
-        builder._active_model_name = builder.model_name
-        builder._bind_embedding_cache_to_active_model()
-
-    monkeypatch.setattr(builder, "_load_model", load_model)
-    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: _FINGERPRINT)
+    install_deterministic_builder_runtime(
+        monkeypatch, builder, fingerprint=_FINGERPRINT, model=model
+    )
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
@@ -93,20 +90,6 @@ def _corpus_row(arxiv_id: str, title: str, *, year: int = 2023) -> CorpusRow:
         "authors": "Ada Example",
         "year": year,
     }
-
-
-def _response(payload: object) -> MagicMock:
-    """Wrap a JSON payload as a successful transport response.
-
-    :param object payload: Decoded JSON body.
-    :return MagicMock: Response with status 200.
-    """
-    response = MagicMock()
-    response.status_code = 200
-    response.headers = {}
-    response.json.return_value = payload
-    response.raise_for_status.return_value = None
-    return response
 
 
 def _not_found() -> MagicMock:
@@ -217,7 +200,7 @@ class FakeSemanticScholar:
         if url.startswith(RECOMMENDATION_BASE_URL):
             self.requests["recommendations"] += 1
             self.recommendation_params.append(dict(params))
-            return _response(
+            return http_response(
                 {
                     "recommendedPapers": [
                         self.papers[paper_id] for paper_id in self.recommendations
@@ -233,16 +216,18 @@ class FakeSemanticScholar:
             if relation == "citations":
                 self.requests["citations"] += 1
                 ids = self.citations.get(paper_id, [])
-                return _response(self._page(ids, "citingPaper", params))
+                return http_response(self._page(ids, "citingPaper", params))
             kind = (
                 "reference_ids" if params.get("fields") == "paperId" else "references"
             )
             self.requests[kind] += 1
             ids = self.references.get(paper_id, [])
-            return _response(self._page(ids, "citedPaper", params))
+            return http_response(self._page(ids, "citedPaper", params))
         self.requests["paper"] += 1
         paper_id = self._resolve(path)
-        return _not_found() if paper_id is None else _response(self.papers[paper_id])
+        return (
+            _not_found() if paper_id is None else http_response(self.papers[paper_id])
+        )
 
     def post(
         self,
@@ -262,7 +247,7 @@ class FakeSemanticScholar:
         for raw_id in (json or {}).get("ids", []):
             paper_id = self._resolve(raw_id)
             rows.append(None if paper_id is None else self.papers[paper_id])
-        return _response(rows)
+        return http_response(rows)
 
 
 @contextmanager
@@ -379,10 +364,9 @@ def _members(builder: HybridGraphBuilder, s2_ids: Sequence[str]) -> set[str]:
 
 @pytest.mark.parametrize("mode", _MODES)
 def test_pool_holds_every_list_of_its_mode(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory, mode: str
+    monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     """Each mode pools every reference and citer plus its own semantic lists."""
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     scenario = _scenario()
     with fake_client(scenario.world) as client:
         builder = _builder(client, scenario, mode)
@@ -425,13 +409,12 @@ def test_pool_holds_every_list_of_its_mode(
 
 @pytest.mark.parametrize("mode", ["arxiv-corpus", "both"])
 def test_indexed_provider_records_use_their_corpus_rows(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory, mode: str
+    monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     """Provider records join under their corpus row even when no search finds it.
 
     Only members without a corpus row are encoded in memory.
     """
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     monkeypatch.setattr(hybrid_module, "HYBRID_CORPUS_NEIGHBOURS", 1)
     scenario = _scenario()
     with fake_client(scenario.world) as client:
@@ -512,11 +495,8 @@ def test_citers_are_ranked_without_truncation(
     assert scenario.world.requests["citations"] == 1
 
 
-def test_publication_version_takes_one_slot(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
-) -> None:
+def test_publication_version_takes_one_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     """A citer's journal version folds into its corpus preprint before selection."""
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     scenario = _scenario(citers=0)
     title = "learning rate schedules seed revisited"
     preprint = "arxiv:2402.00001"
@@ -550,10 +530,9 @@ def test_publication_version_takes_one_slot(
 
 @pytest.mark.parametrize("mode", _MODES)
 def test_publication_version_without_a_corpus_row_takes_one_slot(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory, mode: str
+    monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     """A provider preprint absent from the corpus and its publication fold in every mode."""
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     scenario = _scenario(citers=0)
     title = "learning rate schedules seed revisited"
     preprint = scenario.world.add("d" * 40, title, arxiv_id="2402.00002", year=2024)
@@ -579,7 +558,9 @@ def test_publication_version_without_a_corpus_row_takes_one_slot(
     assert builder.seed_relations[preprint] == "cites_seed"
     ranked_ids = [item.paper_id for item in builder.discovery_ranking]
     assert preprint in ranked_ids and publication not in ranked_ids
-    assert publication not in papers
+    # The pair takes one of the three slots; the publication takes none.
+    assert preprint in papers and publication not in papers
+    assert list(papers)[1:] == ranked_ids[:3]
 
 
 def _graph_signature(
@@ -597,11 +578,8 @@ def _graph_signature(
     return sorted(map(str, graph.nodes)), edges
 
 
-def test_builds_are_deterministic(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
-) -> None:
+def test_builds_are_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     """Repeated builds rank, select and connect papers identically."""
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     scenario = _scenario()
     model = WordHashEncodeModel()
     outcomes = []
@@ -659,7 +637,6 @@ def test_builds_are_deterministic(
 )
 def test_provider_requests_per_build(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path_factory: pytest.TempPathFactory,
     mode: str,
     cold: dict[str, int],
     warm: dict[str, int],
@@ -669,7 +646,6 @@ def test_provider_requests_per_build(
     Warm rebuilds reuse the paper and reference caches, so only the seed's own
     lists are requested again.
     """
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     scenario = _scenario()
     model = WordHashEncodeModel()
     counts = []
@@ -724,10 +700,9 @@ def _encoding_role(text: str) -> str:
 
 @pytest.mark.parametrize("mode", ["arxiv-corpus", "both"])
 def test_json_export_carries_each_related_papers_discovery_evidence(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory, mode: str
+    monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     """Related nodes export their fused rank, score, features and list ranks."""
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path_factory.mktemp("cache")))
     scenario = _scenario()
     with fake_client(scenario.world) as client:
         builder = _builder(client, scenario, mode)

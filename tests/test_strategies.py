@@ -40,7 +40,9 @@ from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuild
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 from tests._helpers import (
+    build_publication_pair,
     disable_embedding_dep_checks,
+    http_response,
     offline_hybrid_encoder,
     stub_hybrid_corpus,
     word_hash_vectors,
@@ -128,19 +130,9 @@ def _recommendation_payload(paper_id: str) -> dict[str, object]:
     }
 
 
-def _http_response(payload: object) -> MagicMock:
-    """Build a successful direct-transport response fixture."""
-    response = MagicMock()
-    response.status_code = 200
-    response.headers = {}
-    response.json.return_value = payload
-    response.raise_for_status.return_value = None
-    return response
-
-
 def _relation_response(key: str, paper_id: str) -> MagicMock:
     """Build one REST relation page containing a paper ID."""
-    return _http_response({"data": [{key: {"paperId": paper_id}}], "next": None})
+    return http_response({"data": [{key: {"paperId": paper_id}}], "next": None})
 
 
 def _reference_outage_transport(url: str, **_kwargs: object) -> MagicMock:
@@ -149,7 +141,7 @@ def _reference_outage_transport(url: str, **_kwargs: object) -> MagicMock:
         raise requests.ConnectionError("offline")
     if url.endswith("/citations"):
         return _relation_response("citingPaper", "healthy-citation")
-    return _http_response(
+    return http_response(
         {"recommendedPapers": [_recommendation_payload("healthy-recommendation")]}
     )
 
@@ -763,7 +755,7 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
             """Fail citations while serving the recommendation page."""
             if url.endswith("/citations"):
                 raise requests.ConnectionError("offline")
-            return _http_response(
+            return http_response(
                 {
                     "recommendedPapers": [
                         _recommendation_payload("healthy-recommendation")
@@ -892,7 +884,7 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
                 "fields": ",".join(s2.payloads.DEFAULT_PAPER_FIELDS),
                 "limit": 6,
             }
-            return _http_response(
+            return http_response(
                 {
                     "recommendedPapers": [
                         _recommendation_payload(paper_id)
@@ -3329,57 +3321,9 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_recommendation_rank() -> 
     assert pool.recommendation_ranks == {local.paper_id: 1}
 
 
-def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
-    """Hybrid false twins should remain separate source classes without a bonus."""
-    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
-    seed = _seed_paper()
-    pool = DiscoveryPool(seed, builder.seed_relations)
-    candidates, sources = pool.papers, pool.sources
-    authors = [Author(name="Katherine Johnson")]
-    citation_twin = Paper(
-        paper_id="e" * 40,
-        title="Same title",
-        year=2022,
-        authors=authors,
-    )
-    semantic_twin = Paper(
-        paper_id="f" * 40,
-        title="Same title",
-        year=2022,
-        authors=authors,
-    )
-    pool.add(citation_twin, source="citation", relation="cites_seed")
-    pool.add(semantic_twin, source="semantic", relation="semantic_only")
-
-    assert set(candidates) == {citation_twin.paper_id, semantic_twin.paper_id}
-    assert sources[citation_twin.paper_id] == {"citation"}
-    assert sources[semantic_twin.paper_id] == {"semantic"}
-
-
-def test_hybrid_ingest_merges_s2_duplicates_with_shared_external_id() -> None:
-    """Hybrid ingestion keeps one canonical S2 record for matching DOI metadata."""
-    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
-    seed = _seed_paper()
-    pool = DiscoveryPool(seed, builder.seed_relations)
-    candidates, sources = pool.papers, pool.sources
-    first = _paper("1" * 40)
-    first.doi = "10.1000/shared"
-    second = _paper("2" * 40)
-    second.doi = "10.1000/shared"
-
-    pool.add(first, source="citation", relation="cites_seed")
-    pool.add(second, source="semantic", relation="semantic_only")
-
-    assert set(candidates) == {first.paper_id}
-    assert sources[first.paper_id] == {"citation", "semantic"}
-    assert builder.seed_relations[first.paper_id] == "cites_seed"
-
-
-def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> None:
+def test_identity_historical_provider_alias_respects_conflicting_identifiers() -> None:
     """A changed provider payload cannot overwrite a reconciled corpus identity."""
-    builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
-    seed = _seed_paper()
-    pool = DiscoveryPool(seed, builder.seed_relations)
+    pool = DiscoveryPool(_seed_paper())
     candidates, sources = pool.papers, pool.sources
     cited = _paper("1" * 40)
     cited.arxiv_id = "2401.00001"
@@ -3401,22 +3345,13 @@ def test_hybrid_historical_provider_alias_respects_conflicting_identifiers() -> 
     assert not local.doi
     assert sources[local.paper_id] == {"citation", "semantic"}
     assert sources[refreshed.paper_id] == {"semantic"}
-    assert builder.seed_relations[local.paper_id] == "cites_seed"
+    assert pool.seed_relations[local.paper_id] == "cites_seed"
 
 
 @pytest.fixture
 def unlinked_publication_pair() -> tuple[Paper, Paper]:
     """A corpus preprint and published record without a shared external ID."""
-    corpus = _paper("arxiv:2503.06378", year=2025, refs=["reference-a"])
-    corpus.is_local_corpus = True
-    corpus.title = "Measuring Model\nCapabilities"
-    corpus.authors = [Author(name="Lexin Zhou")]
-    corpus.doi = "10.48550/arXiv.2503.06378"
-    publication = _paper("f" * 40, year=2026, refs=["reference-b"])
-    publication.title = "Measuring model capabilities"
-    publication.authors = [Author(name="Lexin Zhou")]
-    publication.doi = "10.1000/published"
-    return corpus, publication
+    return build_publication_pair()
 
 
 def test_hybrid_collection_preserves_reconciled_publication_reference(
@@ -3447,11 +3382,9 @@ def test_hybrid_collection_preserves_reconciled_publication_reference(
     assert builder.paper_sources[corpus.paper_id] == "both"
 
 
-def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:
+def test_candidate_pool_keeps_ambiguous_corpus_matches_separate() -> None:
     """An S2 paper must not collapse two matching local-corpus records."""
-    builder = HybridGraphBuilder(max_papers=5, client=MagicMock())
-    seed = _seed_paper()
-    pool = DiscoveryPool(seed, builder.seed_relations)
+    pool = DiscoveryPool(_seed_paper())
     candidates, sources = pool.papers, pool.sources
     corpus_first = _paper("local-first")
     corpus_first.is_local_corpus = True
