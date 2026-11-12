@@ -11,12 +11,12 @@ import argparse
 import math
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn, cast
 
 from rich import box
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
 from rich_argparse import RichHelpFormatter
@@ -120,6 +120,19 @@ class _ArgumentParser(argparse.ArgumentParser):
         self.exit(2)
 
 
+def _missing_command(parser: argparse.ArgumentParser) -> int:
+    """Show a command group's full help on stderr when no subcommand was given.
+
+    A bare ``citemesh``, ``citemesh cache``, or ``citemesh config`` is a usage
+    error, so it exits like one but lists the choices instead of one usage line.
+
+    :param argparse.ArgumentParser parser: Command group that needs a subcommand.
+    :return int: Argparse's usage-error status.
+    """
+    parser.print_help(sys.stderr)
+    return 2
+
+
 def _help_examples(*examples: tuple[str, str]) -> Table:
     """Render labeled command examples that wrap with the help's terminal width.
 
@@ -138,6 +151,18 @@ def _help_examples(*examples: tuple[str, str]) -> Table:
     for label, command in examples:
         table.add_row(Text.assemble((label + "\n", "dim"), (command + "\n", "cyan")))
     return table
+
+
+def _rich_epilog(renderable: RenderableType) -> str:
+    """Pass a Rich renderable through argparse's string-typed ``epilog``.
+
+    ``RichHelpFormatter`` renders renderables given as the epilog, but typeshed
+    declares the parameter as ``str``; this is the one place that bridges that.
+
+    :param RenderableType renderable: Epilog content, such as help examples.
+    :return str: The same object, typed for ``ArgumentParser(epilog=...)``.
+    """
+    return cast(str, renderable)
 
 
 def _output_table(title: str) -> Table:
@@ -167,14 +192,14 @@ class _TrackedActionMixin(argparse.Action):
         self,
         parser: argparse.ArgumentParser,
         namespace: argparse.Namespace,
-        values: object,
+        values: str | Sequence[object] | None,
         option_string: str | None = None,
     ) -> None:
         """Record options and retain parent options across subparser namespaces.
 
         :param argparse.ArgumentParser parser: Parser invoking this action.
         :param argparse.Namespace namespace: Destination namespace.
-        :param object values: Parsed action values.
+        :param values: Parsed action values.
         :param str | None option_string: Explicit option spelling, if any.
         :return None: Apply the action and merge presence tracking.
         """
@@ -187,13 +212,7 @@ class _TrackedActionMixin(argparse.Action):
                 provided = set()
                 setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
             provided.add(self.dest)
-        action_call = cast(
-            Callable[
-                [argparse.ArgumentParser, argparse.Namespace, object, str | None], None
-            ],
-            super().__call__,
-        )
-        action_call(parser, namespace, values, option_string)
+        super().__call__(parser, namespace, values, option_string)
         if isinstance(self, argparse._SubParsersAction):
             # argparse copies a fresh child namespace over its parent.
             child_provided: set[str] = getattr(
@@ -406,9 +425,7 @@ def _create_root_parser() -> tuple[
     parser = _ArgumentParser(
         prog="citemesh",
         description="CiteMesh — discover related research and build paper graphs.",
-        # RichHelpFormatter accepts renderables through argparse's string-typed epilog.
-        epilog=cast(
-            str,
+        epilog=_rich_epilog(
             Group(
                 _help_examples(
                     (
@@ -463,7 +480,7 @@ def _add_build_graph_arguments(
         type=str,
         choices=list(STRATEGY_CHOICES),
         default="recommendation",
-        help="recommendation, citation, embedding, hybrid (default: recommendation)",
+        help="recommendation, citation, embedding, hybrid (default: %(default)s)",
     )
 
     # Common arguments
@@ -563,8 +580,8 @@ def _add_build_citation_arguments(
         metavar="N",
         default=25,
         help=(
-            "Maximum citing papers to fetch (default: 25; hybrid fetches up to "
-            f"{HYBRID_DEFAULT_MAX_CITATIONS} and ranks them all)"
+            "Maximum citing papers to fetch (default: %(default)s; hybrid fetches "
+            f"up to {HYBRID_DEFAULT_MAX_CITATIONS} and ranks them all)"
         ),
     )
 
@@ -575,8 +592,8 @@ def _add_build_citation_arguments(
         metavar="N",
         default=25,
         help=(
-            "Maximum referenced papers to fetch (default: 25; hybrid fetches up "
-            f"to {HYBRID_DEFAULT_MAX_REFERENCES} and ranks them all)"
+            "Maximum referenced papers to fetch (default: %(default)s; hybrid "
+            f"fetches up to {HYBRID_DEFAULT_MAX_REFERENCES} and ranks them all)"
         ),
     )
 
@@ -642,7 +659,7 @@ def _add_build_corpus_arguments(
         choices=list(MODEL_PROFILE_CHOICES),
         default="auto",
         help=(
-            "auto, default, embeddinggemma (default: auto). "
+            "auto, default, embeddinggemma (default: %(default)s). "
             "Use an explicit profile for stripped local exports."
         ),
     )
@@ -671,7 +688,7 @@ def _add_build_corpus_arguments(
         type=_non_empty_str,
         default="train",
         help=(
-            "ArXiv dataset split (default: train; non-streaming slices such as "
+            "ArXiv dataset split (default: %(default)s; non-streaming slices such as "
             "train[:1000] bound rows exposed to CiteMesh)"
         ),
     )
@@ -699,7 +716,7 @@ def _add_build_corpus_arguments(
         type=_positive_int,
         metavar="N",
         default=4,
-        help="Neighbors per node for the embedding strategy only (default: 4)",
+        help="Neighbors per node for the embedding strategy only (default: %(default)s)",
     )
 
     embedding_group.add_argument(
@@ -717,6 +734,7 @@ def _add_build_corpus_arguments(
     semantic_group.add_argument(
         "--min-semantic-similarity",
         type=_threshold_float,
+        metavar="SCORE",
         default=EMBEDDING_CONFIG.min_semantic_similarity,
         help=(
             "Minimum semantic cosine for embedding/hybrid graph edges "
@@ -916,7 +934,7 @@ def _add_build_runtime_arguments(
         choices=list(DEVICE_CHOICES),
         default="auto",
         help=(
-            "auto, cuda, mps, cpu (default: auto). Auto prefers CUDA, "
+            "auto, cuda, mps, cpu (default: %(default)s). Auto prefers CUDA, "
             "then MPS (Apple Silicon), then CPU."
         ),
     )
@@ -940,8 +958,7 @@ def _add_build_arguments(
         "build",
         help="Build a graph from a paper or topic",
         description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
-        epilog=cast(
-            str,
+        epilog=_rich_epilog(
             _help_examples(
                 (
                     "Create or extend the dashboard collection in out/",
@@ -1013,8 +1030,7 @@ def _add_view_arguments(
         "view",
         help="Open saved results in a browser",
         description="Open an existing HTML export or a collection directory's dashboard.html in a browser.",
-        epilog=cast(
-            str,
+        epilog=_rich_epilog(
             _help_examples(
                 ("Open the default saved dashboard", "citemesh view"),
                 ("Open another collection", "citemesh view out/my-collection"),
@@ -1027,7 +1043,7 @@ def _add_view_arguments(
         type=Path,
         nargs="?",
         default=Path("out") / DASHBOARD_COLLECTION_FILENAME,
-        help="HTML file or collection directory (default: out/dashboard.html)",
+        help="HTML file or collection directory (default: %(default)s)",
     )
     view_parser.add_argument(
         "--browser",
@@ -1055,8 +1071,7 @@ def _add_search_arguments(
             "embeddings when available, otherwise Semantic Scholar. Local mode "
             "uses the same model and cache settings as your configured builds."
         ),
-        epilog=cast(
-            str,
+        epilog=_rich_epilog(
             _help_examples(
                 (
                     "Search available sources automatically",
@@ -1090,7 +1105,7 @@ def _add_search_arguments(
         type=_positive_int,
         metavar="N",
         default=10,
-        help="Maximum results (default: 10; S2 relevance search supports up to 1000)",
+        help="Maximum results (default: %(default)s; S2 relevance search supports up to 1000)",
     )
     search_parser.add_argument(
         "--mode",
@@ -1240,8 +1255,7 @@ def _add_cache_arguments(
         "cache",
         help="Inspect or clear local caches",
         description="Inspect local cache usage or delete cached data. Clearing preserves your config.toml settings.",
-        epilog=cast(
-            str,
+        epilog=_rich_epilog(
             _help_examples(
                 ("Show storage by cache section", "citemesh cache scan"),
                 ("Clear cached data after confirmation", "citemesh cache clear"),
@@ -1368,8 +1382,7 @@ def _add_config_arguments(
             "the cache root. Precedence: explicit CLI flag > environment "
             "variable > config.toml > built-in default."
         ),
-        epilog=cast(
-            str,
+        epilog=_rich_epilog(
             _help_examples(
                 ("Show saved settings", "citemesh config list"),
                 (

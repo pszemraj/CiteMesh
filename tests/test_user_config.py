@@ -1656,13 +1656,14 @@ def test_config_cli_rejects_unknown_key_and_bad_value() -> None:
 
 
 def test_config_cli_without_subcommand_prints_help() -> None:
-    """Invoking config without an operation should print help and fail.
+    """Invoking config without an operation should print help to stderr and fail.
 
     :return None: Assertions validate the incomplete command response.
     """
     result = _run_cli(["config"])
-    assert result.returncode == 1
-    assert "Config operations" in result.stdout
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "Config operations" in result.stderr
 
 
 @pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
