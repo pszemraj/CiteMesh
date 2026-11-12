@@ -1,6 +1,6 @@
 # Defaults tuning studies
 
-Measurements and tradeoffs behind CiteMesh's semantic threshold and embedding dimension.
+Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and embedding text.
 
 ## Semantic edge threshold (September 2026)
 
@@ -119,3 +119,51 @@ Two GPT-5.6 Sol reviewers each assessed six different established seeds using bl
 Both saved caches reopened with 100,000 rows and reused hydration without loading the dataset. CiteMesh's actual graph candidate search reproduced all 60 ranked lists exactly. The evaluation did not measure the full 3.15-million-paper corpus, Semantic Scholar fusion, graph topology, or real CPU/MPS execution. The 11.4% complete-cache increase applies to these INT8 corpus caches; it is not an estimate for FP32 candidate or graph-similarity stores.
 
 The decision favors retention of the full model's retrieval behavior over the lowest storage and search cost. Explicit 256d remains available when those costs matter more.
+
+## Embedding text (November 2026)
+
+### Decision
+
+Retrieval documents keep both the title and the abstract, in EmbeddingGemma's two document fields (`title: T | text: A`), and the seed's retrieval query keeps `T. A`. Dropping the title did not raise precision and lost important papers at the top of the list. Encoding the title alone, or giving the title its own vector, was worse throughout and would also double encoding cost.
+
+### Method
+
+Sixteen machine-learning seeds from 2021 to 2026 were replayed offline through the shipped hybrid ranking. Each pool held the seed's references, citers, and 200 recommendations, plus its 180 nearest corpus papers in the query role and in the document role, ranked by reciprocal rank fusion and cut at 44 papers. Every candidate and the seed were re-encoded under each variant from rehuman-normalized text: corpus papers from their arXiv text, the rest from their Semantic Scholar text. Grades are a blind Claude Sonnet judge's relevance labels from title and abstract: useful is 1 or 2, important is 2, tangent is 0. Papers that no earlier arm had surfaced stay ungraded and count only in the denominator.
+
+- **TA**: title and abstract, as shipped.
+- **A**: abstract only (`title: none | text: A`); papers without an abstract keep their TA text.
+- **T**: title only (`title: T | text:`, as a paper without an abstract is encoded).
+- **SUM**: one stored vector, the normalized sum of the T and A vectors, at two encodes per paper.
+- **PAIR**: two stored vectors per paper; a pair scores the mean of its title-title and abstract-abstract cosines.
+
+### Results
+
+Shares of the returned list over all 16 seeds (160 slots at k = 10, 320 at k = 20, 704 at k = 44):
+
+| variant | k | useful | important | tangent | ungraded |
+|---|---|---|---|---|---|
+| TA | 10 | 86.2% | 61.9% | 13.8% | 0.0% |
+| TA | 20 | 81.2% | 46.9% | 18.8% | 0.0% |
+| TA | 44 | 72.2% | 35.8% | 26.3% | 1.6% |
+| A | 10 | 85.0% | 54.4% | 14.4% | 0.6% |
+| A | 20 | 79.4% | 45.6% | 18.4% | 2.2% |
+| A | 44 | 65.8% | 32.2% | 25.4% | 8.8% |
+| T | 10 | 63.1% | 37.5% | 18.1% | 18.8% |
+| T | 44 | 41.6% | 19.6% | 16.9% | 41.5% |
+| SUM | 10 | 83.8% | 52.5% | 15.0% | 1.2% |
+| SUM | 20 | 74.4% | 41.6% | 21.6% | 4.1% |
+| SUM | 44 | 59.4% | 30.1% | 25.7% | 14.9% |
+| PAIR | 10 | 80.6% | 50.6% | 18.8% | 0.6% |
+| PAIR | 20 | 76.9% | 43.8% | 19.7% | 3.4% |
+| PAIR | 44 | 61.5% | 31.0% | 24.6% | 13.9% |
+
+Per seed, TA and A tie on useful and tangent papers at k = 10 (TA ahead on 3 seeds, behind on 4) and at k = 20, but TA has more important papers in its top 10 on 10 seeds and fewer on 3 (sign test p = 0.09). TA has more useful papers than SUM in its top 20 on 10 seeds and fewer on none (p = 0.002), more than PAIR in its top 10 on 7 seeds and fewer on 1 (p = 0.07), and more than T in its top 10 on 15 of 16 seeds, tying on the other.
+
+The same replay with the stored pre-normalization vectors scores 86.9% useful, 60.0% important and 13.1% tangent at k = 10, and 70.7% useful and 29.3% tangent at k = 44 with nothing ungraded, so normalization matches the old text at the top and returns 3 points fewer tangents over the full list.
+
+### Limits
+
+- Each variant re-selected its corpus neighbours from each seed's wide candidate table (2,260 to 20,093 corpus papers per seed: the TA neighbourhoods of the seed, its references, and its citers), not from the whole index, so a variant could not retrieve a paper TA never reached.
+- At k = 44, A leaves 8.8% of its list ungraded. If every one of those papers were useful, A would reach 74.6% against TA's 72.2-73.8%, so the most A can achieve on the full list is a tie.
+- The judge reads only titles and abstracts, which may favour semantically retrieved papers over structurally relevant ones.
+- Graph edges were not compared: the symmetric similarity role keeps `T. A`, and the 0.74 threshold above was calibrated on that text.
