@@ -34,6 +34,19 @@ def validate_canonical_node_ids(node_ids: Iterable[Hashable]) -> None:
         serialized_owners[identifier] = node_id
 
 
+def _collapse_whitespace(value: object) -> object:
+    """Join hard-wrapped text into one line, leaving non-strings unchanged.
+
+    arXiv metadata wraps titles and abstracts at fixed widths with newlines and
+    indentation; exports should show the text, not the source's line layout.
+
+    :param object value: Raw title or abstract field.
+    :return object: ``value`` with each whitespace run replaced by one space when
+        it is a string, otherwise ``value`` itself.
+    """
+    return " ".join(value.split()) if isinstance(value, str) else value
+
+
 def effective_node_metadata(
     node_id: Hashable, attrs: Mapping[str, object]
 ) -> EffectiveNodeMetadata:
@@ -42,6 +55,8 @@ def effective_node_metadata(
     An attached :class:`~citemesh.core.models.Paper` owns bibliographic metadata.
     The graph's explicit ``is_seed`` attribute remains authoritative because seed
     role belongs to one graph build rather than to the reusable paper record.
+    Titles and abstracts are collapsed to single-spaced text here, at the
+    presentation boundary, so embedding inputs keep the source text unchanged.
 
     :param Hashable node_id: Graph node identifier.
     :param Mapping[str, object] attrs: Raw graph node attributes.
@@ -51,11 +66,11 @@ def effective_node_metadata(
     if isinstance(paper, Paper):
         return {
             "id": node_id,
-            "title": paper.title,
+            "title": _collapse_whitespace(paper.title),
             "year": paper.year,
             "authors": [author.name for author in paper.authors],
             "citation_count": paper.citation_count,
-            "abstract": paper.abstract,
+            "abstract": _collapse_whitespace(paper.abstract),
             "venue": paper.venue,
             "arxiv_id": paper.arxiv_id,
             "doi": paper.doi,
@@ -66,11 +81,11 @@ def effective_node_metadata(
 
     return {
         "id": node_id,
-        "title": attrs.get("title", ""),
+        "title": _collapse_whitespace(attrs.get("title", "")),
         "year": attrs.get("year"),
         "authors": attrs.get("authors") or [],
         "citation_count": attrs.get("citation_count", 0),
-        "abstract": attrs.get("abstract", ""),
+        "abstract": _collapse_whitespace(attrs.get("abstract", "")),
         "venue": attrs.get("venue", ""),
         "arxiv_id": attrs.get("arxiv_id", ""),
         "doi": attrs.get("doi", ""),
