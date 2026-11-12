@@ -58,6 +58,11 @@ _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULTS_TABLE = "defaults"
 API_TABLE = "api"
 
+# Reading config.toml fails with these. ``ValueError`` covers decoding errors
+# and ``TOMLDecodeError``, and also the plain ``ValueError`` that tomllib lets
+# through for an integer literal over Python's 4300-digit conversion limit.
+_TOML_READ_ERRORS = (OSError, ValueError)
+
 _TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
 _FALSEY_STRINGS = frozenset({"false", "0", "no", "off"})
 
@@ -335,7 +340,7 @@ def load_user_config(path: Path | None = None) -> UserConfig:
             document = tomllib.load(handle)
     except FileNotFoundError:
         return UserConfig(path=config_path)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except _TOML_READ_ERRORS as exc:
         logger.warning("Ignoring unreadable config file %s: %s", config_path, exc)
         return UserConfig(path=config_path)
 
@@ -369,7 +374,7 @@ def _read_raw_document(config_path: Path) -> dict[str, TOMLValue]:
             return tomllib.load(handle)
     except FileNotFoundError:
         return {}
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except _TOML_READ_ERRORS as exc:
         raise ConfigFileError(
             f"Cannot rewrite config file {config_path}: {exc}. "
             "Fix or remove the file, then retry."

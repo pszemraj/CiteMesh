@@ -31,6 +31,7 @@ from citemesh.core.choices import (
     THEME_CHOICES,
 )
 from citemesh.core.config import EmbeddingStorageConfig
+from citemesh.core.validation import ValueValidationError, parse_unit_interval_float
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
 from citemesh.data.user_config import (
@@ -329,7 +330,16 @@ def test_load_skips_unknown_and_invalid_entries(
     assert "unknown_table" in messages
 
 
-@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+# Files tomllib cannot read. The last raises a plain ValueError (Python's
+# integer-string digit limit) instead of TOMLDecodeError.
+_CORRUPT_CONFIG_PAYLOADS = [
+    pytest.param(b"not [valid toml", id="syntax"),
+    pytest.param(b"\xff", id="not-utf8"),
+    pytest.param(b"[defaults]\nmax_papers = " + b"1" * 5000, id="5000-digit-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
 def test_load_corrupt_file_warns_and_returns_empty(
     payload: bytes, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -350,7 +360,7 @@ def test_load_corrupt_file_warns_and_returns_empty(
     )
 
 
-@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+@pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
 def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> None:
     """Mutation should reject corrupt config files without overwriting them.
 
@@ -364,6 +374,104 @@ def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> Non
         set_config_value("defaults.theme", "dark", path=config_path)
     # Corrupt content must remain untouched for manual repair.
     assert config_path.read_bytes() == payload
+
+
+_HUGE_TOML_INT = "1" + "0" * 400
+
+# Valid TOML values of every kind a hand-edited config can hold.
+_ODD_TOML_LITERALS = [
+    pytest.param(_HUGE_TOML_INT, id="huge-int"),
+    pytest.param(f"-{_HUGE_TOML_INT}", id="huge-negative-int"),
+    pytest.param("3.5", id="float"),
+    pytest.param("inf", id="inf"),
+    pytest.param("-inf", id="negative-inf"),
+    pytest.param("nan", id="nan"),
+    pytest.param("true", id="bool"),
+    pytest.param("[]", id="empty-array"),
+    pytest.param("[1, 2]", id="array"),
+    pytest.param("[[1], ['a']]", id="nested-array"),
+    pytest.param("[{ a = 1 }]", id="array-of-tables"),
+    pytest.param("{ a = 1 }", id="inline-table"),
+    pytest.param("1979-05-27T07:32:00Z", id="datetime"),
+    pytest.param("1979-05-27", id="date"),
+]
+
+
+@pytest.mark.parametrize("literal", _ODD_TOML_LITERALS)
+def test_load_accepts_or_warns_on_odd_values_for_every_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, literal: str
+) -> None:
+    """No TOML value under ``[defaults]`` may make loading raise.
+
+    Each key gets the value directly and inside a nested table, and either
+    accepts it or drops it with a warning naming the key.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :param str literal: TOML literal written for every key.
+    :return None: Assertions validate that loading returns and warns.
+    """
+    config_path = tmp_path / "config.toml"
+    for key in CONFIG_DEFAULT_KEY_SPECS:
+        for document in (
+            f"[defaults]\n{key} = {literal}\n",
+            f"[defaults.{key}]\nvalue = {literal}\n",
+        ):
+            config_path.write_text(document, encoding="utf-8")
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
+                config = load_user_config(config_path)
+            if key not in config.defaults:
+                assert f"Ignoring invalid config value for 'defaults.{key}'" in (
+                    caplog.text
+                ), document
+
+
+_HUGE_INT_PARAMS = [
+    pytest.param(10**400, id="huge-int"),
+    pytest.param(-(10**400), id="huge-negative-int"),
+]
+
+
+@pytest.mark.parametrize("literal", _ODD_TOML_LITERALS[:2])
+def test_huge_toml_threshold_is_ignored_with_a_warning(
+    caplog: pytest.LogCaptureFixture, literal: str
+) -> None:
+    """An integer beyond float range is an invalid threshold, not a crash.
+
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :param str literal: TOML integer too large to convert to a float.
+    :return None: Assertions validate the warning, other keys and ``config list``.
+    """
+    config_path = user_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f'[defaults]\ntheme = "light"\nmin_semantic_similarity = {literal}\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
+        config = load_user_config()
+
+    assert config.defaults == {"theme": "light"}
+    assert (
+        "Ignoring invalid config value for 'defaults.min_semantic_similarity'"
+        in caplog.text
+    )
+    assert "expected a finite float between 0.0 and 1.0" in caplog.text
+    assert _run_cli(["config", "list"]).returncode == 0
+
+
+@pytest.mark.parametrize("value", _HUGE_INT_PARAMS)
+def test_unit_interval_parser_rejects_ints_beyond_float_range(value: int) -> None:
+    """The shared CLI/config float parser reports overflow as out of range.
+
+    :param int value: Integer too large to convert to a float.
+    :return None: Assertions validate the validation reason.
+    """
+    with pytest.raises(ValueValidationError) as error:
+        parse_unit_interval_float(value)
+    assert error.value.reason == "out_of_range"
 
 
 def test_config_write_wraps_parent_directory_error(
@@ -630,7 +738,9 @@ def test_configured_dataset_source_is_ignored_in_candidate_mode(
     )
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1", True])
+@pytest.mark.parametrize(
+    "value", ["nan", "inf", "-0.1", "1.1", True, *_HUGE_INT_PARAMS]
+)
 def test_semantic_threshold_config_rejects_invalid_values(value: object) -> None:
     """Keep persisted thresholds within the same range as CLI arguments.
 
@@ -1555,7 +1665,7 @@ def test_config_cli_without_subcommand_prints_help() -> None:
     assert "Config operations" in result.stdout
 
 
-@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+@pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
 def test_config_cli_list_survives_corrupt_file(payload: bytes) -> None:
     """Config listing should remain usable with a corrupt config file.
 
