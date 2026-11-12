@@ -1495,7 +1495,12 @@ class EmbeddingGraphBuilder(
     def cached_bibliography_metadata(
         self, keys: Sequence[BibliographyKey]
     ) -> dict[BibliographyKey, Paper]:
-        """Resolve title, first author, and year within the prepared corpus."""
+        """Resolve title, first author, and year within the prepared corpus.
+
+        :param Sequence[BibliographyKey] keys: Identifier-free references to resolve.
+        :return dict[BibliographyKey, Paper]: Corpus paper for each key that matches
+            exactly one cached record; unresolved keys are omitted.
+        """
         metadata = self.embedding_cache.get_paper_metadata_for_bibliography(
             keys,
             corpus_size=self.corpus_size if self._cache_selection is not None else None,

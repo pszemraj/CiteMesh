@@ -532,6 +532,11 @@ class EmbeddingCache(
 
         An arXiv preprint can be one year earlier than the cited publication.
         If both dates match different rows, the reference remains unresolved.
+
+        :param Sequence[BibliographyKey] keys: Identifier-free references to resolve.
+        :param int | None corpus_size: Optional newest-N view within active membership.
+        :return dict[BibliographyKey, CachedPaperRecord]: Record for each key that
+            matches exactly one cached paper; unresolved keys are omitted.
         """
         normalized = {}
         for key in keys:
@@ -548,6 +553,11 @@ class EmbeddingCache(
         years = sorted({year for key in wanted for year in (key.year, key.year - 1)})
 
         def matching_title(title: str | None) -> bool:
+            """Report whether a stored title normalizes to a wanted reference title.
+
+            :param str | None title: Stored title, absent when the row has none.
+            :return bool: Whether the title is one of the wanted titles.
+            """
             return (
                 title is not None
                 and bibliography_text_key(title, first_tokens) in titles

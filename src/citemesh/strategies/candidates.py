@@ -506,7 +506,16 @@ def _select_recovered_references_by_text(
 def _add_verified_reference(
     seed: Paper, references: list[Paper], paper: Paper | None
 ) -> None:
-    """Keep the canonical reference while excluding matches to the seed."""
+    """Keep the canonical reference while excluding matches to the seed.
+
+    A paper that duplicates an already collected reference is merged into it
+    instead of being appended.
+
+    :param Paper seed: Seed paper whose own records are never kept as references.
+    :param list[Paper] references: Collected references, extended in place.
+    :param Paper | None paper: Resolved reference record, or ``None`` if unresolved.
+    :return None: Appends or merges ``paper`` into ``references``.
+    """
     if (
         paper is None
         or paper.paper_id == seed.paper_id

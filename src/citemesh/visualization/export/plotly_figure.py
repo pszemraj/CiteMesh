@@ -490,6 +490,12 @@ def _build_label_annotations(
     x_span = max(node_x, default=0.0) - x_min
 
     def horizontal_anchor(x: float) -> Literal["left", "center", "right"]:
+        """Anchor a label so it extends toward the middle of the graph.
+
+        :param float x: Node x coordinate.
+        :return Literal["left", "center", "right"]: ``left`` in the left third of
+            the horizontal span, ``right`` in the right third, else ``center``.
+        """
         # Long title fallbacks near either edge should extend into the graph.
         if x_span > 0:
             if x < x_min + x_span / 3:
