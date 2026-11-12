@@ -40,11 +40,11 @@ from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
 )
-from citemesh.data.embedding_contract import InstalledCorpusError
+from citemesh.data.embedding_contract import CorpusSource, InstalledCorpusError
 from citemesh.progress import progress_task
 from citemesh.strategies.base import deterministic_sort_key
 
-from . import deps
+from . import corpus_source, deps
 from .config import (
     CALIBRATION_RESERVOIR_SEED,
     CANDIDATE_MULTIPLIER,
@@ -95,6 +95,25 @@ def _precomputed_text(texts: Mapping[str, str], metadata: CacheInputMetadata) ->
     :return str: The record's formatted retrieval-document text.
     """
     return texts[str(metadata.get("paper_id", "")).strip()]
+
+
+def _unloadable_revision_error(
+    operation: str, source: str, revision: str, exc: Exception
+) -> RuntimeError:
+    """Explain that the source commit a corpus cache is pinned to cannot be read.
+
+    :param str operation: Pass that needed rows at the pinned commit.
+    :param str source: Dataset source recorded on the cache.
+    :param str revision: Commit the cache was hydrated from.
+    :param Exception exc: Failure raised while loading that commit.
+    :return RuntimeError: Error naming the commit and the rebuild remedy.
+    """
+    return RuntimeError(
+        f"{operation} could not load {source} at revision {revision}, the source "
+        f"commit this corpus cache was hydrated from: {exc}. Re-run to retry; if "
+        "that revision is no longer available, rerun with --force-rebuild-cache "
+        "--overwrite-cache to rebuild the corpus from one current revision."
+    )
 
 
 class _ColumnarDataset(Iterable[DatasetRecord], Protocol):
@@ -333,7 +352,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """Hydrate the active corpus while its operation lock is held.
 
         Reuse a valid cache, resume incomplete hydration, or load the source and
-        rebuild the namespace when existing rows cannot be reused.
+        rebuild the namespace when existing rows cannot be reused. A rebuild
+        pins the source to one commit, and every later read of that namespace,
+        resumes included, uses the commit it recorded.
 
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
@@ -342,22 +363,22 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         if cached_dataset_source == self.dataset_source:
-            if self.embedding_cache.prepare_corpus_identity_reconciliation():
-                logger.debug(
-                    "Rechecking legacy corpus membership by stable content "
-                    "identity while preserving existing paper IDs and vectors."
-                )
-            if (
-                not self.embedding_cache.has_current_corpus_metadata()
-                and self._cached_corpus_rows_are_reusable(
-                    cached_dataset_source, self.embedding_cache.payload_stats()
-                )
-            ):
-                # Restore text discarded by old adapters before content aliases
-                # decide which source rows still need an embedding.
-                self._refresh_cached_corpus_metadata(
-                    cached_dataset_source, use_streaming
-                )
+            self._prepare_legacy_identity_reconciliation()
+            if not self.embedding_cache.has_current_corpus_metadata():
+                stats = self.embedding_cache.payload_stats()
+                revision = self.embedding_cache.get_hydration_source_revision()
+                # An interrupted hydration that recorded no revision cannot be
+                # read at the one it started from; the resume below refuses it.
+                if (
+                    revision is not None or stats.hydration_complete
+                ) and self._cached_corpus_rows_are_reusable(
+                    cached_dataset_source, stats
+                ):
+                    # Restore text discarded by old adapters before content
+                    # aliases decide which source rows still need an embedding.
+                    self._refresh_cached_corpus_metadata(
+                        cached_dataset_source, use_streaming, revision=revision
+                    )
         cache_is_current, cached_dataset_source = self._revalidate_hydrated_cache(
             cached_dataset_source, use_streaming
         )
@@ -368,15 +389,14 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             use_streaming=use_streaming,
             cached_dataset_source=cached_dataset_source,
         ):
-            self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
+            self._refresh_cached_corpus_metadata(
+                cached_dataset_source,
+                use_streaming,
+                revision=self.embedding_cache.get_hydration_source_revision(),
+            )
             return
 
-        capped_upstream_rows = (
-            self._resolve_dataset_split_row_count(self.dataset_source)
-            if self.corpus_size is not None and ":" not in str(self.dataset_split)
-            else None
-        )
-        dataset_source, dataset = self._resolve_hydration_dataset(
+        dataset_source, revision, dataset = self._resolve_hydration_dataset(
             cached_dataset_source, use_streaming
         )
         if self.embedding_cache.is_hydrated(
@@ -384,17 +404,28 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             self.corpus_size,
             dataset_source=dataset_source,
         ):
-            self._refresh_cached_corpus_metadata(dataset_source, use_streaming)
+            self._refresh_cached_corpus_metadata(
+                dataset_source,
+                use_streaming,
+                revision=self.embedding_cache.get_hydration_source_revision(),
+            )
             return
 
+        capped_upstream_rows = (
+            self._resolve_dataset_split_row_count(dataset_source, revision=revision)
+            if self.corpus_size is not None and ":" not in str(self.dataset_split)
+            else None
+        )
         self._prepare_clean_hydration_namespace(
             dataset_source=dataset_source,
+            revision=revision,
             cached_dataset_source=cached_dataset_source,
             use_streaming=use_streaming,
         )
         hydration_result = self._hydrate_selected_dataset(
             dataset=dataset,
             dataset_source=dataset_source,
+            revision=revision,
             use_streaming=use_streaming,
         )
         if hydration_result.hydrated_records == 0:
@@ -411,6 +442,41 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             source_rows=hydration_result.source_rows_consumed,
             capped_upstream_rows=capped_upstream_rows,
         )
+
+    def _prepare_legacy_identity_reconciliation(self) -> None:
+        """Mark a cache with positional-looking IDs for one source reconciliation.
+
+        That reconciliation runs as a resume of the now-incomplete cache, and a
+        resume reads a pinned revision. A complete cache hydrated before
+        revisions were recorded is therefore pinned to the current source
+        commit, resolved before the cache is marked incomplete; while that
+        lookup fails, the check waits for a later build.
+        """
+        cache = self.embedding_cache
+        revision: str | None = None
+        if (
+            cache.get_hydration_source_revision() is None
+            and cache.needs_corpus_identity_reconciliation()
+            and cache.payload_stats().hydration_complete
+        ):
+            try:
+                revision = self._resolve_source_revision()
+            except OSError as exc:
+                logger.debug(
+                    "Deferring the legacy corpus identity check for %s/%s: %s",
+                    self.dataset_source,
+                    self.dataset_split,
+                    exc,
+                )
+                return
+        if not cache.prepare_corpus_identity_reconciliation():
+            return
+        logger.debug(
+            "Rechecking legacy corpus membership by stable content "
+            "identity while preserving existing paper IDs and vectors."
+        )
+        if revision is not None:
+            cache.set_hydration_source_revision(revision)
 
     def _ready_manual_corpus(self) -> bool:
         """Bind a ready managed corpus and validate its requested source and view.
@@ -487,7 +553,11 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         ):
             return False, cached_dataset_source
 
-        self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
+        self._refresh_cached_corpus_metadata(
+            cached_dataset_source,
+            use_streaming,
+            revision=self.embedding_cache.get_hydration_source_revision(),
+        )
         self._refresh_hydrated_full_corpus_cache(
             use_streaming=use_streaming,
             cached_dataset_source=cached_dataset_source,
@@ -524,16 +594,18 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
     def _resolve_hydration_dataset(
         self, cached_dataset_source: str | None, use_streaming: bool
-    ) -> tuple[str, Iterable[DatasetRecord]]:
-        """Resolve the dataset to hydrate from, warning first about a rebuild.
+    ) -> tuple[str, str, Iterable[DatasetRecord]]:
+        """Pin and load the dataset to hydrate from, warning first about a rebuild.
 
-        A source that cannot be resolved is fatal rather than a fall back to the
-        existing cache: reusing unvalidated rows would silently serve another
-        corpus.
+        The source is resolved to one commit before its rows are loaded, so the
+        rebuild and any later resume of it read the same snapshot. A source that
+        cannot be resolved is fatal rather than a fall back to the existing
+        cache: reusing unvalidated rows would silently serve another corpus.
 
         :param Optional[str] cached_dataset_source: Source recorded on the cache.
         :param bool use_streaming: Whether hydration mode is streaming.
-        :return tuple[str, Iterable[DatasetRecord]]: Resolved source and rows.
+        :return tuple[str, str, Iterable[DatasetRecord]]: Resolved source, the
+            commit it is pinned to, and its rows.
         :raises RuntimeError: If the configured dataset source cannot be resolved.
         """
         if cached_dataset_source or self.embedding_cache.has_cached_payload():
@@ -546,31 +618,112 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             )
 
         try:
-            return self._load_dataset_for_hydration(use_streaming=use_streaming)
+            revision = self._resolve_source_revision()
+            dataset_source, dataset = self._load_dataset_for_hydration(
+                use_streaming=use_streaming, revision=revision
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to resolve hydration dataset source {self.dataset_source!r}; refusing to reuse "
                 "existing hydrated cache without source revalidation."
             ) from exc
+        return dataset_source, revision, dataset
+
+    def _resolve_source_revision(self) -> str:
+        """Resolve the configured source's default branch to an immutable commit.
+
+        :return str: Commit that every read of the pass about to start uses.
+        :raises OSError: If the dataset host cannot resolve the source.
+        """
+        snapshot = corpus_source.resolve_source_snapshot(
+            CorpusSource(
+                self.dataset_source,
+                None,
+                self.dataset_split,
+                "",
+                "all" if self.corpus_size is None else "newest",
+                self.corpus_size,
+            )
+        )
+        logger.debug(
+            "Pinned hydration source %s/%s to revision %s.",
+            self.dataset_source,
+            self.dataset_split,
+            snapshot.revision,
+        )
+        return snapshot.revision
+
+    def _recorded_resume_revision(self, source: str) -> str:
+        """Return the source commit an interrupted hydration must resume at.
+
+        :param str source: Dataset source recorded on the incomplete attempt.
+        :return str: Commit recorded when the hydration started.
+        :raises RuntimeError: If the attempt predates recorded source revisions.
+        """
+        revision = self.embedding_cache.get_hydration_source_revision()
+        if revision is None:
+            raise RuntimeError(
+                f"The incomplete corpus cache for {source}/{self.dataset_split} "
+                "records no source revision, so resuming it could mix rows from "
+                "two upstream revisions. Rerun with --force-rebuild-cache "
+                "--overwrite-cache to rebuild the corpus from one revision."
+            )
+        logger.debug(
+            "Resuming %s/%s at its pinned source revision %s.",
+            source,
+            self.dataset_split,
+            revision,
+        )
+        return revision
+
+    def _follows_upstream_growth(self, source: str) -> bool:
+        """Return whether a complete cache still tracks its moving upstream source.
+
+        A cache pinned to a source commit holds that revision, which cannot
+        grow; moving it to a newer one is ``citemesh cache refresh``'s job. Only
+        a cache hydrated before revisions were recorded follows upstream.
+
+        :param str source: Dataset source recorded on the cache.
+        :return bool: ``False`` when the namespace records a source revision.
+        """
+        revision = self.embedding_cache.get_hydration_source_revision()
+        if revision is None:
+            return True
+        logger.debug(
+            "Corpus cache for %s/%s is pinned to source revision %s; skipping "
+            "the upstream growth check.",
+            source,
+            self.dataset_split,
+            revision,
+        )
+        return False
 
     def _prepare_clean_hydration_namespace(
         self,
         *,
         dataset_source: str,
+        revision: str,
         cached_dataset_source: str | None,
         use_streaming: bool,
     ) -> None:
         """Clear the namespace and re-mark it for a fresh hydration attempt.
 
         The model fingerprint is carried across the clear so the rebuilt
-        namespace stays bound to the checkpoint that is already loaded.
+        namespace stays bound to the checkpoint that is already loaded, and the
+        source revision is recorded before any row is written so an interrupted
+        attempt resumes at that revision.
 
         :param str dataset_source: Resolved dataset source token.
+        :param str revision: Source commit this hydration reads.
         :param Optional[str] cached_dataset_source: Source recorded on the cache.
         :param bool use_streaming: Whether hydration mode is streaming.
         :return None: Leaves an empty namespace marked incomplete.
         """
-        logger.info("Hydrating embedding cache...")
+        logger.info(
+            "Hydrating embedding cache from %s at source revision %s...",
+            dataset_source,
+            revision,
+        )
         logger.debug(
             "Embedding cache hydration: split=%s, corpus_size=%s, streaming=%s.",
             self.dataset_split,
@@ -610,6 +763,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             corpus_size=self.corpus_size,
             complete=False,
         )
+        self.embedding_cache.set_hydration_source_revision(revision)
         # The cleared namespace contains only rows from the current adapter,
         # including when this hydration is interrupted and resumed later.
         self.embedding_cache.mark_corpus_metadata_current()
@@ -619,12 +773,14 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         *,
         dataset: Iterable[DatasetRecord],
         dataset_source: str,
+        revision: str,
         use_streaming: bool,
     ) -> _HydrationSourceSliceResult:
         """Encode a clean namespace while counting the source rows actually read.
 
         :param Iterable[DatasetRecord] dataset: Selected dataset rows.
         :param str dataset_source: Resolved dataset source token.
+        :param str revision: Source commit the rows were loaded at.
         :param bool use_streaming: Whether hydration mode is streaming.
         :return _HydrationSourceSliceResult: Cache writes and observed source progress.
         """
@@ -640,11 +796,13 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=dataset_source,
+            revision=revision,
             selected_dataset=selected_dataset,
         )
         return self._hydrate_exact_hydration_source_slice(
             dataset=dataset,
             source=dataset_source,
+            revision=revision,
             use_streaming=use_streaming,
             progress_total=progress_total,
             progress_label="Hydrating dataset",
@@ -667,8 +825,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         :param str dataset_source: Resolved dataset source token.
         :param int source_rows: Rows consumed from the loaded source snapshot.
-        :param Optional[int] capped_upstream_rows: Upstream row count observed
-            before a capped selection began.
+        :param Optional[int] capped_upstream_rows: Upstream row count of a
+            capped selection's pinned revision.
         :return None: Marks the namespace hydrated and complete.
         """
         if self.corpus_size is None and ":" not in str(self.dataset_split):
@@ -704,12 +862,15 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             )
 
     def _refresh_cached_corpus_metadata(
-        self, source: str | None, use_streaming: bool
+        self, source: str | None, use_streaming: bool, *, revision: str | None
     ) -> None:
         """Refresh cached bibliographic fields from matching source rows.
 
         :param source: Dataset recorded on the matching cache.
         :param use_streaming: Whether source rows should be streamed.
+        :param revision: Commit the cache is pinned to, or ``None`` for a cache
+            hydrated before revisions were recorded.
+        :raises RuntimeError: If the pinned commit cannot be loaded.
         """
         cache = self.embedding_cache
         if (
@@ -719,15 +880,27 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         ):
             return
 
-        logger.debug("Refreshing cached corpus metadata from %s.", source)
+        logger.debug(
+            "Refreshing cached corpus metadata from %s at revision %s.",
+            source,
+            revision or "unpinned",
+        )
         # A capped cache retains its original paper selection. Inspect the full
         # selected split so older cached papers can still receive metadata fixes.
-        dataset = deps._import_datasets_module().load_dataset(
-            source,
-            split=self.dataset_split,
-            streaming=use_streaming,
-            num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
-        )
+        try:
+            dataset = deps._import_datasets_module().load_dataset(
+                source,
+                split=self.dataset_split,
+                streaming=use_streaming,
+                num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
+                revision=revision,
+            )
+        except Exception as exc:
+            if revision is None:
+                raise
+            raise _unloadable_revision_error(
+                "Corpus metadata refresh", source, revision, exc
+            ) from exc
         legacy_aliases = cache.get_legacy_corpus_identity_aliases(
             _anonymous_dataset_paper_id
         )
@@ -810,13 +983,15 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         Covers both an interrupted hydration and a completed one whose recorded
         corpus merely differs in size from the request; the latter is a resize,
-        not an incompatible corpus, and must never cost an existing cache.
+        not an incompatible corpus, and must never cost an existing cache. An
+        interrupted hydration resumes at the source revision it recorded.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Dataset source recorded on the
             cached hydration attempt.
         :return bool: ``True`` when the cache was resumed, extended, or safely
             retained without requiring a full namespace clear.
+        :raises RuntimeError: If an interrupted hydration recorded no revision.
         """
         source = str(cached_dataset_source or "").strip()
         if source != self.dataset_source:
@@ -830,6 +1005,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if not self._incomplete_cache_is_resumable(source, stats):
             return False
 
+        # Cached IDs are skipped without re-reading their text, so a resume at
+        # any other revision would mix two snapshots in one namespace.
+        revision = self._recorded_resume_revision(source)
         coverage = _corpus_size_coverage(stats.hydration_corpus_size, self.corpus_size)
         if (
             coverage == "extends"
@@ -839,6 +1017,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return self._resume_selected_corpus_cache(
                 use_streaming=use_streaming,
                 source=source,
+                revision=revision,
                 stats=stats,
                 corpus_size=(
                     self.corpus_size
@@ -847,7 +1026,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 ),
             )
         return self._resume_full_corpus_cache(
-            use_streaming=use_streaming, source=source, stats=stats
+            use_streaming=use_streaming, source=source, revision=revision, stats=stats
         )
 
     def _incomplete_cache_is_resumable(
@@ -976,6 +1155,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         previous_reconciliation = (
             self.embedding_cache.get_hydration_rowcount_reconciliation()
         )
+        previous_revision = self.embedding_cache.get_hydration_source_revision()
         try:
             if cached_corpus_size is None:
                 # An uncapped cache covers every capped request, and recency for
@@ -1002,6 +1182,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             self._restore_reused_corpus_completeness(
                 source=source, corpus_size=cached_corpus_size
             )
+            # The unfinished pass may have pinned a revision whose rows the
+            # restored cache does not hold.
+            self.embedding_cache.set_hydration_source_revision(previous_revision)
             if previous_reconciliation is not None:
                 self.embedding_cache.set_hydration_rowcount_reconciliation(
                     upstream_rows=previous_reconciliation[0],
@@ -1058,6 +1241,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """Add rows needed to satisfy a larger corpus-size request.
 
         Existing cache metadata remains usable if the extension is interrupted.
+        A pinned cache is extended from its pinned revision.
 
         :param use_streaming: Whether hydration mode is streaming.
         :param source: Dataset source recorded on the complete cache.
@@ -1066,7 +1250,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """
         cached_token = str(stats.hydration_corpus_size or "").strip()
         requested_token = _corpus_size_token(self.corpus_size)
-        upstream_rows = self._resolve_dataset_split_row_count(source)
+        revision = self.embedding_cache.get_hydration_source_revision()
+        upstream_rows = self._resolve_dataset_split_row_count(source, revision=revision)
         cached_paper_ids = self._cached_corpus_paper_ids()
         logger.debug(
             "Extending cached corpus for %s/%s from %s to %s; reusing %d cached "
@@ -1080,10 +1265,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=source,
+            revision=revision,
         )
         extension = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
+            revision=revision,
             progress_total=(
                 self.corpus_size if self.corpus_size is not None else upstream_rows
             ),
@@ -1150,6 +1337,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         *,
         use_streaming: bool,
         source: str,
+        revision: str | None,
         stats: CacheNamespacePayloadStats,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> bool:
@@ -1161,6 +1349,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param str source: Dataset source recorded on the incomplete attempt.
+        :param Optional[str] revision: Source commit to scan, or ``None`` for an
+            unpinned cache that still follows upstream.
         :param CacheNamespacePayloadStats stats: Current namespace payload stats.
         :param _CorpusSizeArg corpus_size: Recorded cap to resume, including an
             uncapped corpus reused by a smaller request.
@@ -1168,7 +1358,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """
         resumed_corpus_size = self._effective_corpus_size(corpus_size)
         capped_upstream_rows = (
-            self._resolve_dataset_split_row_count(source)
+            self._resolve_dataset_split_row_count(source, revision=revision)
             if resumed_corpus_size is not None and ":" not in str(self.dataset_split)
             else None
         )
@@ -1182,6 +1372,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=source,
+            revision=revision,
             corpus_size=resumed_corpus_size,
         )
         # A full-source pass sees every listed ID, so cached IDs it never sees
@@ -1194,6 +1385,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         resume_result = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
+            revision=revision,
             progress_total=resumed_corpus_size,
             progress_label="Resuming dataset",
             operation="Incomplete hydration resume",
@@ -1267,7 +1459,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         return True
 
     def _resume_full_corpus_cache(
-        self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
+        self,
+        *,
+        use_streaming: bool,
+        source: str,
+        revision: str | None,
+        stats: CacheNamespacePayloadStats,
     ) -> bool:
         """Resume a full-corpus cache by reconciling its source IDs.
 
@@ -1275,11 +1472,17 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         :param use_streaming: Whether hydration mode is streaming.
         :param source: Dataset source recorded on the incomplete attempt.
+        :param revision: Source commit to reconcile against, or ``None`` for an
+            unpinned cache that still follows upstream.
         :param stats: Current namespace payload statistics.
         :return: Whether the complete source was reconciled successfully.
         """
         return self._resume_selected_corpus_cache(
-            use_streaming=use_streaming, source=source, stats=stats, corpus_size=None
+            use_streaming=use_streaming,
+            source=source,
+            revision=revision,
+            stats=stats,
+            corpus_size=None,
         )
 
     def _load_exact_hydration_source_slice(
@@ -1287,6 +1490,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         *,
         use_streaming: bool,
         source: str,
+        revision: str | None,
         operation: str,
         row_limit: int | None = None,
         row_offset: int | None = None,
@@ -1296,20 +1500,29 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         :param bool use_streaming: Whether to load a streaming dataset iterator.
         :param str source: Previously recorded dataset source to load.
+        :param Optional[str] revision: Source commit the cache is pinned to, or
+            ``None`` for an unpinned cache that still follows upstream.
         :param str operation: Caller-facing operation name for mismatch errors.
         :param Optional[int] row_limit: Optional number of rows to load.
         :param Optional[int] row_offset: Optional source row offset.
         :param _CorpusSizeArg corpus_size: Cap the newest-first selection applies,
             defaulting to the cap this build requested.
         :return Iterable[DatasetRecord]: The exact-source dataset slice.
-        :raises RuntimeError: If the loader resolves a different source.
+        :raises RuntimeError: If the loader resolves a different source, or the
+            pinned revision cannot be loaded.
         """
-        resolved_source, dataset = self._load_dataset_for_hydration(
-            use_streaming=use_streaming,
-            row_limit=row_limit,
-            row_offset=row_offset,
-            corpus_size=self._effective_corpus_size(corpus_size),
-        )
+        try:
+            resolved_source, dataset = self._load_dataset_for_hydration(
+                use_streaming=use_streaming,
+                row_limit=row_limit,
+                row_offset=row_offset,
+                corpus_size=self._effective_corpus_size(corpus_size),
+                revision=revision,
+            )
+        except Exception as exc:
+            if revision is None:
+                raise
+            raise _unloadable_revision_error(operation, source, revision, exc) from exc
         if resolved_source != source:
             raise RuntimeError(
                 f"{operation} resolved unexpected dataset source {resolved_source!r} "
@@ -1322,6 +1535,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         *,
         use_streaming: bool,
         source: str,
+        revision: str | None,
         progress_total: int | None,
         progress_label: str,
         operation: str,
@@ -1339,6 +1553,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         :param use_streaming: Whether to load a streaming dataset iterator.
         :param source: Recorded dataset source to load.
+        :param revision: Source commit to load, or ``None`` for an unpinned
+            cache that still follows upstream.
         :param progress_total: Expected row count for progress display.
         :param progress_label: Progress-bar description.
         :param operation: Operation name used in source-mismatch errors.
@@ -1357,6 +1573,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             dataset = self._load_exact_hydration_source_slice(
                 use_streaming=use_streaming,
                 source=source,
+                revision=revision,
                 operation=operation,
                 row_limit=row_limit,
                 row_offset=row_offset,
@@ -1562,6 +1779,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         *,
         use_streaming: bool,
         dataset_source: str,
+        revision: str | None,
         selected_dataset: _SizedDataset | None = None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> None:
@@ -1569,6 +1787,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
 
         :param bool use_streaming: Whether the hydration source streams records.
         :param str dataset_source: Resolved dataset source token for hydration.
+        :param Optional[str] revision: Source commit a reloaded sample is drawn
+            from, or ``None`` for an unpinned cache that still follows upstream.
         :param Optional[Sequence[DatasetRecord]] selected_dataset: Already
             loaded, repeatable hydration rows to sample instead of reloading the
             source. This includes non-streaming datasets and capped streaming
@@ -1592,6 +1812,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             calibration_dataset = self._load_exact_hydration_source_slice(
                 use_streaming=use_streaming,
                 source=dataset_source,
+                revision=revision,
                 operation="Calibration prepass",
                 corpus_size=corpus_size,
             )
@@ -1842,10 +2063,14 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return selectable_dataset.select(selected_indices)
         return selected
 
-    def _resolve_dataset_split_row_count(self, dataset_source: str) -> int | None:
+    def _resolve_dataset_split_row_count(
+        self, dataset_source: str, *, revision: str | None
+    ) -> int | None:
         """Resolve dataset split row count from HuggingFace metadata when available.
 
         :param str dataset_source: Dataset source identifier.
+        :param Optional[str] revision: Source commit whose split is counted, or
+            ``None`` for the moving default branch an unpinned cache follows.
         :return Optional[int]: Split row count, or ``None`` when unavailable.
         """
         if ":" in str(self.dataset_split):
@@ -1855,7 +2080,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             # Resolved inside the guard: this whole lookup is best-effort, and a
             # datasets module without the builder API must not fail a build.
             load_dataset_builder = deps._import_datasets_module().load_dataset_builder
-            builder = load_dataset_builder(dataset_source)
+            builder = load_dataset_builder(dataset_source, revision=revision)
             splits = getattr(getattr(builder, "info", None), "splits", None)
             if splits is None:
                 return None
@@ -1891,7 +2116,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """Reconcile hydrated full-corpus IDs when the source row count changes.
 
         Existing vectors are retained even when net growth includes removals or
-        reordering, so the stored row count cannot act as a source offset.
+        reordering, so the stored row count cannot act as a source offset. Only
+        a cache without a pinned revision follows upstream this way, and a scan
+        that marks it incomplete first pins the revision it reads, so an
+        interrupted scan resumes there and the cache stays at that revision.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Hydrated dataset source token.
@@ -1919,9 +2147,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                     cached_rows=cached_rows,
                 )
             try:
+                # The cache stays complete through this scan, so no resume ever
+                # depends on the revision it reads.
                 self._resume_full_corpus_cache(
                     use_streaming=use_streaming,
                     source=source,
+                    revision=None,
                     stats=self.embedding_cache.payload_stats(),
                 )
             except Exception as exc:
@@ -1934,6 +2165,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                     exc,
                 )
             return
+        # The incomplete mark below makes the next build resume this scan, and a
+        # resume must read the revision the scan started from.
+        revision = self._resolve_source_revision()
+        self.embedding_cache.set_hydration_source_revision(revision)
         self.embedding_cache.mark_hydrated(
             dataset_source=source,
             dataset_split=self.dataset_split,
@@ -1945,6 +2180,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         self._resume_full_corpus_cache(
             use_streaming=use_streaming,
             source=source,
+            revision=revision,
             stats=self.embedding_cache.payload_stats(),
         )
 
@@ -1958,7 +2194,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """Compare the newest-N selection with cached IDs and admit missing rows.
 
         Split row counts gate source scans. Selected IDs detect backfilled
-        submissions even when the newest chronology key has not changed.
+        submissions even when the newest chronology key has not changed. Only a
+        cache without a pinned revision follows upstream this way; the cache
+        stays complete throughout, so these reads need no pin.
 
         :param use_streaming: Whether hydration mode is streaming.
         :param cached_dataset_source: Hydrated dataset source token.
@@ -1968,14 +2206,14 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if refreshed_corpus_size is None or ":" in str(self.dataset_split):
             return
         source = str(cached_dataset_source or "").strip()
-        if not source:
+        if not source or not self._follows_upstream_growth(source):
             return
 
         watermark = self.embedding_cache.get_max_chronology_key()
         cached_rows = self._cached_payload_row_count()
         if cached_rows < 1:
             return
-        upstream_rows = self._resolve_dataset_split_row_count(source)
+        upstream_rows = self._resolve_dataset_split_row_count(source, revision=None)
         if upstream_rows is not None and (
             self.embedding_cache.get_hydration_rowcount_reconciliation()
             == (upstream_rows, cached_rows)
@@ -2074,6 +2312,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         dataset = self._load_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
+            revision=None,
             operation="Capped corpus recency check",
             corpus_size=corpus_size,
         )
@@ -2161,11 +2400,13 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=source,
+            revision=None,
             corpus_size=corpus_size,
         )
         refresh = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
+            revision=None,
             progress_total=corpus_size,
             progress_label="Refreshing dataset",
             operation="Capped corpus recency refresh",
@@ -2214,9 +2455,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         """Decide whether full-corpus source counts warrant a refresh.
 
         Returning ``None`` means the request shape rules out refresh (capped or
-        sliced corpus), counts remain unchanged, or a prior reconciliation already
-        verified this source/cache row-count pair. Unknown cardinality requests an
-        ID scan because no stable count is available to memoize.
+        sliced corpus), the cache is pinned to a source revision, counts remain
+        unchanged, or a prior reconciliation already verified this source/cache
+        row-count pair. Unknown cardinality requests an ID scan because no stable
+        count is available to memoize.
 
         :param str source: Hydrated dataset source token.
         :param _CorpusSizeArg corpus_size: Corpus this pass refreshes, defaulting
@@ -2233,10 +2475,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return None
 
         cached_rows = self._cached_payload_row_count()
-        if cached_rows < 1:
+        if cached_rows < 1 or not self._follows_upstream_growth(source):
             return None
 
-        upstream_rows = self._resolve_dataset_split_row_count(source)
+        upstream_rows = self._resolve_dataset_split_row_count(source, revision=None)
         if upstream_rows is None:
             return cached_rows, None
         previous_reconciliation = (
@@ -2271,6 +2513,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         row_limit: int | None = None,
         row_offset: int | None = None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
+        *,
+        revision: str | None,
     ) -> tuple[str, Iterable[DatasetRecord]]:
         """Load the configured arXiv metadata dataset for hydration.
 
@@ -2279,6 +2523,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         :param Optional[int] row_offset: Optional row offset for delta refresh loading.
         :param _CorpusSizeArg corpus_size: Cap the newest-first selection applies,
             defaulting to the cap this build requested.
+        :param Optional[str] revision: Source commit to load, or ``None`` for the
+            moving default branch an unpinned cache follows.
         :return Tuple[str, Iterable[DatasetRecord]]: Dataset source name and iterable.
         """
         load_dataset = deps._import_datasets_module().load_dataset
@@ -2316,6 +2562,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             split=split_for_load,
             streaming=use_streaming,
             num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
+            revision=revision,
         )
         if use_streaming and (parsed_row_limit is not None or parsed_row_offset > 0):
             stream_stop_idx = (
@@ -2334,8 +2581,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 dataset, self.dataset_source, selection_corpus_size
             )
         logger.debug(
-            "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s, row_offset=%s).",
+            "Hydration dataset selected: %s (revision=%s, split=%s, streaming=%s, "
+            "row_limit=%s, row_offset=%s).",
             self.dataset_source,
+            revision or "unpinned",
             split_for_load,
             use_streaming,
             "none" if parsed_row_limit is None else parsed_row_limit,

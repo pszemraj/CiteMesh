@@ -11,6 +11,7 @@ import threading
 import types
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager, nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -32,6 +33,7 @@ from citemesh.data.embedding_cache import (
     CacheSearchResult,
     EmbeddingCache,
 )
+from citemesh.data.embedding_contract import CorpusSource
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
     SemanticScholarRequestError,
@@ -50,6 +52,7 @@ from citemesh.strategies.embedding import (
     resolve_embedding_device,
 )
 from citemesh.strategies.embedding import builder as builder_module
+from citemesh.strategies.embedding import corpus_source as corpus_source_module
 from citemesh.strategies.embedding import deps as deps_module
 from citemesh.strategies.embedding import hydration as hydration_module
 from citemesh.strategies.embedding import model_runtime as model_runtime_module
@@ -73,6 +76,35 @@ _REAL_DEP_CHECK_TESTS = {
 
 
 pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
+
+#: Commit the fake dataset host reports for every source's default branch.
+SOURCE_COMMIT = "1" * 40
+#: Commit an earlier, interrupted hydration recorded; ``main`` has since moved on.
+PINNED_COMMIT = "2" * 40
+
+
+def _resolve_fake_source_snapshot(
+    source: CorpusSource, revision: str = "main"
+) -> CorpusSource:
+    """Pin a source the way the dataset host would, without network access.
+
+    :param CorpusSource source: Source selection to resolve.
+    :param str revision: Branch or commit requested; a commit resolves to itself.
+    :return CorpusSource: Selection pinned to :data:`SOURCE_COMMIT` for ``main``.
+    """
+    return replace(source, revision=SOURCE_COMMIT if revision == "main" else revision)
+
+
+@pytest.fixture(autouse=True)
+def _offline_source_snapshots(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Resolve hydration sources to a fixed commit unless a test runs live."""
+    if request.node.get_closest_marker("slow"):
+        return
+    monkeypatch.setattr(
+        corpus_source_module, "resolve_source_snapshot", _resolve_fake_source_snapshot
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -347,6 +379,8 @@ def _concurrent_hydration_worker(
     :return None: Reports selected paper IDs through ``result_queue``.
     """
     try:
+        # A spawned worker runs without the module's autouse fixtures.
+        corpus_source_module.resolve_source_snapshot = _resolve_fake_source_snapshot
         is_first = worker_name == "first"
         source = "source-a" if is_first else "source-b"
         split = "train" if is_first else "test"
@@ -413,7 +447,9 @@ def _concurrent_hydration_worker(
             return original_search(seed_embedding)
 
         builder._ensure_cache_model_fingerprint = ensure_fingerprint
-        builder._resolve_dataset_split_row_count = lambda _: corpus_size
+        builder._resolve_dataset_split_row_count = lambda _source, *, revision: (
+            corpus_size
+        )
         builder._load_dataset_for_hydration = load_dataset
         builder._ensure_int8_calibration_ranges = no_op
         builder._refresh_cached_corpus_metadata = no_op
@@ -2686,6 +2722,7 @@ def test_streaming_capped_selection_reuses_rows_for_calibration(
     builder._ensure_int8_calibration_ranges(
         use_streaming=True,
         dataset_source="dataset",
+        revision=SOURCE_COMMIT,
         selected_dataset=selected_rows if reuse_selection else None,
         corpus_size=calibration_cap,
     )
@@ -2694,6 +2731,7 @@ def test_streaming_capped_selection_reuses_rows_for_calibration(
     assert len(initialized[0]) == expected_rows
     if not reuse_selection:
         assert loader.call_args.kwargs["corpus_size"] == calibration_cap
+        assert loader.call_args.kwargs["revision"] == SOURCE_COMMIT
 
 
 def test_newest_first_selection_drains_streams_with_a_cost_warning(
@@ -2897,7 +2935,9 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
     builder.embedding_cache.get_hydration_rowcount_reconciliation = MagicMock(
         return_value=(12, 12)
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 12)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 12
+    )
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
@@ -3577,13 +3617,14 @@ def test_metadata_and_streaming_loader_contracts(
     assert versioned["paper_id"] == "arxiv:1706.03762"
 
     monkeypatch.setattr(hydration_module.os, "cpu_count", lambda: cpu_count)
-    load_calls: list[tuple[str, str, bool, int | None]] = []
+    load_calls: list[tuple[str, str, bool, int | None, str | None]] = []
 
     def fake_load_dataset(
         dataset_name: str,
         split: str,
         streaming: bool = False,
         num_proc: int | None = None,
+        revision: str | None = None,
     ) -> list[dict[str, Any]]:
         """Record the selected source and return one arXiv metadata row.
 
@@ -3591,9 +3632,10 @@ def test_metadata_and_streaming_loader_contracts(
         :param str split: Requested split or slice.
         :param bool streaming: Whether loading uses streaming.
         :param int | None num_proc: Worker count for non-streaming preparation.
+        :param str | None revision: Source commit, or ``None`` for the default branch.
         :return list[dict[str, Any]]: Single-paper fixture.
         """
-        load_calls.append((dataset_name, split, streaming, num_proc))
+        load_calls.append((dataset_name, split, streaming, num_proc, revision))
         return [
             {
                 "id": "2609.03430",
@@ -3615,10 +3657,12 @@ def test_metadata_and_streaming_loader_contracts(
         max_papers=1, use_streaming=True, client=MagicMock()
     )
     assert builder.corpus_size is None
-    selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=True)
+    selected_name, dataset = builder._load_dataset_for_hydration(
+        use_streaming=True, revision=SOURCE_COMMIT
+    )
 
     assert selected_name == DEFAULT_DATASET_SOURCE
-    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True, None)]
+    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True, None, SOURCE_COMMIT)]
     assert len(list(dataset)) == 1
     assert load_calls[0][1] == "train"
 
@@ -3630,9 +3674,11 @@ def test_metadata_and_streaming_loader_contracts(
         client=MagicMock(),
         dataset_source="example/arxiv",
     )
-    selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=False)
+    selected_name, dataset = builder._load_dataset_for_hydration(
+        use_streaming=False, revision=None
+    )
     assert selected_name == "example/arxiv"
-    assert load_calls == [("example/arxiv", "train", False, workers)]
+    assert load_calls == [("example/arxiv", "train", False, workers, None)]
     # Capped hydration loads the full split; newest-N selection happens by
     # arXiv ID chronology after load, not via positional split slicing.
     assert load_calls[0][1] == "train"
@@ -3643,9 +3689,12 @@ def test_metadata_and_streaming_loader_contracts(
         use_streaming=False,
         row_limit=3,
         row_offset=5,
+        revision=SOURCE_COMMIT,
     )
     assert selected_name == "example/arxiv"
-    assert load_calls == [("example/arxiv", "train[5:8]", False, workers)]
+    assert load_calls == [
+        ("example/arxiv", "train[5:8]", False, workers, SOURCE_COMMIT)
+    ]
     assert load_calls[0][1] == "train[5:8]"
     assert len(list(dataset)) == 1
 
@@ -3657,14 +3706,17 @@ def test_metadata_and_streaming_loader_contracts(
         use_streaming=True,
         row_limit=1,
         row_offset=1,
+        revision=SOURCE_COMMIT,
     )
     assert selected_name == DEFAULT_DATASET_SOURCE
-    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True, None)]
+    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True, None, SOURCE_COMMIT)]
     assert load_calls[0][1] == "train"
     assert len(list(dataset)) == 0
 
     with pytest.raises(ValueError, match="row_offset must be at least 0"):
-        builder._load_dataset_for_hydration(use_streaming=False, row_offset=-1)
+        builder._load_dataset_for_hydration(
+            use_streaming=False, row_offset=-1, revision=None
+        )
 
     with pytest.raises(ValueError, match="does not support sliced dataset splits"):
         EmbeddingGraphBuilder(
@@ -3961,7 +4013,9 @@ def test_fresh_hydration_resume_skips_metadata_backfill(
     monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
     monkeypatch.setattr(builder, "_get_model_for_encoding", ConstantEncodeModel)
     monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 1)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
+    )
     records = [
         {"id": "1706.03762", "title": "First", "abstract": "First abstract"},
         {"id": "1810.04805", "title": "Second", "abstract": "Second abstract"},
@@ -4103,11 +4157,13 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
         assert not cache.has_current_corpus_metadata()
         interrupt = False
     builder._ensure_cache_hydrated(use_streaming=False)
+    # A complete cache hydrated before revisions were recorded reads upstream.
     load_dataset.assert_called_with(
         source,
         split="train",
         streaming=False,
         num_proc=max(1, (hydration_module.os.cpu_count() or 1) // 2),
+        revision=None,
     )
     assert cache.has_current_corpus_metadata()
     assert cache.get_cached_paper_ids() == {old_metadata["paper_id"]}
@@ -4166,8 +4222,8 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     ]
 
     fake_datasets = types.ModuleType("datasets")
-    fake_datasets.load_dataset = lambda name, split, streaming=False, num_proc=None: (
-        iter(records)
+    fake_datasets.load_dataset = (
+        lambda name, split, streaming=False, num_proc=None, revision=None: iter(records)
     )
     monkeypatch.setattr(deps_module, "_import_datasets_module", lambda: fake_datasets)
 
@@ -4178,7 +4234,9 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
         corpus_size=3,
         client=MagicMock(),
     )
-    _, dataset = builder._load_dataset_for_hydration(use_streaming=use_streaming)
+    _, dataset = builder._load_dataset_for_hydration(
+        use_streaming=use_streaming, revision=SOURCE_COMMIT
+    )
     assert [record["title"] for record in dataset] == [
         "Late 2024 submission",
         "Recent submission",
@@ -4190,10 +4248,14 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
         {"id": f"paper-{idx}", "title": f"Paper {idx}", "abstract": "A."}
         for idx in range(5)
     ]
-    fake_datasets.load_dataset = lambda name, split, streaming=False, num_proc=None: (
-        iter(no_id_records)
+    fake_datasets.load_dataset = (
+        lambda name, split, streaming=False, num_proc=None, revision=None: iter(
+            no_id_records
+        )
     )
-    _, dataset = builder._load_dataset_for_hydration(use_streaming=use_streaming)
+    _, dataset = builder._load_dataset_for_hydration(
+        use_streaming=use_streaming, revision=SOURCE_COMMIT
+    )
     assert [record["title"] for record in dataset] == ["Paper 0", "Paper 1", "Paper 2"]
 
 
@@ -5059,7 +5121,9 @@ def test_configured_dataset_source_replaces_previous_corpus(
         lambda: types.SimpleNamespace(load_dataset=load),
     )
     monkeypatch.setattr(builder, "_get_model_for_encoding", ConstantEncodeModel)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 1
+    )
 
     assert not builder._cache_hydrated_for_active_spec()
     builder._ensure_cache_hydrated(use_streaming=False)
@@ -5069,7 +5133,9 @@ def test_configured_dataset_source_replaces_previous_corpus(
         split="train",
         streaming=False,
         num_proc=max(1, (hydration_module.os.cpu_count() or 1) // 2),
+        revision=SOURCE_COMMIT,
     )
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
     assert cache.get_cached_paper_ids() == {"arxiv:2609.03430"}
     assert cache.is_hydrated("train", corpus_size, dataset_source=source)
     assert builder._cache_hydrated_for_active_spec()
@@ -5122,6 +5188,7 @@ def test_dataset_load_failure_preserves_cache_without_fallback(
         split="train",
         streaming=False,
         num_proc=max(1, (hydration_module.os.cpu_count() or 1) // 2),
+        revision=SOURCE_COMMIT,
     )
     assert cache.get_cached_paper_ids() == {"arxiv:1706.03762"}
     assert cache.get_hydrated_dataset_source() == "example/previous-arxiv"
@@ -5202,7 +5269,9 @@ def test_full_corpus_refresh_reconciles_source_membership(
         lambda: types.SimpleNamespace(load_dataset=load),
     )
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: len(rows)
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(rows),
     )
     normalize = MagicMock(wraps=hydration_module._extract_dataset_paper_metadata)
     monkeypatch.setattr(hydration_module, "_extract_dataset_paper_metadata", normalize)
@@ -5264,7 +5333,9 @@ def test_full_corpus_incremental_refresh_failure_stays_incomplete(
     builder.embedding_cache.get_hydration_rowcount_reconciliation = MagicMock(
         return_value=None
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 101)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 101
+    )
     monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
 
     def fail_refresh(**_kwargs: Any) -> None:
@@ -5356,10 +5427,14 @@ def test_hydration_read_failure_preserves_cached_work(
         corpus_size=corpus_size,
         complete=complete,
     )
+    if not complete:
+        cache.set_hydration_source_revision(PINNED_COMMIT)
     cache.mark_corpus_metadata_current()
     original_h5 = cache.h5_path.read_bytes()
     monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 1
+    )
     monkeypatch.setattr(
         builder, "_load_dataset_for_hydration", lambda **_: (source, [])
     )
@@ -5424,6 +5499,7 @@ def test_incomplete_full_corpus_cache_reconciles_cached_ids(
         corpus_size=None,
         complete=False,
     )
+    cache.set_hydration_source_revision(PINNED_COMMIT)
     rows = [
         {"id": f"2601.0000{index}", "title": str(index), "abstract": "A"}
         for index in range(1, 4)
@@ -5436,7 +5512,9 @@ def test_incomplete_full_corpus_cache_reconciles_cached_ids(
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=load),
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
+    )
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
@@ -5444,6 +5522,7 @@ def test_incomplete_full_corpus_cache_reconciles_cached_ids(
     assert cache.is_hydrated("train", None, dataset_source=builder.dataset_source)
     assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
     assert load.call_args.kwargs["split"] == "train"
+    assert load.call_args.kwargs["revision"] == PINNED_COMMIT
     _assert_encoded_corpus_records(builder, model, rows[1:])
     clear.assert_not_called()
 
@@ -5497,21 +5576,22 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
         corpus_size=corpus_size,
         complete=False,
     )
+    cache.set_hydration_source_revision(PINNED_COMMIT)
     cache.set_model_fingerprint("test-fingerprint")
     cache.mark_corpus_metadata_current()
     model.encode.reset_mock()
     clear_cache_mock = MagicMock()
     monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    load = MagicMock(side_effect=lambda *args, **kwargs: iter(records))
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
-        lambda: types.SimpleNamespace(
-            load_dataset=lambda *args, **kwargs: iter(records)
-        ),
+        lambda: types.SimpleNamespace(load_dataset=load),
     )
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
+    assert {call.kwargs["revision"] for call in load.call_args_list} == {PINNED_COMMIT}
     assert cache.get_cached_paper_ids() == {
         f"arxiv:{record['id']}" for record in records
     }
@@ -5624,7 +5704,9 @@ def test_complete_capped_cache_extends_to_larger_corpus_size(
         {"id": "2601.00002", "title": "Second", "abstract": "A"},
     ]
     load = MagicMock(side_effect=lambda *args, **kwargs: iter(records))
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -5702,16 +5784,19 @@ def test_fresh_hydration_does_not_memoize_unseen_source_growth(
 ) -> None:
     """First builds must record only the source snapshot they actually consumed.
 
-    Capped builds save a pre-scan count; full builds count their loaded records.
-    Growth during an encode must trigger a later refresh, while unchanged capped
-    sources avoid repeating the full ranking pass.
+    The build pins the source commit it reads, so a newer upstream snapshot,
+    whether published during the encode or after it, is neither memoized as
+    covered nor admitted by later builds: a pinned cache moves only through
+    refresh. Capped builds record the pinned split's row count; full builds
+    count their loaded records.
 
     :param pytest.MonkeyPatch monkeypatch: Isolated source and encoder fixtures.
     :param bool snapshot_grows: Whether a newer snapshot appears after the first scan.
     :param int | None corpus_size: Full-source or capped initial hydration.
-    :return None: Verifies stable reuse and the pre-scan count race boundary.
+    :return None: Verifies the recorded pin and stable reuse at that revision.
     """
     source = "fixture/source"
+    newer_commit = "3" * 40
     builder = EmbeddingGraphBuilder(
         semantic_source="arxiv-corpus",
         storage_precision="float32",
@@ -5730,23 +5815,33 @@ def test_fresh_hydration_does_not_memoize_unseen_source_growth(
         *first_rows,
         {"id": "2601.00004", "title": "4", "abstract": "A"},
     ]
-    observed_count = {"rows": 3}
+    snapshots = {SOURCE_COMMIT: first_rows, newer_commit: later_rows}
+    main = {"commit": SOURCE_COMMIT}
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: observed_count["rows"]
+        corpus_source_module,
+        "resolve_source_snapshot",
+        lambda source, revision="main": replace(
+            source, revision=main["commit"] if revision == "main" else revision
+        ),
     )
-    load_calls: list[int] = []
+    monkeypatch.setattr(
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(snapshots[revision or main["commit"]]),
+    )
+    load_calls: list[tuple[str | None, int]] = []
 
-    def load_dataset(*_args: Any, **_kwargs: Any) -> _FakeIndexableDataset:
-        """Return the snapshot visible to this source load.
+    def load_dataset(*_args: Any, **kwargs: Any) -> _FakeIndexableDataset:
+        """Return the snapshot at the requested revision.
 
         :param Any _args: Ignored loader positional arguments.
-        :param Any _kwargs: Ignored loader keyword arguments.
-        :return _FakeIndexableDataset: Repeatable current source snapshot.
+        :param Any kwargs: Loader options; ``revision`` selects the snapshot.
+        :return _FakeIndexableDataset: Repeatable snapshot at that revision.
         """
-        rows = first_rows if not load_calls else later_rows
-        load_calls.append(len(rows))
+        rows = snapshots[kwargs["revision"] or main["commit"]]
+        load_calls.append((kwargs["revision"], len(rows)))
         if snapshot_grows:
-            observed_count["rows"] = 4
+            main["commit"] = newer_commit
         return _FakeIndexableDataset(rows, ["id", "title", "abstract"])
 
     monkeypatch.setattr(
@@ -5758,7 +5853,8 @@ def test_fresh_hydration_does_not_memoize_unseen_source_growth(
     builder._ensure_cache_hydrated(use_streaming=False)
 
     cache = builder.embedding_cache
-    assert load_calls == [3]
+    assert load_calls == [(SOURCE_COMMIT, 3)]
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
     assert cache.get_hydration_rowcount_reconciliation() == (
         (3, 2) if corpus_size is not None else None
     )
@@ -5766,17 +5862,14 @@ def test_fresh_hydration_does_not_memoize_unseen_source_growth(
     builder._ensure_cache_hydrated(use_streaming=False)
     builder._ensure_cache_hydrated(use_streaming=False)
 
-    assert load_calls == ([3, 4] if snapshot_grows else [3])
+    assert load_calls == [(SOURCE_COMMIT, 3)]
     expected_ids = {"arxiv:2601.00002", "arxiv:2601.00003"}
     if corpus_size is None:
         expected_ids.add("arxiv:2601.00001")
-    if snapshot_grows:
-        expected_ids.add("arxiv:2601.00004")
     assert cache.get_cached_paper_ids() == expected_ids
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
     assert cache.get_hydration_rowcount_reconciliation() == (
-        (4, len(expected_ids))
-        if snapshot_grows
-        else ((3, 2) if corpus_size is not None else None)
+        (3, 2) if corpus_size is not None else None
     )
 
 
@@ -5822,8 +5915,11 @@ def test_capped_extension_over_an_unrankable_dataset_records_its_new_size(
         cache.mark_hydrated(
             dataset_source=source, dataset_split="train", corpus_size=3, complete=False
         )
+        cache.set_hydration_source_revision(PINNED_COMMIT)
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: len(rows)
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(rows),
     )
     dataset = _FakeIndexableDataset(rows, [id_key, "title", "abstract"])
     load = MagicMock(return_value=dataset)
@@ -5879,7 +5975,9 @@ def test_complete_cache_reused_for_smaller_corpus_size(
     cache = builder.embedding_cache
     load = MagicMock()
     cache.set_hydration_rowcount_reconciliation(upstream_rows=2, cached_rows=2)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -5916,7 +6014,9 @@ def test_complete_capped_cache_extends_to_all_corpus(
         {"id": "2601.00001", "title": "First", "abstract": "A"},
         {"id": "2601.00002", "title": "Second", "abstract": "A"},
     ]
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -5967,7 +6067,9 @@ def test_capped_cache_admits_upstream_papers_newer_than_its_watermark(
         {"id": "2601.00003", "title": "Second", "abstract": "A"},
         {"id": new_id, "title": "Newer", "abstract": "A"},
     ]
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6048,7 +6150,9 @@ def test_capped_recency_refresh_ranks_the_source_once(
 
         return generate()
 
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6130,7 +6234,9 @@ def test_unknown_source_cardinality_still_reconciles_ids(
             else _FakeIndexableDataset(records, ["id", "title", "abstract"])
         )
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: None
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6185,7 +6291,9 @@ def test_unknown_cardinality_refresh_failure_keeps_complete_cache_and_retries(
             _FakeIndexableDataset(records, ["id", "title", "abstract"]),
         ]
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: None
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6240,7 +6348,7 @@ def test_interrupted_unknown_count_refresh_cannot_hide_later_known_rows(
     monkeypatch.setattr(
         builder,
         "_resolve_dataset_split_row_count",
-        lambda _: upstream_count["rows"],
+        lambda _source, *, revision: upstream_count["rows"],
     )
     monkeypatch.setattr(
         builder,
@@ -6363,7 +6471,9 @@ def test_capped_cache_without_newer_upstream_papers_stops_rescanning(
         load_calls.append(str(args[0]) if args else "")
         return iter(records)
 
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6425,7 +6535,9 @@ def test_under_cap_capped_cache_refills_when_the_max_key_does_not_move(
         return iter(list(records))
 
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: upstream["rows"]
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: upstream["rows"],
     )
     monkeypatch.setattr(
         deps_module,
@@ -6488,7 +6600,9 @@ def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
         {"id": "2602.00001", "title": "Newer", "abstract": "A"},
         {"id": "2602.00002", "title": "Newest", "abstract": "A"},
     ]
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 5)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 5
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6545,7 +6659,9 @@ def test_reused_uncapped_cache_still_admits_upstream_growth(
         {"id": "2601.00002", "title": "Second", "abstract": "A"},
         {"id": "2602.00003", "title": "Newer", "abstract": "A"},
     ]
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6639,7 +6755,9 @@ def test_raised_reused_corpus_refresh_keeps_the_covering_cache(
     with h5py.File(cache.h5_path, "r") as h5:
         original_vectors = h5["embeddings"][:]
     loader = MagicMock(side_effect=failure_type("source interrupted"))
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6714,12 +6832,15 @@ def test_incomplete_resized_cache_resumes_the_covering_selection(
         corpus_size=cached_corpus_size,
         complete=False,
     )
+    cache.set_hydration_source_revision(PINNED_COMMIT)
     rows = [
         {"id": f"2601.0000{i}", "title": str(i), "abstract": "A"} for i in range(1, 5)
     ]
     dataset = _FakeIndexableDataset(rows, ["id", "title", "abstract"])
     load = MagicMock(return_value=dataset)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 4)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 4
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -6743,24 +6864,373 @@ def test_incomplete_resized_cache_resumes_the_covering_selection(
     assert "no longer lists" not in caplog.text
     builder._ensure_cache_hydrated(use_streaming=False)
     load.assert_called_once()
+    assert load.call_args.kwargs["revision"] == PINNED_COMMIT
     clear_cache_mock.assert_not_called()
 
 
+class _RevisionedDatasets:
+    """Stand-in ``datasets`` module that serves one snapshot per source commit.
+
+    :ivar dict[str, list[dict[str, Any]]] snapshots: Rows each commit holds.
+    :ivar list[tuple[str | None, bool]] loads: Revision and streaming flag of
+        every ``load_dataset`` call.
+    :ivar list[str | None] counted: Revision of every split row-count lookup.
+    """
+
+    def __init__(self, snapshots: dict[str, list[dict[str, Any]]]) -> None:
+        """Store the snapshots and start with no recorded reads.
+
+        :param dict[str, list[dict[str, Any]]] snapshots: Rows each commit holds.
+        :return None: Initializes the stand-in.
+        """
+        self.snapshots = snapshots
+        self.loads: list[tuple[str | None, bool]] = []
+        self.counted: list[str | None] = []
+
+    def _rows(self, path: str, revision: str | None) -> list[dict[str, Any]]:
+        """Return the rows of one commit, as the dataset host would resolve it.
+
+        :param str path: Dataset repository.
+        :param str | None revision: Requested commit.
+        :return list[dict[str, Any]]: Copies of that commit's rows.
+        :raises AssertionError: If a read follows the moving default branch.
+        :raises FileNotFoundError: If the commit does not exist.
+        """
+        assert revision is not None, "hydration read the moving default branch"
+        if revision not in self.snapshots:
+            raise FileNotFoundError(f"Revision {revision} of {path} does not exist")
+        return [dict(row) for row in self.snapshots[revision]]
+
+    def load_dataset(
+        self,
+        path: str,
+        *,
+        split: str,
+        streaming: bool,
+        num_proc: int | None,
+        revision: str | None,
+    ) -> Iterable[dict[str, Any]]:
+        """Load one split at a commit, streamed or as an indexable dataset.
+
+        :param str path: Dataset repository.
+        :param str split: Requested split.
+        :param bool streaming: Whether rows are streamed.
+        :param int | None num_proc: Worker count for non-streaming preparation.
+        :param str | None revision: Requested commit.
+        :return Iterable[dict[str, Any]]: Rows at that commit.
+        """
+        del split, num_proc
+        self.loads.append((revision, streaming))
+        rows = self._rows(path, revision)
+        if streaming:
+            return iter(rows)
+        return _FakeIndexableDataset(rows, ["id", "title", "abstract"])
+
+    def load_dataset_builder(
+        self, path: str, *, revision: str | None
+    ) -> types.SimpleNamespace:
+        """Describe the split sizes of one commit.
+
+        :param str path: Dataset repository.
+        :param str | None revision: Requested commit.
+        :return types.SimpleNamespace: Builder exposing ``info.splits``.
+        """
+        self.counted.append(revision)
+        rows = self._rows(path, revision)
+        split = types.SimpleNamespace(num_examples=len(rows))
+        return types.SimpleNamespace(
+            info=types.SimpleNamespace(splits={"train": split})
+        )
+
+
+@pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.parametrize("corpus_size", [None, 2])
+def test_fresh_hydration_pins_its_source_revision_before_writing(
+    monkeypatch: pytest.MonkeyPatch, use_streaming: bool, corpus_size: int | None
+) -> None:
+    """A rebuild pins its source once, records the pin first, and reads only it.
+
+    The namespace held another source under an older pin, so the rebuild clears
+    it. The new pin must be in place before calibration ranges or any row are
+    written, and every upstream read, the int8 calibration reload of a stream
+    and the capped row count included, must use it.
+
+    :param pytest.MonkeyPatch monkeypatch: Source, encoder, and cache-write spies.
+    :param bool use_streaming: Whether the source is streamed.
+    :param int | None corpus_size: Full-source or capped hydration.
+    :return None: Asserts the pin at every write and on every upstream read.
+    """
+    source = "fixture/pinned"
+    rows = [
+        {"id": f"2601.0000{index}", "title": str(index), "abstract": "A"}
+        for index in range(1, 4)
+    ]
+    datasets = _RevisionedDatasets({SOURCE_COMMIT: rows})
+    monkeypatch.setattr(deps_module, "_import_datasets_module", lambda: datasets)
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        storage_precision="int8",
+        calibration_sample_size=2,
+        corpus_size=corpus_size,
+        dataset_source=source,
+        use_streaming=use_streaming,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", ConstantEncodeModel)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda texts, **_kwargs: np.asarray(
+            [[float(index % 2), float(1 - index % 2)] for index in range(len(texts))],
+            dtype=np.float32,
+        ),
+    )
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source="fixture/previous",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+    cache.set_hydration_source_revision(PINNED_COMMIT)
+    pins_at_writes: list[str | None] = []
+    for name in ("set_calibration_ranges", "upsert_embeddings"):
+
+        def record_pin(
+            *args: Any, _write: Any = getattr(cache, name), **kwargs: Any
+        ) -> Any:
+            """Record the pin the namespace holds when this write begins.
+
+            :param Any args: Positional write arguments.
+            :param Any _write: Original cache write.
+            :param Any kwargs: Keyword write arguments.
+            :return Any: Result of the original write.
+            """
+            pins_at_writes.append(cache.get_hydration_source_revision())
+            return _write(*args, **kwargs)
+
+        monkeypatch.setattr(cache, name, record_pin)
+
+    builder._ensure_cache_hydrated(use_streaming=use_streaming)
+
+    expected_rows = rows if corpus_size is None else rows[-corpus_size:]
+    assert cache.get_cached_paper_ids() == {
+        f"arxiv:{row['id']}" for row in expected_rows
+    }
+    assert cache.is_hydrated("train", corpus_size, dataset_source=source)
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
+    assert builder._embedding_runtime_metadata()["dataset_revision"] == SOURCE_COMMIT
+    assert len(pins_at_writes) >= 2
+    assert set(pins_at_writes) == {SOURCE_COMMIT}
+    # Only an unranked stream is read again for its calibration sample.
+    reloads_stream = use_streaming and corpus_size is None
+    assert datasets.loads == [(SOURCE_COMMIT, use_streaming)] * (
+        2 if reloads_stream else 1
+    )
+    assert datasets.counted == ([] if corpus_size is None else [SOURCE_COMMIT])
+
+
+@pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.parametrize("corpus_size", [None, 2])
+def test_interrupted_hydration_resumes_at_its_pin_after_main_moves(
+    monkeypatch: pytest.MonkeyPatch, use_streaming: bool, corpus_size: int | None
+) -> None:
+    """A resume must read the commit its hydration started from, never ``main``.
+
+    The newer snapshot revises a cached paper's abstract and adds a paper. A
+    resume at ``main`` would skip the cached ID without reading its text and
+    admit the new paper, mixing two revisions in one namespace.
+
+    :param pytest.MonkeyPatch monkeypatch: Source, resolver, and write faults.
+    :param bool use_streaming: Whether the source is streamed.
+    :param int | None corpus_size: Full-source or capped hydration.
+    :return None: Asserts every read, the final rows, and the unchanged pin.
+    """
+    source = "fixture/pinned"
+    newer_commit = "3" * 40
+    first_rows = [
+        {"id": f"2601.0000{index}", "title": str(index), "abstract": "A"}
+        for index in range(1, 4)
+    ]
+    newer_rows = [
+        *[{**row, "abstract": "Revised"} for row in first_rows],
+        {"id": "2601.00009", "title": "9", "abstract": "A"},
+    ]
+    datasets = _RevisionedDatasets(
+        {SOURCE_COMMIT: first_rows, newer_commit: newer_rows}
+    )
+    monkeypatch.setattr(deps_module, "_import_datasets_module", lambda: datasets)
+    monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 1)
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+        corpus_size=corpus_size,
+        dataset_source=source,
+        use_streaming=use_streaming,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    cache = builder.embedding_cache
+    write_batch = builder._cache_metadata_batch
+    writes: list[int] = []
+
+    def write_once_then_fail(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
+        """Commit the first batch, then fail as an interrupted build would.
+
+        :param list[dict[str, Any]] batch: Records to write.
+        :param Mapping[str, str] | None texts: Formatted model inputs.
+        :return int: Number of records written.
+        :raises RuntimeError: On every batch after the first.
+        """
+        if writes:
+            raise RuntimeError("build interrupted")
+        writes.append(len(batch))
+        return write_batch(batch, texts)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(builder, "_cache_metadata_batch", write_once_then_fail)
+        with pytest.raises(RuntimeError, match="build interrupted"):
+            builder._ensure_cache_hydrated(use_streaming=use_streaming)
+    assert not cache.payload_stats().hydration_complete
+    written_ids = cache.get_cached_paper_ids()
+    assert len(written_ids) == 1
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
+
+    # ``main`` moves on before the build is resumed.
+    monkeypatch.setattr(
+        corpus_source_module,
+        "resolve_source_snapshot",
+        lambda selection, revision="main": replace(
+            selection, revision=newer_commit if revision == "main" else revision
+        ),
+    )
+    model.encode.reset_mock()
+    builder._ensure_cache_hydrated(use_streaming=use_streaming)
+
+    expected_rows = first_rows if corpus_size is None else first_rows[-corpus_size:]
+    assert cache.get_cached_paper_ids() == {
+        f"arxiv:{row['id']}" for row in expected_rows
+    }
+    assert cache.is_hydrated("train", corpus_size, dataset_source=source)
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
+    assert {revision for revision, _ in datasets.loads} == {SOURCE_COMMIT}
+    assert set(datasets.counted) <= {SOURCE_COMMIT}
+    _assert_encoded_corpus_records(
+        builder,
+        model,
+        [row for row in expected_rows if f"arxiv:{row['id']}" not in written_ids],
+    )
+    cached = cache.get_paper_metadata_batch(
+        [f"arxiv:{row['id']}" for row in expected_rows]
+    )
+    assert {metadata["abstract"] for metadata in cached.values()} == {"A"}
+
+
+@pytest.mark.parametrize("corpus_size", [None, 2])
+def test_incomplete_cache_without_recorded_revision_refuses_to_resume(
+    monkeypatch: pytest.MonkeyPatch, corpus_size: int | None
+) -> None:
+    """An interrupted hydration that recorded no revision must not resume at ``main``.
+
+    :param pytest.MonkeyPatch monkeypatch: Source and clear spies.
+    :param int | None corpus_size: Full-source or capped resume branch.
+    :return None: Asserts the rebuild guidance, no upstream read, and kept rows.
+    """
+    builder, clear, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=corpus_size,
+        cached_corpus_size=corpus_size,
+        cached_ids=("2601.00001",),
+    )
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=builder.dataset_source,
+        dataset_split="train",
+        corpus_size=corpus_size,
+        complete=False,
+    )
+    datasets = _RevisionedDatasets({SOURCE_COMMIT: []})
+    monkeypatch.setattr(deps_module, "_import_datasets_module", lambda: datasets)
+
+    with pytest.raises(RuntimeError, match="records no source revision") as caught:
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert "--force-rebuild-cache" in str(caught.value)
+    assert datasets.loads == []
+    assert datasets.counted == []
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001"}
+    assert not cache.payload_stats().hydration_complete
+    assert cache.get_hydration_source_revision() is None
+    model.encode.assert_not_called()
+    clear.assert_not_called()
+
+
+@pytest.mark.parametrize("corpus_size", [None, 2])
+def test_resume_reports_an_unloadable_pinned_revision(
+    monkeypatch: pytest.MonkeyPatch, corpus_size: int | None
+) -> None:
+    """A pin that no longer loads must fail with the rebuild guidance, not fall back.
+
+    :param pytest.MonkeyPatch monkeypatch: Source and clear spies.
+    :param int | None corpus_size: Full-source or capped resume branch.
+    :return None: Asserts the error, its cause, the single read, and kept rows.
+    """
+    builder, clear, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=corpus_size,
+        cached_corpus_size=corpus_size,
+        cached_ids=("2601.00001",),
+    )
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=builder.dataset_source,
+        dataset_split="train",
+        corpus_size=corpus_size,
+        complete=False,
+    )
+    cache.set_hydration_source_revision(PINNED_COMMIT)
+    datasets = _RevisionedDatasets({SOURCE_COMMIT: []})
+    monkeypatch.setattr(deps_module, "_import_datasets_module", lambda: datasets)
+
+    with pytest.raises(RuntimeError, match=PINNED_COMMIT) as caught:
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert "--force-rebuild-cache" in str(caught.value)
+    assert isinstance(caught.value.__cause__, FileNotFoundError)
+    assert datasets.loads == [(PINNED_COMMIT, False)]
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001"}
+    assert not cache.payload_stats().hydration_complete
+    assert cache.get_hydration_source_revision() == PINNED_COMMIT
+    model.encode.assert_not_called()
+    clear.assert_not_called()
+
+
 @pytest.mark.parametrize("requested_cap", [1, None])
-@pytest.mark.parametrize("interrupt_regrowth", [False, True])
-def test_shrunk_corpus_reconciliation_survives_reuse_and_regrowth(
+@pytest.mark.parametrize("interrupt_growth", [False, True])
+def test_shrunk_corpus_reconciliation_survives_reuse_and_pins_its_revision(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     requested_cap: int | None,
-    interrupt_regrowth: bool,
+    interrupt_growth: bool,
 ) -> None:
     """Historical rows must neither trigger rebuilds nor hide upstream growth.
+
+    A cache hydrated before source revisions were recorded follows a changed
+    upstream count once more: that rescan pins the commit it reads, so an
+    interrupted rescan resumes at it, and later upstream moves are left to
+    refresh like for any other pinned cache.
 
     :param pytest.MonkeyPatch monkeypatch: Source and encoder fixtures.
     :param pytest.LogCaptureFixture caplog: Retained-history warning capture.
     :param int | None requested_cap: Smaller request or exact all-corpus request.
-    :param bool interrupt_regrowth: Interrupt after committing part of the new IDs.
-    :return None: Checks stable reuse, retry, zero-row sources, and unchanged vectors.
+    :param bool interrupt_growth: Interrupt after committing the new row.
+    :return None: Checks retained history, the pin, resume, and unchanged vectors.
     """
     builder, clear, model = _complete_corpus_cache_builder(
         monkeypatch,
@@ -6769,6 +7239,8 @@ def test_shrunk_corpus_reconciliation_survives_reuse_and_regrowth(
         cached_ids=("2601.00001", "2601.00002", "2601.00003"),
     )
     cache = builder.embedding_cache
+    assert cache.get_hydration_source_revision() is None
+    assert "dataset_revision" not in builder._embedding_runtime_metadata()
     with h5py.File(cache.h5_path, "r") as h5:
         original_vectors = h5["embeddings"][:]
     rows = [
@@ -6781,73 +7253,65 @@ def test_shrunk_corpus_reconciliation_survives_reuse_and_regrowth(
         )
     )
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: len(rows)
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(rows),
     )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=load),
     )
+    if interrupt_growth:
+        write_batch = builder._cache_metadata_batch
+
+        def write_then_interrupt(
+            batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+        ) -> int:
+            """Commit the missing rows before interrupting source reconciliation.
+
+            :param list[dict[str, Any]] batch: Missing upstream records.
+            :return int: Never returns normally.
+            :raises KeyboardInterrupt: Simulates interruption after durable progress.
+            """
+            write_batch(batch, texts)
+            raise KeyboardInterrupt("reconciliation interrupted")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(builder, "_cache_metadata_batch", write_then_interrupt)
+            with pytest.raises(KeyboardInterrupt, match="reconciliation interrupted"):
+                builder._ensure_cache_hydrated(use_streaming=False)
+        assert cache.embedding_count() == 4
+        # The revalidation rescan is left incomplete at its pin; the top-up of
+        # a reused cache restores the complete, unpinned cache it started from.
+        assert cache.get_hydration_source_revision() == (
+            SOURCE_COMMIT if requested_cap is None else None
+        )
+        model.encode.reset_mock()
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
     assert cache.is_hydrated("train", None, dataset_source=builder.dataset_source)
     assert cache.get_cached_paper_ids() == {f"arxiv:2601.0000{i}" for i in range(1, 5)}
     assert cache.get_hydration_rowcount_reconciliation() == (2, 4)
-    _assert_encoded_corpus_records(builder, model, rows[1:])
+    assert cache.get_hydration_source_revision() == SOURCE_COMMIT
+    assert {call.kwargs["revision"] for call in load.call_args_list} == {SOURCE_COMMIT}
+    _assert_encoded_corpus_records(builder, model, [] if interrupt_growth else rows[1:])
     # 2601.00001 and 2601.00003 left the source; their vectors are kept.
     assert "Kept 2 cached papers that the current source" in caplog.text
+    load.reset_mock()
     builder._ensure_cache_hydrated(use_streaming=False)
-    load.assert_called_once()
+    load.assert_not_called()
 
+    # Upstream moves on; the pinned cache stays at the commit it reconciled.
     rows.extend(
         {"id": f"2601.0000{i}", "title": f"New {i}", "abstract": "C"}
         for i in range(5, 9)
     )
-    model.encode.reset_mock()
-    if interrupt_regrowth:
-        write_batch = builder._cache_metadata_batch
-
-        def write_partial_batch(
-            batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
-        ) -> int:
-            """Commit two new rows before interrupting source reconciliation.
-
-            :param list[dict[str, Any]] batch: Missing upstream records.
-            :return int: Never returns normally.
-            :raises KeyboardInterrupt: Simulates interruption after durable progress.
-            """
-            write_batch(batch[:2], texts)
-            raise KeyboardInterrupt("reconciliation interrupted")
-
-        with monkeypatch.context() as fault:
-            fault.setattr(builder, "_cache_metadata_batch", write_partial_batch)
-            with pytest.raises(KeyboardInterrupt, match="reconciliation interrupted"):
-                builder._ensure_cache_hydrated(use_streaming=False)
-        assert cache.embedding_count() == len(rows)
-        assert "arxiv:2601.00008" not in cache.get_cached_paper_ids()
-        model.encode.reset_mock()
-
-    builder._ensure_cache_hydrated(use_streaming=False)
-
-    assert cache.get_cached_paper_ids() == {f"arxiv:2601.0000{i}" for i in range(1, 9)}
-    assert cache.is_hydrated("train", None, dataset_source=builder.dataset_source)
-    assert cache.get_hydration_rowcount_reconciliation() == (6, 8)
-    _assert_encoded_corpus_records(
-        builder, model, rows[4:] if interrupt_regrowth else rows[2:]
-    )
-    load.reset_mock()
     builder.corpus_size = None
     builder._ensure_cache_hydrated(use_streaming=False)
     load.assert_not_called()
-
-    rows.clear()
-    builder._ensure_cache_hydrated(use_streaming=False)
-    assert cache.get_hydration_rowcount_reconciliation() == (0, 8)
-    load.reset_mock()
-    builder._ensure_cache_hydrated(use_streaming=False)
-    load.assert_not_called()
-    assert cache.embedding_count() == 8
+    assert cache.get_cached_paper_ids() == {f"arxiv:2601.0000{i}" for i in range(1, 5)}
     with h5py.File(cache.h5_path, "r") as h5:
         np.testing.assert_array_equal(h5["embeddings"][:3], original_vectors)
     clear.assert_not_called()
@@ -6871,7 +7335,9 @@ def test_failed_corpus_extension_retains_complete_cache(
     )
     cache = builder.embedding_cache
     load_mock = MagicMock()
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: None
+    )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     def extend(**_kwargs: Any) -> records_module._HydrationSourceSliceResult:
@@ -7002,9 +7468,12 @@ def test_incomplete_full_corpus_resume_reconciles_missing_ids(
     cache.mark_hydrated(
         dataset_source=source, dataset_split="train", corpus_size=None, complete=False
     )
+    cache.set_hydration_source_revision(PINNED_COMMIT)
     model.encode.reset_mock()
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: upstream_rows
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: upstream_rows,
     )
 
     def load_source(**kwargs: Any) -> tuple[str, list[dict[str, str]]]:
@@ -7013,6 +7482,7 @@ def test_incomplete_full_corpus_resume_reconciles_missing_ids(
         :param Any kwargs: Hydration slice options.
         :return tuple[str, list[dict[str, str]]]: Source and requested records.
         """
+        assert kwargs["revision"] == PINNED_COMMIT
         if fail_reconciliation and kwargs["row_offset"] is None:
             raise RuntimeError("reconciliation interrupted")
         offset = kwargs["row_offset"] or 0
@@ -7075,7 +7545,10 @@ def test_incomplete_full_corpus_resume_does_not_complete_failed_iteration(
         )
     )
     builder.embedding_cache.mark_hydrated = MagicMock()
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
+    builder.embedding_cache.set_hydration_source_revision(PINNED_COMMIT)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: None
+    )
     monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
 
     def failed_source() -> Iterable[dict[str, Any]]:
@@ -7120,7 +7593,9 @@ def test_initial_full_corpus_hydration_memoizes_duplicate_id_row_deficit(
     builder.embedding_cache.set_hydration_rowcount_reconciliation = MagicMock()
     builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
     monkeypatch.setattr(builder, "_clear_embedding_cache", MagicMock())
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 5)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 5
+    )
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
@@ -7233,6 +7708,7 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
         builder._hydrate_exact_hydration_source_slice(
             use_streaming=False,
             source=source,
+            revision=SOURCE_COMMIT,
             row_limit=10,
             row_offset=100,
             progress_total=10,
@@ -7245,6 +7721,7 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
         row_limit=10,
         row_offset=100,
         corpus_size=None,
+        revision=SOURCE_COMMIT,
     )
     hydrate_mock.assert_not_called()
 
@@ -7296,6 +7773,7 @@ def test_exact_hydration_slice_preserves_content_identity_across_offsets(
     result = builder._hydrate_exact_hydration_source_slice(
         use_streaming=False,
         source=source,
+        revision=SOURCE_COMMIT,
         row_limit=2,
         row_offset=100,
         progress_total=2,
@@ -7379,6 +7857,9 @@ def test_anonymous_corpus_rows_survive_source_reordering(
         corpus_size=corpus_size,
         complete=complete,
     )
+    if not complete:
+        # An interrupted hydration recorded its source revision before writing.
+        cache.set_hydration_source_revision(SOURCE_COMMIT)
     cache.mark_corpus_metadata_current()
     if legacy_ids:
         cache._write_cache_metadata({"corpus_identity_version": ""})
@@ -7396,7 +7877,9 @@ def test_anonymous_corpus_rows_survive_source_reordering(
             else _FakeIndexableDataset(source_rows, columns)
         )
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -7432,6 +7915,16 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     with h5py.File(cache.h5_path, "r") as handle:
         np.testing.assert_array_equal(handle["embeddings"][:2], original_vectors)
     assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
+    if not complete:
+        assert {call.kwargs["revision"] for call in load.call_args_list} == {
+            SOURCE_COMMIT
+        }
+    # A complete cache recorded no revision; the identity migration and the
+    # full-source rescan mark it incomplete, so each pins the commit it reads.
+    follows_upstream = complete and corpus_size is not None and not legacy_ids
+    assert cache.get_hydration_source_revision() == (
+        None if follows_upstream else SOURCE_COMMIT
+    )
     model.encode.reset_mock()
     load.reset_mock()
 
@@ -7481,7 +7974,9 @@ def test_legacy_summary_upgrade_does_not_guess_between_distinct_works(
         {**common, "abstract": None, "summary": "" if unchanged_source_row else "A"},
         {**common, "abstract": None, "summary": "B"},
     ]
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
@@ -7531,7 +8026,9 @@ def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(
             hydration_dataset_source=source,
         )
     )
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 100)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 100
+    )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", MagicMock())
 
     builder._ensure_cache_hydrated(use_streaming=False)
@@ -7561,7 +8058,9 @@ def test_full_corpus_refresh_retries_partial_writes_at_matching_counts(
         {"id": f"2601.0000{i}", "title": str(i), "abstract": "A"} for i in (2, 4, 5, 6)
     ]
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: len(rows)
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(rows),
     )
     monkeypatch.setattr(
         builder,
@@ -7614,11 +8113,13 @@ def test_hydration_reset_restores_model_fingerprint(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-before-clear")
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 1
+    )
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming: (
+        lambda use_streaming, *, revision: (
             "mini-dataset",
             [{"id": "p1", "title": "Paper 1", "abstract": "A"}],
         ),
@@ -7720,7 +8221,9 @@ def test_int8_hydration_calibration_uses_representative_prepass(
     dataset = deps_module._import_datasets_module().Dataset.from_list(records)
     load_mock = MagicMock(return_value=(source, dataset))
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _: len(records)
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(records),
     )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
@@ -7864,11 +8367,13 @@ def test_hydration_flush_size_controls_cache_write_bursting(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-flush-threshold")
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 7)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 7
+    )
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming: (
+        lambda use_streaming, *, revision: (
             "mini-dataset",
             [
                 {"id": f"p{i}", "title": f"Paper {i}", "abstract": f"A{i}"}
@@ -9217,7 +9722,7 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
     monkeypatch.setattr(
         embedding_builder,
         "_resolve_dataset_split_row_count",
-        lambda _source: len(source_rows),
+        lambda _source, *, revision: len(source_rows),
     )
     prepare = MagicMock(wraps=embedding_builder._prepare_corpus_for_build)
     ensure_hydrated = MagicMock(wraps=embedding_builder._ensure_cache_hydrated)
@@ -9363,7 +9868,7 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
         monkeypatch.setattr(
             embedding_builder,
             "_resolve_dataset_split_row_count",
-            lambda _source: len(source_rows),
+            lambda _source, *, revision: len(source_rows),
         )
         return public_builder, embedding_builder, client
 
@@ -9374,6 +9879,9 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
             requested_seed_id
             not in initial_embedding.embedding_cache.get_cached_paper_ids()
         )
+        # Model a cache hydrated before source revisions were recorded: only
+        # those still follow upstream growth during a build.
+        initial_embedding.embedding_cache.set_hydration_source_revision(None)
         source_rows.append(corpus_seed)
 
     cold_builder, cold_embedding, cold_client = make_builder()
@@ -9498,7 +10006,7 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
         monkeypatch.setattr(
             embedding_builder,
             "_resolve_dataset_split_row_count",
-            lambda _: len(source_rows),
+            lambda _source, *, revision: len(source_rows),
         )
         return public_builder, embedding_builder, client
 

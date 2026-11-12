@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import islice
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_cache import EMBEDDINGS_DATASET_NAME
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, EmbeddingGraphBuilder
+from citemesh.strategies.embedding import corpus_source as corpus_source_module
 from citemesh.strategies.embedding import deps as deps_module
 from citemesh.strategies.embedding.records import _dataset_record_paper_id
 
@@ -91,7 +93,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     replacement_rows = source_snapshot.select(range(12, 19))
     assert isinstance(initial_snapshot, datasets_module.Dataset)
     assert {"id", "title", "abstract"} <= set(initial_snapshot.column_names)
-    current_snapshot = {"dataset": initial_snapshot}
+    current_snapshot = {"dataset": initial_snapshot, "commit": "1" * 40}
     requested_splits: list[str] = []
 
     def load_local_snapshot(
@@ -100,6 +102,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
         split: str,
         streaming: bool,
         num_proc: int | None,
+        revision: str | None,
     ) -> Any:
         """Serve a real ``Dataset`` shape whose membership changes by phase.
 
@@ -107,11 +110,13 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
         :param str split: Requested split or row slice.
         :param bool streaming: Whether hydration requested streaming mode.
         :param Optional[int] num_proc: Worker count requested by non-streaming load.
+        :param str | None revision: Source commit the hydration pass pinned.
         :return Any: Current Arrow-backed snapshot or its requested slice.
         """
         assert dataset_source == DEFAULT_DATASET_SOURCE
         assert streaming is False
         assert num_proc is not None and num_proc >= 1
+        assert revision == current_snapshot["commit"]
         requested_splits.append(split)
         return _dataset_slice(current_snapshot["dataset"], split)
 
@@ -119,6 +124,13 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
         deps_module,
         "_import_datasets_module",
         lambda: SimpleNamespace(load_dataset=load_local_snapshot),
+    )
+    monkeypatch.setattr(
+        corpus_source_module,
+        "resolve_source_snapshot",
+        lambda selection, revision="main": replace(
+            selection, revision=current_snapshot["commit"]
+        ),
     )
 
     builder = EmbeddingGraphBuilder(
@@ -134,7 +146,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     monkeypatch.setattr(
         builder,
         "_resolve_dataset_split_row_count",
-        lambda _source: len(current_snapshot["dataset"]),
+        lambda _source, *, revision: len(current_snapshot["dataset"]),
     )
     builder._load_model()
     assert builder._active_model_name == DEFAULT_EMBEDDING_MODEL_NAME
@@ -157,6 +169,10 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     historical_vectors = cache.get_cached_embeddings(list(historical_ids))
     assert historical_vectors.keys() == historical_ids
     assert all(vector.dtype == np.float32 for vector in historical_vectors.values())
+    assert cache.get_hydration_source_revision() == current_snapshot["commit"]
+    # A pinned cache moves only through refresh; model one hydrated before
+    # source revisions were recorded, which still follows upstream changes.
+    cache.set_hydration_source_revision(None)
 
     clear_calls: list[str] = []
     original_clear = cache.clear
@@ -175,6 +191,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     current_snapshot["dataset"] = datasets_module.Dataset.from_list(
         [*list(initial_snapshot), *list(replacement_rows.select(range(1)))]
     )
+    current_snapshot["commit"] = "2" * 40
     builder.corpus_size = 4
     original_hydrate = builder._hydrate_dataset_records
 
@@ -194,6 +211,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     assert interrupted_stats.hydration_complete is True
     assert interrupted_stats.hydration_corpus_size == "all"
     assert cache.get_cached_paper_ids() == historical_ids
+    assert cache.get_hydration_source_revision() is None
 
     monkeypatch.setattr(builder, "_hydrate_dataset_records", original_hydrate)
     current_snapshot["dataset"] = datasets_module.Dataset.from_list(
@@ -202,6 +220,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
             *list(replacement_rows),
         ]
     )
+    current_snapshot["commit"] = "3" * 40
     new_ids = {
         _dataset_record_paper_id(dict(record), index)
         for index, record in enumerate(replacement_rows)
@@ -225,6 +244,7 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
         len(current_snapshot["dataset"]),
         cache.embedding_count(),
     )
+    assert cache.get_hydration_source_revision() == current_snapshot["commit"]
     requested_splits.clear()
     builder._ensure_cache_hydrated(use_streaming=False)
     builder.corpus_size = None

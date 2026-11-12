@@ -157,7 +157,7 @@ citemesh cache refresh --namespace NAMESPACE --adopt \
   --model-revision main --dataset-revision SOURCE_COMMIT
 ```
 
-Adoption checks the supplied historical selectors and stored model fingerprint; it never labels old vectors with the current moving model revision. A namespace whose original settings cannot be established is preserved and refused.
+Adoption checks the supplied historical selectors and stored model fingerprint; it never labels old vectors with the current moving model revision. Without `--dataset-revision`, a namespace whose build hydration recorded a source commit is adopted at that commit, and an older namespace at the current `main`. A namespace whose original settings cannot be established is preserved and refused.
 
 ### Publishing
 
@@ -191,11 +191,13 @@ The automatic hydration rules below apply to ordinary legacy corpus caches. Cert
 
 arXiv-corpus mode hydrates the full selected `--dataset-split` by default - "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; on a cold build the cap bounds what gets embedded, not how many rows are scanned to establish that order. Streaming ranking drains the source before encoding begins. An indexable non-streaming dataset instead scans its identifier columns. A slice such as `train[:2%]` limits the population ranked. Rows without parseable arXiv IDs fill any shortfall in source order, with a warning; when none can be parsed, the cap selects the first N rows.
 
-An interrupted run scans the selected source IDs and encodes only missing papers, provided the recorded source and split match, the recorded cap is compatible, and the namespace is self-consistent - equal SQLite and embedding row counts, at least one row, and persisted calibration ranges under `--storage-precision int8`. Anything else falls through to a full rebuild.
+A hydration from an empty namespace, including one emptied by `--force-rebuild-cache`, resolves `--dataset-source` to its current commit once and records that commit in the namespace before writing the first row; every read of the source during that hydration, its int8 calibration sample and row count included, uses the recorded commit.
+
+An interrupted run scans the selected source IDs at the recorded commit and encodes only missing papers, provided the recorded source and split match, the recorded cap is compatible, and the namespace is self-consistent - equal SQLite and embedding row counts, at least one row, and persisted calibration ranges under `--storage-precision int8`. Anything else falls through to a full rebuild. Upstream commits published in the meantime never reach a resumed run, so one hydration never mixes rows from two revisions. An interrupted cache whose recorded commit can no longer be loaded stops the build with an error instead of resuming; rerun with `--force-rebuild-cache` (plus `--overwrite-cache` for scripts) to rebuild it from one current commit. An unpinned cache from an older version that is left incomplete (an interrupted older build, or vectors lost in a crash) records no commit to resume at and must be rebuilt with `--force-rebuild-cache --overwrite-cache`.
 
 Metadata migrations of older corpus caches are described under [Older caches](#older-caches).
 
-A hydrated cache on a non-sliced split checks upstream growth:
+A complete cache stays at its recorded commit: builds reuse it without checking upstream, and moving it to a newer revision is the job of [`citemesh cache refresh`](#refresh), which records the new commit when it completes. A complete cache hydrated before commits were recorded has no pin, so on a non-sliced split it still checks upstream growth as below; a full-split rescan, and the one-time identity migration of older positional IDs, record the commit they read before they start, after which the cache is pinned like any other:
 
 | Upstream state | Reuse or update |
 | --- | --- |
@@ -222,7 +224,7 @@ Of the corpus flags, only a changed `--dataset-source` or `--dataset-split` clea
 
 A model-fingerprint mismatch is not one of those conditions. When a hydrated corpus was built under a different fingerprint than the active model's, CiteMesh stops and names both fingerprints, the rows and on-disk size at stake, and the remedy - `--force-rebuild-cache`, plus `--overwrite-cache` for scripts, or `citemesh cache clear`. Candidate-pool and graph-similarity namespaces re-encode in seconds and still clear silently; corpus hydration metadata is what earns a namespace the protection.
 
-Hydration compatibility uses dataset source, split, and cap rather than an immutable upstream revision. A sliced `--dataset-split` skips growth checks, but the same slice expression can refer to different records after an upstream update. Neither slicing nor cache reuse guarantees an immutable corpus.
+Hydration compatibility uses dataset source, split, and cap; the recorded commit decides only which revision a resume, an in-place cap extension, or a metadata migration reads. A sliced `--dataset-split` skips growth checks, and the same slice expression refers to the same records only at the same commit.
 
 ### Quantization
 

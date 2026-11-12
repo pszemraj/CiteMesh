@@ -937,6 +937,11 @@ class EmbeddingGraphBuilder(
             if source is not None:
                 metadata["installed_corpus_selection"] = source.selection
                 metadata["installed_corpus_limit"] = source.limit
+        elif self.semantic_source == "arxiv-corpus":
+            # A build-hydrated corpus reports the source commit it is pinned to.
+            dataset_revision = self.embedding_cache.get_hydration_source_revision()
+            if dataset_revision is not None:
+                metadata["dataset_revision"] = dataset_revision
         return metadata
 
     def _cache_model_identity(self) -> str:

@@ -537,6 +537,46 @@ def test_explicit_legacy_adoption_retains_requested_main_address(
     assert builder.embedding_cache.get_max_chronology_key() is not None
 
 
+@pytest.mark.parametrize("explicit_revision", [None, "two"])
+def test_adoption_defaults_to_the_pinned_hydration_revision(
+    monkeypatch, runtime, explicit_revision
+):
+    loads = []
+    sources = {
+        "one": [row("2401.00001")],
+        "two": [row("2401.00001"), row("2401.00002")],
+    }
+    # ``main`` has moved past both; nothing may resolve or read it.
+    reads, resolutions = install_source(monkeypatch, sources, ["three"], loads)
+    builder = make_builder()
+    builder.model_revision = None
+    fingerprint = "hf::org/example::" + "a" * 40
+    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+    namespace = builder._embedding_cache_namespace(artifact_identity=fingerprint)
+    cache = builder._create_embedding_cache(namespace)
+    cache.set_model_fingerprint(fingerprint)
+    builder._load_model()
+    cache.upsert_embeddings(
+        {"arxiv:2401.00001": {"title": "2401.00001", "abstract": "body"}},
+        builder.model,
+        text_builder=builder._format_retrieval_document_metadata,
+    )
+    cache.mark_hydrated(
+        builder.dataset_source, builder.dataset_split, None, complete=True
+    )
+    cache.set_hydration_source_revision("one")
+    target = explicit_revision or "one"
+
+    result = adopt_legacy_cache(builder, cache.namespace_id, revision=explicit_revision)
+
+    assert result["source"]["revision"] == target
+    assert resolutions == [target]
+    assert reads == [target]
+    assert loads == [(target, False)]
+    assert result["active_rows"] == len(sources[target])
+    assert builder.embedding_cache.get_hydration_source_revision() == target
+
+
 @pytest.mark.parametrize("stored_size", [None, 2])
 def test_legacy_adoption_rejects_conflicting_explicit_coverage(
     monkeypatch, runtime, stored_size

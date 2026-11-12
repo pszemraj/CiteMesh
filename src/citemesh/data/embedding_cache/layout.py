@@ -45,6 +45,7 @@ from .constants import (
     HYDRATION_DATASET_SOURCE_KEY,
     HYDRATION_RECONCILED_CACHE_ROWS_KEY,
     HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY,
+    HYDRATION_SOURCE_REVISION_KEY,
     HYDRATION_SPLIT_KEY,
     MODEL_FINGERPRINT_KEY,
     SCHEMA_VERSION_KEY,
@@ -743,6 +744,7 @@ class _H5LayoutMixin(_EmbeddingCacheHost):
             conn,
             {
                 HYDRATION_DATASET_SOURCE_KEY: "",
+                HYDRATION_SOURCE_REVISION_KEY: "",
                 HYDRATION_SPLIT_KEY: "",
                 HYDRATION_CORPUS_SIZE_KEY: "",
                 HYDRATION_COMPLETE_KEY: "0",

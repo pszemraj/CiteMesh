@@ -1239,6 +1239,7 @@ class CorpusOperationSession(Generic[_CacheT]):
                 {
                     constants.HYDRATION_COMPLETE_KEY: "1",
                     constants.HYDRATION_DATASET_SOURCE_KEY: self.target_source.repo_id,
+                    constants.HYDRATION_SOURCE_REVISION_KEY: self.target_source.revision,
                     constants.HYDRATION_SPLIT_KEY: self.target_source.split,
                     constants.HYDRATION_CORPUS_SIZE_KEY: constants._corpus_size_token(
                         self.target_source.limit

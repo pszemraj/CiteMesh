@@ -501,7 +501,9 @@ def adopt_legacy_cache(
     :param builder: Builder configured with the source selectors for the cache.
     :param namespace_id: Legacy cache namespace to open.
     :param cache_dir: Cache directory containing the legacy namespace.
-    :param revision: Optional dataset revision to reconcile.
+    :param revision: Optional dataset revision to reconcile, defaulting to the
+        revision build hydration pinned, so certification checks the corpus
+        against the snapshot it was built from.
     :return: Source identity and either an unchanged marker or refresh counts.
     """
     from citemesh.data.embedding_cache import constants, open_existing_cache
@@ -548,4 +550,8 @@ def adopt_legacy_cache(
     )
     builder._cache_selection = selection
     builder.embedding_cache = cache
+    if revision is None:
+        revision = metadata.get(constants.HYDRATION_SOURCE_REVISION_KEY) or None
+        if revision is not None:
+            logger.debug("Adopting at the pinned hydration revision %s", revision)
     return refresh_builder_corpus(builder, revision)

@@ -56,6 +56,7 @@ from .constants import (
     HYDRATION_DATASET_SOURCE_KEY,
     HYDRATION_RECONCILED_CACHE_ROWS_KEY,
     HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY,
+    HYDRATION_SOURCE_REVISION_KEY,
     HYDRATION_SPLIT_KEY,
     INT8_CLIPPED_VALUE_COUNT_KEY,
     INT8_SATURATION_WARN_RATIO,
@@ -691,6 +692,15 @@ class EmbeddingCache(
                     output[decoded["paper_id"]] = _cached_paper_metadata(decoded)
         return output
 
+    def needs_corpus_identity_reconciliation(self) -> bool:
+        """Return whether the cache predates the corpus identity marker.
+
+        :return bool: Whether :meth:`prepare_corpus_identity_reconciliation`
+            still has to inspect this cache.
+        """
+        metadata = self._read_cache_metadata()
+        return metadata.get(CORPUS_IDENTITY_VERSION_KEY) != CORPUS_IDENTITY_VERSION
+
     def prepare_corpus_identity_reconciliation(self) -> bool:
         """Prepare one source reconciliation for caches with positional-looking IDs.
 
@@ -988,6 +998,27 @@ class EmbeddingCache(
         """
         cached_source = self._read_cache_metadata().get(HYDRATION_DATASET_SOURCE_KEY)
         return cached_source if cached_source else None
+
+    def get_hydration_source_revision(self) -> str | None:
+        """Return the source commit every build-hydration read of this corpus uses.
+
+        :return Optional[str]: Pinned commit, or ``None`` for a corpus hydrated
+            before revisions were recorded.
+        """
+        metadata = self._read_cache_metadata()
+        revision = str(metadata.get(HYDRATION_SOURCE_REVISION_KEY, "")).strip()
+        return revision or None
+
+    def set_hydration_source_revision(self, revision: str | None) -> None:
+        """Pin, or with ``None`` unpin, the source commit hydration reads.
+
+        :param Optional[str] revision: Immutable source commit, or ``None``.
+        :raises ValueError: If ``revision`` is blank.
+        """
+        normalized = "" if revision is None else str(revision).strip()
+        if revision is not None and not normalized:
+            raise ValueError("revision must be a non-empty string or None.")
+        self._write_cache_metadata({HYDRATION_SOURCE_REVISION_KEY: normalized})
 
     def has_current_corpus_metadata(self) -> bool:
         """Return whether corpus years, DOIs and venues use the current adapter.
