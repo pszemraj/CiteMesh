@@ -525,9 +525,9 @@ def _run_search_command(
     if overrides:
         if args.mode == "s2":
             logger.error(
-                "%s only apply to local semantic search; drop them or use "
-                "--mode local.",
+                "Only local semantic search accepts %s; drop %s or use --mode local.",
                 ", ".join(override_labels),
+                "it" if len(override_labels) == 1 else "them",
             )
             return 2
         if selected_namespace:

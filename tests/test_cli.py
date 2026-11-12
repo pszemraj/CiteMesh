@@ -1238,7 +1238,8 @@ def test_search_mode_s2_rejects_local_flags(
     )
     assert result.returncode == 2
     message = str(error_mock.call_args)
-    assert "only apply to local semantic search" in message
+    assert "Only local semantic search accepts" in message
+    assert ("'it'" if len(local_flags) == 2 else "'them'") in message
     for flag in local_flags[::2]:
         assert flag in message
 
