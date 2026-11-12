@@ -1,0 +1,152 @@
+# config_reference.toml: every key CiteMesh reads from its user config file, config.toml. Start from example.toml.
+# Loadable form: an uncommented key holds its built-in default, and a commented-out key has no single literal default and shows an example value.
+# Hand-maintained. tests/test_config_reference.py checks its keys and default values against the loader and the build parser.
+# Location: config.toml in the cache root, as printed by `citemesh config path`. CITEMESH_CACHE_DIR moves the cache root (docs/reference/environment.md).
+# Read once per command. `citemesh build` and `citemesh search` apply it, and docs/guides/configuration.md covers editing it with `citemesh config`.
+# Precedence, lowest to highest: built-in defaults, this file, command-line flags.
+# Each [defaults] key is the default of the build flag spelled with `-` for `_`, so max_papers is --max-papers. Exceptions are named on the key.
+# A configured value is a default, not a flag: it never causes an unsupported-option error, and a strategy that does not use it ignores it.
+# Keys under the Semantic discovery, Embedding model and storage, and arXiv corpus banners are read only by embedding and hybrid builds and by local search.
+# --cache-namespace overrides model, model_revision, model_profile, truncate_dim, storage_precision, calibration_sample_size, dataset_source and dataset_split.
+# Unknown tables and keys are ignored with a warning.
+# A value that breaks a constraint stated here is ignored with a warning naming the key, and the built-in default applies.
+# A file that cannot be read as TOML is ignored whole, with a warning. Entries state failure only where it differs, such as a combination that stops a build.
+# Strings are trimmed and must be nonempty, and an int is at least 1 unless its entry says otherwise.
+# Numbers also accept numeric strings, and a bool also accepts "true"/"false", "yes"/"no", "on"/"off" or "1"/"0".
+
+[defaults]
+
+# ---------- Graph ----------
+# Built-in max_papers, max_citations and max_references are 40, 25 and 25, or 45, 1000 and 1000 for hybrid. A configured value applies to hybrid too.
+# max_citations and max_references are read only by citation and hybrid builds, and 0 skips that source.
+# Citation builds: they cap the citers and references that join the graph, within max_papers.
+# Hybrid builds: they are fetch limits for the candidate pool, which ranking then cuts to max_papers.
+# Warning: one configured value serves both strategies, so a cap chosen for citation builds also shrinks hybrid's candidate pool.
+
+# 'recommendation' | 'citation' | 'embedding' | 'hybrid'. Discovery strategy of `citemesh build` (docs/guides/strategies.md).
+# embedding and hybrid need the embeddings extra and download the embedding model on first use.
+strategy = "recommendation"
+
+# int. Maximum papers in the graph, seed included.
+# max_papers = 45
+
+# int, at least 0. How many papers citing the seed to fetch.
+# max_citations = 1000
+
+# int, at least 0. How many of the seed's references to fetch.
+# max_references = 1000
+
+# int. Edges each paper keeps in an embedding graph, strongest first.
+# Only used when: strategy is embedding.
+top_k = 4
+
+# ---------- Output ----------
+
+# list of 'png' | 'html' | 'plotly' | 'dashboard' | 'json' | 'csv' | 'bibtex' | 'graphml' | 'all'. Formats `citemesh build` writes, where 'all' is every format.
+# Also accepts one comma-separated string such as "json,dashboard". Duplicates are dropped.
+# An explicit --export replaces this list instead of adding to it.
+export = ["png"]
+
+# 'light' | 'dark' | 'solarized' | 'auto'. Color theme of every export. 'auto' reads the terminal background from COLORFGBG or DARKMODE.
+theme = "dark"
+
+# ---------- Semantic discovery ----------
+# An explicit corpus flag (--dataset-source, --dataset-split, --corpus-size, --all-corpus or --streaming) turns a configured 'candidates' into 'arxiv-corpus'.
+# An explicit --candidate-pool-size turns a configured 'arxiv-corpus' into 'candidates'. Passing flags of both kinds is an error.
+
+# 'candidates' | 'arxiv-corpus' | 'both'. Source of semantic candidates, and of the cache namespace local search reads.
+# 'candidates': Semantic Scholar papers, either a candidate_pool_size pool (embedding) or 200 recommendations beside the references and citers (hybrid).
+# 'arxiv-corpus': the nearest papers in a local arXiv corpus, installed with `citemesh cache import` or hydrated by the first corpus build.
+# 'both' (hybrid only): recommendations and corpus neighbors together. Other strategies and local search read a configured 'both' as 'arxiv-corpus'.
+# With --cache-namespace, every value except 'both' on a hybrid build becomes 'arxiv-corpus'.
+semantic_source = "candidates"
+
+# int. Semantic Scholar references, citers and recommendations an embedding build gathers as its candidate pool.
+# Only used when: strategy is embedding and semantic_source is 'candidates'. Hybrid takes whole provider lists instead.
+candidate_pool_size = 400
+
+# float, 0.0 to 1.0. Minimum embedding cosine for a graph edge. Hybrid also scores a weaker pair when it shares references.
+# Recommended: re-tune after changing model or truncate_dim, because 0.74 was calibrated for EmbeddingGemma at 512 dimensions (other settings log a warning).
+# See: docs/reference/defaults-tuning-study.md
+min_semantic_similarity = 0.74
+
+# ---------- Embedding model and storage ----------
+# Changing model, model_revision, the resolved model_profile, truncate_dim, storage_precision or int8 calibration_sample_size selects another cache namespace.
+# A new namespace starts empty, so a corpus source must be hydrated or installed again. Switching back to the old settings reopens the old vectors.
+# See: docs/guides/caching.md#embedding-namespaces
+# Candidate pools and graph-similarity vectors are always stored as float32, so the storage keys shape corpus storage only.
+# binary_prefilter and calibration_sample_size apply only when storage_precision is 'int8'.
+
+# string. Hugging Face model ID or local checkpoint path that encodes papers and queries.
+# The default model falls back to google/embeddinggemma-300m when it fails to load, unless model_revision is set (docs/reference/embedding-runtime.md).
+model = "unsloth/embeddinggemma-300m"
+
+# 'auto' | 'default' | 'embeddinggemma'. Model family, which sets prompt formatting, the dimension policy and compile eligibility.
+# 'auto' detects EmbeddingGemma from the model ID or checkpoint architecture, and 'default' turns family-specific behavior off.
+# Recommended: 'embeddinggemma' for a stripped or custom EmbeddingGemma export that 'auto' does not recognize.
+model_profile = "auto"
+
+# string (optional). Hub branch, tag or commit of model to load. Setting it disables the default model's fallback.
+# Unset: the main branch.
+# model_revision = "main"
+
+# int (optional). Dimensions kept from each embedding. EmbeddingGemma accepts 768, 512, 256 or 128, and a build stops on any other value.
+# Unset: the profile's recommendation, which is 512 for EmbeddingGemma and the full model output for the default profile.
+# truncate_dim = 512
+
+# 'auto' | 'cuda' | 'mps' | 'cpu'. Device that encodes papers and queries. 'auto' prefers cuda, then mps, then cpu.
+# A configured device this machine lacks stops an embedding or hybrid build with an error naming this key.
+device = "auto"
+
+# int. Texts per model encode pass, in corpus hydration, builds and local search. Flag: --batch-size.
+encode_batch_size = 32
+
+# bool. Best-effort torch.compile for eligible model profiles, at a warm-up cost (docs/reference/embedding-runtime.md#compile-policy).
+torch_compile = false
+
+# 'int8' | 'float32'. Precision of stored corpus vectors. int8 is quantized with ranges taken from a calibration sample.
+storage_precision = "int8"
+
+# bool. Hamming-distance prefilter over int8 corpus vectors before exact rescoring. Toggling it reuses the stored vectors.
+binary_prefilter = true
+
+# int. Corpus papers sampled to set the int8 quantization ranges when a namespace is first written.
+calibration_sample_size = 2000
+
+# ---------- arXiv corpus ----------
+# These keys are read only when the effective semantic source is 'arxiv-corpus' or 'both'.
+# Under 'candidates', configured values are reset to their built-in defaults, with a DEBUG log line.
+# Without an installed index, the first corpus build encodes the selected split, or its corpus_size newest papers, at far more cost than candidates.
+# Warning: changing dataset_source or dataset_split clears a self-hydrated corpus namespace and encodes it again. An installed index refuses the change instead.
+# See: docs/guides/caching.md#corpus-hydration-and-resume
+
+# string. Hugging Face dataset of arXiv metadata that corpus hydration reads.
+dataset_source = "librarian-bots/arxiv-metadata-snapshot"
+
+# string. Split of dataset_source to hydrate. A slice such as "train[:5%]" bounds the papers considered.
+dataset_split = "train"
+
+# int (optional). Hydrate only the N newest submissions of the split, by arXiv ID.
+# Unset: the full split.
+# Overridden by: --all-corpus. With --cache-namespace, the index's recorded cap also bounds it.
+# corpus_size = 100000
+
+# bool. Stream the dataset instead of loading it into memory.
+# Requires: an unsliced dataset_split. A slice stops the build with an error.
+streaming = false
+
+# ---------- Search ----------
+
+# 'auto' | 'local' | 's2'. Where `citemesh search` looks. Flag: search --mode.
+# 'local' searches the local embedding cache and fails when it holds no vectors for the current settings. 's2' runs a Semantic Scholar keyword search.
+# 'auto' searches local vectors when the namespace has any, and Semantic Scholar otherwise.
+# Overridden by: search's namespace flags, such as --model or --cache-namespace, which select local mode.
+# In 'auto', a configured value local search cannot use, such as an unavailable device, falls back to Semantic Scholar with a warning.
+search_mode = "auto"
+
+[api]
+
+# string (optional). Semantic Scholar API key for authenticated requests.
+# Overridden by: the S2_API_KEY environment variable whenever it is set, even to an empty string, which forces anonymous access.
+# Warning: stored in plain text. CiteMesh writes the file owner-only, `citemesh config list` masks the key, and `citemesh config get` prints it.
+# s2_api_key = ""
