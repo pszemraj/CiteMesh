@@ -12,28 +12,40 @@ Related papers were graded 0 (tangent), 1 (useful) or 2 (important) from title a
 
 ## Results on the development seeds
 
-Five development seeds, at the list sizes of a hosted literature-mapping tool's exports for the same seeds (194 slots in total). Useful counts papers graded 1 or 2; important counts papers graded 2. The ranking design was chosen on these seeds.
+Five development seeds, at the list sizes of a hosted literature-mapping tool's exports for the same seeds (194 slots in total). Useful counts papers graded 1 or 2; important counts papers graded 2; tangent counts papers graded 0. Every system is scored on the same 194 slots, so each count is a share of the returned list. The ranking design was chosen on these seeds.
 
-| System | Useful | Important |
-| --- | ---: | ---: |
-| Hosted literature-mapping tool | 62 | 27 |
-| Previous hybrid | 92 | 47 |
-| Current hybrid, `both` (local corpus index and recommendations) | 138 | 66 |
-| Current hybrid, default `candidates` mode | 136 | 59 |
-| Current hybrid, `arxiv-corpus` | 128 | 64 |
+| System | Useful | Important | Tangent |
+| --- | ---: | ---: | ---: |
+| Hosted literature-mapping tool | 62 (32%) | 27 (14%) | 132 (68%) |
+| Previous hybrid | 92 (47%) | 47 (24%) | 102 (53%) |
+| Current hybrid, `both` (local corpus index and recommendations) | 138 (71%) | 66 (34%) | 56 (29%) |
+| Current hybrid, default `candidates` mode | 136 (70%) | 59 (30%) | 58 (30%) |
+| Current hybrid, `arxiv-corpus` | 128 (66%) | 64 (33%) | 66 (34%) |
 
 ## Results on held-out seeds
 
 Eleven held-out seeds that played no part in the design, 44 related papers each.
 
-| System | Useful | Important | Papers graded |
-| --- | ---: | ---: | ---: |
-| Previous hybrid | 263 | 140 | 483 |
-| Current hybrid, `both` | 345 | 180 | 484 |
-| Current hybrid, `candidates` | 343 | 174 | 483 |
-| Current hybrid, `arxiv-corpus` | 328 | 150 | 484 |
+| System | Useful | Important | Tangent | Papers graded |
+| --- | ---: | ---: | ---: | ---: |
+| Previous hybrid | 263 (54%) | 140 (29%) | 220 (46%) | 483 |
+| Current hybrid, `both` | 345 (71%) | 180 (37%) | 139 (29%) | 484 |
+| Current hybrid, `candidates` | 343 (71%) | 174 (36%) | 140 (29%) | 483 |
+| Current hybrid, `arxiv-corpus` | 328 (68%) | 150 (31%) | 156 (32%) | 484 |
 
-In `both` mode nine seeds gained useful papers, one tied and one lost one useful paper, within the judge's repeat noise. In `candidates` mode nine gained and two tied on useful papers while losing one to three important ones. `both` is the strongest mode: against `arxiv-corpus` the recommendation list adds 17 useful and 30 important papers on these seeds. Precision falls with rank, so the first twenty papers are the most reliable.
+In `both` mode nine seeds gained useful papers, one tied and one lost one useful paper, within the judge's repeat noise. In `candidates` mode nine gained and two tied on useful papers while losing one to three important ones. `both` is the strongest mode: against `arxiv-corpus` the recommendation list adds 17 useful and 30 important papers on these seeds.
+
+## Precision by list length
+
+The list length is set by `-p` and did not change: the wider pool feeds the same 44 slots the previous hybrid filled, so the counts above are precision, not recall. Share of the first k papers graded useful / important on the held-out seeds:
+
+| Mode | First 10 | First 20 | First 30 | All 44 |
+| --- | ---: | ---: | ---: | ---: |
+| `both` | 83% / 56% | 81% / 50% | 77% / 44% | 71% / 37% |
+| `candidates` | 82% / 55% | 79% / 47% | 76% / 42% | 71% / 36% |
+| `arxiv-corpus` | 84% / 52% | 77% / 42% | 73% / 36% | 68% / 31% |
+
+Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31 to 44 are 60 percent useful and 23 percent important. The list is always filled to the requested size, so a seed with few relevant candidates is padded with tangents. Tangents per 44-paper graph in `both` mode ran from 5 to 27 across the held-out seeds, median 11; for the previous hybrid they ran from 14 to 28, median 19.
 
 ## Limits
 
