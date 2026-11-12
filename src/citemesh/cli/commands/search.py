@@ -206,12 +206,12 @@ def _prepare_local_search_builder(
     defaults = build_parser.parse_args(["local-search-placeholder-seed"])
     defaults._s2_api_key = _resolve_user_config_api_key(user_config)
     _pop_tracked_option_dests(defaults)
+    # Local search reads an embedding namespace: a configured strategy must not
+    # replace it, and config defaults must be resolved for this strategy.
+    defaults.strategy = "embedding"
     config_default_dests = _apply_user_config_defaults(
         defaults, {"strategy"}, user_config
     )
-    defaults.strategy = "embedding"
-    if defaults.semantic_source == "both":
-        defaults.semantic_source = "arxiv-corpus"
     overrides = _namespace_overrides(args)
     for dest, value in overrides.items():
         setattr(defaults, dest, value)

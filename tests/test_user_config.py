@@ -20,6 +20,16 @@ from citemesh.cli import cache_ops as cache_ops_module
 from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import parser as parser_module
 from citemesh.core import API_CONFIG
+from citemesh.core.choices import (
+    DEVICE_CHOICES,
+    EXPORT_CHOICES,
+    HYBRID_SEMANTIC_SOURCE_CHOICES,
+    MODEL_PROFILE_CHOICES,
+    SEARCH_MODE_CHOICES,
+    STORAGE_PRECISION_CHOICES,
+    STRATEGY_CHOICES,
+    THEME_CHOICES,
+)
 from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
@@ -27,6 +37,7 @@ from citemesh.data.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
     ConfigFileError,
     ConfigKeyError,
+    ConfigValue,
     ConfigValueError,
     UserConfig,
     format_config_value,
@@ -1116,12 +1127,12 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
 
     assert "Loaded config defaults" in str(debug.call_args_list)
     info.assert_not_called()
-    messages = str(debug.call_args_list)
-    assert "Ignoring corpus-only config default(s)" in messages
-    assert "defaults.corpus_size" in messages
-    assert "defaults.dataset_source" in messages
-    assert "defaults.streaming" in messages
-    assert "defaults.semantic_source='arxiv-corpus'" in messages
+    messages = [call.args[0] % call.args[1:] for call in debug.call_args_list]
+    assert (
+        "Ignoring corpus-only config default(s) defaults.corpus_size, "
+        f"defaults.dataset_source, defaults.streaming from {config.path} "
+        "because the effective semantic source is candidates."
+    ) in messages
     payload = graph_config_module._build_graph_config_payload(
         args,
         "seed",
@@ -1135,6 +1146,299 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     assert embedding["candidate_pool_size"] == args.candidate_pool_size
     assert not set(embedding) & build_options_module._CORPUS_ONLY_OPTION_DESTS
     assert "calibration_sample_size" not in embedding
+
+
+# ---------------------------------------------------------------------------
+# Invariant: no single accepted config default breaks a plain build
+# ---------------------------------------------------------------------------
+
+_CFG_PATH = Path("cfg-home") / "config.toml"
+
+# Every choice of a choice-typed key; the lower bound and a typical value of an
+# integer; both booleans; the bounds of the similarity threshold; one string,
+# plus a sliced split because streaming rejects those.
+_REPRESENTATIVE_CONFIG_VALUES: dict[str, tuple[object, ...]] = {
+    "strategy": STRATEGY_CHOICES,
+    "export": tuple([choice] for choice in EXPORT_CHOICES),
+    "theme": THEME_CHOICES,
+    "model": ("org/generic-embedding-model",),
+    "model_profile": MODEL_PROFILE_CHOICES,
+    "model_revision": ("main",),
+    "device": DEVICE_CHOICES,
+    "semantic_source": HYBRID_SEMANTIC_SOURCE_CHOICES,
+    "candidate_pool_size": (1, 400),
+    "encode_batch_size": (1, 64),
+    "storage_precision": STORAGE_PRECISION_CHOICES,
+    "binary_prefilter": (True, False),
+    "calibration_sample_size": (1, 2000),
+    "max_papers": (1, 40),
+    "max_citations": (0, 20),
+    "max_references": (0, 20),
+    "top_k": (1, 5),
+    "truncate_dim": (1, 256),
+    "min_semantic_similarity": (0.0, 1.0),
+    "corpus_size": (1, 5000),
+    "dataset_source": ("research/arxiv-snapshot",),
+    "dataset_split": ("train", "train[:5%]"),
+    "streaming": (True, False),
+    "torch_compile": (True, False),
+    "search_mode": SEARCH_MODE_CHOICES,
+}
+
+
+def test_single_default_sweep_covers_every_config_key() -> None:
+    """The sweep below must name a value for every accepted ``[defaults]`` key.
+
+    :return None: Assertion fails when a config key is added or removed.
+    """
+    assert set(_REPRESENTATIVE_CONFIG_VALUES) == set(CONFIG_DEFAULT_KEY_SPECS)
+
+
+@pytest.mark.parametrize(
+    ("key", "raw_value", "strategy"),
+    [
+        pytest.param(
+            key,
+            raw_value,
+            strategy,
+            id=f"{key}={raw_value}-{strategy}",
+        )
+        for key, values in _REPRESENTATIVE_CONFIG_VALUES.items()
+        for raw_value in values
+        for strategy in STRATEGY_CHOICES
+    ],
+)
+def test_single_accepted_config_default_never_breaks_a_plain_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    raw_value: object,
+    strategy: str,
+) -> None:
+    """A default the loader accepts must not fail ``build --strategy S <seed>``.
+
+    Device availability is a property of the host, not of the config: the probe
+    is patched to resolve every device, so ``cuda`` and ``mps`` are checked like
+    ``cpu`` on any machine. A missing device still fails builds, with the config
+    source named, as ``test_config_device_validation_names_the_config_source``
+    pins.
+
+    :param Path tmp_path: Isolated config file location.
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the device probe.
+    :param str key: Config ``[defaults]`` key under test.
+    :param object raw_value: Value persisted through ``config set``.
+    :param str strategy: Strategy passed on the command line.
+    :return None: Completion shows the contract accepts the overlaid default.
+    """
+    monkeypatch.setattr(
+        build_contract_module, "resolve_embedding_device", lambda device: device
+    )
+    config_path = tmp_path / "config.toml"
+    value = set_config_value(f"defaults.{key}", raw_value, path=config_path)
+    config = load_user_config(config_path)
+    assert config.defaults == {key: value}
+    args, provided, _ = _parsed_build_args(["paper-id", "--strategy", strategy])
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+
+    build_contract_module._validate_build_cli_contract(
+        args,
+        build_contract_module._ValueErrorParserErrorSink(),
+        provided,
+        config_defaults=applied,
+        config_path=config.path,
+    )
+
+
+@pytest.mark.parametrize("strategy_from_config", [False, True])
+@pytest.mark.parametrize("strategy", STRATEGY_CHOICES)
+def test_configured_combined_source_narrows_outside_hybrid(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, strategy_from_config: bool
+) -> None:
+    """A configured ``both`` means the corpus for every strategy except hybrid.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture capturing debug logging.
+    :param str strategy: Effective build strategy.
+    :param bool strategy_from_config: Whether the strategy is configured too.
+    :return None: Assertions check the value, its provenance and the debug line.
+    """
+    debug = MagicMock()
+    monkeypatch.setattr(build_options_module.logger, "debug", debug)
+    defaults: dict[str, ConfigValue] = {"semantic_source": "both"}
+    if strategy_from_config:
+        defaults["strategy"] = strategy
+    argv = (
+        ["paper-id"] if strategy_from_config else ["paper-id", "--strategy", strategy]
+    )
+    args, provided, _ = _parsed_build_args(argv)
+
+    applied = build_options_module._apply_user_config_defaults(
+        args, provided, UserConfig(path=_CFG_PATH, defaults=defaults)
+    )
+
+    narrowed = strategy != "hybrid"
+    assert args.semantic_source == ("arxiv-corpus" if narrowed else "both")
+    assert "semantic_source" in applied
+    assert "semantic_source" not in provided
+    messages = [call.args[0] % call.args[1:] for call in debug.call_args_list]
+    narrowing = [line for line in messages if "defaults.semantic_source='both'" in line]
+    assert len(narrowing) == int(narrowed)
+    if narrowed:
+        assert str(_CFG_PATH) in narrowing[0]
+        assert narrowing[0].endswith(f"the active strategy is {strategy}.")
+
+
+def _configured_embedding_outcome(
+    semantic_source: str, flags: list[str]
+) -> tuple[str, str]:
+    """Validate an embedding build over one configured semantic source.
+
+    :param str semantic_source: Configured ``defaults.semantic_source``.
+    :param list[str] flags: Extra build flags after ``--strategy embedding``.
+    :return tuple[str, str]: Effective source and storage precision, or
+        ``("error", message)`` when the contract rejects the build.
+    """
+    args, provided, _ = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding", *flags]
+    )
+    config = UserConfig(path=_CFG_PATH, defaults={"semantic_source": semantic_source})
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    try:
+        build_contract_module._validate_build_cli_contract(
+            args,
+            build_contract_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+    except ValueError as exc:
+        return "error", str(exc)
+    return str(args.semantic_source), str(args.storage_precision)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], ("arxiv-corpus", "int8")),
+        (["--candidate-pool-size", "50"], ("candidates", "float32")),
+        (["--corpus-size", "100"], ("arxiv-corpus", "int8")),
+    ],
+)
+def test_configured_combined_source_resolves_like_configured_corpus(
+    flags: list[str], expected: tuple[str, str]
+) -> None:
+    """Outside hybrid, a configured ``both`` behaves exactly like ``arxiv-corpus``.
+
+    It stays a config default, so candidate-only flags still imply candidates.
+
+    :param list[str] flags: Extra build flags after ``--strategy embedding``.
+    :param tuple[str, str] expected: Effective source and precision.
+    :return None: Assertions compare both configured values with the expectation.
+    """
+    assert _configured_embedding_outcome("both", flags) == expected
+    assert _configured_embedding_outcome("arxiv-corpus", flags) == expected
+
+
+_INT8_CANDIDATES_ERROR = (
+    "--storage-precision int8 requires --semantic-source arxiv-corpus "
+    "(int8 calibration ranges are computed during corpus hydration)."
+)
+
+
+@pytest.mark.parametrize(
+    ("semantic_source", "flags", "config_context"),
+    [
+        (
+            "candidates",
+            ["--storage-precision", "int8"],
+            f" Config source: defaults.semantic_source in {_CFG_PATH}; "
+            "update or unset the configured value.",
+        ),
+        (
+            "arxiv-corpus",
+            ["--candidate-pool-size", "50", "--storage-precision", "int8"],
+            "",
+        ),
+        ("both", ["--candidate-pool-size", "50", "--storage-precision", "int8"], ""),
+    ],
+)
+def test_semantic_source_error_context_names_config_only_when_it_decided(
+    semantic_source: str, flags: list[str], config_context: str
+) -> None:
+    """A source implied by explicit flags is no longer blamed on config.toml.
+
+    :param str semantic_source: Configured ``defaults.semantic_source``.
+    :param list[str] flags: Extra build flags after ``--strategy embedding``.
+    :param str config_context: Expected config provenance suffix.
+    :return None: Assertions pin the error and its provenance suffix.
+    """
+    assert _configured_embedding_outcome(semantic_source, flags) == (
+        "error",
+        _INT8_CANDIDATES_ERROR + config_context,
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "defaults", "config_context"),
+    [
+        (
+            ["paper-id", "--strategy", "embedding", "--semantic-source", "both"],
+            {"semantic_source": "both"},
+            "",
+        ),
+        (
+            ["paper-id", "--semantic-source", "both"],
+            {"strategy": "embedding"},
+            f" Config source: defaults.strategy in {_CFG_PATH}; "
+            "update or unset the configured value.",
+        ),
+    ],
+)
+def test_explicit_combined_source_still_requires_hybrid(
+    argv: list[str], defaults: dict[str, ConfigValue], config_context: str
+) -> None:
+    """Only a configured ``both`` is narrowed; the flag stays a usage error.
+
+    :param list[str] argv: Build arguments including ``--semantic-source both``.
+    :param dict[str, ConfigValue] defaults: Configured defaults for the run.
+    :param str config_context: Expected config provenance suffix.
+    :return None: Assertions pin the unchanged error message.
+    """
+    args, provided, _ = _parsed_build_args(argv)
+    config = UserConfig(path=_CFG_PATH, defaults=defaults)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+
+    with pytest.raises(ValueError) as error:
+        build_contract_module._validate_build_cli_contract(
+            args,
+            build_contract_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+
+    assert str(error.value) == (
+        "--semantic-source both requires --strategy hybrid." + config_context
+    )
+
+
+@pytest.mark.parametrize("flags", [[], ["--corpus-size", "100"]])
+def test_configured_combined_source_is_kept_for_hybrid(flags: list[str]) -> None:
+    """Hybrid keeps a configured ``both``, and corpus flags refine it.
+
+    :param list[str] flags: Extra build flags after ``--strategy hybrid``.
+    :return None: Assertions check the combined source survives validation.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "hybrid", *flags]
+    )
+    config = UserConfig(path=_CFG_PATH, defaults={"semantic_source": "both"})
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied, config_path=config.path
+    )
+
+    assert args.semantic_source == "both"
+    assert args.storage_precision == "int8"
 
 
 # ---------------------------------------------------------------------------

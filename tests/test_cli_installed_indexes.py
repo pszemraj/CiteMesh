@@ -14,15 +14,21 @@ from unittest.mock import MagicMock
 import networkx as nx
 import pytest
 
-from citemesh.cli.build_contract import _validate_build_cli_contract
-from citemesh.cli.build_options import _shared_embedding_builder_kwargs
+from citemesh.cli.build_contract import (
+    _validate_build_cli_contract,
+    _ValueErrorParserErrorSink,
+)
+from citemesh.cli.build_options import (
+    _apply_user_config_defaults,
+    _shared_embedding_builder_kwargs,
+)
 from citemesh.cli.cache_selection import _apply_cache_selection
 from citemesh.cli.commands import search
 from citemesh.cli.commands.build import run_build_command
 from citemesh.cli.commands.cache import run_cache_command
 from citemesh.cli.parser import _create_parser, _pop_tracked_option_dests
 from citemesh.data.embedding_contract import EmbeddingContract, ExistingCacheSelection
-from citemesh.data.user_config import UserConfig
+from citemesh.data.user_config import ConfigValue, UserConfig
 from tests._helpers import build_seed_graph
 
 
@@ -916,9 +922,126 @@ def test_legacy_adoption_rejects_explicit_all_against_recorded_limit(
     assert run_cache_command(args, cache_parser) == 1
 
 
+@pytest.mark.parametrize("namespace", [False, True])
+@pytest.mark.parametrize(
+    ("strategy", "origin", "expected"),
+    [
+        ("embedding", "config", "arxiv-corpus"),
+        ("embedding", "flag", None),
+        ("hybrid", "config", "both"),
+        ("hybrid", "flag", "both"),
+    ],
+)
+def test_combined_semantic_source_resolution(
+    installed_selection: ExistingCacheSelection,
+    strategy: str,
+    origin: str,
+    expected: str | None,
+    namespace: bool,
+) -> None:
+    """Resolve ``both`` by strategy and origin, with and without an installed corpus.
+
+    :param ExistingCacheSelection installed_selection: Stored corpus contract.
+    :param str strategy: Build strategy passed on the command line.
+    :param str origin: Whether ``both`` comes from config.toml or ``--semantic-source``.
+    :param str | None expected: Effective source, or ``None`` for a usage error.
+    :param bool namespace: Whether ``--cache-namespace`` selects the installed corpus.
+    :return None: Assertions follow the build command's overlay, selection and contract.
+    """
+    parser, build_parser, _, _ = _create_parser()
+    args = parser.parse_args(
+        [
+            "build",
+            "seed",
+            "--strategy",
+            strategy,
+            *(
+                ["--cache-namespace", installed_selection.namespace_id]
+                if namespace
+                else []
+            ),
+            *(["--semantic-source", "both"] if origin == "flag" else []),
+        ]
+    )
+    provided = _pop_tracked_option_dests(args)
+    user_config = UserConfig(
+        Path("cfg-home") / "config.toml",
+        defaults={"semantic_source": "both"} if origin == "config" else {},
+    )
+    sink = _ValueErrorParserErrorSink()
+    config_dests = _apply_user_config_defaults(args, provided, user_config)
+
+    def resolve() -> None:
+        config_dests.difference_update(_apply_cache_selection(args, provided, sink))
+        _validate_build_cli_contract(
+            args,
+            sink,
+            provided,
+            config_defaults=config_dests,
+            config_path=user_config.path,
+        )
+
+    if expected is None:
+        with pytest.raises(ValueError) as error:
+            resolve()
+        assert str(error.value) == "--semantic-source both requires --strategy hybrid."
+        return
+    resolve()
+    assert args.semantic_source == expected
+
+
+@pytest.mark.parametrize("namespace", [False, True])
+@pytest.mark.parametrize("configured_strategy", [None, "hybrid"])
+def test_local_search_narrows_configured_combined_source(
+    installed_selection: ExistingCacheSelection,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_strategy: str | None,
+    namespace: bool,
+) -> None:
+    """Local search reads a configured ``both`` as the corpus, whatever the strategy.
+
+    :param ExistingCacheSelection installed_selection: Stored corpus contract.
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the builder.
+    :param str | None configured_strategy: Optional ``defaults.strategy``.
+    :param bool namespace: Whether ``--cache-namespace`` selects the installed corpus.
+    :return None: Assertions check the strategy and source the builder receives.
+    """
+    builder_factory = MagicMock()
+    monkeypatch.setattr(search, "EmbeddingGraphBuilder", builder_factory)
+    parser, build_parser, _, _ = _create_parser()
+    args = parser.parse_args(
+        [
+            "search",
+            "query",
+            *(
+                ["--cache-namespace", installed_selection.namespace_id]
+                if namespace
+                else []
+            ),
+        ]
+    )
+    defaults: dict[str, ConfigValue] = {"semantic_source": "both"}
+    if configured_strategy is not None:
+        defaults["strategy"] = configured_strategy
+
+    _, effective = search._prepare_local_search_builder(
+        args, build_parser, UserConfig(Path("cfg-home") / "config.toml", defaults)
+    )
+
+    assert effective.strategy == "embedding"
+    assert effective.semantic_source == "arxiv-corpus"
+    assert builder_factory.call_args.kwargs["semantic_source"] == "arxiv-corpus"
+
+
 @pytest.mark.parametrize(
     ("strategy", "combined_from"),
-    [("embedding", ""), ("hybrid", ""), ("hybrid", "cli"), ("hybrid", "config")],
+    [
+        ("embedding", ""),
+        ("embedding", "config"),
+        ("hybrid", ""),
+        ("hybrid", "cli"),
+        ("hybrid", "config"),
+    ],
 )
 @pytest.mark.parametrize("installed_limit", [None, 5])
 def test_selected_build_writes_contract_and_runtime_provenance(
@@ -933,7 +1056,8 @@ def test_selected_build_writes_contract_and_runtime_provenance(
     from citemesh.cli.commands import build
     from citemesh.data.embedding_cache import lifecycle
 
-    combined = bool(combined_from)
+    # A configured ``both`` is the corpus outside hybrid.
+    combined = strategy == "hybrid" and bool(combined_from)
     installed_scope = "all" if installed_limit is None else "newest"
     monkeypatch.setattr(
         lifecycle,

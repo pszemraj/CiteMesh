@@ -146,7 +146,8 @@ class _BuildContractContext:
     :param _ParserErrorSink error_sink: Parser-like validation error sink.
     :param set[str] contract_provided: Destinations that count as explicitly
         supplied for gating, after effective no-ops have been discarded.
-    :param set[str] config_defaults: Destinations filled from config.toml.
+    :param set[str] config_defaults: Destinations filled from config.toml, less
+        a semantic source that flags later implied.
     :param Path | None config_path: Active config.toml path for diagnostics.
     """
 
@@ -234,6 +235,9 @@ def _resolve_implied_semantic_source(
 ) -> tuple[list[str], list[str]]:
     """Infer ``--semantic-source`` from the corpus- or candidate-only flags used.
 
+    An implied source comes from those flags, so it stops counting as a config
+    default and later errors do not point at ``defaults.semantic_source``.
+
     :param _BuildContractContext context: Shared validation inputs.
     :return tuple[list[str], list[str]]: Provided corpus-only and candidate-only
         option labels, in that order.
@@ -241,6 +245,9 @@ def _resolve_implied_semantic_source(
     args = context.args
     provided_corpus_flags = context.provided_labels(_CORPUS_ONLY_OPTION_DESTS)
     provided_candidate_flags = context.provided_labels(_CANDIDATE_ONLY_OPTION_DESTS)
+    # An unflagged ``both`` reaches here only for hybrid, because config defaults
+    # narrow it for other strategies. It already includes the corpus that
+    # corpus-only flags refine, and hybrid rejects candidate-only flags.
     if (
         "semantic_source" not in context.contract_provided
         and args.semantic_source != "both"
@@ -252,12 +259,14 @@ def _resolve_implied_semantic_source(
             )
         if provided_corpus_flags:
             args.semantic_source = "arxiv-corpus"
+            context.config_defaults.discard("semantic_source")
             logger.debug(
                 "Corpus option(s) %s imply --semantic-source arxiv-corpus.",
                 ", ".join(provided_corpus_flags),
             )
         elif provided_candidate_flags:
             args.semantic_source = "candidates"
+            context.config_defaults.discard("semantic_source")
             logger.debug(
                 "Candidate option(s) %s imply --semantic-source candidates.",
                 ", ".join(provided_candidate_flags),
@@ -282,8 +291,7 @@ def _drop_ignored_corpus_config_defaults(context: _BuildContractContext) -> None
     )
     logger.debug(
         "Ignoring corpus-only config default(s) %s from %s because "
-        "the effective semantic source is candidates; set "
-        "defaults.semantic_source='arxiv-corpus' to apply them.",
+        "the effective semantic source is candidates.",
         ignored_text,
         source,
     )
@@ -304,6 +312,8 @@ def _validate_semantic_source_options(
     :return None: Normalizes candidate-mode storage precision in place.
     """
     args = context.args
+    # Config defaults never reach this with a non-hybrid strategy (they are
+    # narrowed on overlay), so this rejects only an explicit flag.
     if args.semantic_source == "both" and context.strategy != "hybrid":
         context.fail(
             "--semantic-source both requires --strategy hybrid.",

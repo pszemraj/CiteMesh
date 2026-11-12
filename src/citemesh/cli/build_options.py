@@ -354,9 +354,13 @@ def _apply_user_config_defaults(
     """Overlay config.toml defaults onto build args the user did not set.
 
     Precedence: explicit CLI flag > config.toml > built-in default. Values are
-    already whitelist-validated at config load time.
+    already whitelist-validated at config load time. A configured
+    ``semantic_source = "both"`` means the corpus plus provider recommendations
+    where the strategy can combine them, so any strategy other than hybrid gets
+    ``arxiv-corpus``; the value still counts as config-derived.
 
-    :param argparse.Namespace args: Parsed build arguments.
+    :param argparse.Namespace args: Parsed build arguments. A caller that fixes
+        the strategy sets it first and lists ``strategy`` in ``provided``.
     :param Set[str] provided: Explicit option destinations found in argv.
     :param UserConfig user_config: Loaded user configuration snapshot.
     :return Set[str]: Destinations that were filled from config.toml.
@@ -374,6 +378,19 @@ def _apply_user_config_defaults(
             for dest in sorted(applied)
         )
         logger.debug("Loaded config defaults from %s: %s", user_config.path, summary)
+    if (
+        "semantic_source" in applied
+        and args.semantic_source == "both"
+        and str(args.strategy) != "hybrid"
+    ):
+        args.semantic_source = "arxiv-corpus"
+        logger.debug(
+            "Using arxiv-corpus for defaults.semantic_source='both' from %s: "
+            "only --strategy hybrid combines it with provider recommendations, "
+            "and the active strategy is %s.",
+            user_config.path,
+            args.strategy,
+        )
     return applied
 
 
