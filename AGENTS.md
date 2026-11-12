@@ -2,6 +2,15 @@
 
 Rules for working on CiteMesh, for humans and coding agents.
 
+## Project intent
+
+CiteMesh turns one seed paper into a graph of related papers that are relevant and worth considering, however obscure, found through citations and references and through embeddings. It is a discovery tool, not a map of the citation graph: papers that are not relevant are filtered out even when they are cited.
+
+- It is a similarity graph, not a citation tree: edges are scored similarity between papers, not citation direction.
+- Keep edges sparse. Per-node degree caps bound the edge count ([edge scoring](docs/guides/how-it-works.md#6-edge-scoring)); do not loosen caps or thresholds to add edges.
+- Do not crawl citations recursively. Candidates come from the seed's own neighborhood (its references and citers, provider recommendations, corpus neighbors); reference lists fetched for selected papers serve only as bibliographic-coupling evidence.
+- Corpus modes default to the full selected split; use `--corpus-size` only to cap quick iteration.
+
 ## Scope
 
 - Maintain [CI](.github/workflows/ci.yml) as one Linux/Python job running Ruff lint/format and Mypy. Do not restore tests or add build validation, benchmarks, model runs, extra workflows, release automation, or publishing steps without explicit scope and cost approval.
@@ -28,43 +37,31 @@ Inside sandboxed agent shells Metal is not visible: `torch.backends.mps.is_avail
 
 ## Environment and commands
 
-Read the repository-root `LOCAL.md`, if present, for this machine's development
-environment, test worker selection, and hardware notes. Keep `LOCAL.md` local and
-gitignored; keep shared project instructions in this tracked `AGENTS.md`. If the
-Python environment is not specified, ask which one to use.
+Read the repository-root `LOCAL.md`, if present, for this machine's development environment, test worker selection, and hardware notes. Keep `LOCAL.md` local and gitignored; keep shared project instructions in this tracked `AGENTS.md`. If the Python environment is not specified, ask which one to use.
 
-Install the project for development with `pip install -e ".[all]"`. Versions come
-from Git tags via setuptools-scm, so fetch tags when a checkout reports an
-unexpected development version.
+Install the project for development with `pip install -e ".[all]"`. Versions come from Git tags via setuptools-scm, so fetch tags when a checkout reports an unexpected development version.
 
-Before committing, run these checks using the environment and pytest worker
-selection from `LOCAL.md` when available:
+Before committing, run these checks using the environment and pytest worker selection from `LOCAL.md` when available:
 
 ```bash
-python -m pytest -n auto --dist worksteal
+pytest -n auto --dist worksteal
 ruff check .
 ruff format --check .
+mypy
 ```
 
-The default suite is network-free and excludes `slow` tests. Run it in parallel
-when the machine has sufficient CPU and memory. Without a local worker selection,
-`-n auto` starts one worker per physical CPU core using the development extra's
-`psutil` dependency. Adjust with `-n N` for the machine's resources and other
-workloads; use `-n 0` for serial debugging. Cache-locking, subprocess,
-threaded-export, and rendering tests belong in this parallel suite: each test has
-isolated cache and temporary paths.
+The default suite is network-free and excludes `slow` tests. Run it in parallel when the machine has sufficient CPU and memory. Without a local worker selection, `-n auto` starts one worker per physical CPU core using the development extra's `psutil` dependency. Adjust with `-n N` for the machine's resources and other workloads; use `-n 0` for serial debugging. Cache-locking, subprocess, threaded-export, and rendering tests belong in this parallel suite: each test has isolated cache and temporary paths.
 
-Run opt-in real-model and compilation checks serially with `python -m pytest -n 0 -m slow`. These tests can compete for the same accelerator, CPU inference threads, and compiler resources. For CUDA only, use `python -m pytest -n 0 -m "slow and cuda"`. Some slow tests may download the designated model or fetch live arXiv data; CPU semantic-quality tests require the model already cached.
+Run opt-in real-model and compilation checks serially with `pytest -n 0 -m slow`. These tests can compete for the same accelerator, CPU inference threads, and compiler resources. For CUDA only, use `pytest -n 0 -m "slow and cuda"`. Some slow tests may download the designated model or fetch live arXiv data; CPU semantic-quality tests require the model already cached.
+
+For a quick live check, build a small graph from a well-known seed such as `arxiv:1706.03762` (Transformer) or `arxiv:1810.04805` (BERT), for example `citemesh build "arxiv:1706.03762" --strategy citation -p 20`. It calls the live Semantic Scholar API, so run it outside the sandbox.
 
 ## Code conventions
 
 - Prefer explicit code and focused changes. Add or update tests for changed behavior.
 - Patch names where they are used, not where they were originally defined.
-- Keep optional dependencies lazily imported and preserve the dependency direction
-  in [Architecture](docs/internals/architecture.md#rules).
-- Use INFO for brief phases and outcomes. Use WARNING only when results are
-  materially degraded or an explicitly requested capability is unavailable. Put
-  cache, provider, runtime, and scoring details at DEBUG.
+- Keep optional dependencies lazily imported and preserve the dependency direction in [Architecture](docs/internals/architecture.md#rules), which also holds the package map and the extension points for strategies, exporters, and model profiles.
+- Use INFO for brief phases and outcomes. Use WARNING only when results are materially degraded or an explicitly requested capability is unavailable. Put cache, provider, runtime, and scoring details at DEBUG.
 
 ## Runtime data
 
@@ -72,8 +69,4 @@ The cache root (`CITEMESH_CACHE_DIR`, see [Environment Variables](docs/reference
 
 ## Curated demo
 
-The checked-in Megalodon dashboard under `assets/examples/megalodon/` uses
-`arxiv:2404.08801`, matching the bare input recorded in its collection package.
-Use `arxiv:2404.08801v1` only when intentionally pinning arXiv bibliography
-recovery to version 1. The `arxiv:2608.27147` identifiers in recovery tests refer
-to Thomson and are not the demo seed.
+The checked-in Megalodon dashboard under `assets/examples/megalodon/` uses `arxiv:2404.08801`, matching the bare input recorded in its collection package. The Pages workflow publishes that directory's dashboard, collection package, favicon, and Open Graph image as the live demo on every push to main. Use `arxiv:2404.08801v1` only when intentionally pinning arXiv bibliography recovery to version 1. The `arxiv:2608.27147` identifiers in recovery tests refer to Thomson and are not the demo seed.
