@@ -123,7 +123,7 @@ Toolbar controls and data actions:
 
 ![CiteMesh dashboard with the Filters row open and a search term narrowing the graph](../../assets/ui-dashboard-search-filter.png)
 
-_Filters open with `attention` typed: the list narrows from 45 to 28 papers and the graph dims everything else._
+_Filters open with `recurrent` typed: the list narrows from 45 to 17 papers and the graph dims everything else._
 
 Downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
