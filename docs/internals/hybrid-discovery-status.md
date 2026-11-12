@@ -45,7 +45,7 @@ The list length is set by `-p` and did not change: the wider pool feeds the same
 | `candidates` | 82% / 55% | 79% / 47% | 76% / 42% | 71% / 36% |
 | `arxiv-corpus` | 84% / 52% | 77% / 42% | 73% / 36% | 68% / 31% |
 
-Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31 to 44 are 60 percent useful and 23 percent important. The list is always filled to the requested size, so a seed with few relevant candidates is padded with tangents. Tangents per 44-paper graph in `both` mode ran from 5 to 27 across the held-out seeds, median 11; for the previous hybrid they ran from 14 to 28, median 19.
+Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31 to 44 are 60 percent useful and 23 percent important. The dashboard opens hybrid graphs in this order; in its previous default order (relevance over the final graph) the first 10 papers in `both` mode were 76 percent useful and 49 percent important. The list is always filled to the requested size, so a seed with few relevant candidates is padded with tangents. Tangents per 44-paper graph in `both` mode ran from 5 to 27 across the held-out seeds, median 11; for the previous hybrid they ran from 14 to 28, median 19.
 
 ## Limits
 
