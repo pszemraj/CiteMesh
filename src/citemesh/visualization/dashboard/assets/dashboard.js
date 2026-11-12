@@ -658,7 +658,7 @@
       hoverId: null,
       filters: { citation: true, semantic: true, both: true },
       searchText: "",
-      sortKey: "relevance",
+      sortKey: defaultSortKey(),
       scopeMode: "all",
       yearMin: null,
       yearMax: null,
@@ -1547,11 +1547,24 @@
       controls.yearMax.placeholder = `Year max (${maxYear})`;
     }
 
+    function hasDiscoveryRanks() {
+      return nodes.some((node) => Number.isInteger(node.discovery_rank));
+    }
+
+    function defaultSortKey() {
+      // A hybrid graph ranks every related paper, so lead with that order when the
+      // ranking is complete. Any other graph keeps the relevance default.
+      const related = nodes.filter((node) => !node.is_seed);
+      const fullyRanked = related.length > 0
+        && related.every((node) => Number.isInteger(node.discovery_rank));
+      return fullyRanked ? "discovery_rank" : "relevance";
+    }
+
     function syncDiscoverySortOption() {
       // Only hybrid graphs carry discovery ranks; elsewhere the option is hidden.
       const option = controls.sort.querySelector('option[value="discovery_rank"]');
       if (option) {
-        option.hidden = !nodes.some((node) => Number.isInteger(node.discovery_rank));
+        option.hidden = !hasDiscoveryRanks();
       }
     }
 
@@ -1570,13 +1583,13 @@
       state.selectedId = (payload.meta && payload.meta.seed_id) || null;
       state.hoverId = null;
       state.searchText = "";
-      state.sortKey = "relevance";
+      state.sortKey = defaultSortKey();
       state.scopeMode = "all";
       state.yearMin = null;
       state.yearMax = null;
       state.visibleIds = new Set(nodeOrder);
       controls.search.value = "";
-      controls.sort.value = "relevance";
+      controls.sort.value = state.sortKey;
       controls.yearMin.value = "";
       controls.yearMax.value = "";
       controls.scopeButtons.forEach((entry) => entry.classList.remove("active"));
@@ -2402,6 +2415,7 @@
       }
       setupControls();
       syncDiscoverySortOption();
+      controls.sort.value = state.sortKey;
       // Toolbar changes resize the pane without triggering a window resize.
       const graphResizeObserver = new ResizeObserver(() => Plotly.Plots.resize(graphDiv));
       graphResizeObserver.observe(graphDiv);

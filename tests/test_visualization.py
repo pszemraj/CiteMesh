@@ -2862,6 +2862,189 @@ def test_dashboard_scope_filter_keys_on_seed_relation_before_year(
     assert probed["all"] == sorted(graph.nodes)
 
 
+def _build_discovery_graph(*, ranked: int) -> nx.Graph:
+    """Create a hybrid-style graph whose discovery order differs from relevance.
+
+    Every related paper has equal relevance and citations, so the relevance
+    order is year then ID; discovery ranks run in reverse ID order.
+
+    :param int ranked: How many related papers carry discovery evidence.
+    :return nx.Graph: Graph carrying ``discovery_ranker`` and ``discovery_ranking``.
+    """
+    graph = _build_seed_relation_graph()
+    graph.graph["strategy"] = "hybrid"
+    related = sorted(node_id for node_id in graph.nodes if node_id != "seed")
+    if ranked:
+        graph.graph["discovery_ranker"] = {
+            "method": "reciprocal_rank_fusion",
+            "k": 60,
+            "lists": ["semantic"],
+        }
+        graph.graph["discovery_ranking"] = {
+            node_id: {
+                "discovery_rank": rank,
+                "discovery_score": 1 / (60 + rank),
+                "discovery_features": {
+                    "seed_similarity": 0.5,
+                    "bibliography_similarity": None,
+                    "direct_citation": False,
+                    "recommendation_rank": None,
+                },
+                "discovery_list_ranks": {"semantic": rank},
+            }
+            for rank, node_id in enumerate(reversed(related), start=1)
+            if rank <= ranked
+        }
+    return graph
+
+
+def _export_discovery_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ranked: int
+) -> Path:
+    """Export a hybrid-style dashboard with ``ranked`` ranked related papers.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :param int ranked: How many related papers carry discovery evidence.
+    :return Path: Exported dashboard HTML.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph = _build_discovery_graph(ranked=ranked)
+    layout = {
+        node_id: (float(index), float(index % 3))
+        for index, node_id in enumerate(sorted(graph.nodes))
+    }
+    out_path = tmp_path / f"discovery-{ranked}.dashboard.html"
+    GraphExporter(graph, "seed", layout=layout).to_dashboard_html(out_path)
+    return out_path
+
+
+# Replaces the sort control with a recording stub so the harness can read what
+# the runtime sets on it and fire the user's change event.
+_SORT_CONTROL_HARNESS = r"""
+const sortOption = { hidden: true };
+const sortControl = {
+  value: "relevance",
+  handlers: [],
+  addEventListener(name, handler) { if (name === "change") this.handlers.push(handler); },
+  querySelector() { return sortOption; },
+};
+const getElement = document.getElementById;
+document.getElementById = (id) => (id === "sort-select" ? sortControl : getElement(id));
+eval(runtime + "\n;globalThis.citemeshProbe = (source) => eval(source);");
+const probe = globalThis.citemeshProbe;
+"""
+
+
+@pytest.mark.parametrize(
+    ("ranked", "sort_key", "option_hidden"),
+    [
+        (7, "discovery_rank", False),
+        # A partial ranking still offers the option but is not a default order.
+        (3, "relevance", False),
+        (0, "relevance", True),
+    ],
+)
+def test_dashboard_defaults_to_discovery_rank_only_when_every_paper_is_ranked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ranked: int,
+    sort_key: str,
+    option_hidden: bool,
+) -> None:
+    """Lead with the discovery order only when all related papers carry a rank.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :param int ranked: How many of the seven related papers are ranked.
+    :param str sort_key: Expected initial sort.
+    :param bool option_hidden: Whether the Discovery rank option stays hidden.
+    :return None: Checks the initial sort state, control, option and list order.
+    """
+    path = _export_discovery_dashboard(tmp_path, monkeypatch, ranked=ranked)
+    completed = _run_dashboard_runtime_in_node(
+        path,
+        _SORT_CONTROL_HARNESS
+        + r"""
+process.stdout.write(JSON.stringify({
+  sortKey: probe("state.sortKey"),
+  control: sortControl.value,
+  optionHidden: sortOption.hidden,
+  order: probe("filteredNodes().map((node) => node.id)"),
+}));
+""",
+        [],
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+
+    assert result["sortKey"] == sort_key
+    assert result["control"] == sort_key
+    assert result["optionHidden"] is option_hidden
+    related = sorted(node for node in result["order"] if node != "seed")
+    assert result["order"][0] == "seed"
+    if sort_key == "discovery_rank":
+        assert result["order"][1:] == list(reversed(related))
+    else:
+        assert result["order"][1:] != list(reversed(related))
+
+
+def test_dashboard_import_resets_the_sort_to_the_loaded_graphs_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add Results resets the sort to the loaded graph's default, whatever was picked.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks sort state after importing ranked and unranked graphs.
+    """
+    path = _export_discovery_dashboard(tmp_path, monkeypatch, ranked=7)
+    completed = _run_dashboard_runtime_in_node(
+        path,
+        _SORT_CONTROL_HARNESS
+        + r"""
+const ranked = probe("buildPortableJsonPayload()");
+const unranked = JSON.parse(JSON.stringify(ranked));
+unranked.nodes.forEach((node) => {
+  Object.keys(node).filter((key) => key.startsWith("discovery_")).forEach((key) => delete node[key]);
+});
+const load = (graph) => { probe("applyImportedPayload")(JSON.parse(JSON.stringify(graph)), "next"); };
+const pick = (value) => { sortControl.handlers.forEach((handler) => handler({ target: { value } })); };
+const seen = () => [probe("state.sortKey"), sortControl.value];
+const log = {};
+load(unranked);
+log.unranked = seen();
+load(ranked);
+log.ranked = seen();
+pick("year");
+load(ranked);
+log.yearThenRanked = seen();
+pick("year");
+load(unranked);
+log.yearThenUnranked = seen();
+pick("relevance");
+load(ranked);
+log.relevanceThenRanked = seen();
+pick("discovery_rank");
+load(unranked);
+log.discoveryThenUnranked = seen();
+process.stdout.write(JSON.stringify(log));
+""",
+        [],
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "unranked": ["relevance", "relevance"],
+        "ranked": ["discovery_rank", "discovery_rank"],
+        "yearThenRanked": ["discovery_rank", "discovery_rank"],
+        "yearThenUnranked": ["relevance", "relevance"],
+        "relevanceThenRanked": ["discovery_rank", "discovery_rank"],
+        "discoveryThenUnranked": ["relevance", "relevance"],
+    }
+
+
 def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
     two_node_dashboard: Path,
 ) -> None:

@@ -80,7 +80,7 @@ Each node carries:
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`seed_relevance` is unchanged and measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and the "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
+`seed_relevance` is unchanged and measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every non-seed paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
