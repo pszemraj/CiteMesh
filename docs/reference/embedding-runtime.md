@@ -23,7 +23,7 @@ Default model `unsloth/embeddinggemma-300m`, falling back to `google/embeddingge
 
 Retrieval ranking and graph topology live in separate prompt-conditioned spaces:
 
-- paper and free-text seeds use the retrieval-query role
+- paper and free-text seeds use the retrieval-query role; hybrid also encodes the seed in the retrieval-document role, because it ranks candidates by document-to-document cosine and searches the corpus in both roles
 - candidate and corpus papers use the retrieval-document role, for seed-to-paper ranking and local search
 - papers selected for the final graph are re-encoded with the symmetric sentence-similarity role, and only those vectors score paper-to-paper edges
 

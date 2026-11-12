@@ -96,7 +96,7 @@ One `@article` per paper, with `title`, `author`, `year`, `doi`, `url`, and `abs
 
 ## GraphML (`<strategy>.graphml`)
 
-A reduced node schema: `provenance`, `provenance_base`, `seed_relation`, `seed_relevance`, `links`, and `bibtex` are omitted, `authors` and `categories` are flattened to comma-separated strings, `is_seed` is written as `0`/`1`, and nullable text fields become empty values. Graph-level attributes are `citemesh_graphml_determinism`, `citemesh_graphml_writer_version`, and one `citemesh_meta_<key>` per run-metadata key.
+A reduced node schema: `provenance`, `provenance_base`, `seed_relation`, `seed_relevance`, the four `discovery_*` fields (`discovery_rank`, `discovery_score`, `discovery_features`, `discovery_list_ranks`), `links`, and `bibtex` are omitted, `authors` and `categories` are flattened to comma-separated strings, `is_seed` is written as `0`/`1`, and nullable text fields become empty values. Graph-level attributes are `citemesh_graphml_determinism`, `citemesh_graphml_writer_version`, and one `citemesh_meta_<key>` per run-metadata key.
 
 ## Dashboard HTML
 

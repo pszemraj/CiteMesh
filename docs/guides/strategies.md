@@ -36,7 +36,9 @@ citemesh build arxiv:2410.05192 --strategy hybrid --semantic-source both \
   --cache-namespace NAMESPACE --max-papers 45
 ```
 
-Every candidate gets a retrieval-document vector: its stored corpus vector when it is a corpus row, otherwise an in-memory encoding of its title and abstract. Publication and preprint versions of one work are reconciled across the whole pool before ranking, so a pair recognised as one work never takes two slots. Up to four ranked lists are then fused, each candidate scoring the sum of `1 / (60 + rank)` over the lists that contain it:
+With `--cache-namespace`, hybrid keeps `both` only when `--semantic-source both` was passed or `both` is the configured default; otherwise the installed index selects `arxiv-corpus`, so no provider recommendations are requested.
+
+Every candidate gets a retrieval-document vector: its stored corpus vector when it is a corpus row, otherwise an encoding of its title and abstract, stored in the candidate embedding cache in `candidates` mode and held in memory in the corpus modes. Publication and preprint versions of one work are reconciled across the whole pool before ranking, so a pair recognized as one work never takes two slots. Up to four ranked lists are then fused, each candidate scoring the sum of `1 / (60 + rank)` over the lists that contain it:
 
 - similarity to the seed, from the document-role cosine
 - similarity to the seed's bibliography: the mean of the candidate's five highest cosines to the seed's references, excluding itself, absent for a candidate when fewer than five other references exist

@@ -79,7 +79,7 @@ commands and their import, export, refresh, selection, and recovery behavior.
 
 ### Missing Semantic Scholar references
 
-When reference discovery is enabled, hybrid builds request up to `--max-references` seed references from Semantic Scholar (1000 by default) and rank every reference returned together with the other candidates; there is no separate admission floor or relevance-based cut. A retrieved reference that enters through another source still carries its known relationship to the seed.
+Hybrid builds request up to `--max-references` seed references from Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates; there is no separate admission floor or relevance-based cut. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the seed.
 
 If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
 

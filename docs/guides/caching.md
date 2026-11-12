@@ -23,7 +23,7 @@ For embedding files, see [physical layout](../internals/embedding-cache.md#physi
 
 ## Paper metadata and reference IDs
 
-Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record; identifiers do not hold separate metadata copies. Later lookups check disk first, seed resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached. Discovery listings are the exception: reference, citer, and recommendation responses carry each related paper's metadata inline, so they make no batch request and write nothing to `papers/`.
+Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record; identifiers do not hold separate metadata copies. Later lookups check disk first, seed resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached. Discovery listings are the exception: reference, citer, and recommendation responses carry each related paper's metadata inline, so they make no batch request and write nothing to `papers/`. The arXiv bibliography fallback, used when a seed's reference listing is empty or unavailable, still resolves its entries through the batch endpoint and the paper cache.
 
 Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and replaces metadata, including citation counts, from successful responses; a failed fetch preserves the old entry. Unchanged title and abstract text reuses its embedding. Version 2 paper caches remain readable: an older alias copy supplies its canonical paper ID, and lookups read the canonical record. No cache rebuild is required.
 
@@ -39,13 +39,13 @@ builds may also request provider metadata.
 
 A normal build always checks upstream for the requested recommendations, citations, or references; immediate reruns behave the same way. Discovery lists are not cached. Each endpoint invocation checks upstream and uses the returned order directly. Reference, citer, and recommendation requests ask for the default paper fields of every row; only the later reference-ID hydration of selected papers requests the minimal `paperId` projection.
 
-The check preserves upstream membership and ordering among resolvable papers. Candidates come straight from the response rows, with the first row kept for each paper. A row without an ID or usable metadata is omitted while the other papers are retained; it is reported once for recommendations, and for a reference or citer listing only when more than half of its rows are dropped.
+The check preserves upstream membership and ordering among resolvable papers. Candidates come straight from the response rows, with the first row kept for each paper. A row without an ID or usable metadata is omitted while the other papers are retained; each listing logs its dropped rows once, as a warning only when more than half of that listing's rows are dropped and at debug level otherwise.
 
 A failed page or failed `all-cs` fallback stops the required acquisition without replacing existing outputs. Recommendation and candidate modes check `all-cs` when the recent recommendation pool yields no resolvable papers; both checks must succeed before returning an empty recommendation list. Hybrid requests `all-cs` directly in its `candidates` and `both` modes. A reference listing that reached the fetch limit never overwrites the complete reference-ID cache.
 
 Hybrid needs a retrieval-document vector for every pool member. In `candidates` mode the pool is the seed's references and citers plus up to 200 recommendations, and their vectors are kept in the embedding cache's candidate namespace (see [Embedding namespaces](#embedding-namespaces)), so a warm rebuild encodes only the seed's query-role vector. The first build encodes the whole pool, at most about 2,200 title-and-abstract texts at the default 1000-paper limits, dominated by the citers of a heavily cited seed. In the corpus modes the namespace is the corpus itself and takes no provider rows: stored corpus vectors are read for corpus rows, and the references, citers, and recommendations outside the installed index are encoded in memory on every build and never stored, so they do not change the corpus namespace or its membership. The selected papers' symmetric graph-similarity vectors are written to their own cache in every mode.
 
-Normal build output reports that discovery IDs were rechecked upstream separately from reused paper metadata and reference IDs. `--refresh-paper-cache` and `--refresh-reference-cache` still control those two enrichment caches; neither suppresses the discovery check.
+Debug-level output (`--verbose` or `--log-level debug`) reports that discovery IDs were rechecked upstream separately from reused paper metadata and reference IDs; normal output does not. `--refresh-paper-cache` and `--refresh-reference-cache` still control those two enrichment caches; neither suppresses the discovery check.
 
 ## Embedding namespaces
 
@@ -101,12 +101,7 @@ Private buckets require a Hugging Face token with read access for import and
 write access for publication. Set [`HF_TOKEN`](../reference/environment.md#other-respected-variables)
 or save a token with `hf auth login`; public bucket reads need no token.
 
-Explicit `--cache-namespace` selects existing files and pins model, profile,
-formatter, dimension, storage precision, calibration sample size, dataset, and
-split. Conflicting flags fail; device, batch size, scoring, and result limits
-remain configurable. In `--mode auto`, installed-index readiness/compatibility
-errors stay errors under
-explicit or ordinary namespace selection. Import does not change saved defaults.
+Explicit `--cache-namespace` selects existing files and pins model, profile, formatter, dimension, storage precision, calibration sample size, dataset, and split. Conflicting flags fail; device, batch size, scoring, and result limits remain configurable. In `--mode auto`, installed-index readiness/compatibility errors stay errors under explicit or ordinary namespace selection. Import does not change saved defaults. A hybrid build keeps `both` under `--cache-namespace` only when `--semantic-source both` was passed or the configured default `semantic_source` is `both`; otherwise the namespace selects `arxiv-corpus`, so no provider recommendations are requested.
 
 For an installed index, `--corpus-size N` ranks only the newest N active members
 at the completed revision; `--all-corpus` uses every installed active member. Chronology ties

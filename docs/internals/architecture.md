@@ -4,7 +4,7 @@ CiteMesh separates argument handling, paper acquisition, scoring, persistence, a
 
 ## Execution flow
 
-`cli/` parses arguments, applies `config.toml` defaults, validates effective options in `build_contract.py`, and resolves export targets before dispatching to `GraphBuilderStrategy`. Strategies acquire candidates through `strategies/candidates.py`, prepare scoring in `prepare_graph_scoring`, and return a `networkx.Graph`; `visualization/` lays out and exports it. The [graph-input contract](../reference/output-artifacts.md#graph-input) defines node attributes.
+`cli/` parses arguments, applies `config.toml` defaults, validates effective options in `build_contract.py`, and resolves export targets before dispatching to `GraphBuilderStrategy`. Strategies acquire candidates through `strategies/candidates.py`, pool them in `strategies/discovery_pool.py`, prepare scoring in `prepare_graph_scoring`, and return a `networkx.Graph`; `visualization/` lays out and exports it. The [graph-input contract](../reference/output-artifacts.md#graph-input) defines node attributes.
 
 ## Package map
 
@@ -33,7 +33,7 @@ The viewer rebuilds its Plotly figure client-side from the embedded payload, so 
 
 ## Extension points
 
-**A strategy** subclasses `GraphBuilderStrategy` in `strategies/<name>.py` with `collect_papers` (fetching through `candidates.py`, not the client, to inherit budget splitting, identity reconciliation, and the outage policy) and `compute_similarity`. Register it in the lazy export maps of `strategies/__init__.py` and `citemesh/__init__.py`, in `core/choices.py:STRATEGY_CHOICES`, and in `cli/build_options.py`'s factory dispatch and option-support tables. Add any strategy-specific options and validation to the parser and build contract.
+**A strategy** subclasses `GraphBuilderStrategy` in `strategies/<name>.py` with `collect_papers` (fetching through the source helpers in `candidates.py` and pooling with `DiscoveryPool` or `fetch_candidate_pool` from `discovery_pool.py`, not the client directly, to inherit the outage policy, identity reconciliation, and reference recovery) and `compute_similarity`. Register it in the lazy export maps of `strategies/__init__.py` and `citemesh/__init__.py`, in `core/choices.py:STRATEGY_CHOICES`, and in `cli/build_options.py`'s factory dispatch and option-support tables. Add any strategy-specific options and validation to the parser and build contract.
 
 **An export format** adds a writer, usually through a `to_<format>(path, ...)` method on `GraphExporter`; `png` uses `visualize_graph`. Reuse node enrichment or `graph_payload()` as the format requires. Register it in `core/choices.py:EXPORT_FORMATS` and `cli/outputs.py`'s `EXPORT_EXTENSIONS` and `_EXPORTER_METHOD` tables. Collection cleanup derives optional result paths from `EXPORT_FORMATS` and `EXPORT_EXTENSIONS`. Publish through the atomic writers in `data/cache.py`.
 
