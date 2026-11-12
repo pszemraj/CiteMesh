@@ -48,13 +48,13 @@ Import needs no GPU or model weights. Queries and graph similarity still use the
 
 ### Run one graph
 
-Builds default to Semantic Scholar recommendations. Local embeddings are opt-in with `--strategy embedding` or `--strategy hybrid`; add `--semantic-source arxiv-corpus` to swap the S2 candidates for a downloaded arXiv corpus. Any of these can be saved as personal defaults ([user configuration](docs/guides/configuration.md)).
+Builds default to Semantic Scholar recommendations. Local embeddings are opt-in with `--strategy embedding` or `--strategy hybrid`; add `--semantic-source arxiv-corpus` to search a downloaded arXiv corpus instead of S2 candidates. For embedding, the corpus replaces the S2 candidates. For hybrid, it replaces only the S2 recommendations with the seed's nearest corpus neighbors: the seed's references and citers stay in the pool, and hybrid ranks everything by [rank fusion](docs/guides/how-it-works.md#5-ranking-and-selection). Any of these can be saved as personal defaults ([user configuration](docs/guides/configuration.md)).
 
 ```bash
 # Default: Semantic Scholar recommendations
 citemesh build "arxiv:1706.03762"
 
-# Local embeddings over S2 candidates, plus citation links
+# Rank the seed's references, citers, and S2 recommendations with local embeddings
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all
 
 # Embedding search over a downloaded arXiv corpus
@@ -62,6 +62,8 @@ citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-c
 ```
 
 The first semantic build downloads the [embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback); later runs [reuse stored vectors](docs/guides/caching.md). See [Output Artifacts](docs/reference/output-artifacts.md#output-location) for output naming and collections.
+
+Every key you can save as a default is in the [config reference](docs/reference/config/config_reference.toml), with an [example config](docs/reference/config/example.toml) to start from.
 
 ## How it works
 

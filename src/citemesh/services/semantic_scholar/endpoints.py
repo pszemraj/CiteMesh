@@ -8,7 +8,15 @@ import logging
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from functools import wraps
-from typing import TYPE_CHECKING, Concatenate, ParamSpec, Protocol, TypeGuard, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Concatenate,
+    NamedTuple,
+    ParamSpec,
+    Protocol,
+    TypeGuard,
+    TypeVar,
+)
 from urllib.parse import quote
 
 from citemesh.core import Paper
@@ -42,19 +50,64 @@ SEARCH_MAX_RESULTS = 1000
 SEARCH_PAGE_SIZE = 100
 
 
-def _warn_skipped_recommendations(paper_id: str, skipped_records: int) -> None:
-    """Report malformed or unresolved recommendation rows once.
+class _RelationListing(NamedTuple):
+    """Relation records by normalized ID and whether the provider listed them all."""
 
+    records: dict[str, object]
+    complete: bool
+
+
+def _log_skipped_rows(listing: str, paper_id: str, skipped: int, total: int) -> None:
+    """Report the rows a discovery listing dropped, warning only when most were.
+
+    A few rows without an ID or with unconvertible metadata in a long listing
+    are routine, so they are logged at debug level.
+
+    :param str listing: Listing name, such as ``citations discovery``.
     :param str paper_id: Normalized seed identifier.
-    :param int skipped_records: Number of unusable response rows.
-    :return None: Emits a warning only when rows were skipped.
+    :param int skipped: Rows dropped.
+    :param int total: Rows the provider returned.
+    :return None: Logs only when rows were dropped.
     """
-    if skipped_records:
-        logger.warning(
-            "Recommendations for %s skipped %d malformed or unresolved records.",
+    if skipped:
+        logger.log(
+            logging.WARNING if skipped > total / 2 else logging.DEBUG,
+            "%s for %s: skipping %d of %d rows without resolvable metadata.",
+            listing,
             paper_id,
-            skipped_records,
+            skipped,
+            total,
         )
+
+
+def _inline_recommendations(records: Sequence[JSONValue]) -> tuple[list[Paper], int]:
+    """Parse recommendation rows that carry default paper metadata.
+
+    Rows are parsed like relation rows and kept at their first appearance.
+
+    :param Sequence[JSONValue] records: Decoded recommendation rows.
+    :return tuple[list[Paper], int]: Papers in provider order, and the number of
+        rows without an ID or with unconvertible metadata.
+    """
+    papers: list[Paper] = []
+    seen_ids: set[str] = set()
+    skipped = 0
+    for record in records:
+        raw_id = payloads._payload_get(record, "paperId")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            skipped += 1
+            logger.debug("Skipping malformed recommendation row.")
+            continue
+        normalized_id = normalize_paper_id(raw_id)
+        if normalized_id in seen_ids:
+            continue
+        seen_ids.add(normalized_id)
+        paper = payloads._convert_api_paper(record)
+        if paper is None:
+            skipped += 1
+            continue
+        papers.append(paper)
+    return papers, skipped
 
 
 class _ScopedClient(Protocol):
@@ -308,11 +361,11 @@ class _EndpointsMixin:
         *,
         raise_on_unavailable: bool = False,
     ) -> list[Paper]:
-        """Fetch complete records for papers citing a seed.
+        """Fetch full metadata for papers citing a seed.
 
         :param str paper_id: Seed identifier.
         :param int limit: Maximum unique results.
-        :param bool raise_on_unavailable: Raise if discovery or enrichment fails.
+        :param bool raise_on_unavailable: Raise if a relation page fails.
         :return list[Paper]: Ordered citing papers.
         """
         return self._get_related_papers(
@@ -330,11 +383,11 @@ class _EndpointsMixin:
         *,
         raise_on_unavailable: bool = False,
     ) -> list[Paper]:
-        """Fetch complete records for papers referenced by a seed.
+        """Fetch full metadata for papers referenced by a seed.
 
         :param str paper_id: Seed identifier.
         :param int limit: Maximum unique results.
-        :param bool raise_on_unavailable: Raise if discovery or enrichment fails.
+        :param bool raise_on_unavailable: Raise if a relation page fails.
         :return list[Paper]: Ordered referenced papers.
         """
         return self._get_related_papers(
@@ -345,35 +398,38 @@ class _EndpointsMixin:
             raise_on_unavailable=raise_on_unavailable,
         )
 
-    def _relation_ids(
+    def _relation_records(
         self,
         paper_id: str,
         *,
         relation: str,
         nested_key: str,
+        fields: str,
         limit: int | None,
         raise_on_unavailable: bool,
-    ) -> list[str] | None:
-        """Fetch ordered unique relation IDs through explicit REST pages.
+    ) -> _RelationListing | None:
+        """Fetch ordered unique relation records through explicit REST pages.
 
         :param str paper_id: Normalized seed identifier.
         :param str relation: ``references`` or ``citations``.
         :param str nested_key: Relation row's nested paper key.
-        :param int | None limit: Maximum results, or all available IDs.
+        :param str fields: Paper fields requested for each nested record.
+        :param int | None limit: Maximum results, or all available records.
         :param bool raise_on_unavailable: Raise on a failed page.
-        :return list[str] | None: IDs, or ``None`` after a tolerated failed page.
+        :return _RelationListing | None: First record per normalized ID in
+            provider order, or ``None`` after a tolerated failed page.
         """
-        ordered_ids: list[str] = []
-        seen_ids: set[str] = set()
+        records: dict[str, object] = {}
+        complete = False
         offset = 0
-        while limit is None or len(ordered_ids) < limit:
+        while limit is None or len(records) < limit:
             page_limit = GRAPH_RELATION_PAGE_SIZE
             if limit is not None:
-                page_limit = min(page_limit, max(1, limit - len(ordered_ids)))
+                page_limit = min(page_limit, max(1, limit - len(records)))
             response = self._request_json(
                 f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}/{relation}",
                 {
-                    "fields": "paperId",
+                    "fields": fields,
                     "limit": page_limit,
                     "offset": offset,
                 },
@@ -412,13 +468,14 @@ class _EndpointsMixin:
                         f"Semantic Scholar returned invalid {relation} paper ID."
                     )
                 normalized_id = normalize_paper_id(raw_id)
-                if normalized_id not in seen_ids:
-                    seen_ids.add(normalized_id)
-                    ordered_ids.append(normalized_id)
-                    if limit is not None and len(ordered_ids) >= limit:
+                if normalized_id not in records:
+                    records[normalized_id] = paper
+                    if limit is not None and len(records) >= limit:
                         break
             next_offset = response.get("next")
             if not rows or next_offset is None:
+                # A listing that filled its limit may have stopped early.
+                complete = limit is None or len(records) < limit
                 break
             if (
                 isinstance(next_offset, bool)
@@ -433,9 +490,9 @@ class _EndpointsMixin:
             "Checked %s discovery upstream for %s: %d IDs.",
             relation,
             paper_id,
-            len(ordered_ids),
+            len(records),
         )
-        return ordered_ids
+        return _RelationListing(records, complete)
 
     @_scoped_endpoint
     def _get_related_papers(
@@ -447,43 +504,60 @@ class _EndpointsMixin:
         nested_key: str,
         raise_on_unavailable: bool,
     ) -> list[Paper]:
-        """Freshly discover relation IDs, then materialize available records.
+        """Freshly fetch relation pages carrying each related paper's metadata.
+
+        Records come from the relation rows themselves, so no batch request is
+        made and nothing is written to the paper cache. A complete reference
+        listing also refreshes the seed's reference-ID cache.
 
         :param str paper_id: Seed identifier.
         :param int limit: Maximum unique results.
         :param str relation: Relation endpoint name.
         :param str nested_key: Nested response paper key.
-        :param bool raise_on_unavailable: Raise on failed discovery/enrichment.
-        :return list[Paper]: Ordered materialized papers.
+        :param bool raise_on_unavailable: Raise on a failed page.
+        :return list[Paper]: Ordered related papers.
         """
         parsed_limit = payloads._validate_integer_limit(limit, "limit", allow_zero=True)
         if parsed_limit == 0:
             return []
         normalized_id = normalize_paper_id(paper_id)
-        paper_ids = self._relation_ids(
+        listing = self._relation_records(
             normalized_id,
             relation=relation,
             nested_key=nested_key,
+            fields=",".join(payloads._default_paper_fields()),
             limit=parsed_limit,
             raise_on_unavailable=raise_on_unavailable,
         )
-        if paper_ids is None:
+        if listing is None:
             if raise_on_unavailable:
                 raise SemanticScholarUnavailableError(
                     f"Could not fetch {relation} for {normalized_id}: HTTP 404 "
                     "(paper not found)."
                 )
             return []
-        records = self.get_papers(paper_ids, raise_on_unavailable=raise_on_unavailable)
-        unresolved = [paper_id for paper_id in paper_ids if paper_id not in records]
-        if unresolved:
-            logger.warning(
-                "%s discovery for %s: skipping %d IDs without resolvable metadata.",
-                relation,
+        if relation == "references" and listing.complete:
+            self._persist_reference_cache_entry(
+                disk_cache._reference_cache_path(normalized_id),
                 normalized_id,
-                len(unresolved),
+                list(listing.records),
             )
-        return [records[paper_id] for paper_id in paper_ids if paper_id in records]
+        papers: list[Paper] = []
+        for related_id, record in listing.records.items():
+            paper = payloads._convert_api_paper(record)
+            if paper is None:
+                logger.debug(
+                    "Skipping malformed %s paper for %s.", relation, related_id
+                )
+                continue
+            papers.append(paper)
+        _log_skipped_rows(
+            f"{relation} discovery",
+            normalized_id,
+            len(listing.records) - len(papers),
+            len(listing.records),
+        )
+        return papers
 
     @_scoped_endpoint
     def get_cached_reference_ids(self, paper_id: str) -> list[str] | None:
@@ -539,15 +613,17 @@ class _EndpointsMixin:
             if cached is not None:
                 self._candidate_operation.state.reference_cache_hits += 1
                 return cached
-        references = self._relation_ids(
+        listing = self._relation_records(
             normalized_id,
             relation="references",
             nested_key="citedPaper",
+            fields="paperId",
             limit=None,
             raise_on_unavailable=raise_on_unavailable,
         )
-        if references is None:
+        if listing is None:
             return []
+        references = list(listing.records)
         self._persist_reference_cache_entry(cache_path, normalized_id, references)
         return references
 
@@ -570,9 +646,11 @@ class _EndpointsMixin:
 
         :param Iterable[JSONValue] records: Decoded API paper records.
         :param bool cache_full_metadata: Whether records carry default full metadata.
-        :return tuple[list[Paper], int]: Converted records and malformed-row count.
+        :return tuple[list[Paper], int]: First converted record per paper, in
+            order, and the malformed-row count.
         """
         papers: list[Paper] = []
+        seen_ids: set[str] = set()
         malformed_records = 0
         for record in records:
             paper = payloads._convert_recommendation(record)
@@ -580,6 +658,9 @@ class _EndpointsMixin:
                 malformed_records += 1
                 logger.debug("Skipping malformed Semantic Scholar paper row.")
                 continue
+            if paper.paper_id in seen_ids:
+                continue
+            seen_ids.add(paper.paper_id)
             papers.append(paper)
             if cache_full_metadata:
                 disk_cache._persist_paper(paper, paper.paper_id)
@@ -593,15 +674,24 @@ class _EndpointsMixin:
         fields: list[str] | None = None,
         *,
         raise_on_unavailable: bool = False,
+        pool: str = "recent",
     ) -> list[Paper]:
-        """Freshly fetch recommendation IDs and materialize available papers.
+        """Freshly fetch recommendations with their metadata in one request.
+
+        Without a projection the response carries the default paper fields
+        inline, parsed like relation rows: no batch request is made and nothing
+        is written to the paper cache.
 
         :param str paper_id: Seed identifier.
         :param int limit: Maximum results, up to 500.
         :param list[str] | None fields: Optional direct-response projection.
-        :param bool raise_on_unavailable: Raise on discovery/enrichment failure.
-        :return list[Paper]: Ordered recommendations.
+        :param bool raise_on_unavailable: Raise on discovery failure.
+        :param str pool: Start with ``recent`` and fall back to ``all-cs`` if no
+            papers are returned, or query ``all-cs`` directly.
+        :return list[Paper]: Ordered recommendations, first row per paper.
         """
+        if pool not in ("recent", "all-cs"):
+            raise ValueError("Recommendation pool must be 'recent' or 'all-cs'.")
         parsed_limit = payloads._validate_integer_limit(
             limit, "limit", maximum=RECOMMENDATION_MAX_RESULTS
         )
@@ -618,25 +708,25 @@ class _EndpointsMixin:
             requested_fields.append("paperId")
 
         skipped_records = 0
-        for pool in ("recent", "all-cs"):
+        total_records = 0
+        pools = ("recent", "all-cs") if pool == "recent" else ("all-cs",)
+        for active_pool in pools:
             params: dict[str, str | int] = {
-                "fields": ",".join(requested_fields)
-                if custom_projection
-                else "paperId",
+                "fields": ",".join(requested_fields),
                 "limit": parsed_limit,
             }
-            if pool == "all-cs":
-                params["from"] = pool
+            if active_pool == "all-cs":
+                params["from"] = active_pool
             response = self._request_json(
                 f"{RECOMMENDATION_BASE_URL}/{encoded_id}",
                 params,
-                context=f"fetching {pool} recommendations for {normalized_id}",
+                context=f"fetching {active_pool} recommendations for {normalized_id}",
                 raise_on_unavailable=raise_on_unavailable,
             )
             if response is None:
                 if raise_on_unavailable:
                     raise SemanticScholarUnavailableError(
-                        f"Could not fetch {pool} recommendations for {normalized_id}: "
+                        f"Could not fetch {active_pool} recommendations for {normalized_id}: "
                         "HTTP 404 (paper not found)."
                     )
                 return []
@@ -648,46 +738,25 @@ class _EndpointsMixin:
             logger.debug(
                 "Checked recommendations discovery upstream for %s, %s pool: %d rows.",
                 normalized_id,
-                pool,
+                active_pool,
                 len(records),
             )
             if custom_projection:
                 papers, malformed_records = self._papers_from_records(
                     records, cache_full_metadata=cache_full_metadata
                 )
-                skipped_records += malformed_records
-                if papers:
-                    _warn_skipped_recommendations(normalized_id, skipped_records)
-                    return papers[:parsed_limit]
-                continue
-
-            paper_ids: list[str] = []
-            seen_ids: set[str] = set()
-            for record in records:
-                raw_id = payloads._payload_get(record, "paperId")
-                if not isinstance(raw_id, str) or not raw_id.strip():
-                    skipped_records += 1
-                    logger.debug("Skipping malformed recommendation row.")
-                    continue
-                candidate = normalize_paper_id(raw_id)
-                if candidate not in seen_ids:
-                    seen_ids.add(candidate)
-                    paper_ids.append(candidate)
-            if not paper_ids:
-                continue
-            materialized = self.get_papers(
-                paper_ids, raise_on_unavailable=raise_on_unavailable
-            )
-            papers = [
-                materialized[paper_id]
-                for paper_id in paper_ids
-                if paper_id in materialized
-            ]
-            skipped_records += len(paper_ids) - len(papers)
+            else:
+                papers, malformed_records = _inline_recommendations(records)
+            skipped_records += malformed_records
+            total_records += len(records)
             if papers:
-                _warn_skipped_recommendations(normalized_id, skipped_records)
+                _log_skipped_rows(
+                    "recommendations", normalized_id, skipped_records, total_records
+                )
                 return papers[:parsed_limit]
-        _warn_skipped_recommendations(normalized_id, skipped_records)
+        _log_skipped_rows(
+            "recommendations", normalized_id, skipped_records, total_records
+        )
         return []
 
     @_scoped_endpoint

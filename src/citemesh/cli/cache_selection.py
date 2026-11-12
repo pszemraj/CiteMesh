@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 
 class _ErrorSink(Protocol):
     """Provide argparse-style error reporting for selection validation."""
 
-    def error(self, message: str) -> None: ...
+    def error(self, message: str) -> NoReturn: ...
 
 
 def _apply_cache_selection(
@@ -42,7 +42,6 @@ def _apply_cache_selection(
         "truncate_dim": contract.dimension,
         "storage_precision": contract.stored_dtype,
         "calibration_sample_size": contract.calibration_sample_size,
-        "semantic_source": "arxiv-corpus",
         "dataset_source": selection.source_repo_id,
         "dataset_split": selection.source_split,
     }
@@ -53,6 +52,17 @@ def _apply_cache_selection(
                 f"{selection.namespace_id} (stored value: {value})."
             )
         setattr(args, dest, value)
+    # A configured ``both`` was already narrowed for non-hybrid strategies, so
+    # ``both`` here is hybrid's combined source or an explicit flag that the
+    # build contract checks against the strategy.
+    if args.semantic_source != "both":
+        if "semantic_source" in provided and args.semantic_source != "arxiv-corpus":
+            error_sink.error(
+                f"--semantic-source conflicts with --cache-namespace "
+                f"{selection.namespace_id} (stored value: arxiv-corpus)."
+            )
+        args.semantic_source = "arxiv-corpus"
+        selectors["semantic_source"] = "arxiv-corpus"
     if args.force_rebuild_cache:
         error_sink.error("--force-rebuild-cache cannot be used with --cache-namespace.")
     cache = open_existing_cache(selection)

@@ -1,11 +1,11 @@
 """
-Candidate pool collection and paper-identity helpers.
+Candidate acquisition and paper-identity helpers.
 
-Provides the corpus-free ("candidates") semantic source: candidates come from
-Semantic Scholar neighbors of the seed (references, citations, and
-recommendations) instead of a locally hydrated arXiv corpus. The identity
-alias/merge helpers here are shared by hybrid and embedding strategies so both
-deduplicate equivalent papers identically.
+Fetches the seed's Semantic Scholar neighbors (references, with an arXiv
+bibliography fallback, citations, and recommendations) as per-source results.
+The identity rule and merge helpers here back the indexed pool in
+:mod:`citemesh.strategies.discovery_pool`, which hybrid and the embedding
+strategy's candidates mode both collect into.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ from typing import (
 from citemesh.core import Paper
 from citemesh.core.choices import SEMANTIC_SOURCE_CHOICES as SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import (
+    arxiv_identifier_from_doi,
+    bibliography_text_key,
     external_ids_from_canonical_paper_id,
     is_local_corpus_paper_id,
     normalize_paper_id,
@@ -36,6 +38,7 @@ from citemesh.core.paper_ids import (
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
+    from citemesh.core.paper_ids import BibliographyKey
     from citemesh.data.embedding_cache.models import PaperMetadata
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
@@ -46,6 +49,7 @@ QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
 ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
+CandidateIdentityKey = tuple[str, str]
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _BuilderT = TypeVar("_BuilderT", bound="_CandidateCollectionOwner")
@@ -72,7 +76,7 @@ class CandidateSourceState(str, Enum):
 
 @dataclass(frozen=True)
 class CandidateSourceResult:
-    """Papers, availability state, and optional failure detail for a source."""
+    """Admitted candidates of one attempted source, with its availability."""
 
     source: str
     state: CandidateSourceState
@@ -158,29 +162,30 @@ def provider_lookup_identifier(paper_id: str, paper: Paper) -> str | None:
 def _external_identifiers(paper: Paper) -> dict[str, str] | None:
     """Return explicit normalized arXiv and DOI identifiers for one paper.
 
+    An arXiv-issued DOI belongs to the arXiv namespace, independently of
+    any publication DOI on the same record.
+
     :param Paper paper: Paper metadata supplying canonical and field identifiers.
     :return dict[str, str] | None: Identifiers by namespace, or ``None`` on conflict.
     """
     primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(paper.paper_id)
-    primary_arxiv_id = (
-        recognize_arxiv_identifier(primary_arxiv, allow_bare=True) or ""
-    ).lower()
-    field_arxiv_id = (
-        recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True) or ""
-    ).lower()
-    primary_doi_id = _normalized_doi(primary_doi)
-    field_doi_id = _normalized_doi(paper.doi)
-    if (primary_arxiv_id and field_arxiv_id and primary_arxiv_id != field_arxiv_id) or (
-        primary_doi_id and field_doi_id and primary_doi_id != field_doi_id
+    identifiers: dict[str, str] = {}
+    for namespace, identifier in (
+        ("arxiv", recognize_arxiv_identifier(primary_arxiv, allow_bare=True)),
+        ("arxiv", recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)),
+        ("doi", _normalized_doi(primary_doi)),
+        ("doi", _normalized_doi(paper.doi)),
     ):
-        return None
-    arxiv_id = field_arxiv_id or primary_arxiv_id
-    doi = field_doi_id or primary_doi_id
-    return {
-        namespace: identifier
-        for namespace, identifier in (("arxiv", arxiv_id), ("doi", doi))
-        if identifier
-    }
+        if not identifier:
+            continue
+        identifier = identifier.lower()
+        if namespace == "doi" and (
+            arxiv_alias := arxiv_identifier_from_doi(identifier)
+        ):
+            namespace, identifier = "arxiv", arxiv_alias
+        if identifiers.setdefault(namespace, identifier) != identifier:
+            return None
+    return identifiers
 
 
 def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...] | None:
@@ -210,6 +215,21 @@ def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...] | 
     return tuple(sorted(shared_namespaces))
 
 
+def candidate_identity_keys(paper: Paper) -> tuple[CandidateIdentityKey, ...]:
+    """Return the normalized identifiers through which a record can match.
+
+    :func:`candidate_records_match` holds only for records that share one of
+    these ``(namespace, identifier)`` pairs, so an index on them finds every
+    possible match. A record whose own identifiers conflict matches nothing and
+    has no keys.
+
+    :param Paper paper: Candidate record.
+    :return tuple[CandidateIdentityKey, ...]: Normalized arXiv and DOI keys.
+    """
+    identifiers = _external_identifiers(paper)
+    return tuple(identifiers.items()) if identifiers else ()
+
+
 def candidate_records_match(left: Paper, right: Paper) -> bool:
     """Return whether two candidate records explicitly identify one work.
 
@@ -233,6 +253,60 @@ def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
     :return bool: Whether either record or the pair names different works.
     """
     return _candidate_match_namespaces(left, right) is None
+
+
+def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
+    """Return the preprint when two records are a preprint and its publication.
+
+    Such records often share no identifier. The preprint is the corpus row when
+    exactly one record is one (two corpus rows never match), and otherwise the
+    only record with an arXiv ID; it must carry an arXiv ID and the publication
+    a DOI, and conflicting
+    explicit identifiers remain disqualifying. Titles and full first-author
+    names must match after word normalization, and the publication can be in
+    the preprint's year or the following year. Callers must require a unique
+    match on both sides before reconciling records.
+
+    :param Paper left: One record.
+    :param Paper right: The other record.
+    :return Optional[Paper]: The preprint record, or ``None`` when the records
+        are not a preprint and a publication of one work.
+    """
+    if left.is_local_corpus and right.is_local_corpus:
+        # Two corpus rows are two indexed works.
+        return None
+    if left.is_local_corpus != right.is_local_corpus:
+        preprint, publication = (left, right) if left.is_local_corpus else (right, left)
+    else:
+        left_ids = _external_identifiers(left) or {}
+        right_ids = _external_identifiers(right) or {}
+        if ("arxiv" in left_ids) == ("arxiv" in right_ids):
+            return None
+        preprint, publication = (left, right) if "arxiv" in left_ids else (right, left)
+    preprint_ids = _external_identifiers(preprint)
+    publication_ids = _external_identifiers(publication)
+    if (
+        not preprint_ids
+        or "arxiv" not in preprint_ids
+        or not publication_ids
+        or "doi" not in publication_ids
+        or candidate_identifiers_conflict(preprint, publication)
+        or preprint.year is None
+        or publication.year not in (preprint.year, preprint.year + 1)
+        or not preprint.authors
+        or not publication.authors
+    ):
+        return None
+    title = bibliography_text_key(preprint.title)
+    author = bibliography_text_key(preprint.authors[0].name)
+    matches = (
+        " " in title
+        and " " in author
+        and len(author.partition(" ")[0]) > 1
+        and title == bibliography_text_key(publication.title)
+        and author == bibliography_text_key(publication.authors[0].name)
+    )
+    return preprint if matches else None
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
@@ -429,6 +503,25 @@ def _select_recovered_references_by_text(
     )
 
 
+def _add_verified_reference(
+    seed: Paper, references: list[Paper], paper: Paper | None
+) -> None:
+    """Keep the canonical reference while excluding matches to the seed."""
+    if (
+        paper is None
+        or paper.paper_id == seed.paper_id
+        or candidate_records_match(seed, paper)
+    ):
+        return
+    for existing in references:
+        if existing.paper_id == paper.paper_id or candidate_records_match(
+            existing, paper
+        ):
+            merge_paper_metadata(existing, paper)
+            return
+    references.append(paper)
+
+
 def fetch_seed_references(
     client: SemanticScholarClient,
     seed: Paper,
@@ -436,9 +529,13 @@ def fetch_seed_references(
     *,
     seed_identifier: str | None = None,
     local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
+    local_bibliography_lookup: Callable[
+        [Sequence[BibliographyKey]], dict[BibliographyKey, Paper]
+    ]
+    | None = None,
     reference_selector: ReferenceSelector | None = None,
 ) -> tuple[CandidateSourceResult, ...]:
-    """Recover an empty seed-reference source using its arXiv bibliography.
+    """Collect S2 seed references with an arXiv bibliography fallback.
 
     :param SemanticScholarClient client: Existing metadata and discovery client.
     :param Paper seed: Resolved seed, supplying external identifiers.
@@ -446,6 +543,8 @@ def fetch_seed_references(
     :param str | None seed_identifier: Original input, retaining arXiv version.
     :param Callable | None local_lookup: Read unambiguous requested aliases from an
         already prepared corpus, keyed by normalized request identifier.
+    :param Callable | None local_bibliography_lookup: Resolve identifier-free
+        entries by title, first author, and year after an empty S2 response.
     :param Callable | None reference_selector: Strategy-specific selector applied
         after the complete fallback bibliography is materialized.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
@@ -504,8 +603,9 @@ def fetch_seed_references(
     # Resolve the full bibliography in bounded batches before applying the cap.
     # Otherwise HTML order (often alphabetical) chooses survivors before useful
     # metadata is available for ranking.
-    for offset in range(0, len(entries), 50):
-        batch = entries[offset : offset + 50]
+    identified = [entry.identifiers for entry in entries if entry.identifiers]
+    for offset in range(0, len(identified), 50):
+        batch = identified[offset : offset + 50]
         ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
 
         resolver.bind_entries(batch)
@@ -557,47 +657,44 @@ def fetch_seed_references(
             resolver.bind_entries(batch)
         attempted.update(ids)
         for entry in batch:
-            resolved_paper = resolver.resolve(entry)
-            if (
-                resolved_paper is None
-                or resolved_paper.paper_id == seed.paper_id
-                or candidate_records_match(seed, resolved_paper)
-            ):
-                continue
-            existing = next(
-                (
-                    item
-                    for item in recovered
-                    if item.paper_id == resolved_paper.paper_id
-                    or candidate_records_match(item, resolved_paper)
-                ),
-                None,
-            )
-            if existing is not None:
-                merge_paper_metadata(existing, resolved_paper)
-            else:
-                recovered.append(resolved_paper)
-    identifiable_entries = len({frozenset(entry) for entry in entries if entry})
-    materialized_count = len(recovered)
+            _add_verified_reference(seed, recovered, resolver.resolve(entry))
     _enrich_local_reference_records(client, recovered)
+    resolved_with_identifiers = len(recovered)
+
+    if (
+        original.state is CandidateSourceState.EMPTY
+        and local_bibliography_lookup is not None
+    ):
+        keys = list(
+            dict.fromkeys(
+                entry.key
+                for entry in entries
+                if not entry.identifiers and entry.key is not None
+            )
+        )
+        if keys:
+            records_by_key = local_bibliography_lookup(keys)
+            for key in keys:
+                _add_verified_reference(seed, recovered, records_by_key.get(key))
+
+    materialized_count = len(recovered)
     selector = reference_selector or _select_recovered_references_by_text
     recovered = selector(seed, recovered, limit)
     logger.debug(
-        "arXiv bibliography extraction: entries=%d, identifiable=%d, "
-        "materialized=%d, selected=%d, reference_limit=%d.",
+        "arXiv bibliography extraction: entries=%d, resolved_with_identifiers=%d, "
+        "resolved_by_title=%d, materialized=%d, selected=%d, reference_limit=%d.",
         len(entries),
-        identifiable_entries,
+        resolved_with_identifiers,
+        materialized_count - resolved_with_identifiers,
         materialized_count,
         len(recovered),
         limit,
     )
     if recovered:
-        if identifiable_entries > len(recovered) and len(recovered) >= limit:
+        if materialized_count > len(recovered):
             logger.info(
-                "Recovered %d reference identifiers from the arXiv bibliography; "
-                "ranked %d resolved references and keeping %d "
+                "Ranked %d recovered references from the arXiv bibliography, keeping %d "
                 "(reference limit: %d).",
-                identifiable_entries,
                 materialized_count,
                 len(recovered),
                 limit,
@@ -750,12 +847,38 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     )
     if (not preferred.venue) and incoming.venue:
         preferred.venue = incoming.venue
-    for record in (preferred, incoming):
-        arxiv_id, doi = external_ids_from_canonical_paper_id(record.paper_id)
-        if not preferred.arxiv_id:
-            preferred.arxiv_id = record.arxiv_id or arxiv_id
-        if not preferred.doi:
-            preferred.doi = record.doi or doi
+    preferred_arxiv, preferred_doi = external_ids_from_canonical_paper_id(
+        preferred.paper_id
+    )
+    incoming_arxiv, incoming_doi = external_ids_from_canonical_paper_id(
+        incoming.paper_id
+    )
+    supplemental_doi = incoming.doi or incoming_doi
+    doi = preferred.doi or preferred_doi or supplemental_doi
+    preprint_alias = arxiv_identifier_from_doi(doi)
+    if preprint_alias:
+        arxiv_suffix = preprint_alias.removeprefix("arxiv:")
+        if preferred.doi or preferred_doi:
+            preferred_arxiv = preferred_arxiv or arxiv_suffix
+        # Keep the arXiv identity alongside compatible publication DOI evidence.
+        if not candidate_identifiers_conflict(preferred, incoming):
+            incoming_arxiv = incoming_arxiv or arxiv_suffix
+            for candidate_doi in (preferred_doi, incoming.doi, incoming_doi):
+                normalized_doi = _normalized_doi(candidate_doi)
+                if normalized_doi and arxiv_identifier_from_doi(normalized_doi) is None:
+                    doi = candidate_doi
+                    break
+    arxiv_id = (
+        preferred.arxiv_id or preferred_arxiv or incoming.arxiv_id or incoming_arxiv
+    )
+    if not arxiv_id:
+        incoming_alias = arxiv_identifier_from_doi(
+            supplemental_doi
+        ) or arxiv_identifier_from_doi(incoming_doi)
+        if incoming_alias and not candidate_identifiers_conflict(preferred, incoming):
+            arxiv_id = incoming_alias.removeprefix("arxiv:")
+    preferred.arxiv_id = arxiv_id
+    preferred.doi = doi
     if (not preferred.categories) and incoming.categories:
         preferred.categories = incoming.categories
     reference_ids: list[str] = []
@@ -791,197 +914,3 @@ def paper_embedding_metadata(paper: Paper) -> PaperMetadata:
         "doi": paper.doi or "",
         "categories": list(paper.categories or []),
     }
-
-
-@dataclass
-class CandidatePool:
-    """Deduplicated candidate papers fetched from Semantic Scholar."""
-
-    seed: Paper
-    papers: dict[str, Paper] = field(default_factory=dict)
-    sources: dict[str, set[str]] = field(default_factory=dict)
-    seed_relations: dict[str, str] = field(default_factory=dict)
-    source_status: dict[str, str] = field(default_factory=dict)
-
-    def add(self, paper: Paper, *, source: str, relation: str) -> None:
-        """Add a paper, reconciling exact IDs and unambiguous external IDs.
-
-        :param Paper paper: Candidate paper payload.
-        :param str source: Provenance tag (``reference``/``citation``/``recommendation``).
-        :param str relation: Seed-relation label for this provenance.
-        :return None: Pool state is mutated in place.
-        """
-        paper_id = str(paper.paper_id).strip()
-        if paper.is_seed or not paper_id:
-            return
-        if paper_id == self.seed.paper_id or candidate_records_match(self.seed, paper):
-            merge_paper_metadata(self.seed, paper)
-            return
-        canonical_id = paper_id
-        existing = self.papers.get(canonical_id)
-        if existing is None:
-            matching_ids = [
-                candidate_id
-                for candidate_id, candidate in self.papers.items()
-                if candidate_records_match(candidate, paper)
-            ]
-            if len(matching_ids) == 1:
-                canonical_id = matching_ids[0]
-                existing = self.papers[canonical_id]
-        if existing is None:
-            self.papers[canonical_id] = paper
-        else:
-            merge_paper_metadata(existing, paper)
-        self.sources.setdefault(canonical_id, set()).add(source)
-        merged_relation = merge_seed_relation(
-            self.seed_relations.get(canonical_id, ""), relation
-        )
-        if merged_relation:
-            self.seed_relations[canonical_id] = merged_relation
-
-
-def fetch_candidate_pool(
-    client: SemanticScholarClient,
-    seed_paper: Paper,
-    *,
-    max_references: int = 0,
-    max_citations: int = 0,
-    max_recommendations: int = 0,
-    seed_identifier: str | None = None,
-    reference_selector: ReferenceSelector | None = None,
-) -> CandidatePool:
-    """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
-
-    Free-text query seeds (``query:`` IDs) have no S2 neighbors; they are proxied
-    through paper search on the query text before recommendation expansion.
-
-    :param SemanticScholarClient client: Semantic Scholar client.
-    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
-    :param int max_references: Maximum seed references to fetch (0 disables).
-    :param int max_citations: Maximum citing papers to fetch (0 disables).
-    :param int max_recommendations: Maximum recommendations to fetch (0 disables).
-    :param str | None seed_identifier: Original input, retaining an arXiv version.
-    :param Callable | None reference_selector: Strategy-specific recovered-reference
-        selector.
-    :return CandidatePool: Deduplicated candidate pool with provenance tags.
-    """
-    with client.candidate_operation_scope():
-        return _fetch_candidate_pool(
-            client,
-            seed_paper,
-            max_references=max_references,
-            max_citations=max_citations,
-            max_recommendations=max_recommendations,
-            seed_identifier=seed_identifier,
-            reference_selector=reference_selector,
-        )
-
-
-def _fetch_candidate_pool(
-    client: SemanticScholarClient,
-    seed_paper: Paper,
-    *,
-    max_references: int = 0,
-    max_citations: int = 0,
-    max_recommendations: int = 0,
-    seed_identifier: str | None = None,
-    reference_selector: ReferenceSelector | None = None,
-) -> CandidatePool:
-    """Fetch candidates while an outer operation scope is active.
-
-    :param SemanticScholarClient client: Semantic Scholar client.
-    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
-    :param int max_references: Maximum seed references to fetch (0 disables).
-    :param int max_citations: Maximum citing papers to fetch (0 disables).
-    :param int max_recommendations: Maximum recommendations to fetch (0 disables).
-    :param str | None seed_identifier: Original input, retaining an arXiv version.
-    :param Callable | None reference_selector: Strategy-specific recovered-reference
-        selector.
-    :return CandidatePool: Deduplicated candidate pool with provenance tags.
-    """
-    pool = CandidatePool(seed=seed_paper)
-    source_results: list[CandidateSourceResult] = []
-    seed_id = str(seed_paper.paper_id)
-    is_query_seed = seed_id.startswith("query:")
-    query_candidate_budget = (
-        max_references + max_citations + max_recommendations if is_query_seed else 0
-    )
-    recommendation_limit = max_recommendations
-
-    if is_query_seed:
-        query_text = (seed_paper.title or "").strip() or seed_id
-        search_limit = min(QUERY_SEED_SEARCH_LIMIT, query_candidate_budget)
-        if search_limit > 0:
-            search_result = fetch_candidate_source(
-                "search",
-                lambda: client.search_papers(
-                    query_text,
-                    limit=search_limit,
-                    raise_on_unavailable=True,
-                ),
-            )
-            source_results.append(search_result)
-            for paper in search_result.papers:
-                pool.add(paper, source="recommendation", relation="semantic_only")
-        anchor_ids = list(pool.papers)[:1]
-        recommendation_limit = min(
-            max_recommendations,
-            max(0, query_candidate_budget - len(pool.papers)),
-        )
-    else:
-        anchor_ids = [seed_id]
-        if max_references > 0:
-            reference_results = fetch_seed_references(
-                client,
-                seed_paper,
-                max_references,
-                seed_identifier=seed_identifier,
-                reference_selector=reference_selector,
-            )
-            source_results.extend(reference_results)
-            for result in reference_results:
-                for paper in result.papers:
-                    pool.add(paper, source="reference", relation="referenced_by_seed")
-        if max_citations > 0:
-            citation_result = fetch_candidate_source(
-                "citations",
-                lambda: client.get_paper_citations(
-                    seed_id,
-                    limit=max_citations,
-                    raise_on_unavailable=True,
-                ),
-            )
-            source_results.append(citation_result)
-            for paper in citation_result.papers:
-                pool.add(paper, source="citation", relation="cites_seed")
-
-    if recommendation_limit > 0 and anchor_ids:
-        recommendation_result = fetch_candidate_source(
-            "recommendations",
-            lambda: client.get_recommended_papers(
-                anchor_ids[0],
-                limit=recommendation_limit,
-                raise_on_unavailable=True,
-            ),
-        )
-        source_results.append(recommendation_result)
-        for paper in recommendation_result.papers:
-            pool.add(paper, source="recommendation", relation="semantic_only")
-
-    pool.source_status = {
-        result.source: result.state.value for result in source_results
-    }
-    require_available_candidate_source(
-        source_results,
-        context=f"candidate acquisition for {seed_id}",
-    )
-
-    logger.debug(
-        "Candidate pool for %s: %d papers (refs<=%d cites<=%d recs<=%d).",
-        seed_id,
-        len(pool.papers),
-        max_references,
-        max_citations,
-        max_recommendations,
-    )
-    return pool

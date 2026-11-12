@@ -658,7 +658,7 @@
       hoverId: null,
       filters: { citation: true, semantic: true, both: true },
       searchText: "",
-      sortKey: "relevance",
+      sortKey: defaultSortKey(),
       scopeMode: "all",
       yearMin: null,
       yearMax: null,
@@ -938,6 +938,15 @@
         }
         return tieBreak(nodeA, nodeB);
       }
+      if (state.sortKey === "discovery_rank") {
+        // Papers without a discovery rank (other strategies) sort last.
+        const rankA = Number.isInteger(nodeA.discovery_rank) ? nodeA.discovery_rank : Infinity;
+        const rankB = Number.isInteger(nodeB.discovery_rank) ? nodeB.discovery_rank : Infinity;
+        if (rankA !== rankB) {
+          return rankA < rankB ? -1 : 1;
+        }
+        return tieBreak(nodeA, nodeB);
+      }
 
       const relevanceA = Number(nodeA.seed_relevance || 0);
       const relevanceB = Number(nodeB.seed_relevance || 0);
@@ -1101,11 +1110,14 @@
         kind: GRAPH_PAYLOAD_KIND,
         schema_version: GRAPH_PAYLOAD_SCHEMA_VERSION,
         seed_id: nextMeta.seed_id || "",
-        meta: {
-          strategy: nextMeta.strategy || "",
-          year_range: nextMeta.year_range ?? null,
-          candidate_source_status: nextMeta.candidate_source_status || {},
-        },
+        meta: Object.assign(
+          {
+            strategy: nextMeta.strategy || "",
+            year_range: nextMeta.year_range ?? null,
+            candidate_source_status: nextMeta.candidate_source_status || {},
+          },
+          nextMeta.discovery_ranker ? { discovery_ranker: nextMeta.discovery_ranker } : {}
+        ),
         summary,
         dashboard: {
           meta: dashboardMeta,
@@ -1279,6 +1291,11 @@
         plotly_node_sizes:
           importedDashboardMeta.plotly_node_sizes || importedMeta.plotly_node_sizes || [],
       };
+      const discoveryRanker =
+        importedDashboardMeta.discovery_ranker || importedMeta.discovery_ranker;
+      if (discoveryRanker) {
+        baseMeta.discovery_ranker = discoveryRanker;
+      }
       if (!hasCompleteDashboardGeometry(baseMeta)) {
         throw new Error(
           `Imported results from ${String(label || "the selected file")} are missing stored dashboard geometry. Export dashboard-compatible CiteMesh results first.`
@@ -1530,6 +1547,27 @@
       controls.yearMax.placeholder = `Year max (${maxYear})`;
     }
 
+    function hasDiscoveryRanks() {
+      return nodes.some((node) => Number.isInteger(node.discovery_rank));
+    }
+
+    function defaultSortKey() {
+      // A hybrid graph ranks every related paper, so lead with that order when the
+      // ranking is complete. Any other graph keeps the relevance default.
+      const related = nodes.filter((node) => !node.is_seed);
+      const fullyRanked = related.length > 0
+        && related.every((node) => Number.isInteger(node.discovery_rank));
+      return fullyRanked ? "discovery_rank" : "relevance";
+    }
+
+    function syncDiscoverySortOption() {
+      // Only hybrid graphs carry discovery ranks; elsewhere the option is hidden.
+      const option = controls.sort.querySelector('option[value="discovery_rank"]');
+      if (option) {
+        option.hidden = !hasDiscoveryRanks();
+      }
+    }
+
     function applyImportedPayload(imported, label) {
       const normalizedImport = normalizeImportedDashboardPayload(imported, label, true);
       const nextPayload = normalizedImport.payload;
@@ -1545,13 +1583,13 @@
       state.selectedId = (payload.meta && payload.meta.seed_id) || null;
       state.hoverId = null;
       state.searchText = "";
-      state.sortKey = "relevance";
+      state.sortKey = defaultSortKey();
       state.scopeMode = "all";
       state.yearMin = null;
       state.yearMax = null;
       state.visibleIds = new Set(nodeOrder);
       controls.search.value = "";
-      controls.sort.value = "relevance";
+      controls.sort.value = state.sortKey;
       controls.yearMin.value = "";
       controls.yearMax.value = "";
       controls.scopeButtons.forEach((entry) => entry.classList.remove("active"));
@@ -1565,6 +1603,7 @@
       });
       populateCollectionSelector();
       updateYearPlaceholders();
+      syncDiscoverySortOption();
       renderTimeline();
       return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
         setupGraphInteractions();
@@ -1671,13 +1710,36 @@
         ? `Shortest path to seed: ${path.map((pid) => compactNodeLabel(pid)).join(" -> ")}`
         : "Shortest path to seed: unavailable";
       const relevanceLine = `Seed relevance: ${Number(node.seed_relevance || 0).toFixed(4)} | Relation: ${relationLabel}`;
+      const discoveryLine = discoveryWhyLine(node);
 
       controls.detailWhy.classList.remove("muted");
       controls.detailWhy.innerHTML = [
         `<div>${escapeHtml(relevanceLine)}</div>`,
+        discoveryLine ? `<div>${escapeHtml(discoveryLine)}</div>` : "",
         `<div>${escapeHtml(neighborLine)}</div>`,
         `<div>${escapeHtml(pathLine)}</div>`,
       ].join("");
+    }
+
+    function discoveryWhyLine(node) {
+      if (!Number.isInteger(node.discovery_rank)) {
+        return "";
+      }
+      const features = node.discovery_features || {};
+      const parts = [
+        `Discovery rank ${node.discovery_rank} (score ${Number(node.discovery_score || 0).toFixed(4)})`,
+        `seed similarity ${Number(features.seed_similarity || 0).toFixed(3)}`,
+      ];
+      if (Number.isFinite(features.bibliography_similarity)) {
+        parts.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
+      }
+      if (features.direct_citation) {
+        parts.push("direct citation");
+      }
+      if (Number.isInteger(features.recommendation_rank)) {
+        parts.push(`recommended #${features.recommendation_rank}`);
+      }
+      return parts.join(" | ");
     }
 
     function renderDetail(nodeId, previewOnly) {
@@ -2352,6 +2414,8 @@
         setDashboardStatus(bootstrapStatusMessage, "warning");
       }
       setupControls();
+      syncDiscoverySortOption();
+      controls.sort.value = state.sortKey;
       // Toolbar changes resize the pane without triggering a window resize.
       const graphResizeObserver = new ResizeObserver(() => Plotly.Plots.resize(graphDiv));
       graphResizeObserver.observe(graphDiv);

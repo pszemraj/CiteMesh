@@ -6,13 +6,18 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import unquote, urlparse
 
 import requests
 
 from citemesh.core import Author, Paper
-from citemesh.core.paper_ids import strip_arxiv_version
+from citemesh.core.paper_ids import (
+    BibliographyKey,
+    arxiv_identifier_from_doi,
+    strip_arxiv_version,
+)
 
 logger = logging.getLogger(__name__)
 _ARXIV_LEGACY_ARCHIVE = (
@@ -39,6 +44,9 @@ _ARXIV_URL_TEXT = re.compile(
     r"https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/[^\s<>\"]+", re.I
 )
 _DOI = re.compile(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+", re.I)
+_BIBLIOGRAPHY_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
+_TITLE_YEAR_SUFFIX = re.compile(r"[,;]\s*((?:19|20)\d{2})[.\s]*$")
+_AUTHOR_SEPARATOR = re.compile(r",|\s+and\s+", re.IGNORECASE)
 _VOID_TAGS = {
     "area",
     "base",
@@ -106,6 +114,8 @@ def arxiv_identifier(value: str) -> str | None:
 def _identifiers(text: str, links: list[str]) -> tuple[str, ...]:
     """Extract explicit identifiers from one bibliography entry.
 
+    An arXiv-issued DOI also yields its arXiv ID.
+
     :param str text: Visible entry text.
     :param list[str] links: Entry hyperlink targets.
     :return tuple[str, ...]: Unique canonical aliases, arXiv before DOI.
@@ -120,15 +130,47 @@ def _identifiers(text: str, links: list[str]) -> tuple[str, ...]:
         identifier = arxiv_identifier(link)
         if identifier:
             arxiv_ids.append(identifier)
-    identifiers = [f"arxiv:{_canonical_arxiv_suffix(value)}" for value in arxiv_ids]
+    dois: list[str] = []
     for source in [text, *(unquote(link) for link in links)]:
         for match in _DOI.finditer(source):
             doi = match[0].rstrip(".,;:")
             # Sentence punctuation is not part of a DOI; balanced suffixes can be.
             while doi.endswith(")") and doi.count(")") > doi.count("("):
                 doi = doi[:-1]
-            identifiers.append(doi.lower())
-    return tuple(dict.fromkeys(identifiers))
+            dois.append(doi.lower())
+    arxiv_ids.extend(
+        alias.removeprefix("arxiv:")
+        for doi in dois
+        if (alias := arxiv_identifier_from_doi(doi))
+    )
+    identifiers = [f"arxiv:{_canonical_arxiv_suffix(value)}" for value in arxiv_ids]
+    return tuple(dict.fromkeys([*identifiers, *dois]))
+
+
+@dataclass(frozen=True)
+class BibliographyEntry:
+    """Explicit aliases or bibliographic evidence from one LaTeXML entry."""
+
+    identifiers: tuple[str, ...]
+    key: BibliographyKey | None = None
+
+
+def _bibliography_key(blocks: list[list[str]]) -> BibliographyKey | None:
+    """Read author, title, and unambiguous year from LaTeXML bibblocks."""
+    if len(blocks) < 2:
+        return None
+    authors, title, *publication = ("".join(block).strip() for block in blocks)
+    years = set(_BIBLIOGRAPHY_YEAR.findall(" ".join(publication)))
+    if (suffix := _TITLE_YEAR_SUFFIX.search(title)) is not None:
+        years.add(suffix[1])
+        title = title[: suffix.start()]
+    if len(years) != 1:
+        return None
+    return BibliographyKey(
+        title,
+        _AUTHOR_SEPARATOR.split(authors, maxsplit=1)[0],
+        int(years.pop()),
+    )
 
 
 class _BibliographyParser(HTMLParser):
@@ -137,12 +179,14 @@ class _BibliographyParser(HTMLParser):
     def __init__(self) -> None:
         """Initialize entry and element state."""
         super().__init__(convert_charrefs=True)
-        self.entries: list[tuple[str, ...]] = []
+        self.entries: list[BibliographyEntry] = []
         self.stack: list[str] = []
         self.bibliography_depth: int | None = None
         self.entry_depth: int | None = None
         self.text: list[str] = []
         self.links: list[str] = []
+        self.blocks: list[list[str]] = []
+        self.block_depth: int | None = None
 
     def _finish_entry(self) -> None:
         """Store the active bibliography entry when its boundary is reached.
@@ -150,8 +194,15 @@ class _BibliographyParser(HTMLParser):
         :return None: Appends the active entry and clears its state.
         """
         if self.entry_depth is not None:
-            self.entries.append(_identifiers("".join(self.text), self.links))
+            identifiers = _identifiers("".join(self.text), self.links)
+            self.entries.append(
+                BibliographyEntry(
+                    identifiers,
+                    _bibliography_key(self.blocks) if not identifiers else None,
+                )
+            )
             self.entry_depth = None
+            self.block_depth = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Track bibliography scope and capture entry links.
@@ -178,8 +229,14 @@ class _BibliographyParser(HTMLParser):
             self.entry_depth = len(self.stack)
             self.text = []
             self.links = []
-        if self.entry_depth is not None and tag == "a" and attributes.get("href"):
+            self.blocks = []
+        if self.entry_depth is None:
+            return
+        if tag == "a" and attributes.get("href"):
             self.links.append(attributes["href"] or "")
+        if self.block_depth is None and "ltx_bibblock" in classes:
+            self.block_depth = len(self.stack)
+            self.blocks.append([])
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Handle self-closing elements without leaving stack entries.
@@ -201,6 +258,8 @@ class _BibliographyParser(HTMLParser):
         if tag not in self.stack:
             return
         depth = len(self.stack) - self.stack[::-1].index(tag)
+        if self.block_depth is not None and depth <= self.block_depth:
+            self.block_depth = None
         if self.entry_depth is not None and depth <= self.entry_depth:
             self._finish_entry()
         if self.bibliography_depth is not None and depth <= self.bibliography_depth:
@@ -215,18 +274,21 @@ class _BibliographyParser(HTMLParser):
         """
         if self.entry_depth is not None:
             self.text.append(data)
+            if self.block_depth is not None:
+                self.blocks[-1].append(data)
 
 
-def extract_reference_identifiers(html: str) -> list[tuple[str, ...]]:
-    """Extract aliases grouped by bibliography entry, in document order.
-
-    :param str html: arXiv LaTeXML HTML.
-    :return list[tuple[str, ...]]: Entries including those without explicit IDs.
-    """
+def _extract_bibliography(html: str) -> list[BibliographyEntry]:
+    """Extract bibliography entries in document order."""
     parser = _BibliographyParser()
     parser.feed(html)
     parser.close()
     return parser.entries
+
+
+def extract_reference_identifiers(html: str) -> list[tuple[str, ...]]:
+    """Extract explicit aliases grouped by bibliography entry, in document order."""
+    return [entry.identifiers for entry in _extract_bibliography(html)]
 
 
 class ArxivClient:
@@ -269,19 +331,15 @@ class ArxivClient:
             return None
         return response
 
-    def get_bibliography(self, identifier: str) -> list[tuple[str, ...]] | None:
+    def get_bibliography(self, identifier: str) -> list[BibliographyEntry] | None:
         """Read the seed's bibliography, retaining the requested version.
 
         :param str identifier: Recognized arXiv suffix.
-        :return list[tuple[str, ...]] | None: Entries, or unavailable HTML.
+        :return list[BibliographyEntry] | None: Entries, or unavailable HTML.
         """
         request_identifier = _arxiv_request_suffix(identifier)
         response = self._get(f"https://arxiv.org/html/{request_identifier}")
-        return (
-            extract_reference_identifiers(response.text)
-            if response is not None
-            else None
-        )
+        return _extract_bibliography(response.text) if response is not None else None
 
     def get_papers(self, identifiers: list[str]) -> dict[str, Paper] | None:
         """Fetch exact arXiv metadata, removing reported malformed IDs on retry.

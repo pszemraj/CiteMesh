@@ -1,6 +1,6 @@
 # Defaults tuning studies
 
-Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and hybrid discovery defaults.
+Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and, as a historical record, an earlier set of hybrid discovery budgets.
 
 ## Semantic edge threshold (September 2026)
 
@@ -122,7 +122,7 @@ The decision favors retention of the full model's retrieval behavior over the lo
 
 ## Hybrid defaults (February 2026)
 
-The earlier hybrid-default sweep below tuned citation/reference/semantic budgets; it did not compare embedding dimensions.
+This sweep is historical. It tuned the citation, reference, and semantic-only budgets of an earlier hybrid ranker; the `--max-semantic` flag and those budgets have since been removed, because hybrid now ranks every reference, citer, and recommendation it fetches by rank fusion ([ranking](../guides/how-it-works.md#5-ranking-and-selection)). It did not compare embedding dimensions.
 
 ### Scope
 
@@ -157,7 +157,7 @@ Configs tested end-to-end with full CLI execution:
 - `h20_20_30`
 - `h25_25_25`
 
-Naming format is `h<max_refs>_<max_cites>_<max_semantic>`.
+Naming format is `h<max_refs>_<max_cites>_<max_semantic>`, where `max_semantic` was the since-removed semantic-only budget.
 
 ### Results
 

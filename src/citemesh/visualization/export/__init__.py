@@ -211,6 +211,8 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         candidate_source_status = dashboard_meta.get("candidate_source_status")
         if isinstance(candidate_source_status, dict):
             portable_meta["candidate_source_status"] = candidate_source_status
+        if "discovery_ranker" in dashboard_meta:
+            portable_meta["discovery_ranker"] = dashboard_meta["discovery_ranker"]
         payload: GraphPayload = {
             "kind": GRAPH_PAYLOAD_KIND,
             "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,

@@ -61,6 +61,8 @@ from tests._helpers import (
     ConstantEncodeModel,
     LengthRecordingEncodeModel,
     disable_embedding_dep_checks,
+    install_deterministic_builder_runtime,
+    offline_hybrid_encoder,
     raise_import_error,
 )
 
@@ -309,38 +311,6 @@ def _pin_model_fingerprint(
     monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
     builder._resolved_model_fingerprint = fingerprint
     builder._bind_embedding_cache_to_active_model()
-
-
-def _install_deterministic_builder_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-    builder: EmbeddingGraphBuilder,
-    *,
-    fingerprint: str,
-    model: Any | None = None,
-) -> None:
-    """Install a tiny encoder while preserving lazy artifact binding.
-
-    :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
-    :param EmbeddingGraphBuilder builder: Fresh builder receiving the fake runtime.
-    :param str fingerprint: Artifact identity shared by lifecycle operations.
-    :param Optional[Any] model: Deterministic encoder override.
-    :return None: Installs the deterministic runtime in-place.
-    """
-    runtime_model = ConstantEncodeModel() if model is None else model
-
-    def load_model() -> None:
-        """Mimic a fresh load whose immutable artifact is not resolved yet.
-
-        :return None: Binds the fake model and clears provisional cache handles.
-        """
-        if builder.model is not None:
-            return
-        builder.model = runtime_model
-        builder._active_model_name = builder.model_name
-        builder._bind_embedding_cache_to_active_model()
-
-    monkeypatch.setattr(builder, "_load_model", load_model)
-    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
 
 
 def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> None:
@@ -8486,7 +8456,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
             force_rebuild_reason="fresh-build lifecycle regression",
             client=client,
         )
-        _install_deterministic_builder_runtime(
+        install_deterministic_builder_runtime(
             monkeypatch,
             builder,
             fingerprint=fingerprint,
@@ -8526,7 +8496,6 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
             max_papers=2,
             max_references=1,
             max_citations=1,
-            max_semantic=1,
             fetch_references=True,
             semantic_source="arxiv-corpus",
             dataset_source=dataset_source,
@@ -8539,7 +8508,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
         )
         assert build_builder.embedding_builder is not None
         active_embedding_builder = build_builder.embedding_builder
-        _install_deterministic_builder_runtime(
+        install_deterministic_builder_runtime(
             monkeypatch,
             active_embedding_builder,
             fingerprint=fingerprint,
@@ -8668,12 +8637,11 @@ def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
                 **common_options,
                 max_references=1,
                 max_citations=0,
-                max_semantic=1,
                 fetch_references=fetch_references,
             )
             assert builder.embedding_builder is not None
             active_embedding = builder.embedding_builder
-        _install_deterministic_builder_runtime(
+        install_deterministic_builder_runtime(
             monkeypatch,
             active_embedding,
             fingerprint=fingerprint,
@@ -8880,7 +8848,6 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
             **common_options,
             max_references=0,
             max_citations=0,
-            max_semantic=1,
             fetch_references=False,
         )
         assert public_builder.embedding_builder is not None
@@ -8947,27 +8914,21 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
             "enrich_cached_corpus_seed",
             lambda _seed: probe.record(events, "enrich"),
         )
+        offline_hybrid_encoder(monkeypatch, hybrid_builder)
         monkeypatch.setattr(
-            hybrid_builder.citation_builder,
-            "collect_papers",
-            lambda *_args, **_kwargs: (
-                probe.record(events, "citations") or {seed.paper_id: seed}
-            ),
+            embedding_builder,
+            "search_prepared_corpus",
+            lambda *_args: probe.record(events, "neighbors") or [seed, neighbor],
         )
         monkeypatch.setattr(
             embedding_builder,
-            "collect_papers",
-            lambda *_args, **_kwargs: (
-                probe.record(events, "neighbors")
-                or {seed.paper_id: seed, neighbor.paper_id: neighbor}
-            ),
+            "cached_corpus_vectors",
+            lambda _ids: probe.record(events, "vectors") or {},
         )
         monkeypatch.setattr(
-            hybrid_builder,
-            "_rank_candidates",
-            lambda _seed, candidates, _sources: (
-                probe.record(events, "rank") or list(candidates)
-            ),
+            embedding_builder,
+            "_enrich_corpus_papers",
+            lambda _papers: probe.record(events, "enrich neighbors"),
         )
 
     papers = public_builder.collect_papers(seed.paper_id)
@@ -9130,13 +9091,12 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
             **common_options,
             max_references=0,
             max_citations=0,
-            max_semantic=1,
             fetch_references=False,
         )
         assert public_builder.embedding_builder is not None
         embedding_builder = public_builder.embedding_builder
     model = _DirectionalModel()
-    _install_deterministic_builder_runtime(
+    install_deterministic_builder_runtime(
         monkeypatch,
         embedding_builder,
         fingerprint=fingerprint,
@@ -9313,12 +9273,11 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
                 **common_options,
                 max_references=0,
                 max_citations=0,
-                max_semantic=1,
                 fetch_references=False,
             )
             assert public_builder.embedding_builder is not None
             embedding_builder = public_builder.embedding_builder
-        _install_deterministic_builder_runtime(
+        install_deterministic_builder_runtime(
             monkeypatch,
             embedding_builder,
             fingerprint=fingerprint,
@@ -9452,12 +9411,11 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
                 **common_options,
                 max_references=1,
                 max_citations=1,
-                max_semantic=1,
                 fetch_references=False,
             )
             assert public_builder.embedding_builder is not None
             embedding_builder = public_builder.embedding_builder
-        _install_deterministic_builder_runtime(
+        install_deterministic_builder_runtime(
             monkeypatch,
             embedding_builder,
             fingerprint=fingerprint,

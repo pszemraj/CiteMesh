@@ -12,6 +12,7 @@
 
 ## Reference
 
+- [Config reference](reference/config/config_reference.toml): every `config.toml` key, with [example.toml](reference/config/example.toml) to start from
 - [Environment variables](reference/environment.md)
 - [Output artifacts](reference/output-artifacts.md)
 - [Embedding runtime](reference/embedding-runtime.md)
@@ -21,5 +22,6 @@
 
 - [Architecture](internals/architecture.md)
 - [Embedding cache](internals/embedding-cache.md)
+- [Hybrid discovery status](internals/hybrid-discovery-status.md): what hybrid does after the discovery rework and how it was evaluated
 
 [Installation](../README.md#quick-start) and [release notes](https://github.com/pszemraj/CiteMesh/releases).

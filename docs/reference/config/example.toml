@@ -1,0 +1,13 @@
+# example.toml: a small CiteMesh user config.
+# As config.toml, it makes every `citemesh build` a hybrid build that writes an interactive dashboard and the graph JSON.
+# Copy it to the path that `citemesh config path` prints, which replaces any config already there, then run: citemesh build "arxiv:1706.03762"
+# Every other key, with its default, is in config_reference.toml. The `citemesh config` commands are in docs/guides/configuration.md.
+
+[defaults]
+# Hybrid ranks the seed's references, citers and Semantic Scholar recommendations with local embeddings, the strategy built for finding related work.
+# It needs the embeddings extra, included in citemesh[recommended], and downloads the embedding model on first use.
+# Choose "recommendation" instead for a quick start without those.
+strategy = "hybrid"
+
+# The dashboard is the interactive view, and the JSON keeps the graph data, which a dashboard can load later.
+export = ["dashboard", "json"]

@@ -19,6 +19,7 @@ import pytest
 from filelock import FileLock
 
 from citemesh.cli import cache_ops
+from citemesh.core.paper_ids import BibliographyKey
 from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import EmbeddingCache, constants, lifecycle
 from citemesh.data.embedding_cache.lifecycle import (
@@ -1061,6 +1062,58 @@ def test_nonsearch_readers_enforce_installed_coverage(tmp_path):
             cache.get_cached_embeddings(ids, corpus_size=size)
     assert cache.require_complete_certified_corpus(corpus_size=2)["membership_complete"]
     assert cache.get_cached_paper_ids(corpus_size=2) == {"paper-1", "paper-2"}
+
+
+def test_bibliography_lookup_requires_unique_identity_in_active_view(
+    tmp_path: Path,
+) -> None:
+    """Compare exact Unicode identity over both eligible years and active rows."""
+    settings = _settings(tmp_path)
+    records = _records()
+    records[0].update(title="Café Experiments", authors=["Áda Example"], year=2023)
+    records[1].update(
+        title="Cafe\u0301: EXPERIMENTS",
+        authors=["A\u0301da Example"],
+        year=2022,
+        arxiv_id="2209.10655",
+    )
+    records[2].update(
+        title="Café Experiments", authors=["Other Example", "Áda Example"], year=2023
+    )
+    records[3].update(title="Other Topic", authors=["Áda Example"], year=2022)
+    with import_destination_session(**settings) as session:
+        session.append_stored_embeddings(
+            records, np.eye(4, dtype=np.float32), first_row=0
+        )
+        session.finish(expected_rows=4, source_records_examined=4)
+        cache = session.cache
+
+    revised_year = BibliographyKey("CAFÉ—Experiments!", "Áda Example", 2023)
+    non_arxiv_year = BibliographyKey("Other Topic", "Áda Example", 2023)
+    exact_year = BibliographyKey("Other Topic", "Áda Example", 2022)
+    keys = [revised_year, non_arxiv_year, exact_year]
+    assert set(cache.get_paper_metadata_for_bibliography(keys)) == {exact_year}
+    newest = cache.get_paper_metadata_for_bibliography(keys, corpus_size=2)
+    assert {key: row["paper_id"] for key, row in newest.items()} == {
+        revised_year: "paper-1"
+    }
+
+    # Removing one active member leaves its vectors and metadata on disk.
+    with cache.operation_session(
+        kind="refresh",
+        identity={"refresh": 1},
+        target_source=settings["source"],
+        contract=settings["contract"],
+        namespace_selectors=settings["namespace_selectors"],
+    ) as session:
+        session.record_membership(records[1:])
+        session.finish(expected_rows=3, source_records_examined=4)
+    matches = cache.get_paper_metadata_for_bibliography(keys)
+    assert {key: row["paper_id"] for key, row in matches.items()} == {
+        revised_year: "paper-1",
+        exact_year: "paper-3",
+    }
+    assert cache.get_paper_metadata_for_bibliography(keys, corpus_size=1) == {}
 
 
 @pytest.mark.parametrize(

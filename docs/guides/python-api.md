@@ -51,7 +51,6 @@ from citemesh.visualization import GraphExporter, compute_layout, visualize_grap
 
 builder = HybridGraphBuilder(
     max_papers=25,
-    max_semantic=10,
     device="auto",
     truncate_dim=512,
 )
@@ -77,7 +76,7 @@ visualize_graph(
 - **Credentials.** Set `S2_API_KEY` before the first builder creates the shared API client. Saved `api.s2_api_key` values are applied by the CLI, not by direct builder construction. The [API request policy](cli.md#troubleshooting) also applies to Python calls.
 - **S2 recovery budget.** Import `SemanticScholarClient` from `citemesh.services` and pass `SemanticScholarClient(retry_budget_seconds=...)` to a builder to override its shared recovery-time allowance. It follows the CLI's [API request policy](cli.md#troubleshooting).
 - **Configuration and caches.** Builders take constructor arguments and built-in defaults; they do not load `[defaults]` from `config.toml`. They share the CLI's [cache root and namespaces](caching.md), so Python runs can reuse or extend those caches.
-- **Constructor keywords mirror CLI flags** (`max_semantic=` is `--max-semantic`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants - `0 <= max_semantic <= max_papers - 1`, `top_k >= 1`, `max_papers >= 1` - and raise `ValueError`.
+- **Constructor keywords mirror CLI flags** (`max_citations=` is `--max-citations`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants - `max_papers >= 1`, `top_k >= 1` for the embedding builder, non-negative `max_citations` and `max_references` and a known `semantic_source` for the hybrid builder - and raise `ValueError`. Keywords that no longer exist, such as the former `max_semantic=`, raise `TypeError`.
 - **Failures are exceptions, not empty graphs.** A total candidate-source outage raises `CandidateAcquisitionError`, semantic inference that cannot produce a complete ranking space raises `EmbeddingInferenceError`, and an unavailable explicit device raises `ValueError`.
 
 Ordering and layout are deterministic for the same graph inputs; API responses, corpus updates, and runtime numerics can still change results. Pass `layout_seed` to `compute_layout` or `visualize_graph` to choose the layout seed. The [CLI guide](cli.md#option-reference) describes corresponding controls; constructor names can differ, such as `enable_torch_compile` for `--torch-compile`.

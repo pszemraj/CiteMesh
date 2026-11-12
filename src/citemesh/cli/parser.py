@@ -32,6 +32,7 @@ from citemesh.core import (
 from citemesh.core.choices import (
     DEVICE_CHOICES,
     EXPORT_CHOICES,
+    HYBRID_SEMANTIC_SOURCE_CHOICES,
     MODEL_PROFILE_CHOICES,
     SEARCH_MODE_CHOICES,
     SEMANTIC_SOURCE_CHOICES,
@@ -51,7 +52,6 @@ from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
 )
 from citemesh.strategies.hybrid import (
-    DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
     HYBRID_DEFAULT_MAX_REFERENCES,
@@ -563,8 +563,8 @@ def _add_build_citation_arguments(
         metavar="N",
         default=25,
         help=(
-            "Maximum citing papers to fetch (default: 25; "
-            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_CITATIONS})"
+            "Maximum citing papers to fetch (default: 25; hybrid fetches up to "
+            f"{HYBRID_DEFAULT_MAX_CITATIONS} and ranks them all)"
         ),
     )
 
@@ -575,8 +575,8 @@ def _add_build_citation_arguments(
         metavar="N",
         default=25,
         help=(
-            "Maximum referenced papers to fetch (default: 25; "
-            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_REFERENCES})"
+            "Maximum referenced papers to fetch (default: 25; hybrid fetches up "
+            f"to {HYBRID_DEFAULT_MAX_REFERENCES} and ranks them all)"
         ),
     )
 
@@ -889,11 +889,12 @@ def _add_build_runtime_arguments(
         "--semantic-source",
         metavar="SOURCE",
         dest="semantic_source",
-        choices=list(SEMANTIC_SOURCE_CHOICES),
+        choices=HYBRID_SEMANTIC_SOURCE_CHOICES,
         default="candidates",
         help=(
-            "candidates embeds S2 seed neighbors; arxiv-corpus builds a local "
-            "corpus (default: %(default)s). Corpus flags imply arxiv-corpus."
+            "candidates uses S2 seed neighbors (hybrid: with S2 recommendations); "
+            "arxiv-corpus searches a local corpus; both combines the two "
+            "(hybrid only). Default: %(default)s. Corpus flags imply arxiv-corpus."
         ),
     )
     semantic_group.add_argument(
@@ -903,7 +904,8 @@ def _add_build_runtime_arguments(
         metavar="N",
         default=DEFAULT_CANDIDATE_POOL_SIZE,
         help=(
-            "Maximum S2 candidate pool size fetched in candidates mode "
+            "Embedding strategy only: maximum S2 candidate pool size in "
+            "candidates mode; hybrid always takes whole provider lists "
             "(default: %(default)s)."
         ),
     )
@@ -916,27 +918,6 @@ def _add_build_runtime_arguments(
         help=(
             "auto, cuda, mps, cpu (default: auto). Auto prefers CUDA, "
             "then MPS (Apple Silicon), then CPU."
-        ),
-    )
-
-
-def _add_build_hybrid_arguments(
-    hybrid_group: argparse._ArgumentGroup,
-) -> None:
-    """Add the hybrid expansion budget option.
-
-    :param argparse._ArgumentGroup hybrid_group: "Hybrid expansion" section.
-    :return None: Mutates the group in place.
-    """
-    # Hybrid strategy arguments
-    hybrid_group.add_argument(
-        "--max-semantic",
-        type=_non_negative_int,
-        metavar="N",
-        default=None,
-        help=(
-            "Semantic additions, at most max-papers - 1; 0 disables embeddings. "
-            f"Default: reserve citation depth, then add up to {DEFAULT_MAX_SEMANTIC}."
         ),
     )
 
@@ -1009,7 +990,6 @@ def _add_build_arguments(
         "These options select arxiv-corpus sourcing when --semantic-source is omitted.",
     )
     storage_group = build_parser.add_argument_group("Embedding cache")
-    hybrid_group = build_parser.add_argument_group("Hybrid expansion")
 
     _add_build_graph_arguments(graph_group, export_group)
     _add_build_citation_arguments(citation_group)
@@ -1018,7 +998,6 @@ def _add_build_arguments(
     )
     _add_build_cache_arguments(build_parser, storage_group)
     _add_build_runtime_arguments(build_parser, embedding_group, semantic_group)
-    _add_build_hybrid_arguments(hybrid_group)
     return build_parser
 
 

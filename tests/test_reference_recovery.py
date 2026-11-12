@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock
+from collections.abc import Sequence
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from citemesh.core import Paper
+from citemesh.core.paper_ids import BibliographyKey
 from citemesh.services import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
 )
-from citemesh.services.arxiv import ArxivClient
+from citemesh.services.arxiv import ArxivClient, BibliographyEntry
 from citemesh.services.semantic_scholar.disk_cache import (
     _load_cached_paper,
     _persist_paper,
@@ -20,11 +22,13 @@ from citemesh.services.semantic_scholar.disk_cache import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
-    fetch_candidate_pool,
     fetch_seed_references,
     require_available_candidate_source,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.discovery_pool import fetch_candidate_pool
+from citemesh.strategies.hybrid import HybridGraphBuilder
+from tests._helpers import offline_hybrid_encoder, stub_hybrid_corpus
 
 
 @pytest.fixture
@@ -64,7 +68,7 @@ def paper(identifier: str, **kwargs: object) -> Paper:
     return Paper(paper_id=identifier, title=identifier, year=2024, **kwargs)
 
 
-@pytest.mark.parametrize("limit", [0, 2])
+@pytest.mark.parametrize("limit", [0, 2, 105])
 def test_successful_s2_or_disabled_discovery_never_fetches_html(
     providers: tuple, limit: int
 ) -> None:
@@ -76,11 +80,24 @@ def test_successful_s2_or_disabled_discovery_never_fetches_html(
     """
     client, bibliography, metadata = providers
     client.get_paper_references.return_value = [paper("reference")]
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), limit)
+    title_lookup = MagicMock()
+    selector = MagicMock(side_effect=lambda _seed, refs, cap: refs[:cap])
+    results = fetch_seed_references(
+        client,
+        paper("arxiv:2608.27147"),
+        limit,
+        local_bibliography_lookup=title_lookup,
+        reference_selector=selector,
+    )
+    title_lookup.assert_not_called()
     bibliography.assert_not_called()
     metadata.assert_not_called()
+    selector.assert_not_called()
     if limit:
         assert results[0].papers[0].paper_id == "reference"
+        client.get_paper_references.assert_called_once_with(
+            "arxiv:2608.27147", limit=limit, raise_on_unavailable=True
+        )
     else:
         assert results == ()
         client.get_paper_references.assert_not_called()
@@ -103,16 +120,22 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
             "offline"
         )
         client.get_papers.side_effect = SemanticScholarUnavailableError("offline")
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [
+        BibliographyEntry(("arxiv:1706.03762",)),
+        BibliographyEntry((), BibliographyKey("Title only", "First Author", 2024)),
+    ]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
+    title_lookup = MagicMock(return_value={})
     with caplog.at_level(logging.DEBUG):
         results = fetch_seed_references(
             client,
             paper("seed", arxiv_id="2608.27147"),
             2,
             seed_identifier="arxiv:2608.27147v1",
+            local_bibliography_lookup=title_lookup,
         )
         require_available_candidate_source(results, context="test")
+    assert title_lookup.call_count == int(not failed)
     bibliography.assert_called_once_with("2608.27147v1")
     assert [result.state.value for result in results] == [
         "unavailable" if failed else "empty",
@@ -149,9 +172,9 @@ def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -
     """
     client, bibliography, metadata = providers
     bibliography.return_value = [
-        ("arxiv:1706.03762", "10.1234/test"),
-        ("10.1234/test",),
-        ("arxiv:2303.08774",),
+        BibliographyEntry(("arxiv:1706.03762", "10.1234/test")),
+        BibliographyEntry(("10.1234/test",)),
+        BibliographyEntry(("arxiv:2303.08774",)),
     ]
     local = paper(
         "local-record", arxiv_id="1706.03762", doi="10.1234/test", is_local_corpus=True
@@ -185,7 +208,7 @@ def test_local_metadata_does_not_request_live_s2_enrichment(providers: tuple) ->
     :return None: Checks local metadata remains usable after a rejected request.
     """
     client, bibliography, metadata = providers
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     local = paper("local-record", arxiv_id="1706.03762", is_local_corpus=True)
     client.get_papers.side_effect = SemanticScholarRequestError("rejected")
     results = fetch_seed_references(
@@ -208,7 +231,7 @@ def test_refresh_enriches_local_metadata_from_live_s2(providers: tuple) -> None:
     """
     client, bibliography, metadata = providers
     client.refresh_paper_cache = True
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     local = paper("local-record", arxiv_id="1706.03762", is_local_corpus=True)
     fresh = paper("s2-record", arxiv_id="1706.03762", citation_count=99)
     client.get_papers.return_value = {"arxiv:1706.03762": fresh}
@@ -228,6 +251,161 @@ def test_refresh_enriches_local_metadata_from_live_s2(providers: tuple) -> None:
     metadata.assert_not_called()
 
 
+def test_title_recovery_appends_local_matches_before_reference_cap(
+    providers: tuple,
+) -> None:
+    """Explicit IDs resolve first, with one cap for both forms of evidence."""
+    client, bibliography, metadata = providers
+    client.refresh_paper_cache = True
+    explicit_id = "arxiv:1706.03762"
+    seed = paper("arxiv:2608.27147", is_local_corpus=True)
+    explicit = paper(explicit_id, is_local_corpus=True)
+    first = paper("arxiv:2303.08774", is_local_corpus=True)
+    second = paper("arxiv:2401.12345", is_local_corpus=True)
+    first_key = BibliographyKey("First recovered work", "One Author", 2023)
+    second_key = BibliographyKey("Second recovered work", "Another Author", 2024)
+    duplicate_key = BibliographyKey("Explicit work", "Some Author", 2017)
+    seed_key = BibliographyKey("Seed work", "Seed Author", 2026)
+    bibliography.return_value = [
+        BibliographyEntry((), first_key),
+        BibliographyEntry((explicit_id,), duplicate_key),
+        BibliographyEntry((), duplicate_key),
+        BibliographyEntry((), first_key),
+        BibliographyEntry((), seed_key),
+        BibliographyEntry((), second_key),
+    ]
+    client.get_papers.return_value = {
+        explicit_id: paper("s2-id", arxiv_id="1706.03762", citation_count=99)
+    }
+
+    def lookup(keys: Sequence[BibliographyKey]) -> dict[BibliographyKey, Paper]:
+        assert keys == [first_key, duplicate_key, seed_key, second_key]
+        client.get_papers.assert_called_once_with(
+            [explicit_id], raise_on_unavailable=True
+        )
+        return {
+            second_key: second,
+            first_key: first,
+            duplicate_key: explicit,
+            seed_key: seed,
+        }
+
+    selector = MagicMock(return_value=[second])
+    results = fetch_seed_references(
+        client,
+        seed,
+        1,
+        local_lookup=MagicMock(return_value={explicit_id: explicit}),
+        local_bibliography_lookup=lookup,
+        reference_selector=selector,
+    )
+
+    selector.assert_called_once_with(seed, [explicit, first, second], 1)
+    assert explicit.citation_count == 99
+    assert results[-1].papers == (second,)
+    client.get_papers.assert_called_once_with([explicit_id], raise_on_unavailable=True)
+    client.get_cached_papers.assert_not_called()
+    metadata.assert_not_called()
+
+
+def test_title_lookup_does_not_replace_unresolved_explicit_id(providers: tuple) -> None:
+    """The title fallback cannot override an entry's explicit identifier."""
+    client, bibliography, metadata = providers
+    identifier = "arxiv:2401.00001"
+    key = BibliographyKey("A Foundational Paper", "First Author", 2023)
+    bibliography.return_value = [BibliographyEntry((identifier,), key)]
+    title_lookup = MagicMock(return_value={key: paper("arxiv:2210.00001")})
+
+    results = fetch_seed_references(
+        client,
+        paper("arxiv:2608.27147"),
+        1,
+        local_bibliography_lookup=title_lookup,
+    )
+
+    client.get_papers.assert_called_once_with([identifier], raise_on_unavailable=True)
+    metadata.assert_called_once_with([identifier])
+    title_lookup.assert_not_called()
+    assert results[-1].papers == ()
+
+
+@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
+def test_hybrid_title_recovery_uses_selected_corpus_view(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch, semantic_source: str
+) -> None:
+    """Hybrid can admit a reference with no explicit identifier in the bibliography."""
+    client, bibliography, metadata = providers
+    seed = paper("arxiv:2608.27147", is_local_corpus=True)
+    key = BibliographyKey("A Foundational Paper", "First Author", 2023)
+    bibliography.return_value = [BibliographyEntry((), key)]
+    client.get_recommended_papers.return_value = []
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=0,
+        fetch_references=False,
+        semantic_source=semantic_source,
+        corpus_size=20,
+        client=client,
+    )
+    engine = builder.embedding_builder
+    stub_hybrid_corpus(builder, seed=seed)
+    offline_hybrid_encoder(monkeypatch, builder)
+    del engine.cached_bibliography_metadata
+    engine._cache_selection = MagicMock()
+    engine.embedding_cache = MagicMock()
+    title_lookup = engine.embedding_cache.get_paper_metadata_for_bibliography
+    reference_id = "arxiv:2210.00001"
+    title_lookup.return_value = {
+        key: {
+            "paper_id": reference_id,
+            "title": key.title,
+            "year": 2022,
+            "authors": [key.first_author],
+            "arxiv_id": "2210.00001",
+        }
+    }
+    selected = builder.collect_papers(seed.paper_id)
+
+    title_lookup.assert_called_once_with([key], corpus_size=20)
+    assert set(selected) == {seed.paper_id, reference_id}
+    assert selected[reference_id].is_local_corpus
+    assert builder.seed_relations[reference_id] == "referenced_by_seed"
+    assert builder.paper_sources[reference_id] == "citation"
+    # Recovery resolved the entry locally; the selected row is enriched afterwards.
+    engine._enrich_corpus_papers.assert_called_once_with(
+        {reference_id: selected[reference_id]}
+    )
+    client.get_papers.assert_not_called()
+    metadata.assert_not_called()
+
+
+def test_hydration_uses_provider_aliases_for_recovered_corpus_references(
+    providers: tuple,
+) -> None:
+    """Use arXiv and DOI lookups while keeping graph and cache IDs local."""
+    client, _, _ = providers
+    seed = paper("content:seed", is_local_corpus=True)
+    opaque = paper("content:opaque", is_local_corpus=True)
+    local_arxiv = paper("content:arxiv", is_local_corpus=True, arxiv_id="2210.00001")
+    local_doi = paper("content:doi", is_local_corpus=True, doi="10.1000/test")
+    papers = {item.paper_id: item for item in (seed, opaque, local_arxiv, local_doi)}
+    client.get_reference_ids.side_effect = [["arxiv-reference"], ["doi-reference"]]
+    builder = CitationGraphBuilder(client=client)
+
+    builder.reference_hydrator.hydrate(papers, seed)
+
+    assert client.get_reference_ids.call_args_list == [
+        call("arxiv:2210.00001", force_refresh=False),
+        call("10.1000/test", force_refresh=False),
+    ]
+    assert builder.reference_hydrator.reference_cache == {
+        local_arxiv.paper_id: ["arxiv-reference"],
+        local_doi.paper_id: ["doi-reference"],
+    }
+    assert not opaque.references
+
+
 def test_local_alias_ambiguity_does_not_cross_bibliography_entries(
     providers: tuple,
 ) -> None:
@@ -238,8 +416,8 @@ def test_local_alias_ambiguity_does_not_cross_bibliography_entries(
     """
     client, bibliography, metadata = providers
     bibliography.return_value = [
-        ("arxiv:1706.03762",),
-        ("10.1000/shared",),
+        BibliographyEntry(("arxiv:1706.03762",)),
+        BibliographyEntry(("10.1000/shared",)),
     ]
     local = paper(
         "local-a",
@@ -277,11 +455,11 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
     """
     client, bibliography, metadata = providers
     bibliography.return_value = [
-        ("10.1234/missing",),
-        ("arxiv:1706.03762",),
-        ("arxiv:1706.03762",),
-        ("arxiv:2303.08774",),
-        ("arxiv:2401.12345",),
+        BibliographyEntry(("10.1234/missing",)),
+        BibliographyEntry(("arxiv:1706.03762",)),
+        BibliographyEntry(("arxiv:1706.03762",)),
+        BibliographyEntry(("arxiv:2303.08774",)),
+        BibliographyEntry(("arxiv:2401.12345",)),
     ]
     records = {
         "arxiv:1706.03762": Paper(
@@ -324,15 +502,118 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
     recovery_logs = [
         record
         for record in caplog.records
-        if record.getMessage().startswith("Recovered 4 reference identifiers")
+        if record.getMessage().startswith("Ranked 3 recovered references")
     ]
     assert len(recovery_logs) == 1
     assert recovery_logs[0].levelno == logging.INFO
     assert recovery_logs[0].getMessage() == (
-        "Recovered 4 reference identifiers from the arXiv bibliography; "
-        "ranked 3 resolved references and keeping 2 (reference limit: 2)."
+        "Ranked 3 recovered references from the arXiv bibliography, "
+        "keeping 2 (reference limit: 2)."
     )
     metadata.assert_called_once()
+
+
+def test_hybrid_recommended_reference_keeps_reference_evidence(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recommendation of a recovered reference is one member with both tags."""
+    client, bibliography, metadata = providers
+    seed = paper("arxiv:2608.27147")
+    admitted = paper("arxiv:1706.03762")
+    omitted = paper("arxiv:2303.08774")
+    rediscovered = paper("recommendation", arxiv_id="2303.08774")
+    unrelated = paper("other-recommendation")
+    client.get_paper.return_value = seed
+    bibliography.return_value = [
+        BibliographyEntry((admitted.paper_id,)),
+        BibliographyEntry((omitted.paper_id,)),
+        BibliographyEntry((), BibliographyKey("Title only", "First Author", 2024)),
+    ]
+    metadata.return_value = {ref.paper_id: ref for ref in (admitted, omitted)}
+    client.get_recommended_papers.return_value = [rediscovered, unrelated]
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_citations=0,
+        fetch_references=False,
+        client=client,
+    )
+    title_lookup = MagicMock()
+    monkeypatch.setattr(
+        builder.embedding_builder, "cached_bibliography_metadata", title_lookup
+    )
+    offline_hybrid_encoder(monkeypatch, builder)
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    pool = builder.discovery_pool
+    assert pool is not None
+    assert set(pool.papers) == {
+        admitted.paper_id,
+        omitted.paper_id,
+        unrelated.paper_id,
+    }
+    assert len(papers) == 3
+    assert pool.sources[omitted.paper_id] == {"citation", "semantic"}
+    assert pool.provider_aliases == {rediscovered.paper_id: omitted.paper_id}
+    assert pool.recommendation_ranks == {omitted.paper_id: 1, unrelated.paper_id: 2}
+    assert builder.seed_relations[omitted.paper_id] == "referenced_by_seed"
+    title_lookup.assert_not_called()
+
+
+def test_hybrid_pools_every_provider_reference_once(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The full provider list joins the pool, one member per work."""
+    client, bibliography, _ = providers
+    seed = paper("arxiv:2608.27147", references=["shared"])
+    seed_alias = paper("seed-alias", arxiv_id="2608.27147")
+    skipped = paper(
+        "early", doi="10.1000/early", citation_count=5, references=["shared"]
+    )
+    duplicate = paper("duplicate", doi=skipped.doi)
+    admitted = paper("later", citation_count=10, references=["different"])
+    rediscovered = paper("recommendation", doi=skipped.doi)
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [
+        seed_alias,
+        skipped,
+        duplicate,
+        admitted,
+    ]
+    client.get_recommended_papers.return_value = [rediscovered]
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        semantic_source="both",
+        fetch_references=False,
+        client=client,
+    )
+    stub_hybrid_corpus(builder)
+    offline_hybrid_encoder(monkeypatch, builder)
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert set(papers) == {seed.paper_id, skipped.paper_id, admitted.paper_id}
+    assert papers[admitted.paper_id].references == ["different"]
+    assert builder.paper_sources == {
+        seed.paper_id: "citation",
+        skipped.paper_id: "both",
+        admitted.paper_id: "citation",
+    }
+    assert builder.seed_relations[skipped.paper_id] == "referenced_by_seed"
+    assert builder.discovery_pool is not None
+    assert set(builder.discovery_pool.papers) == {skipped.paper_id, admitted.paper_id}
+    assert builder.discovery_pool.recommendation_ranks == {skipped.paper_id: 1}
+    assert builder.candidate_source_status == {
+        "references": "complete",
+        "citations": "empty",
+        "recommendations": "complete",
+        "arxiv_corpus": "empty",
+    }
+    client.get_paper_references.assert_called_once_with(
+        seed.paper_id, limit=1000, raise_on_unavailable=True
+    )
+    client.get_reference_ids.assert_not_called()
+    bibliography.assert_not_called()
 
 
 @pytest.mark.parametrize("html", [None, []])
@@ -364,7 +645,7 @@ def test_metadata_outage_marks_recovery_unavailable(
     :return None: Checks unavailable recovery status and one aggregate warning.
     """
     client, bibliography, metadata = providers
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     client.get_papers.side_effect = SemanticScholarUnavailableError("offline")
     metadata.return_value = None
 
@@ -394,7 +675,10 @@ def test_citation_reuses_recovery_without_persisting_partial_bibliography(
     cache_path = _reference_cache_path(seed.paper_id)
     cache_path.write_text('{"version":1,"paper_id":"arxiv:2608.27147","references":[]}')
     original = cache_path.read_bytes()
-    bibliography.return_value = [("arxiv:1706.03762",), ("arxiv:2303.08774",)]
+    bibliography.return_value = [
+        BibliographyEntry(("arxiv:1706.03762",)),
+        BibliographyEntry(("arxiv:2303.08774",)),
+    ]
     metadata.side_effect = lambda ids: {value: paper(value) for value in ids}
     builder = CitationGraphBuilder(
         max_papers=2, max_references=5, max_citations=0, client=client
@@ -469,7 +753,7 @@ def test_citation_hydrates_cached_seed_after_recovered_arxiv_references(
     client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
         ["cached-reference"] if paper_id == seed.paper_id else []
     )
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
     builder = CitationGraphBuilder(
         max_papers=2, max_references=1, max_citations=0, client=client
@@ -496,8 +780,8 @@ def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> N
     """
     client, bibliography, metadata = providers
     bibliography.return_value = [
-        ("arxiv:1706.03762",),
-        ("arxiv:2303.08774",),
+        BibliographyEntry(("arxiv:1706.03762",)),
+        BibliographyEntry(("arxiv:2303.08774",)),
     ]
     metadata.side_effect = lambda ids: {value: paper(value) for value in ids}
     selector = MagicMock(
@@ -542,7 +826,7 @@ def test_refresh_paper_cache_bypasses_persisted_s2_metadata(providers: tuple) ->
     stale = paper("s2-record", arxiv_id="1706.03762", citation_count=1)
     fresh = paper("s2-record", arxiv_id="1706.03762", citation_count=99)
     _persist_paper(stale, "arxiv:1706.03762")
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     client.get_papers.return_value = {"arxiv:1706.03762": fresh}
     results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
     client.get_papers.assert_called_once()
@@ -557,7 +841,9 @@ def test_small_admission_limit_batches_unresolved_metadata(providers: tuple) -> 
     """
     client, bibliography, metadata = providers
     identifiers = [f"arxiv:2401.{index:05d}" for index in range(20)]
-    bibliography.return_value = [(identifier,) for identifier in identifiers]
+    bibliography.return_value = [
+        BibliographyEntry((identifier,)) for identifier in identifiers
+    ]
     metadata.return_value = {identifiers[-1]: paper(identifiers[-1])}
     results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
     client.get_papers.assert_called_once()
@@ -590,11 +876,11 @@ def test_s2_lookup_alias_preserves_metadata_without_external_ids(
     :return None: Checks that usable S2 metadata and citation counts are retained.
     """
     client, bibliography, metadata = providers
-    bibliography.return_value = [("arxiv:1706.03762",)]
+    bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     client.get_papers.return_value = {
         "arxiv:1706.03762": paper("s2-id", citation_count=77)
     }
     results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
     assert results[-1].papers[0].paper_id == "s2-id"
     assert results[-1].papers[0].citation_count == 77
-    assert all(not call.args[0] for call in metadata.call_args_list)
+    metadata.assert_not_called()

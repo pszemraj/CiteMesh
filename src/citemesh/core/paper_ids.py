@@ -3,7 +3,30 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
+
+
+class BibliographyKey(NamedTuple):
+    """Title, full first author, and cited year of an identifier-free reference."""
+
+    title: str
+    first_author: str
+    year: int
+
+
+_BIBLIOGRAPHY_TOKEN = re.compile(r"[^\W_]+")
+
+
+def bibliography_text_key(text: str, first_tokens: set[str] | None = None) -> str:
+    """Normalize bibliographic words, optionally rejecting unrelated first words."""
+    text = unicodedata.normalize("NFKC", text).casefold()
+    if first_tokens is not None:
+        first = _BIBLIOGRAPHY_TOKEN.search(text)
+        if first is None or first.group() not in first_tokens:
+            return ""
+    return " ".join(_BIBLIOGRAPHY_TOKEN.findall(text))
 
 
 def strip_arxiv_version(identifier: str) -> str:
@@ -24,6 +47,7 @@ _ARXIV_IDENTIFIER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LEGACY_POSITIONAL_CORPUS_ID = re.compile(r"arxiv_\d+")
+_ARXIV_DOI_PREFIX = "10.48550/arxiv."
 
 
 def is_local_corpus_paper_id(paper_id: str) -> bool:
@@ -76,6 +100,22 @@ def recognize_arxiv_identifier(
     if not explicitly_prefixed and not _ARXIV_IDENTIFIER_PATTERN.fullmatch(candidate):
         return None
     return f"arxiv:{strip_arxiv_version(candidate)}"
+
+
+def arxiv_identifier_from_doi(doi: str) -> str | None:
+    """Return a versionless arXiv ID for an arXiv-issued DOI.
+
+    :param str doi: DOI in any case, bare, ``doi:``-prefixed, or a ``doi.org`` URL.
+    :return str | None: Canonical arXiv ID, or ``None`` for other identifiers.
+    """
+    normalized = (canonicalize_or_none(doi) or "").lower()
+    if not normalized.startswith(_ARXIV_DOI_PREFIX):
+        return None
+    suffix = normalized.removeprefix(_ARXIV_DOI_PREFIX)
+    match = _ARXIV_IDENTIFIER_PATTERN.fullmatch(suffix)
+    if match is None or not 1 <= int(match["new_month"] or match["old_month"]) <= 12:
+        return None
+    return f"arxiv:{strip_arxiv_version(suffix)}"
 
 
 # Field scales for the packed integer form of a chronology key. A month never

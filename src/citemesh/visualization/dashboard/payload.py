@@ -22,7 +22,11 @@ from citemesh.visualization.export.geometry import (
     _theme_color_scheme,
     theme_hover_label,
 )
-from citemesh.visualization.export.nodes import _sorted_edges, _strategy
+from citemesh.visualization.export.nodes import (
+    _discovery_ranker,
+    _sorted_edges,
+    _strategy,
+)
 
 from ..export._host import _ExporterHost
 from ..themes import Theme
@@ -187,7 +191,9 @@ class DashboardPayloadMixin:
             },
             "year_range": year_range,
         }
-        raw_source_status = self.metadata.get("candidate_source_status")
+        raw_source_status = self.metadata.get(
+            "candidate_source_status", self.graph.graph.get("candidate_source_status")
+        )
         if isinstance(raw_source_status, dict):
             meta["candidate_source_status"] = {
                 str(source): str(status)
@@ -195,6 +201,9 @@ class DashboardPayloadMixin:
                     raw_source_status.items(), key=lambda item: str(item[0])
                 )
             }
+        ranker = _discovery_ranker(self.graph)
+        if ranker is not None:
+            meta["discovery_ranker"] = ranker
         if include_plotly_geometry:
             positions = self._get_layout()
             meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]

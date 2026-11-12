@@ -75,8 +75,8 @@ def parse_unit_interval_float(value: object) -> float:
     :return float: Parsed float between zero and one, inclusive.
     :raises ValueValidationError: With reason ``not_number`` if the value is not
         numeric, ``not_finite`` for NaN/infinity, or ``out_of_range`` if the
-        value falls outside ``[0.0, 1.0]``.
-    :raises OverflowError: If numeric conversion exceeds the float range.
+        value falls outside ``[0.0, 1.0]``, including an integer too large to
+        convert to a float.
     """
     if isinstance(value, bool):
         raise ValueValidationError("not_number", "expected a float, got a boolean")
@@ -84,6 +84,10 @@ def parse_unit_interval_float(value: object) -> float:
         parsed = parse_float(value)
     except (TypeError, ValueError) as exc:
         raise ValueValidationError("not_number", "expected a float") from exc
+    except OverflowError as exc:
+        raise ValueValidationError(
+            "out_of_range", "expected a float between 0.0 and 1.0"
+        ) from exc
     if not math.isfinite(parsed):
         raise ValueValidationError("not_finite", "expected a finite float")
     if parsed < 0.0 or parsed > 1.0:

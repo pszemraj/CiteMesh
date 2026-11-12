@@ -31,9 +31,9 @@ from filelock import FileLock, Timeout
 from citemesh.core.choices import (
     DEVICE_CHOICES,
     EXPORT_CHOICES,
+    HYBRID_SEMANTIC_SOURCE_CHOICES,
     MODEL_PROFILE_CHOICES,
     SEARCH_MODE_CHOICES,
-    SEMANTIC_SOURCE_CHOICES,
     STORAGE_PRECISION_CHOICES,
     STRATEGY_CHOICES,
     THEME_CHOICES,
@@ -57,6 +57,11 @@ USER_CONFIG_FILENAME = "config.toml"
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULTS_TABLE = "defaults"
 API_TABLE = "api"
+
+# Reading config.toml fails with these. ``ValueError`` covers decoding errors
+# and ``TOMLDecodeError``, and also the plain ``ValueError`` that tomllib lets
+# through for an integer literal over Python's 4300-digit conversion limit.
+_TOML_READ_ERRORS = (OSError, ValueError)
 
 _TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
 _FALSEY_STRINGS = frozenset({"false", "0", "no", "off"})
@@ -200,14 +205,13 @@ CONFIG_DEFAULT_KEY_SPECS: dict[str, ConfigCaster] = {
     "model_profile": _choice_caster(MODEL_PROFILE_CHOICES),
     "model_revision": _cast_str,
     "device": _choice_caster(DEVICE_CHOICES),
-    "semantic_source": _choice_caster(SEMANTIC_SOURCE_CHOICES),
+    "semantic_source": _choice_caster(HYBRID_SEMANTIC_SOURCE_CHOICES),
     "candidate_pool_size": _int_caster(1),
     "encode_batch_size": _int_caster(1),
     "storage_precision": _choice_caster(STORAGE_PRECISION_CHOICES),
     "binary_prefilter": _cast_bool,
     "calibration_sample_size": _int_caster(1),
     "max_papers": _int_caster(1),
-    "max_semantic": _int_caster(0),
     "max_citations": _int_caster(0),
     "max_references": _int_caster(0),
     "top_k": _int_caster(1),
@@ -336,7 +340,7 @@ def load_user_config(path: Path | None = None) -> UserConfig:
             document = tomllib.load(handle)
     except FileNotFoundError:
         return UserConfig(path=config_path)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except _TOML_READ_ERRORS as exc:
         logger.warning("Ignoring unreadable config file %s: %s", config_path, exc)
         return UserConfig(path=config_path)
 
@@ -370,7 +374,7 @@ def _read_raw_document(config_path: Path) -> dict[str, TOMLValue]:
             return tomllib.load(handle)
     except FileNotFoundError:
         return {}
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except _TOML_READ_ERRORS as exc:
         raise ConfigFileError(
             f"Cannot rewrite config file {config_path}: {exc}. "
             "Fix or remove the file, then retry."
@@ -490,16 +494,29 @@ def set_config_value(
 def unset_config_value(dotted_key: str, *, path: Path | None = None) -> bool:
     """Remove one config value if present.
 
+    A key this version does not know, such as one a removed option left in the
+    file, is still removed when the file holds it.
+
     :param str dotted_key: Dotted key such as ``defaults.semantic_source``.
     :param Optional[Path] path: Optional explicit config file path override.
     :return bool: ``True`` when a value was removed, ``False`` if unset.
+    :raises ConfigKeyError: If the key is unknown and absent from the file.
     """
-    table, key, _spec = parse_config_key(dotted_key)
+    unknown_key: ConfigKeyError | None = None
+    try:
+        table, key, _spec = parse_config_key(dotted_key)
+    except ConfigKeyError as exc:
+        table, _separator, key = str(dotted_key).strip().partition(".")
+        unknown_key = exc
     config_path = path if path is not None else user_config_path()
+    if unknown_key is not None and not config_path.is_file():
+        raise unknown_key
     with config_lock(config_path):
         document = _read_raw_document(config_path)
         section = document.get(table)
         if not isinstance(section, dict) or key not in section:
+            if unknown_key is not None:
+                raise unknown_key
             return False
         del section[key]
         if not section:

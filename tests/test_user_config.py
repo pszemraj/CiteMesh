@@ -20,13 +20,25 @@ from citemesh.cli import cache_ops as cache_ops_module
 from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import parser as parser_module
 from citemesh.core import API_CONFIG
+from citemesh.core.choices import (
+    DEVICE_CHOICES,
+    EXPORT_CHOICES,
+    HYBRID_SEMANTIC_SOURCE_CHOICES,
+    MODEL_PROFILE_CHOICES,
+    SEARCH_MODE_CHOICES,
+    STORAGE_PRECISION_CHOICES,
+    STRATEGY_CHOICES,
+    THEME_CHOICES,
+)
 from citemesh.core.config import EmbeddingStorageConfig
+from citemesh.core.validation import ValueValidationError, parse_unit_interval_float
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
 from citemesh.data.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
     ConfigFileError,
     ConfigKeyError,
+    ConfigValue,
     ConfigValueError,
     UserConfig,
     format_config_value,
@@ -146,6 +158,26 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
     assert "streaming" not in reloaded.defaults
     assert reloaded.defaults["semantic_source"] == "arxiv-corpus"
     assert reloaded.defaults["dataset_source"] == "research/arxiv-snapshot"
+
+
+def test_unset_removes_an_unknown_key_present_in_the_file(tmp_path: Path) -> None:
+    """A key left by a removed option can be unset; an absent unknown key cannot.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate removal and the unknown-key error.
+    """
+    config_path = tmp_path / "config.toml"
+    with pytest.raises(ConfigKeyError, match="Unknown config key"):
+        unset_config_value("defaults.max_semantic", path=config_path)
+    assert not config_path.exists()
+
+    config_path.write_text(
+        '[defaults]\nmax_semantic = 30\ntheme = "dark"\n', encoding="utf-8"
+    )
+    assert unset_config_value("defaults.max_semantic", path=config_path) is True
+    assert config_path.read_text(encoding="utf-8") == '[defaults]\ntheme = "dark"\n'
+    with pytest.raises(ConfigKeyError, match="Unknown config key"):
+        unset_config_value("defaults.max_semantic", path=config_path)
 
 
 def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
@@ -298,7 +330,16 @@ def test_load_skips_unknown_and_invalid_entries(
     assert "unknown_table" in messages
 
 
-@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+# Files tomllib cannot read. The last raises a plain ValueError (Python's
+# integer-string digit limit) instead of TOMLDecodeError.
+_CORRUPT_CONFIG_PAYLOADS = [
+    pytest.param(b"not [valid toml", id="syntax"),
+    pytest.param(b"\xff", id="not-utf8"),
+    pytest.param(b"[defaults]\nmax_papers = " + b"1" * 5000, id="5000-digit-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
 def test_load_corrupt_file_warns_and_returns_empty(
     payload: bytes, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -319,7 +360,7 @@ def test_load_corrupt_file_warns_and_returns_empty(
     )
 
 
-@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+@pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
 def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> None:
     """Mutation should reject corrupt config files without overwriting them.
 
@@ -333,6 +374,104 @@ def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> Non
         set_config_value("defaults.theme", "dark", path=config_path)
     # Corrupt content must remain untouched for manual repair.
     assert config_path.read_bytes() == payload
+
+
+_HUGE_TOML_INT = "1" + "0" * 400
+
+# Valid TOML values of every kind a hand-edited config can hold.
+_ODD_TOML_LITERALS = [
+    pytest.param(_HUGE_TOML_INT, id="huge-int"),
+    pytest.param(f"-{_HUGE_TOML_INT}", id="huge-negative-int"),
+    pytest.param("3.5", id="float"),
+    pytest.param("inf", id="inf"),
+    pytest.param("-inf", id="negative-inf"),
+    pytest.param("nan", id="nan"),
+    pytest.param("true", id="bool"),
+    pytest.param("[]", id="empty-array"),
+    pytest.param("[1, 2]", id="array"),
+    pytest.param("[[1], ['a']]", id="nested-array"),
+    pytest.param("[{ a = 1 }]", id="array-of-tables"),
+    pytest.param("{ a = 1 }", id="inline-table"),
+    pytest.param("1979-05-27T07:32:00Z", id="datetime"),
+    pytest.param("1979-05-27", id="date"),
+]
+
+
+@pytest.mark.parametrize("literal", _ODD_TOML_LITERALS)
+def test_load_accepts_or_warns_on_odd_values_for_every_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, literal: str
+) -> None:
+    """No TOML value under ``[defaults]`` may make loading raise.
+
+    Each key gets the value directly and inside a nested table, and either
+    accepts it or drops it with a warning naming the key.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :param str literal: TOML literal written for every key.
+    :return None: Assertions validate that loading returns and warns.
+    """
+    config_path = tmp_path / "config.toml"
+    for key in CONFIG_DEFAULT_KEY_SPECS:
+        for document in (
+            f"[defaults]\n{key} = {literal}\n",
+            f"[defaults.{key}]\nvalue = {literal}\n",
+        ):
+            config_path.write_text(document, encoding="utf-8")
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
+                config = load_user_config(config_path)
+            if key not in config.defaults:
+                assert f"Ignoring invalid config value for 'defaults.{key}'" in (
+                    caplog.text
+                ), document
+
+
+_HUGE_INT_PARAMS = [
+    pytest.param(10**400, id="huge-int"),
+    pytest.param(-(10**400), id="huge-negative-int"),
+]
+
+
+@pytest.mark.parametrize("literal", _ODD_TOML_LITERALS[:2])
+def test_huge_toml_threshold_is_ignored_with_a_warning(
+    caplog: pytest.LogCaptureFixture, literal: str
+) -> None:
+    """An integer beyond float range is an invalid threshold, not a crash.
+
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :param str literal: TOML integer too large to convert to a float.
+    :return None: Assertions validate the warning, other keys and ``config list``.
+    """
+    config_path = user_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f'[defaults]\ntheme = "light"\nmin_semantic_similarity = {literal}\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
+        config = load_user_config()
+
+    assert config.defaults == {"theme": "light"}
+    assert (
+        "Ignoring invalid config value for 'defaults.min_semantic_similarity'"
+        in caplog.text
+    )
+    assert "expected a finite float between 0.0 and 1.0" in caplog.text
+    assert _run_cli(["config", "list"]).returncode == 0
+
+
+@pytest.mark.parametrize("value", _HUGE_INT_PARAMS)
+def test_unit_interval_parser_rejects_ints_beyond_float_range(value: int) -> None:
+    """The shared CLI/config float parser reports overflow as out of range.
+
+    :param int value: Integer too large to convert to a float.
+    :return None: Assertions validate the validation reason.
+    """
+    with pytest.raises(ValueValidationError) as error:
+        parse_unit_interval_float(value)
+    assert error.value.reason == "out_of_range"
 
 
 def test_config_write_wraps_parent_directory_error(
@@ -599,7 +738,9 @@ def test_configured_dataset_source_is_ignored_in_candidate_mode(
     )
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1", True])
+@pytest.mark.parametrize(
+    "value", ["nan", "inf", "-0.1", "1.1", True, *_HUGE_INT_PARAMS]
+)
 def test_semantic_threshold_config_rejects_invalid_values(value: object) -> None:
     """Keep persisted thresholds within the same range as CLI arguments.
 
@@ -925,33 +1066,6 @@ def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:
     )
 
 
-def test_config_device_is_inert_when_hybrid_semantic_branch_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disabled hybrid semantic work should not resolve config-only devices.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
-    :return None: Assertions verify the unavailable device is never inspected.
-    """
-    args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "hybrid", "--max-semantic", "0"]
-    )
-    config = UserConfig(path=Path("config.toml"), defaults={"device": "cuda"})
-    applied = build_options_module._apply_user_config_defaults(args, provided, config)
-    resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
-    monkeypatch.setattr(build_contract_module, "resolve_embedding_device", resolver)
-
-    build_contract_module._validate_build_cli_contract(
-        args,
-        build_parser,
-        provided,
-        config_defaults=applied,
-        config_path=config.path,
-    )
-
-    resolver.assert_not_called()
-
-
 def test_config_device_validation_names_the_config_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1060,45 +1174,32 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
         assert build_parser.get_default(dest) == expected
 
 
-@pytest.mark.parametrize(
-    ("max_semantic", "flags", "expected"),
-    [
-        (100, [], "--max-semantic must be between"),
-        (0, ["--torch-compile"], "disabled by defaults.max_semantic=0"),
-        (0, ["--no-torch-compile"], "--no-torch-compile"),
-    ],
-)
-def test_config_max_semantic_validation_names_the_config_source(
-    max_semantic: int, flags: list[str], expected: str
+def test_legacy_max_semantic_config_key_is_ignored(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Hybrid budget failures should identify config-sourced values.
+    """A config written before hybrid ranking replaced the semantic cap still loads.
 
-    :param int max_semantic: Configured semantic budget.
-    :param list[str] flags: Explicit embedding options.
-    :param str expected: Required diagnostic text.
-    :return None: Assertions verify actionable config provenance.
+    :param Path tmp_path: Isolated config directory.
+    :param pytest.LogCaptureFixture caplog: Captured load warnings.
+    :return None: The removed key is dropped with a warning; other keys apply.
     """
-    args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "hybrid", *flags]
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[defaults]\nstrategy = 'hybrid'\nmax_semantic = 5\nmax_papers = 25\n",
+        encoding="utf-8",
     )
-    config = UserConfig(
-        path=Path("cfg-home") / "config.toml", defaults={"max_semantic": max_semantic}
-    )
+
+    with caplog.at_level(logging.WARNING):
+        config = load_user_config(config_path)
+
+    assert config.defaults == {"strategy": "hybrid", "max_papers": 25}
+    assert "Ignoring unknown config key 'defaults.max_semantic'" in caplog.text
+    args, provided, build_parser = _parsed_build_args(["paper-id"])
     applied = build_options_module._apply_user_config_defaults(args, provided, config)
-
-    with pytest.raises(ValueError) as error:
-        build_contract_module._validate_build_cli_contract(
-            args,
-            build_contract_module._ValueErrorParserErrorSink(),
-            provided,
-            config_defaults=applied,
-            config_path=config.path,
-        )
-
-    message = str(error.value)
-    assert expected in message
-    assert "defaults.max_semantic" in message
-    assert str(config.path) in message
+    build_contract_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied
+    )
+    assert (args.strategy, args.max_papers) == ("hybrid", 25)
 
 
 def test_candidate_mode_announces_ignored_corpus_config_defaults(
@@ -1136,12 +1237,12 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
 
     assert "Loaded config defaults" in str(debug.call_args_list)
     info.assert_not_called()
-    messages = str(debug.call_args_list)
-    assert "Ignoring corpus-only config default(s)" in messages
-    assert "defaults.corpus_size" in messages
-    assert "defaults.dataset_source" in messages
-    assert "defaults.streaming" in messages
-    assert "defaults.semantic_source='arxiv-corpus'" in messages
+    messages = [call.args[0] % call.args[1:] for call in debug.call_args_list]
+    assert (
+        "Ignoring corpus-only config default(s) defaults.corpus_size, "
+        f"defaults.dataset_source, defaults.streaming from {config.path} "
+        "because the effective semantic source is candidates."
+    ) in messages
     payload = graph_config_module._build_graph_config_payload(
         args,
         "seed",
@@ -1155,6 +1256,299 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     assert embedding["candidate_pool_size"] == args.candidate_pool_size
     assert not set(embedding) & build_options_module._CORPUS_ONLY_OPTION_DESTS
     assert "calibration_sample_size" not in embedding
+
+
+# ---------------------------------------------------------------------------
+# Invariant: no single accepted config default breaks a plain build
+# ---------------------------------------------------------------------------
+
+_CFG_PATH = Path("cfg-home") / "config.toml"
+
+# Every choice of a choice-typed key; the lower bound and a typical value of an
+# integer; both booleans; the bounds of the similarity threshold; one string,
+# plus a sliced split because streaming rejects those.
+_REPRESENTATIVE_CONFIG_VALUES: dict[str, tuple[object, ...]] = {
+    "strategy": STRATEGY_CHOICES,
+    "export": tuple([choice] for choice in EXPORT_CHOICES),
+    "theme": THEME_CHOICES,
+    "model": ("org/generic-embedding-model",),
+    "model_profile": MODEL_PROFILE_CHOICES,
+    "model_revision": ("main",),
+    "device": DEVICE_CHOICES,
+    "semantic_source": HYBRID_SEMANTIC_SOURCE_CHOICES,
+    "candidate_pool_size": (1, 400),
+    "encode_batch_size": (1, 64),
+    "storage_precision": STORAGE_PRECISION_CHOICES,
+    "binary_prefilter": (True, False),
+    "calibration_sample_size": (1, 2000),
+    "max_papers": (1, 40),
+    "max_citations": (0, 20),
+    "max_references": (0, 20),
+    "top_k": (1, 5),
+    "truncate_dim": (1, 256),
+    "min_semantic_similarity": (0.0, 1.0),
+    "corpus_size": (1, 5000),
+    "dataset_source": ("research/arxiv-snapshot",),
+    "dataset_split": ("train", "train[:5%]"),
+    "streaming": (True, False),
+    "torch_compile": (True, False),
+    "search_mode": SEARCH_MODE_CHOICES,
+}
+
+
+def test_single_default_sweep_covers_every_config_key() -> None:
+    """The sweep below must name a value for every accepted ``[defaults]`` key.
+
+    :return None: Assertion fails when a config key is added or removed.
+    """
+    assert set(_REPRESENTATIVE_CONFIG_VALUES) == set(CONFIG_DEFAULT_KEY_SPECS)
+
+
+@pytest.mark.parametrize(
+    ("key", "raw_value", "strategy"),
+    [
+        pytest.param(
+            key,
+            raw_value,
+            strategy,
+            id=f"{key}={raw_value}-{strategy}",
+        )
+        for key, values in _REPRESENTATIVE_CONFIG_VALUES.items()
+        for raw_value in values
+        for strategy in STRATEGY_CHOICES
+    ],
+)
+def test_single_accepted_config_default_never_breaks_a_plain_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    raw_value: object,
+    strategy: str,
+) -> None:
+    """A default the loader accepts must not fail ``build --strategy S <seed>``.
+
+    Device availability is a property of the host, not of the config: the probe
+    is patched to resolve every device, so ``cuda`` and ``mps`` are checked like
+    ``cpu`` on any machine. A missing device still fails builds, with the config
+    source named, as ``test_config_device_validation_names_the_config_source``
+    pins.
+
+    :param Path tmp_path: Isolated config file location.
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the device probe.
+    :param str key: Config ``[defaults]`` key under test.
+    :param object raw_value: Value persisted through ``config set``.
+    :param str strategy: Strategy passed on the command line.
+    :return None: Completion shows the contract accepts the overlaid default.
+    """
+    monkeypatch.setattr(
+        build_contract_module, "resolve_embedding_device", lambda device: device
+    )
+    config_path = tmp_path / "config.toml"
+    value = set_config_value(f"defaults.{key}", raw_value, path=config_path)
+    config = load_user_config(config_path)
+    assert config.defaults == {key: value}
+    args, provided, _ = _parsed_build_args(["paper-id", "--strategy", strategy])
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+
+    build_contract_module._validate_build_cli_contract(
+        args,
+        build_contract_module._ValueErrorParserErrorSink(),
+        provided,
+        config_defaults=applied,
+        config_path=config.path,
+    )
+
+
+@pytest.mark.parametrize("strategy_from_config", [False, True])
+@pytest.mark.parametrize("strategy", STRATEGY_CHOICES)
+def test_configured_combined_source_narrows_outside_hybrid(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, strategy_from_config: bool
+) -> None:
+    """A configured ``both`` means the corpus for every strategy except hybrid.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture capturing debug logging.
+    :param str strategy: Effective build strategy.
+    :param bool strategy_from_config: Whether the strategy is configured too.
+    :return None: Assertions check the value, its provenance and the debug line.
+    """
+    debug = MagicMock()
+    monkeypatch.setattr(build_options_module.logger, "debug", debug)
+    defaults: dict[str, ConfigValue] = {"semantic_source": "both"}
+    if strategy_from_config:
+        defaults["strategy"] = strategy
+    argv = (
+        ["paper-id"] if strategy_from_config else ["paper-id", "--strategy", strategy]
+    )
+    args, provided, _ = _parsed_build_args(argv)
+
+    applied = build_options_module._apply_user_config_defaults(
+        args, provided, UserConfig(path=_CFG_PATH, defaults=defaults)
+    )
+
+    narrowed = strategy != "hybrid"
+    assert args.semantic_source == ("arxiv-corpus" if narrowed else "both")
+    assert "semantic_source" in applied
+    assert "semantic_source" not in provided
+    messages = [call.args[0] % call.args[1:] for call in debug.call_args_list]
+    narrowing = [line for line in messages if "defaults.semantic_source='both'" in line]
+    assert len(narrowing) == int(narrowed)
+    if narrowed:
+        assert str(_CFG_PATH) in narrowing[0]
+        assert narrowing[0].endswith(f"the active strategy is {strategy}.")
+
+
+def _configured_embedding_outcome(
+    semantic_source: str, flags: list[str]
+) -> tuple[str, str]:
+    """Validate an embedding build over one configured semantic source.
+
+    :param str semantic_source: Configured ``defaults.semantic_source``.
+    :param list[str] flags: Extra build flags after ``--strategy embedding``.
+    :return tuple[str, str]: Effective source and storage precision, or
+        ``("error", message)`` when the contract rejects the build.
+    """
+    args, provided, _ = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding", *flags]
+    )
+    config = UserConfig(path=_CFG_PATH, defaults={"semantic_source": semantic_source})
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    try:
+        build_contract_module._validate_build_cli_contract(
+            args,
+            build_contract_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+    except ValueError as exc:
+        return "error", str(exc)
+    return str(args.semantic_source), str(args.storage_precision)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], ("arxiv-corpus", "int8")),
+        (["--candidate-pool-size", "50"], ("candidates", "float32")),
+        (["--corpus-size", "100"], ("arxiv-corpus", "int8")),
+    ],
+)
+def test_configured_combined_source_resolves_like_configured_corpus(
+    flags: list[str], expected: tuple[str, str]
+) -> None:
+    """Outside hybrid, a configured ``both`` behaves exactly like ``arxiv-corpus``.
+
+    It stays a config default, so candidate-only flags still imply candidates.
+
+    :param list[str] flags: Extra build flags after ``--strategy embedding``.
+    :param tuple[str, str] expected: Effective source and precision.
+    :return None: Assertions compare both configured values with the expectation.
+    """
+    assert _configured_embedding_outcome("both", flags) == expected
+    assert _configured_embedding_outcome("arxiv-corpus", flags) == expected
+
+
+_INT8_CANDIDATES_ERROR = (
+    "--storage-precision int8 requires --semantic-source arxiv-corpus "
+    "(int8 calibration ranges are computed during corpus hydration)."
+)
+
+
+@pytest.mark.parametrize(
+    ("semantic_source", "flags", "config_context"),
+    [
+        (
+            "candidates",
+            ["--storage-precision", "int8"],
+            f" Config source: defaults.semantic_source in {_CFG_PATH}; "
+            "update or unset the configured value.",
+        ),
+        (
+            "arxiv-corpus",
+            ["--candidate-pool-size", "50", "--storage-precision", "int8"],
+            "",
+        ),
+        ("both", ["--candidate-pool-size", "50", "--storage-precision", "int8"], ""),
+    ],
+)
+def test_semantic_source_error_context_names_config_only_when_it_decided(
+    semantic_source: str, flags: list[str], config_context: str
+) -> None:
+    """A source implied by explicit flags is no longer blamed on config.toml.
+
+    :param str semantic_source: Configured ``defaults.semantic_source``.
+    :param list[str] flags: Extra build flags after ``--strategy embedding``.
+    :param str config_context: Expected config provenance suffix.
+    :return None: Assertions pin the error and its provenance suffix.
+    """
+    assert _configured_embedding_outcome(semantic_source, flags) == (
+        "error",
+        _INT8_CANDIDATES_ERROR + config_context,
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "defaults", "config_context"),
+    [
+        (
+            ["paper-id", "--strategy", "embedding", "--semantic-source", "both"],
+            {"semantic_source": "both"},
+            "",
+        ),
+        (
+            ["paper-id", "--semantic-source", "both"],
+            {"strategy": "embedding"},
+            f" Config source: defaults.strategy in {_CFG_PATH}; "
+            "update or unset the configured value.",
+        ),
+    ],
+)
+def test_explicit_combined_source_still_requires_hybrid(
+    argv: list[str], defaults: dict[str, ConfigValue], config_context: str
+) -> None:
+    """Only a configured ``both`` is narrowed; the flag stays a usage error.
+
+    :param list[str] argv: Build arguments including ``--semantic-source both``.
+    :param dict[str, ConfigValue] defaults: Configured defaults for the run.
+    :param str config_context: Expected config provenance suffix.
+    :return None: Assertions pin the unchanged error message.
+    """
+    args, provided, _ = _parsed_build_args(argv)
+    config = UserConfig(path=_CFG_PATH, defaults=defaults)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+
+    with pytest.raises(ValueError) as error:
+        build_contract_module._validate_build_cli_contract(
+            args,
+            build_contract_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+
+    assert str(error.value) == (
+        "--semantic-source both requires --strategy hybrid." + config_context
+    )
+
+
+@pytest.mark.parametrize("flags", [[], ["--corpus-size", "100"]])
+def test_configured_combined_source_is_kept_for_hybrid(flags: list[str]) -> None:
+    """Hybrid keeps a configured ``both``, and corpus flags refine it.
+
+    :param list[str] flags: Extra build flags after ``--strategy hybrid``.
+    :return None: Assertions check the combined source survives validation.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "hybrid", *flags]
+    )
+    config = UserConfig(path=_CFG_PATH, defaults={"semantic_source": "both"})
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied, config_path=config.path
+    )
+
+    assert args.semantic_source == "both"
+    assert args.storage_precision == "int8"
 
 
 # ---------------------------------------------------------------------------
@@ -1271,7 +1665,7 @@ def test_config_cli_without_subcommand_prints_help() -> None:
     assert "Config operations" in result.stdout
 
 
-@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+@pytest.mark.parametrize("payload", _CORRUPT_CONFIG_PAYLOADS)
 def test_config_cli_list_survives_corrupt_file(payload: bytes) -> None:
     """Config listing should remain usable with a corrupt config file.
 

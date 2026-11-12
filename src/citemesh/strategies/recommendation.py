@@ -25,12 +25,12 @@ from citemesh.strategies.base import (
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
-    candidate_records_match,
     fetch_candidate_source,
-    merge_paper_metadata,
     require_available_candidate_source,
     scope_candidate_collection,
 )
+from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.reference_hydration import ReferenceHydrator
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
@@ -63,48 +63,15 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers=max_papers)
-        self.fetch_references = fetch_references
-        self.refresh_reference_cache = bool(refresh_reference_cache)
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
+        self.reference_hydrator = ReferenceHydrator(
+            self.client,
+            fetch_references=fetch_references,
+            refresh_reference_cache=refresh_reference_cache,
+        )
         self._abstract_index = AbstractSimilarityIndex()
         self.candidate_source_status: dict[str, str] = {}
-        self._reference_source_unavailable = False
-
-    def _hydrate_references(self, paper: Paper) -> None:
-        """Populate reference IDs for a paper when strategy settings require it.
-
-        :param Paper paper: Paper record to enrich.
-        :return None: Mutates ``paper.references`` in place when successful.
-        """
-        if not self.fetch_references or paper.references:
-            return
-
-        if self._reference_source_unavailable:
-            if not self.refresh_reference_cache:
-                cached_references = self.client.get_cached_reference_ids(paper.paper_id)
-                if cached_references is not None:
-                    paper.references = list(cached_references)
-            return
-
-        from citemesh.services import SemanticScholarUnavailableError
-
-        try:
-            paper.references = self.client.get_reference_ids(
-                paper.paper_id,
-                force_refresh=self.refresh_reference_cache,
-            )
-        except SemanticScholarUnavailableError as exc:
-            self._reference_source_unavailable = True
-            logger.warning(
-                "Reference hydration unavailable; continuing with available "
-                "reference data."
-            )
-            logger.debug(
-                "Reference hydration failed for recommendation %s: %s",
-                paper.paper_id,
-                exc,
-            )
 
     @scope_candidate_collection
     def collect_papers(
@@ -118,7 +85,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         """
         papers: dict[str, Paper] = {}
         self.candidate_source_status = {}
-        self._reference_source_unavailable = False
+        self.reference_hydrator.reset()
 
         logger.debug("Fetching seed paper: %s", seed_id)
         seed = self.client.get_paper(
@@ -155,44 +122,26 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
         # Discovery is the primary acquisition path. Do it before optional seed
         # enrichment, whose retries share the collection's S2 recovery budget.
-        self._hydrate_references(seed)
+        self.reference_hydrator.ensure(seed)
 
+        # The pool merges records of one work, including records of the seed,
+        # which enrich the original seed object so the graph keeps its seed node.
+        pool = DiscoveryPool(seed)
         for paper in recommendation_result.papers:
-            # Recommendation payloads can include the seed paper itself.
-            # Preserve the original seed object so GraphBuilderStrategy can always
-            # identify a node with ``is_seed=True``.
-            paper_id = str(paper.paper_id).strip()
-            if not paper_id:
+            if not str(paper.paper_id).strip():
                 continue
-            if paper_id == seed.paper_id or candidate_records_match(seed, paper):
-                merge_paper_metadata(seed, paper)
-                continue
-            canonical_id = paper_id
-            existing = papers.get(canonical_id)
-            if existing is None:
-                matching_ids = [
-                    candidate_id
-                    for candidate_id, candidate in papers.items()
-                    if candidate_id != seed.paper_id
-                    and candidate_records_match(candidate, paper)
-                ]
-                if len(matching_ids) == 1:
-                    canonical_id = matching_ids[0]
-                    existing = papers[canonical_id]
-            if existing is not None:
-                if not existing.references:
-                    self._hydrate_references(paper)
-                merge_paper_metadata(existing, paper)
-                continue
-
-            if not paper.abstract or not paper.title:
-                continue
-
-            if len(papers) >= self.max_papers:
-                continue
-
-            self._hydrate_references(paper)
-            papers[canonical_id] = paper
+            target_id = pool.resolve(paper)
+            if target_id is None:
+                # A new member needs text for the abstract index and a free slot.
+                if not paper.abstract or not paper.title:
+                    continue
+                if len(pool.papers) + 1 >= self.max_papers:
+                    continue
+                self.reference_hydrator.ensure(paper)
+            elif target_id != seed.paper_id and not pool.papers[target_id].references:
+                self.reference_hydrator.ensure(paper)
+            pool.add(paper, source="recommendation", relation="semantic_only")
+        papers.update(pool.papers)
 
         self._abstract_index.build(papers)
         self._set_collection_summary(
@@ -237,6 +186,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             paper1,
             paper2,
             abstract_index=self._abstract_index,
+            reference_coupling=self.reference_hydrator.fetch_references,
             with_references_weights=(0.60, 0.15, 0.00, 0.25),
             without_references_weights=(0.75, 0.25, 0.00, 0.00),
             cap_at_one=True,

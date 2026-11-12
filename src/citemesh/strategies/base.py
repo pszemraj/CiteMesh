@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -39,30 +39,13 @@ class _SeedPaperOption(TypedDict, total=False):
     seed_paper: Paper | None
 
 
-class _CitationSpecificOptions(TypedDict, total=False):
-    """Options used only while collecting citation candidates."""
-
-    validate_source_availability: bool
-    hydrate_references: bool
-    reference_metadata_lookup: Callable[[list[str]], dict[str, Paper]] | None
-    reference_selector: Callable[[Paper, Sequence[Paper], int], list[Paper]] | None
-
-
 class _CorpusPreparedOption(TypedDict, total=False):
     """Flag indicating that a parent already prepared the corpus."""
 
     _corpus_prepared: bool
 
 
-class CitationCollectionOptions(_SeedPaperOption, _CitationSpecificOptions):
-    """Options accepted by citation collection."""
-
-
-class EmbeddingCollectionOptions(_SeedPaperOption, _CorpusPreparedOption):
-    """Options accepted by embedding graph collection."""
-
-
-class GraphCollectionOptions(CitationCollectionOptions, EmbeddingCollectionOptions):
+class GraphCollectionOptions(_SeedPaperOption, _CorpusPreparedOption):
     """Combined keyword options exposed by the abstract graph builder."""
 
 
@@ -412,6 +395,7 @@ class GraphBuilderStrategy(ABC):
         paper2: Paper,
         *,
         abstract_index: AbstractSimilarityIndex,
+        reference_coupling: bool,
         with_references_weights: tuple[float, float, float, float],
         without_references_weights: tuple[float, float, float, float],
         cap_at_one: bool = False,
@@ -421,6 +405,8 @@ class GraphBuilderStrategy(ABC):
         :param Paper paper1: First paper to compare.
         :param Paper paper2: Second paper to compare.
         :param AbstractSimilarityIndex abstract_index: Index of paper-text vectors.
+        :param bool reference_coupling: Whether shared references may score, that
+            is, whether this build fetched reference lists.
         :param tuple[float, float, float, float] with_references_weights: Component
             weights used when reference data is available.
         :param tuple[float, float, float, float] without_references_weights: Component
@@ -434,9 +420,7 @@ class GraphBuilderStrategy(ABC):
         temporal_similarity = self.temporal_similarity(paper1, paper2)
         citation_similarity = self.citation_similarity(paper1, paper2)
         has_bibliographic_coupling = bool(
-            getattr(self, "fetch_references", False)
-            and paper1.references
-            and paper2.references
+            reference_coupling and paper1.references and paper2.references
         )
         bibliographic_coupling = (
             self.bibliographic_coupling(paper1, paper2)

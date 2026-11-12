@@ -74,7 +74,6 @@ from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     GraphCollectionOptions,
-    _CitationSpecificOptions,
     build_capped_undirected_graph,
     deterministic_sort_key,
     validate_embedding_vectors,
@@ -84,13 +83,13 @@ from citemesh.strategies.candidates import (
     SEMANTIC_SOURCE_CHOICES,
     candidate_identifiers_conflict,
     corpus_matches_s2,
-    fetch_candidate_pool,
     merge_paper_metadata,
     paper_embedding_metadata,
     provider_lookup_identifier,
     scope_candidate_collection,
     select_recovered_references_by_score,
 )
+from citemesh.strategies.discovery_pool import fetch_candidate_pool
 from citemesh.strategies.similarity import cosine_similarity_to_query
 
 from . import deps
@@ -117,6 +116,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
+    from citemesh.core.paper_ids import BibliographyKey
     from citemesh.core.text_batching import _TextEncoder
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
@@ -144,7 +144,6 @@ class EmbeddingRuntimeOptions(TypedDict, total=False):
     enable_torch_compile: bool
     device: str | None
     semantic_source: str
-    candidate_pool_size: int
     client: SemanticScholarClient | None
     min_semantic_similarity: float
     dataset_source: str
@@ -155,6 +154,7 @@ class EmbeddingBuilderRuntimeOptions(EmbeddingRuntimeOptions, total=False):
 
     max_papers: int
     top_k: int
+    candidate_pool_size: int
 
 
 class _RequiredEmbeddingRuntimeMetadata(TypedDict):
@@ -1052,7 +1052,6 @@ class EmbeddingGraphBuilder(
         *,
         seed_paper: Paper | None = None,
         _corpus_prepared: bool = False,
-        **kwargs: Unpack[_CitationSpecificOptions],
     ) -> dict[str, Paper]:
         """Collect papers while excluding corpus replacement between stages.
 
@@ -1060,7 +1059,6 @@ class EmbeddingGraphBuilder(
         :param Optional[Paper] seed_paper: Optional pre-fetched seed metadata.
         :param bool _corpus_prepared: Whether a parent prepared the corpus while
             retaining this same reentrant operation lock.
-        :param kwargs: Extra options are forwarded to collection.
         :return Dict[str, Paper]: Dictionary of paper ID to paper metadata.
         """
         with self._corpus_operation_lock():
@@ -1068,7 +1066,6 @@ class EmbeddingGraphBuilder(
                 seed_id,
                 seed_paper=seed_paper,
                 _corpus_prepared=_corpus_prepared,
-                **kwargs,
             )
 
     def _collect_papers_under_operation_lock(
@@ -1077,7 +1074,6 @@ class EmbeddingGraphBuilder(
         *,
         seed_paper: Paper | None = None,
         _corpus_prepared: bool = False,
-        **kwargs: Unpack[_CitationSpecificOptions],
     ) -> dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
@@ -1085,9 +1081,8 @@ class EmbeddingGraphBuilder(
         :param str seed_id: Seed paper identifier (ArXiv ID or text query)
         :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
             reuse instead of fetching the seed from Semantic Scholar again.
-        :param bool _corpus_prepared: Whether a hybrid parent prepared this corpus
+        :param bool _corpus_prepared: Whether a parent prepared this corpus
             under the operation lock that remains held by the caller.
-        :param kwargs: Extra options are ignored.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers: dict[str, Paper] = {}
@@ -1462,6 +1457,54 @@ class EmbeddingGraphBuilder(
             if len(matches) == 1
         }
 
+    def cached_corpus_vectors(
+        self, paper_ids: Sequence[str]
+    ) -> dict[str, NDArray[np.float32]]:
+        """Read stored retrieval-document vectors of prepared corpus rows.
+
+        :param Sequence[str] paper_ids: Corpus row IDs.
+        :return dict[str, NDArray[np.float32]]: Unit vectors keyed by ID; rows
+            outside the selected corpus are omitted.
+        """
+        if not paper_ids:
+            return {}
+        return self.embedding_cache.get_cached_embeddings(
+            paper_ids,
+            corpus_size=self.corpus_size if self._cache_selection is not None else None,
+        )
+
+    def search_prepared_corpus(
+        self, query: NDArray[np.float32], top_k: int
+    ) -> list[Paper]:
+        """Return the prepared corpus rows nearest to a vector, best first.
+
+        Uses the configured binary prefilter and rescore multiplier.
+
+        :param NDArray[np.float32] query: Search vector.
+        :param int top_k: Rows to return.
+        :return list[Paper]: Corpus papers by descending similarity.
+        """
+        self._ensure_cache_model_fingerprint()
+        with self.embedding_cache.hydration_operation_lock():
+            found = self._search_cache_candidates(query, top_k=top_k)
+        return [
+            self._paper_from_cached_metadata(paper_id, metadata)
+            for paper_id, metadata, _embedding in found
+        ]
+
+    def cached_bibliography_metadata(
+        self, keys: Sequence[BibliographyKey]
+    ) -> dict[BibliographyKey, Paper]:
+        """Resolve title, first author, and year within the prepared corpus."""
+        metadata = self.embedding_cache.get_paper_metadata_for_bibliography(
+            keys,
+            corpus_size=self.corpus_size if self._cache_selection is not None else None,
+        )
+        return {
+            key: self._paper_from_cached_metadata(record["paper_id"], record)
+            for key, record in metadata.items()
+        }
+
     def _candidate_pool_budgets(self) -> tuple[int, int, int]:
         """Split the candidate pool size into per-source fetch budgets.
 
@@ -1564,7 +1607,23 @@ class EmbeddingGraphBuilder(
         return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
 
     def embed_papers(self, papers: dict[str, Paper]) -> dict[str, NDArray[np.float32]]:
-        """Embed retrieval documents through cache, encoding only missing ones.
+        """Embed retrieval documents and record them in ``retrieval_embeddings``.
+
+        :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
+        :return Dict[str, NDArray[np.float32]]: Float32 vectors keyed by paper ID.
+        """
+        embeddings = self.document_vectors(papers)
+        self.retrieval_embeddings.update(embeddings)
+        return embeddings
+
+    def document_vectors(
+        self, papers: dict[str, Paper]
+    ) -> dict[str, NDArray[np.float32]]:
+        """Return retrieval-document vectors through cache, encoding only missing ones.
+
+        Unlike :meth:`embed_papers`, this leaves ``retrieval_embeddings`` alone.
+        A ready installed corpus is read but never written; other caches store
+        what is encoded.
 
         :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
         :return Dict[str, NDArray[np.float32]]: Float32 vectors keyed by paper ID.
@@ -1604,17 +1663,14 @@ class EmbeddingGraphBuilder(
                     batch_size=self.encode_batch_size,
                 )
                 embeddings.update(zip(missing, vectors, strict=True))
-            self.retrieval_embeddings.update(embeddings)
             return embeddings
-        embeddings = self.embedding_cache.get_embeddings(
+        return self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
             show_progress=False,
             text_builder=self._format_retrieval_document_metadata,
         )
-        self.retrieval_embeddings.update(embeddings)
-        return embeddings
 
     def _format_retrieval_document_metadata(
         self, metadata: CacheInputMetadata | CachedPaperMetadata
