@@ -6684,6 +6684,7 @@ def test_raised_reused_corpus_refresh_keeps_the_covering_cache(
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 def test_incomplete_resized_cache_resumes_the_covering_selection(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     cached_corpus_size: int | None,
     requested_corpus_size: int | None,
     resumed_corpus_size: int | None,
@@ -6692,6 +6693,7 @@ def test_incomplete_resized_cache_resumes_the_covering_selection(
     """Resizing an interrupted corpus must retain vectors and complete its scope.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Warning capture; nothing was removed upstream.
     :param int | None cached_corpus_size: Larger cap or uncapped recorded corpus.
     :param int | None requested_corpus_size: Smaller or larger requested scope.
     :param int | None resumed_corpus_size: Scope covering both cache and request.
@@ -6738,6 +6740,7 @@ def test_incomplete_resized_cache_resumes_the_covering_selection(
         len(expected_rows),
     )
     _assert_encoded_corpus_records(builder, model, expected_rows[:-1])
+    assert "no longer lists" not in caplog.text
     builder._ensure_cache_hydrated(use_streaming=False)
     load.assert_called_once()
     clear_cache_mock.assert_not_called()
@@ -6792,7 +6795,8 @@ def test_shrunk_corpus_reconciliation_survives_reuse_and_regrowth(
     assert cache.get_cached_paper_ids() == {f"arxiv:2601.0000{i}" for i in range(1, 5)}
     assert cache.get_hydration_rowcount_reconciliation() == (2, 4)
     _assert_encoded_corpus_records(builder, model, rows[1:])
-    assert "including any papers removed upstream" in caplog.text
+    # 2601.00001 and 2601.00003 left the source; their vectors are kept.
+    assert "Kept 2 cached papers that the current source" in caplog.text
     builder._ensure_cache_hydrated(use_streaming=False)
     load.assert_called_once()
 

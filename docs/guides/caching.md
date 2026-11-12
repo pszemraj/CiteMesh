@@ -202,7 +202,7 @@ A hydrated cache on a non-sliced split checks upstream growth:
 | Published row count matches the last verified count | Reuse memoized metadata without scanning source IDs. |
 | Row count changed | Scan current IDs. Full-split caches append missing papers; capped caches compare the newest-N selection, including backfilled submissions. |
 | No published row count | Scan IDs each build. If this optional check cannot read the source, keep the complete cache usable and retry next time. |
-| Rows removed upstream | Preserve historical vectors and record the verified source count separately from stored vector count. |
+| Rows removed upstream | Preserve historical vectors, warn with the number of cached papers the source no longer lists, and record the verified source count separately from stored vector count. |
 
 Rows are added, never evicted automatically:
 

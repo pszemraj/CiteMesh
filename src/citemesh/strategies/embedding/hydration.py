@@ -1184,6 +1184,13 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             dataset_source=source,
             corpus_size=resumed_corpus_size,
         )
+        # A full-source pass sees every listed ID, so cached IDs it never sees
+        # are papers the current source no longer lists.
+        unlisted_paper_ids = (
+            self.embedding_cache.get_cached_paper_ids()
+            if resumed_corpus_size is None
+            else None
+        )
         resume_result = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
@@ -1191,6 +1198,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             progress_label="Resuming dataset",
             operation="Incomplete hydration resume",
             existing_paper_ids=cached_paper_ids,
+            unlisted_paper_ids=unlisted_paper_ids,
             corpus_size=resumed_corpus_size,
         )
         if not (resume_result.source_exhausted or resume_result.row_cap_reached):
@@ -1211,11 +1219,18 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 updated_rows,
                 resumed_corpus_size,
             )
-        if resumed_corpus_size is None:
+        if unlisted_paper_ids:
             logger.warning(
-                "Revalidated the full source for %s/%s while retaining %d cached "
-                "rows, including any papers removed upstream. Use "
-                "--force-rebuild-cache to apply upstream membership exactly.",
+                "Kept %d cached papers that the current source for %s/%s no "
+                "longer lists. Use --force-rebuild-cache to apply upstream "
+                "membership exactly.",
+                len(unlisted_paper_ids),
+                source,
+                self.dataset_split,
+            )
+        if resumed_corpus_size is None:
+            logger.debug(
+                "Revalidated the full source for %s/%s; %d cached rows.",
                 source,
                 self.dataset_split,
                 updated_rows,
@@ -1313,6 +1328,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         row_limit: int | None = None,
         row_offset: int | None = None,
         existing_paper_ids: set[str] | None = None,
+        unlisted_paper_ids: set[str] | None = None,
         max_new_records: int | None = None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
         dataset: Iterable[DatasetRecord] | None = None,
@@ -1329,6 +1345,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         :param row_limit: Maximum source rows to load.
         :param row_offset: Starting source row offset.
         :param existing_paper_ids: IDs to skip during reconciliation.
+        :param unlisted_paper_ids: Cached IDs, each removed once the source lists it.
         :param max_new_records: Maximum newly hydrated records.
         :param corpus_size: Cap this pass selects and hydrates at,
             defaulting to the cap this build requested.
@@ -1373,6 +1390,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             progress_total=progress_total,
             progress_label=progress_label,
             existing_paper_ids=existing_paper_ids,
+            unlisted_paper_ids=unlisted_paper_ids,
             max_new_records=max_new_records,
             fallback_index_offset=int(row_offset or 0),
             corpus_size=slice_corpus_size,
@@ -1605,6 +1623,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         progress_total: int | None,
         progress_label: str,
         existing_paper_ids: set[str] | None = None,
+        unlisted_paper_ids: set[str] | None = None,
         max_new_records: int | None = None,
         fallback_index_offset: int = 0,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
@@ -1616,6 +1635,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         :param str progress_label: Progress-bar description label.
         :param Optional[Set[str]] existing_paper_ids: Optional set used to skip
             already-cached paper IDs while hydrating.
+        :param Optional[Set[str]] unlisted_paper_ids: Optional set each source
+            row's paper ID is removed from; requires ``existing_paper_ids``.
         :param Optional[int] max_new_records: Optional cap on newly selected records.
         :param int fallback_index_offset: Source offset for row error messages.
         :param _CorpusSizeArg corpus_size: Cap on rows taken from the slice,
@@ -1648,6 +1669,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                         paper_id = _dataset_record_paper_id(
                             raw_record, fallback_index_offset + local_idx
                         )
+                        if unlisted_paper_ids is not None:
+                            unlisted_paper_ids.discard(paper_id)
                         if not paper_id or paper_id in existing_paper_ids:
                             progress.update(1)
                             continue
