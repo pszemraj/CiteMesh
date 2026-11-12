@@ -40,6 +40,7 @@ from citemesh.core.paper_ids import (
 )
 from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.core.text_batching import l2_normalize_embeddings
+from citemesh.core.text_normalization import normalize_text
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
@@ -1763,7 +1764,7 @@ class EmbeddingGraphBuilder(
         :raises InstalledCorpusError: If installed state, coverage, source or
             vector contract prevents reuse.
         """
-        normalized_query = str(query).strip()
+        normalized_query = normalize_text(str(query))
         if not normalized_query:
             raise ValueError("query must not be empty")
         if int(top_k) < 1:

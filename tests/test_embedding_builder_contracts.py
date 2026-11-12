@@ -3465,8 +3465,8 @@ def test_task_specific_embedding_caches_partition_storage_and_formatters(
     assert retrieval_cache.text_formatter_fingerprint != (
         graph_cache.text_formatter_fingerprint
     )
-    assert builder._document_formatter_fingerprint == "0d40a6b5f7852b1a"
-    assert builder._similarity_formatter_fingerprint == "78ac67b7a864666a"
+    assert builder._document_formatter_fingerprint == "b821375defea16a6"
+    assert builder._similarity_formatter_fingerprint == "d53437877915d14a"
     assert "representation=retrieval-document-v1" in retrieval_cache.model_name
     assert "representation=graph-similarity-v1" in graph_cache.model_name
     assert "storage_precision=float32" in graph_cache.model_name

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from citemesh.core.choices import (
     MODEL_PROFILE_CHOICES as EMBEDDING_MODEL_PROFILE_CHOICES,
 )
+from citemesh.core.text_normalization import normalize_text
 
 from .cache import read_json_object
 
@@ -38,13 +39,15 @@ DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, tuple[str, ...]] = {
 def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
     """Compose a stable document string from title/abstract metadata.
 
+    Both fields pass through :func:`~citemesh.core.text_normalization.normalize_text`.
+
     :param Mapping[str, object] metadata: Paper metadata payload.
     :return str: Best-effort ``"title. abstract"`` representation.
     """
     raw_title = metadata.get("title", "")
     raw_abstract = metadata.get("abstract", "")
-    title = str(raw_title).strip() if raw_title is not None else ""
-    abstract = str(raw_abstract).strip() if raw_abstract is not None else ""
+    title = normalize_text(str(raw_title)) if raw_title is not None else ""
+    abstract = normalize_text(str(raw_abstract)) if raw_abstract is not None else ""
     if title and abstract:
         return f"{title}. {abstract}"
     if title:

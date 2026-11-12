@@ -10,6 +10,7 @@ from __future__ import annotations
 from enum import Enum
 
 from citemesh.core import Paper
+from citemesh.core.text_normalization import normalize_text
 from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
@@ -30,6 +31,8 @@ _FORMATTER_FINGERPRINT_PROBES: tuple[EmbeddingInputMetadata, ...] = (
     {"title": "Alpha", "abstract": ""},
     {"title": "", "abstract": "Beta"},
     {"title": "  Alpha  ", "abstract": "  Beta  "},
+    # Exercises text normalization, so changing it changes the formatter identity.
+    {"title": "Alpha\n  “Beta”", "abstract": "Gamma​ — delta…"},
 )
 
 
@@ -48,12 +51,12 @@ def _embedding_text_metadata(title: object, abstract: object) -> EmbeddingInputM
     :param object abstract: Raw paper abstract.
     :return EmbeddingInputMetadata: Clean text metadata for prompt formatting.
     """
-    normalized_title = str(title or "").strip()
+    normalized_title = normalize_text(str(title or ""))
     if normalized_title.casefold() in _PLACEHOLDER_EMBEDDING_TITLES:
         normalized_title = ""
     return {
         "title": normalized_title,
-        "abstract": str(abstract or "").strip(),
+        "abstract": normalize_text(str(abstract or "")),
     }
 
 
