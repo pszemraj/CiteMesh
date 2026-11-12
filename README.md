@@ -6,9 +6,9 @@ Run it locally with recommendation, citation, embedding, or hybrid discovery, th
 
 **[Explore the live demo](https://pszemraj.github.io/CiteMesh/)** to try the Megalodon dashboard in your browser without installing anything.
 
-![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
+![CiteMesh dashboard showing a Megalodon hybrid graph with Lightning Attention-2 selected](assets/ui.png)
 
-_A hybrid graph seeded by "Megalodon" over a full arXiv corpus index, with "LM-Infinite" selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
+_A hybrid graph seeded by "Megalodon" that combines its references, citers, and Semantic Scholar recommendations with nearest neighbors from the 3.2-million-paper arXiv index (45 papers, 109 links). "Lightning Attention-2" is selected: Megalodon does not cite it, but it was recommended and resembles the papers Megalodon cites, so it ranks 16th. Its evidence is shown under "Why this paper"._
 
 After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
