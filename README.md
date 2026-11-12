@@ -8,7 +8,7 @@ It is a discovery tool, not a citation map. Candidates come from the seed's refe
 
 ![CiteMesh dashboard showing a Megalodon hybrid graph with Lightning Attention-2 selected](assets/ui.png)
 
-_A hybrid graph seeded by "Megalodon" that combines its references, citers, and Semantic Scholar recommendations with nearest neighbors from the 3.2-million-paper arXiv index (45 papers, 109 links). "Lightning Attention-2" is selected: Megalodon does not cite it, but it was recommended and resembles the papers Megalodon cites, so it ranks 16th. Its evidence is shown under "Why this paper"._
+_A hybrid graph seeded by "Megalodon" that combines its references, citers, and Semantic Scholar recommendations with nearest neighbors from the 3.2-million-paper arXiv index (45 papers, 108 links). "Lightning Attention-2" is selected: Megalodon does not cite it, but it was recommended and resembles the papers Megalodon cites, so it ranks 26th. Its evidence is shown under "Why this paper"._
 
 After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
