@@ -86,6 +86,7 @@ HYBRID_RECOMMENDATION_LIMIT = 200
 HYBRID_CORPUS_NEIGHBOURS = 180
 _REFERENCE_RELATIONS = frozenset({"referenced_by_seed", "overlap"})
 _CITER_RELATIONS = frozenset({"cites_seed", "overlap"})
+SEED_CITATION_RELATIONS = _REFERENCE_RELATIONS | _CITER_RELATIONS
 
 
 class EmbeddingInferenceError(RuntimeError):
@@ -783,9 +784,24 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 f"Hybrid graph-similarity embedding failed: {type(exc).__name__}: {exc}"
             ) from exc
 
+    def _is_seed_citation_pair(self, paper1: Paper, paper2: Paper) -> bool:
+        """Report whether one paper is the seed and the other cites or is cited by it.
+
+        :param Paper paper1: First paper.
+        :param Paper paper2: Second paper.
+        :return bool: True for a seed paired with one of its references or citers.
+        """
+        if paper1.is_seed == paper2.is_seed:
+            return False
+        other = paper2 if paper1.is_seed else paper1
+        return self.seed_relations.get(other.paper_id, "") in SEED_CITATION_RELATIONS
+
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """
         Compute similarity using adaptive weights.
+
+        A pair passes the gate on embedding similarity, shared references, or a
+        direct citation between the seed and the other paper.
 
         :param Paper paper1: First paper
         :param Paper paper2: Second paper
@@ -815,6 +831,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if (
             embed_sim < self.embedding_builder.min_semantic_similarity
             and biblio_coupling <= 0.0
+            and not self._is_seed_citation_pair(paper1, paper2)
         ):
             return 0.0
 
@@ -925,7 +942,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             return graph, actual_seed_id
 
         filtered_graph = build_capped_undirected_graph(
-            graph, max_edges, seed_id=actual_seed_id
+            graph,
+            max_edges,
+            seed_id=actual_seed_id,
+            priority_seed_neighbors={
+                paper_id
+                for paper_id, relation in self.seed_relations.items()
+                if relation in SEED_CITATION_RELATIONS and paper_id in graph
+            },
         )
 
         logger.debug(
@@ -951,6 +975,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param float similarity: Computed similarity
         :return bool: True if edge should be created
         """
+        # The seed's own references and citers always qualify; they take every
+        # other seed slot, and the seed's degree cap bounds how many are kept.
+        if self._is_seed_citation_pair(paper1, paper2):
+            return similarity > 0.0
+
         # Basic threshold
         if similarity < 0.2:
             return False
