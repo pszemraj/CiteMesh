@@ -32,7 +32,7 @@ versions are listed in [Embedding Runtime](../reference/embedding-runtime.md#dep
 Then install:
 
 ```bash
-python -m pip install -e ".[recommended]"
+pip install -e ".[recommended]"
 citemesh cache import --help
 python -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.cuda.is_available(), 'MPS:', torch.backends.mps.is_available())"
 ```

@@ -80,7 +80,7 @@ dev = [
 all = ["citemesh[dev,embeddings,viz]"]
 
 [project.scripts]
-citemesh = "citemesh.__main__:run"
+citemesh = "citemesh.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/pszemraj/CiteMesh"

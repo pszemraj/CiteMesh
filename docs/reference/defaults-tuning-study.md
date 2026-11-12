@@ -28,7 +28,7 @@ These small, manually labeled fixtures are regressions rather than a representat
 With the designated model cached locally:
 
 ```bash
-python -m pytest -m slow tests/test_semantic_quality.py
+pytest -n 0 -m slow tests/test_semantic_quality.py
 ```
 
 ## Embedding dimensions (September 2026)

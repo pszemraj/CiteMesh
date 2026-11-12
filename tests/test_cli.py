@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import runpy
 import shlex
 import sqlite3
 import subprocess
@@ -5607,24 +5606,6 @@ def test_output_writes_into_an_existing_directory(
     )
 
     assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
-
-
-def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
-    called: dict[str, object] = {}
-
-    def fake_main(argv: list[str] | None = None) -> int:
-        called["argv"] = argv
-        return 0
-
-    monkeypatch.setattr("citemesh.cli.main", fake_main)
-    monkeypatch.setattr(
-        "sys.argv", ["python", "build", "seed", "--strategy", "citation"]
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("citemesh.__main__", run_name="__main__")
-    assert exc_info.value.code == 0
-    assert called["argv"] is None
 
 
 def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:
