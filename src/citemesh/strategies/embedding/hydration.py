@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import random
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from itertools import islice
 from typing import (
     TYPE_CHECKING,
@@ -84,6 +85,16 @@ _REQUESTED_CORPUS_SIZE: Final = "requested"
 #: Corpus cap threaded into a hydration pass: an explicit cap (``None`` meaning
 #: uncapped), or :data:`_REQUESTED_CORPUS_SIZE`.
 _CorpusSizeArg = int | None | Literal["requested"]
+
+
+def _precomputed_text(texts: Mapping[str, str], metadata: CacheInputMetadata) -> str:
+    """Return the model input formatted ahead of encoding for one record.
+
+    :param Mapping[str, str] texts: Formatted text keyed by stripped paper ID.
+    :param CacheInputMetadata metadata: Record whose text is looked up.
+    :return str: The record's formatted retrieval-document text.
+    """
+    return texts[str(metadata.get("paper_id", "")).strip()]
 
 
 class _ColumnarDataset(Iterable[DatasetRecord], Protocol):
@@ -1649,12 +1660,15 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                     selected_records += 1
                     batch.append(metadata)
                     if len(batch) >= HYDRATION_FLUSH_SIZE:
+                        # Build the next batch's model input while the previous
+                        # batch is still encoding, so the GPU does not wait on it.
+                        texts = self._document_texts(batch)
                         if pending_write is not None:
                             hydrated_records += pending_write.result()
                             progress.update(pending_batch_size)
                         pending_batch_size = len(batch)
                         pending_write = executor.submit(
-                            self._cache_metadata_batch, batch
+                            self._cache_metadata_batch, batch, texts
                         )
                         batch = []
                     if max_new_records is not None and selected_records >= int(
@@ -1663,11 +1677,14 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                         break
 
                 if batch:
+                    texts = self._document_texts(batch)
                     if pending_write is not None:
                         hydrated_records += pending_write.result()
                         progress.update(pending_batch_size)
                     pending_batch_size = len(batch)
-                    pending_write = executor.submit(self._cache_metadata_batch, batch)
+                    pending_write = executor.submit(
+                        self._cache_metadata_batch, batch, texts
+                    )
 
                 if pending_write is not None:
                     hydrated_records += pending_write.result()
@@ -2334,10 +2351,30 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             embedding_dim=int(sample_embeddings.shape[1]),
         )
 
-    def _cache_metadata_batch(self, batch: list[ExtractedPaperMetadata]) -> int:
+    def _document_texts(self, batch: list[ExtractedPaperMetadata]) -> dict[str, str]:
+        """Format each record's retrieval-document text, keyed by its stripped ID.
+
+        :param List[ExtractedPaperMetadata] batch: Metadata records including ``paper_id``.
+        :return dict[str, str]: Model input text per paper, the last duplicate winning.
+        """
+        return {
+            metadata["paper_id"].strip(): self._format_retrieval_document_metadata(
+                metadata
+            )
+            for metadata in batch
+            if metadata["paper_id"].strip()
+        }
+
+    def _cache_metadata_batch(
+        self,
+        batch: list[ExtractedPaperMetadata],
+        texts: Mapping[str, str] | None = None,
+    ) -> int:
         """Encode/cache a batch of metadata records.
 
         :param List[ExtractedPaperMetadata] batch: Metadata records including ``paper_id``.
+        :param Mapping[str, str] | None texts: Model input already formatted by
+            :meth:`_document_texts` for this batch; formatted here when omitted.
         :return int: Number of paper IDs routed into cache encoding.
         """
         if not batch:
@@ -2353,11 +2390,16 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if not metadata_map:
             return 0
 
+        text_builder: Callable[[CacheInputMetadata], str] = (
+            self._format_retrieval_document_metadata
+            if texts is None
+            else partial(_precomputed_text, texts)
+        )
         self.embedding_cache.upsert_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=min(self.encode_batch_size, len(metadata_map)),
             show_progress=False,
-            text_builder=self._format_retrieval_document_metadata,
+            text_builder=text_builder,
         )
         return len(metadata_map)

@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import threading
 import types
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -6249,7 +6249,9 @@ def test_interrupted_unknown_count_refresh_cannot_hide_later_known_rows(
     )
     write_batch = builder._cache_metadata_batch
 
-    def write_one_then_interrupt(batch: list[dict[str, Any]]) -> int:
+    def write_one_then_interrupt(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Commit one missing row before simulating process interruption.
 
         :param list[dict[str, Any]] batch: Missing source rows.
@@ -6257,7 +6259,7 @@ def test_interrupted_unknown_count_refresh_cannot_hide_later_known_rows(
         :raises KeyboardInterrupt: Always, after one durable cache write.
         """
         assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
-        write_batch(batch[:1])
+        write_batch(batch[:1], texts)
         raise KeyboardInterrupt("unknown-count scan interrupted")
 
     with monkeypatch.context() as fault:
@@ -6802,14 +6804,16 @@ def test_shrunk_corpus_reconciliation_survives_reuse_and_regrowth(
     if interrupt_regrowth:
         write_batch = builder._cache_metadata_batch
 
-        def write_partial_batch(batch: list[dict[str, Any]]) -> int:
+        def write_partial_batch(
+            batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+        ) -> int:
             """Commit two new rows before interrupting source reconciliation.
 
             :param list[dict[str, Any]] batch: Missing upstream records.
             :return int: Never returns normally.
             :raises KeyboardInterrupt: Simulates interruption after durable progress.
             """
-            write_batch(batch[:2])
+            write_batch(batch[:2], texts)
             raise KeyboardInterrupt("reconciliation interrupted")
 
         with monkeypatch.context() as fault:
@@ -7131,7 +7135,9 @@ def test_initial_full_corpus_hydration_memoizes_duplicate_id_row_deficit(
     )
     cached_ids: set[str] = set()
 
-    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+    def _cache_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Model cache writes that coalesce duplicate canonical IDs."""
         cached_ids.update(str(record["paper_id"]) for record in batch)
         return len(batch)
@@ -7270,7 +7276,9 @@ def test_exact_hydration_slice_preserves_content_identity_across_offsets(
     )
     cached_records: list[dict[str, Any]] = []
 
-    def _capture_batch(batch: list[dict[str, Any]]) -> int:
+    def _capture_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Capture hydrated records and report the number written.
 
         :param list[dict[str, Any]] batch: Hydration batch to capture.
@@ -7558,14 +7566,16 @@ def test_full_corpus_refresh_retries_partial_writes_at_matching_counts(
     )
     write_batch = builder._cache_metadata_batch
 
-    def write_one_then_interrupt(batch: list[dict[str, Any]]) -> int:
+    def write_one_then_interrupt(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Leave exactly as many stored rows as the upstream source before stopping.
 
         :param list[dict[str, Any]] batch: Missing source rows being committed.
         :return int: Never returns normally.
         :raises KeyboardInterrupt: Simulates an interrupted durable write.
         """
-        write_batch(batch[:1])
+        write_batch(batch[:1], texts)
         raise KeyboardInterrupt("interrupted with matching counts")
 
     with monkeypatch.context() as fault:
@@ -7609,7 +7619,9 @@ def test_hydration_reset_restores_model_fingerprint(
             [{"id": "p1", "title": "Paper 1", "abstract": "A"}],
         ),
     )
-    monkeypatch.setattr(builder, "_cache_metadata_batch", lambda batch: len(batch))
+    monkeypatch.setattr(
+        builder, "_cache_metadata_batch", lambda batch, texts=None: len(batch)
+    )
 
     builder._ensure_cache_hydrated(use_streaming=False)
     assert builder.embedding_cache.get_model_fingerprint() == "fp-before-clear"
@@ -7721,7 +7733,9 @@ def test_int8_hydration_calibration_uses_representative_prepass(
 
     monkeypatch.setattr(builder, "_encode_texts", _fake_encode_texts)
 
-    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+    def _cache_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         assert builder.embedding_cache.has_calibration_ranges()
         return len(batch)
 
@@ -7861,7 +7875,9 @@ def test_hydration_flush_size_controls_cache_write_bursting(
 
     flushed_batch_sizes: list[int] = []
 
-    def _capture_flush(batch: list[dict[str, Any]]) -> int:
+    def _capture_flush(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         flushed_batch_sizes.append(len(batch))
         return len(batch)
 
@@ -7903,7 +7919,9 @@ def test_hydration_prepares_next_batch_while_cache_write_runs(
                 next_batch_preparation_started.set()
             yield {"id": f"p{index}", "title": f"Paper {index}"}
 
-    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+    def _cache_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Block the first write until main-thread preparation overlaps it.
 
         :param list[dict[str, Any]] batch: Hydration batch to record.
@@ -7957,7 +7975,9 @@ def test_hydration_cache_write_failure_preserves_completed_prefix(
         del kwargs
         yield progress
 
-    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+    def _cache_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Persist the first batch and fail the next one.
 
         :param list[dict[str, Any]] batch: Hydration batch to process.
@@ -8035,6 +8055,52 @@ def test_cache_metadata_batch_caps_model_encode_batch_size(
     assert routed == len(batch)
     assert captured["paper_count"] == len(batch)
     assert captured["batch_size"] == ENCODE_BATCH_SIZE
+
+
+def test_cache_metadata_batch_encodes_text_formatted_ahead() -> None:
+    """Text formatted ahead of the write is what gets encoded, without reformatting."""
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=1,
+        client=MagicMock(),
+    )
+    batch = [
+        {"paper_id": " paper-1 ", "title": "Title  one", "abstract": "Abstract\none"},
+        {"paper_id": "paper-2", "title": "Title two", "abstract": "Abstract two"},
+    ]
+    texts = builder._document_texts(batch)
+    assert texts == {
+        "paper-1": builder._format_retrieval_document_metadata(batch[0]),
+        "paper-2": builder._format_retrieval_document_metadata(batch[1]),
+    }
+
+    encoded: list[str] = []
+
+    def _capture_upsert_embeddings(
+        papers: dict[str, dict[str, Any]],
+        model: object,
+        batch_size: int = 32,
+        show_progress: bool = True,
+        text_builder: Any = None,
+    ) -> object:
+        del model, batch_size, show_progress
+        encoded.extend(text_builder(metadata) for metadata in papers.values())
+        return object()
+
+    with (
+        patch.object(builder, "_get_model_for_encoding", lambda: object()),
+        patch.object(builder, "_format_retrieval_document_metadata") as reformat,
+        patch.object(
+            builder.embedding_cache, "upsert_embeddings", _capture_upsert_embeddings
+        ),
+    ):
+        assert builder._cache_metadata_batch(batch, texts) == 2
+
+    reformat.assert_not_called()
+    assert encoded == [texts["paper-1"], texts["paper-2"]]
 
 
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
@@ -9447,7 +9513,9 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
     original_write = interrupted_embedding._cache_metadata_batch
     committed_batches = 0
 
-    def interrupt_second_batch(batch: list[dict[str, Any]]) -> int:
+    def interrupt_second_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Commit the first rebuilt row, then simulate process interruption.
 
         :param list[dict[str, Any]] batch: One-row hydration write batch.
@@ -9458,7 +9526,7 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
         if committed_batches:
             raise RuntimeError("interrupted rebuild after first committed batch")
         committed_batches += 1
-        return original_write(batch)
+        return original_write(batch, texts)
 
     with monkeypatch.context() as interruption:
         interruption.setattr(
@@ -9488,14 +9556,16 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
     resumed_ids: list[str] = []
     resume_write = retry_embedding._cache_metadata_batch
 
-    def capture_resume_batch(batch: list[dict[str, Any]]) -> int:
+    def capture_resume_batch(
+        batch: list[dict[str, Any]], texts: Mapping[str, str] | None = None
+    ) -> int:
         """Record exactly which missing source rows resume writes.
 
         :param list[dict[str, Any]] batch: Hydration write batch being committed.
         :return int: Number of records committed by the real cache writer.
         """
         resumed_ids.extend(str(record["paper_id"]) for record in batch)
-        return resume_write(batch)
+        return resume_write(batch, texts)
 
     monkeypatch.setattr(retry_embedding, "_cache_metadata_batch", capture_resume_batch)
     graph, actual_seed_id = retry_builder.build_graph(search_result.paper_id)
