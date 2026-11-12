@@ -171,35 +171,21 @@ whose original settings cannot be established is preserved and refused.
 
 ### Publishing
 
-The manual publisher uses these same refresh and export operations. Create a
-private Storage Bucket first, then run from a source checkout:
+The manual publisher uses these same refresh and export operations. Create a Storage Bucket first (add `--private` if only you should import from it), then run from a source checkout:
 
 ```bash
-hf buckets create OWNER/PRIVATE_INDEX --private
-python scripts/publish_arxiv_index.py OWNER/PRIVATE_INDEX ./arxiv-index \
+hf buckets create OWNER/INDEX
+python scripts/publish_arxiv_index.py OWNER/INDEX ./arxiv-index \
   --adopt-namespace NAMESPACE --device cuda
 ```
 
-Use `--namespace` for an already certified corpus, or omit both namespace flags
-to create a new configuration. Optional `--config NAME` overrides the published
-configuration name; otherwise export derives `<profile>-<dimension>-<dtype>`
-from the stored contract, such as `embeddinggemma-512-int8`. The output directory
-must be new. The script resolves and pins the source, refreshes, exports, and
-publishes one complete configuration. For upload ordering, see
-[Embedding Cache Internals](../internals/embedding-cache.md#portable-format).
-Use one publisher at a time. The bucket must already exist and be private.
+Use `--namespace` for an already certified corpus, or omit both namespace flags to encode a new one. Optional `--config NAME` overrides the published configuration name; otherwise export derives `<profile>-<dimension>-<dtype>` from the stored contract, such as `embeddinggemma-512-int8`. The output directory must be new. The script resolves and pins the source, refreshes, exports, and publishes one complete configuration. For upload ordering, see [Embedding Cache Internals](../internals/embedding-cache.md#portable-format). Use one publisher at a time.
 
-The publisher creates a starter `README.md` only when one is missing. Edit it
-freely and add links, images, or diagrams; later publications preserve it and
-assets outside `variants/`. Imports read the catalog, selected manifest, and its
-declared data files, without reading or validating documentation.
+Publishing to an existing configuration name replaces its snapshot, including when the embedding contract or int8 calibration changed, as after a formatter change. Re-run `citemesh cache import` to install the replacement. A changed contract maps to a new native namespace beside the old one; a replacement with the same contract maps to the installed namespace, which import never overwrites, so delete that namespace's `.db` and `.h5` first ([Inspecting and clearing](#inspecting-and-clearing)).
 
-Only the current snapshot of each configuration is retained remotely, so old
-full indexes do not accumulate as repository history. Keep a local export if
-you need an older snapshot later. Downloads and installed native caches remain
-on each consumer until removed there. Int8 ranges are established once for a
-new configuration and reused on refresh; a different calibration lineage needs
-a different configuration and native destination.
+The publisher writes `README.md` when it is missing and regenerates it on later publications while it still matches the generated overview. Once you edit it, adding links, images, or diagrams, later publications preserve it, along with assets outside `variants/`. Imports read the catalog, selected manifest, and its declared data files, without reading or validating documentation.
+
+Only the current snapshot of each configuration is retained remotely, so old full indexes do not accumulate as repository history. Keep a local export if you need an older snapshot later. Downloads and installed native caches remain on each consumer until removed there. Int8 ranges are established once per native namespace and reused on refresh.
 
 ## Corpus records
 
