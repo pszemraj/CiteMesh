@@ -7,7 +7,7 @@ Import the builders and exporters in a notebook or script; the worked example us
 
 ## What you can import
 
-`citemesh.__all__` gives you `Paper` and `Author` from `citemesh.core.models` (graph nodes carry a `Paper` under the `paper` attribute), the `GraphBuilderStrategy` base class to subclass, and the four builders: `RecommendationGraphBuilder`, `CitationGraphBuilder`, `EmbeddingGraphBuilder`, `HybridGraphBuilder`. Builders resolve lazily on first attribute access, so `import citemesh` does not pull in torch. `citemesh.visualization` adds `GraphExporter`, `compute_layout`, `visualize_graph`, `generate_output_path`, `get_theme`, and `THEMES`.
+`citemesh.__all__` gives you `__version__`, `Paper` and `Author` from `citemesh.core.models` (graph nodes carry a `Paper` under the `paper` attribute), the `GraphBuilderStrategy` base class to subclass, and the four builders: `RecommendationGraphBuilder`, `CitationGraphBuilder`, `EmbeddingGraphBuilder`, `HybridGraphBuilder`. Builders resolve lazily on first attribute access, so `import citemesh` does not pull in torch. `citemesh.visualization` adds `GraphExporter`, `compute_layout`, `visualize_graph`, `generate_output_path`, `get_theme`, and `THEMES`.
 
 Every builder implements the same two methods:
 

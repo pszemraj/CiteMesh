@@ -2,7 +2,7 @@
 
 CiteMesh turns one paper you already know into a graph of the research around it: the newer papers that follow up on it, and the older foundational work it rests on.
 
-Run it locally with recommendation, citation, embedding, or hybrid discovery, then export an interactive dashboard, graph data, bibliography, or image.
+It is a discovery tool, not a citation map. Candidates come from the seed's references and citers, Semantic Scholar recommendations, and embedding neighbors; edges are scored similarity rather than citation direction, and papers that are not relevant are left out even when they are cited. Run it locally with recommendation, citation, embedding, or hybrid discovery, then export an interactive dashboard, graph data, bibliography, or image.
 
 **[Explore the live demo](https://pszemraj.github.io/CiteMesh/)** to try the Megalodon dashboard in your browser without installing anything.
 
@@ -12,22 +12,49 @@ _A hybrid graph seeded by "Megalodon" that combines its references, citers, and 
 
 After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
-Public beta, pre-1.0: export formats, cache layouts, and defaults may change between revisions. Runs on macOS, Linux, and Windows.
-
 ## Quick start
 
-Install PyTorch for your hardware first with the [official selector](https://pytorch.org/get-started/locally/), or pip may resolve a build you did not intend. Then install from GitHub (no PyPI release yet):
+Python >= 3.10. There is no PyPI release yet, so install from GitHub. The embedding and hybrid strategies need PyTorch: install the build for your hardware first with the [official selector](https://pytorch.org/get-started/locally/), or pip may resolve a build you did not intend.
 
 ```bash
 pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
 citemesh --help
 ```
 
-Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly exports), `recommended` (both), `all` (adds dev tooling). Omit the extra for the citation/recommendation-only CLI. For an editable development checkout, run `pip install -e ".[all]"`.
+Extras: `embeddings` (embedding and hybrid strategies), `viz` (html, plotly, and dashboard exports), `recommended` (both), `all` (adds dev tooling). Without an extra, the citation and recommendation strategies export png, json, csv, bibtex, and graphml. For an editable development checkout, run `pip install -e ".[all]"`. Embedding dependencies and device requirements are in [Embedding Runtime](docs/reference/embedding-runtime.md#dependency-floor).
 
-Python >= 3.10. For embedding dependencies and device requirements, see [Embedding Runtime](docs/reference/embedding-runtime.md#dependency-floor).
+### Build a graph
 
-For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#troubleshooting). When Semantic Scholar omits a seed's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
+```bash
+citemesh build "arxiv:1706.03762" --export dashboard
+citemesh view
+```
+
+The first command builds from Semantic Scholar recommendations, the default strategy, and writes `out/dashboard.html` (a viewer that opens from the local filesystem) and `out/dashboard.citemesh.json` (the data package behind it). `citemesh view` opens the dashboard in your browser. Building another seed with `--export dashboard` adds it to the same collection. Without `--export`, a build writes a static PNG. See [Output Artifacts](docs/reference/output-artifacts.md#output-location) for output naming and collections.
+
+The seed can be a DOI, an arXiv ID or URL, or a Semantic Scholar paper ID. To find one, run `citemesh search "attention mechanism transformers"`.
+
+### Choose a strategy
+
+| Strategy | Candidates come from | Needs the `embeddings` extra |
+| --- | --- | --- |
+| `recommendation` (default) | Semantic Scholar recommendations | no |
+| `citation` | the seed's references and citers | no |
+| `embedding` | Semantic Scholar candidates, or a downloaded arXiv corpus | yes |
+| `hybrid` | the seed's references and citers plus Semantic Scholar recommendations or corpus neighbors, all ranked by [rank fusion](docs/guides/how-it-works.md#5-ranking-and-selection) | yes |
+
+```bash
+# Semantic Scholar recommendations (the default)
+citemesh build "arxiv:1706.03762"
+
+# Rank the seed's references, citers, and S2 recommendations with local embeddings
+citemesh build "arxiv:1706.03762" --strategy hybrid --export all
+
+# Embedding search over a downloaded arXiv corpus
+citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
+```
+
+`--semantic-source arxiv-corpus` swaps Semantic Scholar's candidates for the seed's nearest neighbors in a downloaded arXiv corpus; hybrid still takes the seed's references and citers from Semantic Scholar. The first semantic build downloads the [embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback), and later runs [reuse stored vectors](docs/guides/caching.md). The [strategy guide](docs/guides/strategies.md) compares them in detail.
 
 ### Reuse the public arXiv index
 
@@ -46,24 +73,25 @@ citemesh build "arxiv:2610.26830" --strategy embedding --cache-namespace NAMESPA
 
 Import needs no GPU or model weights. Queries and graph similarity still use the index's pinned embedding model locally. See [portable corpus indexes](docs/guides/caching.md#portable-corpus-indexes) for storage, selection, and resume details.
 
-### Run one graph
+### Commands
 
-Builds default to Semantic Scholar recommendations. Local embeddings are opt-in with `--strategy embedding` or `--strategy hybrid`; add `--semantic-source arxiv-corpus` to search a downloaded arXiv corpus instead of S2 candidates. For embedding, the corpus replaces the S2 candidates. For hybrid, it replaces only the S2 recommendations with the seed's nearest corpus neighbors: the seed's references and citers stay in the pool, and hybrid ranks everything by [rank fusion](docs/guides/how-it-works.md#5-ranking-and-selection). Any of these can be saved as personal defaults ([user configuration](docs/guides/configuration.md)).
+| Command | What it does |
+| --- | --- |
+| `citemesh build PAPER` | Build a graph from a paper ID, or from free text with `--strategy embedding`. |
+| `citemesh search QUERY` | Find a seed paper by local semantic search or Semantic Scholar keyword search. |
+| `citemesh view [PATH]` | Open a saved dashboard in a browser. |
+| `citemesh cache` | `scan`, `clear`, `import`, `export`, and `refresh` the data CiteMesh stores. |
+| `citemesh config` | Save personal defaults; see [user configuration](docs/guides/configuration.md). |
 
-```bash
-# Default: Semantic Scholar recommendations
-citemesh build "arxiv:1706.03762"
+Every flag is in `citemesh COMMAND --help` and the [CLI guide](docs/guides/cli.md). Every key you can save as a default is in the [config reference](docs/reference/config/config_reference.toml), with an [example config](docs/reference/config/example.toml) to start from.
 
-# Rank the seed's references, citers, and S2 recommendations with local embeddings
-citemesh build "arxiv:1706.03762" --strategy hybrid --export all
+## Limits
 
-# Embedding search over a downloaded arXiv corpus
-citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
-```
-
-The first semantic build downloads the [embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback); later runs [reuse stored vectors](docs/guides/caching.md). See [Output Artifacts](docs/reference/output-artifacts.md#output-location) for output naming and collections.
-
-Every key you can save as a default is in the [config reference](docs/reference/config/config_reference.toml), with an [example config](docs/reference/config/example.toml) to start from.
+- **Pre-1.0 public beta.** Export formats, cache layouts, and defaults may change between revisions. CiteMesh runs on macOS, Linux, and Windows.
+- **Semantic Scholar sets the pace.** Seed lookup and most candidate collection go through its API, which rate-limits clients and can return HTTP 429. CiteMesh retries with backoff; [configure an API key](docs/guides/configuration.md#api-key) for steadier builds. Anonymous builds share a 90-second recovery budget, and a total outage fails a citation or hybrid build instead of emitting a seed-only graph ([retry policy](docs/guides/cli.md#troubleshooting)).
+- **Thin provider coverage gives thin graphs.** Recommendation depends on what Semantic Scholar recommends for the seed. When it omits a seed's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
+- **Graphs are sparse by design.** Each paper keeps only its few strongest links (3 for recommendation and citation, 4 by default for embedding, 5 for hybrid), so the graph shows the closest relations rather than every one ([edge scoring](docs/guides/how-it-works.md#6-edge-scoring)).
+- **Semantic strategies need a model and hardware.** They download the embedding model on first use, and encoding all 3.2M arXiv papers yourself is a long GPU job, which is why the precomputed index exists. That index covers arXiv papers only.
 
 ## How it works
 
@@ -73,7 +101,7 @@ Follow the pipeline in [How CiteMesh builds a graph](docs/guides/how-it-works.md
 
 ## Contributing
 
-Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues).
+Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues). Development setup and checks are in [AGENTS.md](AGENTS.md).
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/CiteMesh)
 

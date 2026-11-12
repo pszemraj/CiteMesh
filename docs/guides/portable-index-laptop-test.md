@@ -1,21 +1,12 @@
 # Test a portable index on a laptop
 
-This checks that a laptop can install the published corpus without encoding it,
-retrieve from it, and build a graph for a new paper. Run the same
-checks on either or both machines.
+This checks that a laptop can install the published corpus without encoding it, retrieve from it, and build a graph for a new paper. Run the same checks on either or both machines.
 
 ## Choose the input
 
-Use a completed full-coverage portable index with at least eight active papers
-and a [supported embedding model](../reference/embedding-runtime.md#model-selection-and-fallback).
-Get either a local export directory or a readable Storage Bucket from its
-publisher. Check its manifest for the model, dimension, stored dtype, source
-revision, and coverage; allow space for both the portable files and native cache,
-plus model weights.
+Use a completed full-coverage portable index with at least eight active papers and a [supported embedding model](../reference/embedding-runtime.md#model-selection-and-fallback). Get either a local export directory or a readable Storage Bucket from its publisher. Check its manifest for the model, dimension, stored dtype, source revision, and coverage; allow space for both the portable files and native cache, plus model weights.
 
-Import needs no GPU or model weights. Search and graph building use the index's
-pinned encoder; their first run may download it. No upstream corpus download or
-corpus encoding should occur.
+Import needs no GPU or model weights. Search and graph building use the index's pinned encoder; their first run may download it. No upstream corpus download or corpus encoding should occur.
 
 ## 1. Install from a checkout
 
@@ -26,10 +17,7 @@ git clone https://github.com/pszemraj/CiteMesh.git citemesh-index-test
 cd citemesh-index-test
 ```
 
-Use your usual Python environment and install a PyTorch wheel for your hardware
-with the [official selector](https://pytorch.org/get-started/locally/). Supported
-versions are listed in [Embedding Runtime](../reference/embedding-runtime.md#dependency-floor).
-Then install:
+Use your usual Python environment and install a PyTorch wheel for your hardware with the [official selector](https://pytorch.org/get-started/locally/). Supported versions are listed in [Embedding Runtime](../reference/embedding-runtime.md#dependency-floor). Then install:
 
 ```bash
 pip install -e ".[recommended]"
@@ -43,17 +31,13 @@ python -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.cuda.
 | Windows with NVIDIA GPU | `cuda` | CUDA prints `True` |
 | Intel MacBook Air or CPU-only test | `cpu` | Accelerator availability is not required |
 
-If the intended accelerator is unavailable, resolve the installation/device
-issue before calling that accelerator test a pass. CPU can be tested separately.
-For a non-NVIDIA Windows GPU, use CPU; CiteMesh has no DirectML backend.
+If the intended accelerator is unavailable, resolve the installation/device issue before calling that accelerator test a pass. CPU can be tested separately. For a non-NVIDIA Windows GPU, use CPU; CiteMesh has no DirectML backend.
 
-For a private bucket, follow the [bucket authentication instructions](caching.md#import-and-selection).
-A local export needs no bucket credentials.
+For a private bucket, follow the [bucket authentication instructions](caching.md#import-and-selection). A local export needs no bucket credentials.
 
 ## 2. Import into a fresh cache
 
-A fresh root avoids an occupied legacy namespace blocking the import. Set this
-once in the terminal used for every command below. Existing caches stay intact.
+A fresh root avoids an occupied legacy namespace blocking the import. Set this once in the terminal used for every command below. Existing caches stay intact.
 
 macOS:
 
@@ -74,10 +58,7 @@ citemesh cache import --bucket OWNER/INDEX --config CONFIG --log-file index-impo
 citemesh cache scan
 ```
 
-Replace `OWNER/INDEX` and `CONFIG` with the publication's values. This selects
-the current snapshot; add `--snapshot SNAPSHOT_ID` to select a retained snapshot.
-For a local export, replace the import command with
-`citemesh cache import --path ./arxiv-index --log-file index-import.log`.
+Replace `OWNER/INDEX` and `CONFIG` with the publication's values. This selects the current snapshot; add `--snapshot SNAPSHOT_ID` to select a retained snapshot. For a local export, replace the import command with `citemesh cache import --path ./arxiv-index --log-file index-import.log`.
 
 **Pass:** import reports a namespace; scan shows ready, certified membership and the manifest's active row count, dimension, dtype, source revision, and origin. Import performs data transfer and, for int8, local binary-index reconstruction, with no model loading or calibration. Record the namespace and snapshot identity, and replace `NAMESPACE` in every example below. Keep the local snapshot or completed download available for repeat tests; remote snapshots may be pruned. See [Resume and adoption](caching.md#resume-and-adoption) for resume behavior and [Publishing](caching.md#publishing) for snapshot retention.
 
@@ -90,24 +71,13 @@ citemesh search "long-context language models and efficient attention" --mode lo
 citemesh search "long-context language models and efficient attention" --mode local --cache-namespace NAMESPACE --device mps --corpus-size 8 --limit 5
 ```
 
-**Pass:** both return scored papers, use the requested device and selected
-namespace, and never begin corpus hydration or source refresh. The second query
-searches only the eight newest members. Repeat the first command to check warm
-reuse. Different devices may produce slightly different scores/orderings.
+**Pass:** both return scored papers, use the requested device and selected namespace, and never begin corpus hydration or source refresh. The second query searches only the eight newest members. Repeat the first command to check warm reuse. Different devices may produce slightly different scores/orderings.
 
 ## 4. Build from an unseen paper's title and abstract
 
-Choose a real new arXiv paper absent from the snapshot, or an unpublished draft
-whose contents were never indexed. A new identifier assigned to an old indexed
-paper does not establish unseen content. For arXiv use its canonical,
-versionless `arxiv:<id>` identifier. For a draft use a unique `draft:<name>` ID.
+Choose a real new arXiv paper absent from the snapshot, or an unpublished draft whose contents were never indexed. A new identifier assigned to an old indexed paper does not establish unseen content. For arXiv use its canonical, versionless `arxiv:<id>` identifier. For a draft use a unique `draft:<name>` ID.
 
-Create the output directory, then save its real metadata as
-`out/unseen-paper.json`, replacing every placeholder:
-
-```bash
-python -c "from pathlib import Path; Path('out').mkdir(exist_ok=True)"
-```
+Create an `out` directory, then save its real metadata as `out/unseen-paper.json`, replacing every placeholder:
 
 ```json
 {
@@ -118,11 +88,7 @@ python -c "from pathlib import Path; Path('out').mkdir(exist_ok=True)"
 }
 ```
 
-Save the following as `out/test-unseen-paper.py`, then run
-`python out/test-unseen-paper.py`. Set `DEVICE` for the machine. This uses supplied
-metadata and skips optional citation-count enrichment, so a brand-new paper need
-not already be discoverable through Semantic Scholar. It exercises the actual
-pinned encoder, imported corpus retrieval, and separate graph embedding cache.
+Save the following as `out/test-unseen-paper.py`, then run `python out/test-unseen-paper.py`. Set `DEVICE` for the machine. This uses supplied metadata and skips optional citation-count enrichment, so a brand-new paper need not already be discoverable through Semantic Scholar. It exercises the actual pinned encoder, imported corpus retrieval, and separate graph embedding cache.
 
 ```python
 import json
@@ -194,40 +160,23 @@ for cap in (None, 8):
     print(label, "PASS", runtime)
 ```
 
-**Pass:** both runs print `PASS`. Each dashboard contains the actual unseen seed
-and five papers from the installed corpus. The full and newest-eight views leave
-the retrieval corpus and source provenance unchanged; graph vectors occupy a
-separate float32 namespace. Repeating the script should reuse graph vectors.
-Open both dashboard files and confirm titles, abstracts, and navigation work.
+**Pass:** both runs print `PASS`. Each dashboard contains the actual unseen seed and five papers from the installed corpus. The full and newest-eight views leave the retrieval corpus and source provenance unchanged; graph vectors occupy a separate float32 namespace. Repeating the script should reuse graph vectors. Open both dashboard files and confirm titles, abstracts, and navigation work.
 
-The Python selection API is subject to
-the project's [pre-1.0 API policy](python-api.md).
+The Python selection API is subject to the project's [pre-1.0 API policy](python-api.md).
 
 ## 5. Check normal identifier-based CLI use
 
-Once Semantic Scholar resolves that paper with the correct title and abstract,
-replace `arxiv:YOUR_REAL_ID` and the device in this command:
+Once Semantic Scholar resolves that paper with the correct title and abstract, replace `arxiv:YOUR_REAL_ID` and the device in this command:
 
 ```bash
 citemesh build arxiv:YOUR_REAL_ID --strategy embedding --cache-namespace NAMESPACE --device mps --all-corpus --max-papers 6 --min-semantic-similarity 0 --export dashboard --export json --output out/unseen-cli --verbose --log-file unseen-cli.log
 citemesh cache scan
 ```
 
-**Pass:** the output contains the real paper as seed and corpus neighbors. A
-`query:` seed containing only the unresolved identifier is not a pass for this
-paper-metadata test. If the provider does not know the paper yet, use step 4;
-that is a metadata-acquisition limitation rather than an index failure.
-Do not refresh/rebuild the corpus just to query a new seed.
+**Pass:** the output contains the real paper as seed and corpus neighbors. A `query:` seed containing only the unresolved identifier is not a pass for this paper-metadata test. If the provider does not know the paper yet, use step 4; that is a metadata-acquisition limitation rather than an index failure. Do not refresh/rebuild the corpus just to query a new seed.
 
 ## Record each laptop's result
 
-Record the checkout commit, namespace, snapshot identity, source revision and
-coverage, model contract, OS, RAM, GPU, Python/torch versions, requested and
-actual device, import time, first/warm search time, and pass/fail for full/capped
-unseen-paper builds. Keep `index-import.log`, `index-search.log`, `unseen-cli.log`, the printed
-runtime metadata, and the generated JSON/dashboard outputs. Note optional
-provider failures separately from index/model failures.
+Record the checkout commit, namespace, snapshot identity, source revision and coverage, model contract, OS, RAM, GPU, Python/torch versions, requested and actual device, import time, first/warm search time, and pass/fail for full/capped unseen-paper builds. Keep `index-import.log`, `index-search.log`, `unseen-cli.log`, the printed runtime metadata, and the generated JSON/dashboard outputs. Note optional provider failures separately from index/model failures.
 
-Compare semantic relevance across machines rather than requiring bit-identical
-CPU/MPS/CUDA results. Across query/build checks, no corpus-wide encoding,
-calibration, source refresh, or retrieval-row growth should occur.
+Compare semantic relevance across machines rather than requiring bit-identical CPU/MPS/CUDA results. Across query/build checks, no corpus-wide encoding, calibration, source refresh, or retrieval-row growth should occur.
