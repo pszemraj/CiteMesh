@@ -58,4 +58,8 @@ Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31
 - The seed's reference list comes from the provider, and the arXiv bibliography is read only when the provider returns none. The provider's list can omit a few references (one to five on ten of the sixteen seeds), which then rank without their direct-citation evidence. Without the local index, bibliography recovery resolves only entries that carry an explicit identifier.
 - A publication and its preprint are folded when they share an identifier, or when title and first author agree and the publication year is the preprint's or the next. A version republished under a different title is not recognized and can take a second slot; one such pair appeared across the 48 validation builds (16 seeds in three modes).
 
+## Possible follow-ups
+
+- Compare with the hosted literature-mapping tool on held-out seeds. Its exports exist only for the five development seeds, so the comparison above rests on seeds the design was chosen on. Exporting its graphs for some of the eleven held-out seeds and grading them with the same judge would show whether the lead holds on seeds that played no part in the design.
+
 The supported behavior is described in [strategies](../guides/strategies.md#hybrid) and [how it works](../guides/how-it-works.md#5-ranking-and-selection).
