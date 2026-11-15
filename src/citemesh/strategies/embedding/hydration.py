@@ -1001,7 +1001,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             )
         # Older resume code could memoize a deficit without reconciling IDs.
         cache.clear_hydration_rowcount_reconciliation()
-        cache.mark_corpus_metadata_current()
+        cache.mark_corpus_metadata_current(identities_current=False)
 
     def _resume_incomplete_full_corpus_cache(
         self,

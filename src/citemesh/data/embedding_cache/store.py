@@ -1048,14 +1048,18 @@ class EmbeddingCache(
         metadata = self._read_cache_metadata()
         return metadata.get(CORPUS_METADATA_VERSION_KEY) == CORPUS_METADATA_VERSION
 
-    def mark_corpus_metadata_current(self) -> None:
-        """Record successful corpus metadata hydration or backfill."""
-        self._write_cache_metadata(
-            {
-                CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION,
-                CORPUS_IDENTITY_VERSION_KEY: CORPUS_IDENTITY_VERSION,
-            }
-        )
+    def mark_corpus_metadata_current(self, *, identities_current: bool = True) -> None:
+        """Record successful corpus metadata hydration or backfill.
+
+        :param bool identities_current: Whether every row also carries a current
+            source identity, as after hydrating an empty namespace. A backfill of
+            an older cache passes ``False`` and leaves the identity marker to the
+            identity reconciliation, which may still be deferred.
+        """
+        values = {CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION}
+        if identities_current:
+            values[CORPUS_IDENTITY_VERSION_KEY] = CORPUS_IDENTITY_VERSION
+        self._write_cache_metadata(values)
 
     def update_corpus_metadata(
         self, papers: Sequence[CorpusMetadataUpdateValues]

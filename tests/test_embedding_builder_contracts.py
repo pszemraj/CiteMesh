@@ -7947,6 +7947,68 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     clear.assert_not_called()
 
 
+def test_deferred_identity_check_survives_the_metadata_migration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A positional-ID check deferred for lack of a source commit stays due.
+
+    :param pytest.MonkeyPatch monkeypatch: Unresolvable source, readable rows.
+    :return None: Asserts the identity check still runs on a later build.
+    """
+    source = "fixture/anonymous"
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+        corpus_size=None,
+        dataset_source=source,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    model = ConstantEncodeModel()
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    records = [
+        {"title": "First paper", "abstract": "A"},
+        {"title": "Second paper", "abstract": "B"},
+    ]
+    metadata = [_extract_dataset_paper_metadata(r, i) for i, r in enumerate(records)]
+    for index, item in enumerate(metadata):
+        item["paper_id"] = f"arxiv_{index}"
+    builder._cache_metadata_batch(metadata)
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=source, dataset_split="train", corpus_size=None, complete=True
+    )
+    # Hydrated before identity, metadata, and revision markers existed.
+    cache._write_cache_metadata(
+        {"corpus_identity_version": "", "corpus_metadata_version": ""}
+    )
+    cache.set_hydration_rowcount_reconciliation(upstream_rows=2, cached_rows=2)
+
+    def unresolvable(*_args: object, **_kwargs: object) -> CorpusSource:
+        raise OSError("dataset_info unavailable")
+
+    monkeypatch.setattr(corpus_source_module, "resolve_source_snapshot", unresolvable)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _s, *, revision: 2
+    )
+    load = MagicMock(
+        side_effect=lambda *_a, **_k: _FakeIndexableDataset(
+            records, ["title", "abstract"]
+        )
+    )
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.needs_corpus_identity_reconciliation()
+    assert cache.has_current_corpus_metadata()
+    assert cache.get_hydration_source_revision() is None
+
+
 @pytest.mark.parametrize("unchanged_source_row", [False, True])
 def test_legacy_summary_upgrade_does_not_guess_between_distinct_works(
     monkeypatch: pytest.MonkeyPatch, unchanged_source_row: bool
