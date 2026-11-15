@@ -2756,8 +2756,8 @@ def test_capped_selection_alternates_seed_slots_with_direct_links(
     assert {u if v == "seed" else v for u, v, _ in selected} == expected
 
 
-def test_hybrid_seed_citation_pairs_pass_the_edge_gate() -> None:
-    """A seed reference qualifies for an edge without embedding or coupling support."""
+def test_hybrid_seed_citation_pairs_pass_the_gate_and_keep_the_basic_floor() -> None:
+    """A seed reference skips the embedding gate and the seed floor, not the 0.2 floor."""
     builder = HybridGraphBuilder(client=MagicMock())
     seed = Paper(paper_id="seed", title="Algebra", abstract="Rings", year=2024)
     seed.is_seed = True
@@ -2769,10 +2769,21 @@ def test_hybrid_seed_citation_pairs_pass_the_edge_gate() -> None:
     builder.seed_relations = {"seed": "seed", "cited": "semantic_only"}
     assert builder.compute_similarity(seed, cited) == 0.0
 
-    for relation in ("referenced_by_seed", "cites_seed", "overlap"):
+    relations = ("referenced_by_seed", "cites_seed", "overlap")
+    for relation in relations:
         builder.seed_relations["cited"] = relation
         score = builder.compute_similarity(seed, cited)
-        assert score > 0.0
+        assert 0.0 < score < 0.2
+        assert not builder.should_create_edge(seed, cited, score)
+
+    # Cosine 0.6, five years apart: below the 0.4 seed floor, above the 0.2 floor.
+    builder.embedding_builder.embeddings["cited"] = np.asarray(
+        [0.6, 0.8], dtype=np.float32
+    )
+    for relation in relations:
+        builder.seed_relations["cited"] = relation
+        score = builder.compute_similarity(seed, cited)
+        assert 0.2 <= score <= 0.4
         assert builder.should_create_edge(seed, cited, score)
         assert builder.should_create_edge(cited, seed, score)
 

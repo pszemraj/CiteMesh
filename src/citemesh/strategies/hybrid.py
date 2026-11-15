@@ -975,14 +975,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param float similarity: Computed similarity
         :return bool: True if edge should be created
         """
-        # The seed's own references and citers always qualify; they take every
-        # other seed slot, and the seed's degree cap bounds how many are kept.
-        if self._is_seed_citation_pair(paper1, paper2):
-            return similarity > 0.0
-
         # Basic threshold
         if similarity < 0.2:
             return False
+
+        # The seed's own references and citers need only the basic threshold;
+        # they take every other seed slot, and the seed's degree cap bounds how
+        # many are kept.
+        if self._is_seed_citation_pair(paper1, paper2):
+            return True
 
         # Seed paper: always connect if above threshold
         if paper1.is_seed or paper2.is_seed:
