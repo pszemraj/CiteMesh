@@ -1406,12 +1406,16 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             corpus_size=resumed_corpus_size,
         )
         # A full-source pass sees every listed ID, so cached IDs it never sees
-        # are papers the current source no longer lists.
-        unlisted_paper_ids = (
-            self.embedding_cache.get_cached_paper_ids()
-            if resumed_corpus_size is None
-            else None
-        )
+        # are papers the current source no longer lists. A positional legacy row
+        # is listed under its content alias, so the aliases are tracked too.
+        legacy_aliases: dict[str, set[str]] = {}
+        unlisted_paper_ids: set[str] | None = None
+        if resumed_corpus_size is None:
+            legacy_aliases = self.embedding_cache.get_legacy_corpus_identity_aliases(
+                _anonymous_dataset_paper_id
+            )
+            unlisted_paper_ids = self.embedding_cache.get_cached_paper_ids()
+            unlisted_paper_ids.update(legacy_aliases)
         resume_result = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
@@ -1441,6 +1445,11 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 updated_rows,
                 resumed_corpus_size,
             )
+        if unlisted_paper_ids:
+            for alias, paper_ids in legacy_aliases.items():
+                if alias not in unlisted_paper_ids:
+                    unlisted_paper_ids.difference_update(paper_ids)
+            unlisted_paper_ids.difference_update(legacy_aliases)
         if unlisted_paper_ids:
             logger.warning(
                 "Kept %d cached papers that the current source for %s/%s no "

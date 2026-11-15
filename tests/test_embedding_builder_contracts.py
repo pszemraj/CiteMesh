@@ -7812,6 +7812,7 @@ def test_exact_hydration_slice_preserves_content_identity_across_offsets(
 @pytest.mark.parametrize("source_ids", [False, True])
 def test_anonymous_corpus_rows_survive_source_reordering(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     corpus_size: int | None,
     use_streaming: bool,
     legacy_ids: bool,
@@ -7822,6 +7823,7 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     """Front insertion must admit the new paper and retain every existing vector.
 
     :param pytest.MonkeyPatch monkeypatch: Isolated source and encoding fixtures.
+    :param pytest.LogCaptureFixture caplog: Warnings about unlisted papers.
     :param Optional[int] corpus_size: Full or capped source selection.
     :param bool use_streaming: Whether the source yields one-shot records.
     :param bool legacy_ids: Whether existing rows still use positional identities.
@@ -7937,6 +7939,9 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     assert cache.get_hydration_source_revision() == (
         None if follows_upstream else SOURCE_COMMIT
     )
+    # The source still lists every cached paper, positional legacy rows
+    # included under their content aliases.
+    assert "no longer lists" not in caplog.text
     model.encode.reset_mock()
     load.reset_mock()
 
