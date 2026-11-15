@@ -97,11 +97,14 @@ def _run(argv: Sequence[str] | None) -> int:
     parser, build_parser, cache_parser, config_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
-    _configure_logging(
-        log_level=args.log_level,
-        log_width=args.log_width,
-        log_file=getattr(args, "log_file", None),
-    )
+    try:
+        _configure_logging(
+            log_level=args.log_level,
+            log_width=args.log_width,
+            log_file=getattr(args, "log_file", None),
+        )
+    except OSError as exc:
+        parser.error(f"cannot write --log-file {exc.filename}: {exc.strerror}")
     provided_build_options = _pop_tracked_option_dests(args)
 
     if not args.command:
@@ -165,7 +168,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(argv)
         finally:
             # Buffered output reaches a closed pipe here, not during shutdown.
-            sys.stdout.flush()
+            # stdout is None when the process started with descriptor 1 closed.
+            if sys.stdout is not None:
+                sys.stdout.flush()
     except KeyboardInterrupt:
         logger.info("Interrupted.")
         return 130

@@ -11,6 +11,7 @@ from typing import TypedDict, cast
 
 from rich.text import Text
 
+from citemesh.core.text_normalization import normalize_text
 from citemesh.data.embedding_cache import EmbeddingCache, _corpus_size_from_token
 from citemesh.data.embedding_cache.lifecycle import installed_corpus_namespaces
 from citemesh.data.embedding_contract import InstalledCorpusError
@@ -419,7 +420,8 @@ def _render_local_search(
         rows.append(
             (
                 str(result.paper_id),
-                str(metadata.get("title") or ""),
+                # Corpus titles keep arXiv's hard wraps; show them as exports do.
+                normalize_text(str(metadata.get("title") or "")),
                 [str(name) for name in (metadata.get("authors") or [])],
                 metadata.get("year"),
                 f"{float(result.score):.3f}",

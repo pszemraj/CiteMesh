@@ -46,5 +46,5 @@ Request a key through [Semantic Scholar](https://www.semanticscholar.org/product
 
 - CiteMesh rewrites it with mode `0600` because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
 - Mutations serialize on a file lock, fail after 10 seconds rather than overwrite, and refuse to clobber an unreadable file. Ordinary reads skip what they cannot use with a warning, as the reference header describes, so a broken config never blocks other commands.
-- Unknown keys survive a rewrite; comments do not, since the TOML round-trip is value-level.
+- Unknown keys, such as one a later version removed, load with a warning and survive a rewrite; `citemesh config unset` removes one from the file. Comments do not survive, since the TOML round-trip is value-level.
 - To reset, use `citemesh config unset` per key, or delete the path printed by `citemesh config path`. `citemesh cache clear` keeps the file; see [cache maintenance](caching.md#inspecting-and-clearing).
