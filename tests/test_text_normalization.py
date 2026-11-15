@@ -24,6 +24,14 @@ CLEAN_TITLE = "Megalodon: Efficient LLM Pretraining with Unlimited Context Lengt
         ("x  y\t\r\nz", "x y z"),
         ("O(n²) $\\times$ α, Erdős, 日本語", None),
         ("  ", ""),
+        # Pins the policy beyond the fingerprint probes: compatibility characters
+        # survive (NFC, not NFKC), minus signs fold to "-", accents compose. A
+        # change here changes the embedded text, so the probes must change too.
+        (
+            "Scaling x² ﬁne ＡＢＣ at 10⁻³, W⁻¹ − x₋₁ \U0001f642 é",
+            "Scaling x² ﬁne ＡＢＣ at 10-³, W-¹ - x-₁ \U0001f642 é",
+        ),
+        ("caf\udce9 ok", "caf? ok"),
     ],
 )
 def test_normalize_text_cleans_layout_and_invisibles_but_keeps_content(
