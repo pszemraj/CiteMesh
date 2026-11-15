@@ -96,6 +96,19 @@ logger = logging.getLogger(__name__)
 ProgressWrapper = Callable[[Sequence[PaperRequest], str], Iterable[PaperRequest]]
 
 
+def _source_revision_token(revision: str | None) -> str:
+    """Return the stored form of a pinned source commit, empty for no pin.
+
+    :param Optional[str] revision: Immutable source commit, or ``None``.
+    :return str: Stripped commit, or ``""`` for ``None``.
+    :raises ValueError: If ``revision`` is blank.
+    """
+    normalized = "" if revision is None else str(revision).strip()
+    if revision is not None and not normalized:
+        raise ValueError("revision must be a non-empty string or None.")
+    return normalized
+
+
 class EmbeddingCache(
     _LifecycleMixin, _IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin
 ):
@@ -701,7 +714,9 @@ class EmbeddingCache(
         metadata = self._read_cache_metadata()
         return metadata.get(CORPUS_IDENTITY_VERSION_KEY) != CORPUS_IDENTITY_VERSION
 
-    def prepare_corpus_identity_reconciliation(self) -> bool:
+    def prepare_corpus_identity_reconciliation(
+        self, source_revision: str | None = None
+    ) -> bool:
         """Prepare one source reconciliation for caches with positional-looking IDs.
 
         Historical generated IDs and real source IDs may both use the
@@ -709,6 +724,8 @@ class EmbeddingCache(
         make a pre-marker cache incomplete when any such row exists so the
         hydration layer reconciles it once against current source identities.
 
+        :param Optional[str] source_revision: Commit the reconciliation reads,
+            pinned in the same write that marks the cache incomplete.
         :return bool: Whether positional-looking rows require reconciliation.
         """
         with self._locked_connection() as conn:
@@ -727,6 +744,10 @@ class EmbeddingCache(
             values = {CORPUS_IDENTITY_VERSION_KEY: CORPUS_IDENTITY_VERSION}
             if requires_reconciliation:
                 values[HYDRATION_COMPLETE_KEY] = "0"
+                if source_revision is not None:
+                    values[HYDRATION_SOURCE_REVISION_KEY] = _source_revision_token(
+                        source_revision
+                    )
             self._set_cache_metadata(conn, values)
         return requires_reconciliation
 
@@ -1015,10 +1036,9 @@ class EmbeddingCache(
         :param Optional[str] revision: Immutable source commit, or ``None``.
         :raises ValueError: If ``revision`` is blank.
         """
-        normalized = "" if revision is None else str(revision).strip()
-        if revision is not None and not normalized:
-            raise ValueError("revision must be a non-empty string or None.")
-        self._write_cache_metadata({HYDRATION_SOURCE_REVISION_KEY: normalized})
+        self._write_cache_metadata(
+            {HYDRATION_SOURCE_REVISION_KEY: _source_revision_token(revision)}
+        )
 
     def has_current_corpus_metadata(self) -> bool:
         """Return whether corpus years, DOIs and venues use the current adapter.
@@ -1168,6 +1188,7 @@ class EmbeddingCache(
         corpus_size: int | None,
         *,
         complete: bool,
+        source_revision: str | None = None,
     ) -> None:
         """Persist hydration metadata for cache-native retrieval routing.
 
@@ -1175,6 +1196,9 @@ class EmbeddingCache(
         :param str dataset_split: Dataset split used for hydration.
         :param Optional[int] corpus_size: Corpus-size cap used for hydration.
         :param bool complete: Whether hydration completed successfully.
+        :param Optional[str] source_revision: Commit to pin in the same write,
+            so an incomplete mark never lands without the commit a resume reads.
+            ``None`` leaves the recorded pin unchanged.
         :raises ValueError: If ``dataset_source`` is missing or blank.
         """
         normalized_source = (
@@ -1186,16 +1210,19 @@ class EmbeddingCache(
         # too. ``None`` is rejected rather than coerced, which would store "None".
         if not normalized_source:
             raise ValueError("dataset_source must be non-empty for hydration metadata.")
-        self._write_cache_metadata(
-            {
-                HYDRATION_DATASET_SOURCE_KEY: normalized_source,
-                HYDRATION_SPLIT_KEY: dataset_split,
-                HYDRATION_CORPUS_SIZE_KEY: _corpus_size_token(corpus_size),
-                HYDRATION_COMPLETE_KEY: "1" if complete else "0",
-                HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY: "",
-                HYDRATION_RECONCILED_CACHE_ROWS_KEY: "",
-            }
-        )
+        values = {
+            HYDRATION_DATASET_SOURCE_KEY: normalized_source,
+            HYDRATION_SPLIT_KEY: dataset_split,
+            HYDRATION_CORPUS_SIZE_KEY: _corpus_size_token(corpus_size),
+            HYDRATION_COMPLETE_KEY: "1" if complete else "0",
+            HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY: "",
+            HYDRATION_RECONCILED_CACHE_ROWS_KEY: "",
+        }
+        if source_revision is not None:
+            values[HYDRATION_SOURCE_REVISION_KEY] = _source_revision_token(
+                source_revision
+            )
+        self._write_cache_metadata(values)
 
     def clear(self, reason: str | None = None) -> None:
         """Purge cache artifacts for this cache namespace.

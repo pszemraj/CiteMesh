@@ -479,8 +479,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         That reconciliation runs as a resume of the now-incomplete cache, and a
         resume reads a pinned revision. A complete cache hydrated before
         revisions were recorded is therefore pinned to the current source
-        commit, resolved before the cache is marked incomplete; while that
-        lookup fails, the check waits for a later build.
+        commit, in the same write that marks it incomplete; while that commit
+        cannot be resolved, the check waits for a later build.
         """
         cache = self.embedding_cache
         revision: str | None = None
@@ -499,14 +499,11 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                     exc,
                 )
                 return
-        if not cache.prepare_corpus_identity_reconciliation():
-            return
-        logger.debug(
-            "Rechecking legacy corpus membership by stable content "
-            "identity while preserving existing paper IDs and vectors."
-        )
-        if revision is not None:
-            cache.set_hydration_source_revision(revision)
+        if cache.prepare_corpus_identity_reconciliation(source_revision=revision):
+            logger.debug(
+                "Rechecking legacy corpus membership by stable content "
+                "identity while preserving existing paper IDs and vectors."
+            )
 
     def _ready_manual_corpus(self) -> bool:
         """Bind a ready managed corpus and validate its requested source and view.
@@ -791,8 +788,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             dataset_split=self.dataset_split,
             corpus_size=self.corpus_size,
             complete=False,
+            source_revision=revision,
         )
-        self.embedding_cache.set_hydration_source_revision(revision)
         # The cleared namespace contains only rows from the current adapter,
         # including when this hydration is interrupted and resumed later.
         self.embedding_cache.mark_corpus_metadata_current()
@@ -2201,14 +2198,15 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 )
             return
         # The incomplete mark below makes the next build resume this scan, and a
-        # resume must read the revision the scan started from.
+        # resume must read the revision the scan started from, so both land in
+        # one write.
         revision = self._resolve_source_revision()
-        self.embedding_cache.set_hydration_source_revision(revision)
         self.embedding_cache.mark_hydrated(
             dataset_source=source,
             dataset_split=self.dataset_split,
             corpus_size=refreshed_corpus_size,
             complete=False,
+            source_revision=revision,
         )
         # Net growth can hide removals and backfills. Neither the old row count
         # nor equality after a tail append establishes current source coverage.
