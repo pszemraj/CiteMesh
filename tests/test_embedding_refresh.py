@@ -578,6 +578,54 @@ def test_adoption_defaults_to_the_pinned_hydration_revision(
     assert builder.embedding_cache.get_hydration_source_revision() == target
 
 
+def test_plain_adoption_resumes_an_interrupted_adoption_at_its_target(
+    monkeypatch, runtime
+):
+    """A pending adoption's target wins over the older build pin."""
+    sources = {
+        "one": [row("2401.00001")],
+        "two": [row("2401.00001"), row("2401.00002")],
+    }
+    install_source(monkeypatch, sources, ["three"])
+    fingerprint = "hf::org/example::" + "a" * 40
+
+    def legacy_builder():
+        builder = make_builder()
+        builder.model_revision = None
+        monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+        return builder
+
+    builder = legacy_builder()
+    namespace = builder._embedding_cache_namespace(artifact_identity=fingerprint)
+    cache = builder._create_embedding_cache(namespace)
+    cache.set_model_fingerprint(fingerprint)
+    builder._load_model()
+    cache.upsert_embeddings(
+        {"arxiv:2401.00001": {"title": "2401.00001", "abstract": "body"}},
+        builder.model,
+        text_builder=builder._format_retrieval_document_metadata,
+    )
+    cache.mark_hydrated(
+        builder.dataset_source, builder.dataset_split, None, complete=True
+    )
+    cache.set_hydration_source_revision("one")
+    upsert = EmbeddingCache.upsert_embeddings
+
+    def interrupted(self, *args, **kwargs):
+        upsert(self, *args, **kwargs)
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(EmbeddingCache, "upsert_embeddings", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        adopt_legacy_cache(builder, cache.namespace_id, revision="two")
+    monkeypatch.setattr(EmbeddingCache, "upsert_embeddings", upsert)
+
+    result = adopt_legacy_cache(legacy_builder(), cache.namespace_id)
+
+    assert result["source"]["revision"] == "two"
+    assert result["active_rows"] == len(sources["two"])
+
+
 @pytest.mark.parametrize("stored_size", [None, 2])
 def test_legacy_adoption_rejects_conflicting_explicit_coverage(
     monkeypatch, runtime, stored_size

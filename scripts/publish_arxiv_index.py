@@ -41,7 +41,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-revision",
-        help="source revision; latest for new work, recorded target for interrupted work",
+        help="source revision; latest for new work, the recorded pin for interrupted "
+        "work and adoption",
     )
     parser.add_argument(
         "--model-revision", help="model revision for a new native configuration"

@@ -1335,7 +1335,8 @@ def _add_cache_arguments(
     refresh_parser.add_argument(
         "--dataset-revision",
         type=_non_empty_str,
-        help="Upstream source revision (default: latest; interrupted work resumes its pin)",
+        help="Upstream source revision (default: latest; interrupted work and "
+        "--adopt use the recorded pin when there is one)",
     )
     refresh_parser.add_argument(
         "--adopt",
