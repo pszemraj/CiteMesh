@@ -10,6 +10,8 @@ Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch
 
 Related papers were graded 0 (tangent), 1 (useful) or 2 (important) from title and abstract by a blind LLM judge that did not see which system produced a paper. The same judge graded every arm, 2,388 seed and paper pairs in all. The ranking design was chosen on an offline replay of the policy; every number below for the current hybrid comes from builds through the CLI, with each selected paper graded. Regrading hidden duplicates gave the identical grade about 85 to 96 percent of the time and never differed by two grades, and two judge models agreed on 91.5 percent of 200 pairs. An earlier set of grades from primary-source reading was about one grade more lenient and is not used for these numbers. The evaluation data lives in the ignored `local-scratch/hybrid-discovery/v2/` directory: it is machine-local and not part of the repository.
 
+The tables below were measured before embedding text was normalized with `rehuman` and the public arXiv index was rebuilt on 2026-11-12. Rerunning `both` mode on the rebuilt index gave 358 useful (74%) and 184 important (38%) of the 483 held-out papers, and 137 useful (71%) and 62 important (32%) of the 194 development slots. Twelve of those papers were new to the label set and were graded by the same model through its API. The other two modes were not rerun.
+
 ## Results on the development seeds
 
 Five development seeds, at the list sizes of a hosted literature-mapping tool's exports for the same seeds (194 slots in total). Useful counts papers graded 1 or 2; important counts papers graded 2; tangent counts papers graded 0. Every system is scored on the same 194 slots, so each count is a share of the returned list. The ranking design was chosen on these seeds.
@@ -49,7 +51,7 @@ Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31
 
 ## Limits
 
-- One judge family, reading abstracts only.
+- Related papers are graded from title and abstract. On the development seeds, a second judge family (GPT-6.1 Sol) put CiteMesh ahead of the hosted tool on every seed, and giving the judge the seed's full text on three of them raised the hosted lists by 6 to 8 useful papers of 115 and CiteMesh's by at most 1.
 - The development seeds are not independent evidence, because the ranking design was chosen on them.
 - Recall against the whole literature is not measured.
 - For seeds with more than 1,000 citers the provider returns only the most recent 1,000, so older follow-up work reaches the list only through recommendations or corpus neighbors.
