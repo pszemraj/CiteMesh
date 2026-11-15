@@ -478,19 +478,22 @@ def publish_snapshot(
             api.batch_bucket_files(
                 bucket_id, add=[(snapshot_dir / "index.json", selected_path)]
             )
-        if previous.configs.get(manifest.config_name) != selected_path:
-            api.batch_bucket_files(
-                bucket_id,
-                add=[
-                    (json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")
-                ],
-            )
-        _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
         # An owner-edited README is preserved; the generated one tracks the catalog.
+        # It moves in the same batch as the catalog, so a failed prune cannot leave
+        # it describing the previous snapshot, which a retry would then take for
+        # an owner edit.
         readme = _readme(catalog, manifests)
         generated = _readme(previous, previous_manifests)
+        updates: list[tuple[str | Path | bytes, str]] = []
+        if previous.configs.get(manifest.config_name) != selected_path:
+            updates.append(
+                (json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")
+            )
         if "README.md" not in bucket_paths or (
             readme != generated and _fetch_text(bucket_id, "README.md") == generated
         ):
-            api.batch_bucket_files(bucket_id, add=[(readme.encode(), "README.md")])
+            updates.append((readme.encode(), "README.md"))
+        if updates:
+            api.batch_bucket_files(bucket_id, add=updates)
+        _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
         return manifest.snapshot_id

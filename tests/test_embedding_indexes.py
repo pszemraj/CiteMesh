@@ -295,7 +295,7 @@ def test_publish_preserves_other_config_and_prunes_selected_config_history(
         "two": "variants/two/snapshot-two/index.json",
     }
     assert hub.uploads[0]["add"] == ["variants/one/new-snapshot/index.json"]
-    assert hub.uploads[1]["add"] == ["catalog.json"]
+    assert hub.uploads[1]["add"] == ["catalog.json", "README.md"]
     readme = (hub.root / "README.md").read_text()
     assert "[CiteMesh](https://github.com/pszemraj/CiteMesh)" in readme
     assert "independent-source" in readme
@@ -643,6 +643,9 @@ def test_failed_pruning_can_retry_without_reuploading_payload(hub, tmp_path):
         indexes.publish_snapshot("owner/index", export)
     assert indexes.resolve_publication("owner/index").snapshot_id == "new-snapshot"
     assert (hub.root / "variants/one/snapshot-one/index.json").is_file()
+    # The README moved with the catalog, so the retry cannot mistake a stale one
+    # for an owner edit and keep it.
+    assert "`new-snapshot`" in (hub.root / "README.md").read_text()
     hub.fail_delete = False
     hub.uploads.clear()
     assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"
