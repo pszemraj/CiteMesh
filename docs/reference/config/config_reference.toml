@@ -66,7 +66,7 @@ semantic_source = "candidates"
 # Only used when: strategy is embedding and semantic_source is 'candidates'. Hybrid takes whole provider lists instead.
 candidate_pool_size = 400
 
-# float, 0.0 to 1.0. Minimum embedding cosine for an edge. Hybrid also passes a pair that shares references or links the seed to its own reference or citer.
+# float, 0.0 to 1.0. Minimum embedding cosine for an edge. Hybrid also passes a pair that shares references.
 # Recommended: re-tune after changing model or truncate_dim, because 0.74 was calibrated for EmbeddingGemma at 512 dimensions (other settings log a warning).
 # See: docs/guides/how-it-works.md#6-edge-scoring and docs/reference/defaults-tuning-study.md#semantic-edge-threshold-september-2026
 min_semantic_similarity = 0.74

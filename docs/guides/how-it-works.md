@@ -97,13 +97,13 @@ The weights stop at 0.9 to leave headroom for the multiplier; temporal similarit
 
 Hybrid has provenance the embedding strategy lacks, so it scores differently:
 
-- **Gate**: a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar. A pair of the seed and one of its own references or citers always passes, since the citation is itself the evidence.
+- **Gate**: a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar.
 - **Weights** adapt over `(embedding, temporal, citation, bibliographic)`: `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed.
-- **Floors** are asymmetric: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise. A pair of the seed and one of its own references or citers needs only to clear `0.2`.
+- **Floors** are asymmetric: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
 
 Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's edges are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
 
-In hybrid the seed's slots alternate between its direct references and citers and its other neighbors, strongest first within each group and starting with a direct link, so the seed keeps both its cited neighborhood and its closest discoveries. A group with nothing left to offer yields its turns to the other.
+In hybrid the seed's slots alternate between its direct references and citers and its other neighbors, strongest first within each group and starting with a direct link, so the seed keeps both its cited neighborhood and its closest discoveries. Both groups compete only among edges that cleared the gate and the seed floor, and a group with nothing left to offer yields its turns to the other.
 
 Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py); the reference lists that bibliographic coupling compares come from `ReferenceHydrator` in [reference_hydration.py](../../src/citemesh/strategies/reference_hydration.py), shared by the citation, recommendation, and hybrid strategies.
 

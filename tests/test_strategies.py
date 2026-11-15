@@ -2756,36 +2756,24 @@ def test_capped_selection_alternates_seed_slots_with_direct_links(
     assert {u if v == "seed" else v for u, v, _ in selected} == expected
 
 
-def test_hybrid_seed_citation_pairs_pass_the_gate_and_keep_the_basic_floor() -> None:
-    """A seed reference skips the embedding gate and the seed floor, not the 0.2 floor."""
+@pytest.mark.parametrize("relation", ["referenced_by_seed", "cites_seed", "overlap"])
+def test_hybrid_seed_citation_pairs_face_the_seed_edge_thresholds(
+    relation: str,
+) -> None:
+    """A seed's own reference or citer earns an edge only by similarity, like any pair."""
     builder = HybridGraphBuilder(client=MagicMock())
     seed = Paper(paper_id="seed", title="Algebra", abstract="Rings", year=2024)
     seed.is_seed = True
-    cited = Paper(paper_id="cited", title="Biology", abstract="Coral", year=2019)
+    cited = Paper(paper_id="cited", title="Biology", abstract="Coral", year=2024)
     builder.embedding_builder.embeddings = {
         "seed": np.asarray([1.0, 0.0], dtype=np.float32),
         "cited": np.asarray([0.0, 1.0], dtype=np.float32),
     }
-    builder.seed_relations = {"seed": "seed", "cited": "semantic_only"}
+    builder.seed_relations = {"seed": "seed", "cited": relation}
+
     assert builder.compute_similarity(seed, cited) == 0.0
-
-    relations = ("referenced_by_seed", "cites_seed", "overlap")
-    for relation in relations:
-        builder.seed_relations["cited"] = relation
-        score = builder.compute_similarity(seed, cited)
-        assert 0.0 < score < 0.2
-        assert not builder.should_create_edge(seed, cited, score)
-
-    # Cosine 0.6, five years apart: below the 0.4 seed floor, above the 0.2 floor.
-    builder.embedding_builder.embeddings["cited"] = np.asarray(
-        [0.6, 0.8], dtype=np.float32
-    )
-    for relation in relations:
-        builder.seed_relations["cited"] = relation
-        score = builder.compute_similarity(seed, cited)
-        assert 0.2 <= score <= 0.4
-        assert builder.should_create_edge(seed, cited, score)
-        assert builder.should_create_edge(cited, seed, score)
+    assert not builder.should_create_edge(seed, cited, 0.3)
+    assert not builder.should_create_edge(cited, seed, 0.3)
 
 
 def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
