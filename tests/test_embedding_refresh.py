@@ -2,6 +2,7 @@
 
 import json
 import runpy
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -744,6 +745,32 @@ def test_source_duplicate_recency_fallbacks(monkeypatch, older, newer, reader):
         assert len(resolved) == 1
         assert resolved[0]["paper_id"] == "arxiv:2401.00001"
         assert resolved[0]["abstract"] == "a new"
+
+
+def test_streaming_staging_pass_runs_on_the_calling_thread(monkeypatch):
+    """Ctrl-C must stop the staging pass at once, so it must not run on the worker."""
+    staging_threads = set()
+
+    def rows():
+        for index in range(20):
+            staging_threads.add(threading.current_thread())
+            yield row(f"2401.{index:05d}")
+
+    install_source(monkeypatch, {"one": rows()}, ["one"])
+    source = CorpusSource("org/source", None, "train", "one", "all", None)
+    prepared = list(
+        refresh._prepared_batches(
+            corpus_source.iter_source_batches(source, 8),
+            lambda record: f"text {record['paper_id']}",
+        )
+    )
+
+    assert staging_threads == {threading.current_thread()}
+    # The worker reads the later batches through the same staging connection.
+    assert [len(records) for records, _ in prepared] == [8, 8, 4]
+    texts = {key: value for _, batch in prepared for key, value in batch.items()}
+    assert len(texts) == 20
+    assert texts["arxiv:2401.00019"] == "text arxiv:2401.00019"
 
 
 @pytest.mark.parametrize("reader", ["stream", "download"])

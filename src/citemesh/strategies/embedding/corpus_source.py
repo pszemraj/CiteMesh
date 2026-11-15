@@ -282,7 +282,13 @@ def iter_source_records(
     """
     with (
         tempfile.TemporaryDirectory(prefix="citemesh-source-") as temporary,
-        closing(sqlite3.connect(Path(temporary) / "selection.sqlite3")) as connection,
+        # The refresh loop reads the first batch on its own thread and the rest
+        # on a worker, one read at a time.
+        closing(
+            sqlite3.connect(
+                Path(temporary) / "selection.sqlite3", check_same_thread=False
+            )
+        ) as connection,
     ):
         connection.execute(
             "CREATE TABLE records (paper_id TEXT PRIMARY KEY, ordinal INTEGER, "

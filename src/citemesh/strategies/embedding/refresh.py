@@ -236,8 +236,10 @@ def _prepared_batches(
 
     Cache writes stay on the operation's owning thread; one worker thread reads
     the next batch and formats its retrieval text, which releases the GIL. The
-    worker alone advances and closes ``batches``, whose SQLite staging
-    connection is bound to the thread that opened it.
+    first batch is read on the calling thread: for the streaming reader that
+    read is the whole staging pass, which Ctrl-C must stop at once rather than
+    after it finishes. Reads never overlap, so the staging connection can move
+    to the worker for the rest.
 
     :param batches: Source record batches.
     :param format_text: Retrieval-document formatter for one record.
@@ -259,10 +261,11 @@ def _prepared_batches(
         max_workers=1, thread_name_prefix="citemesh-source"
     ) as worker:
         try:
-            pending = worker.submit(prepare)
-            while (prepared := pending.result()) is not None:
+            prepared = prepare()
+            while prepared is not None:
                 pending = worker.submit(prepare)
                 yield prepared
+                prepared = pending.result()
         finally:
             worker.submit(batches.close).result()
 
