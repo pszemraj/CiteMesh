@@ -80,7 +80,7 @@ Each node carries:
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`seed_relevance` is unchanged and measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every non-seed paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
+`seed_relevance` measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every non-seed paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
@@ -123,7 +123,7 @@ Toolbar controls and data actions:
 
 ![CiteMesh dashboard with the Filters row open and a search term narrowing the graph](../../assets/ui-dashboard-search-filter.png)
 
-_Filters open with `recurrent` typed: the list narrows from 45 to 24 papers and the graph dims everything else._
+_Filters open with `recurrent` typed on a hybrid graph seeded by "Attention Is All You Need" (45 papers, 109 links): the list narrows from 45 to 24 papers and the graph dims everything else._
 
 Downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 

@@ -4,7 +4,7 @@ This note records what the `hybrid` strategy does after the discovery rework and
 
 ## What hybrid does now
 
-Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the seed in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the seed, similarity to the seed's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term and no citation-count term, whatever a candidate's source, and edge scoring is unchanged.
+Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the seed in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the seed, similarity to the seed's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term and no citation-count term, whatever a candidate's source. Edges follow [edge scoring](../guides/how-it-works.md#6-edge-scoring), where the seed's own references and citers take every other one of the seed's edge slots.
 
 ## How it was evaluated
 
@@ -55,7 +55,7 @@ Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31
 - The development seeds are not independent evidence, because the ranking design was chosen on them.
 - Recall against the whole literature is not measured.
 - For seeds with more than 1,000 citers the provider returns only the most recent 1,000, so older follow-up work reaches the list only through recommendations or corpus neighbors.
-- Edges and their scoring were not evaluated or changed.
+- Edges were not evaluated. Giving the seed's own references and citers seed edge slots changes edges only, not which papers are selected.
 - CLI builds reproduce the offline replay closely in the corpus modes (97 percent of selected papers shared in `both`, 96 percent in `arxiv-corpus`). In `candidates` mode a build encodes the provider's title and abstract where the replay used stored index vectors, so it shares about 81 percent of the replay's selections; the graded result above is the measurement, not the replay.
 - The seed's reference list comes from the provider, and the arXiv bibliography is read only when the provider returns none. The provider's list can omit a few references (one to five on ten of the sixteen seeds), which then rank without their direct-citation evidence. Without the local index, bibliography recovery resolves only entries that carry an explicit identifier.
 - A publication and its preprint are folded when they share an identifier, or when title and first author agree and the publication year is the preprint's or the next. A version republished under a different title is not recognized and can take a second slot; one such pair appeared across the 48 validation builds (16 seeds in three modes).
