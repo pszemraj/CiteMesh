@@ -594,7 +594,7 @@ def test_manual_publisher_failure_returns_exit_code_with_optional_traceback(
             )
         if failure == "database":
             raise sqlite3.DatabaseError("file is not a database")
-        raise ValueError("bucket must be private")
+        raise ValueError("output directory already exists")
 
     monkeypatch.setattr(publisher, "publish_arxiv_index", fail)
     flags = ["-vv"] if verbose else []
@@ -602,7 +602,7 @@ def test_manual_publisher_failure_returns_exit_code_with_optional_traceback(
     captured = capsys.readouterr()
     assert not captured.out
     expected = {
-        "validation": "bucket must be private",
+        "validation": "output directory already exists",
         "database": "file is not a database",
         "offline": "Cannot resolve dataset test/source@main: offline",
     }[failure]

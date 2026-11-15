@@ -92,7 +92,7 @@ Where the index comes from:
 - Bucket imports use the selected configuration, or the catalog's default, and download only its declared files.
 - Omit `--snapshot` to install the catalog's current snapshot; an explicit snapshot requires `--config`.
 - Snapshot identity identifies the portable files; the manifest separately records the immutable model and upstream dataset revisions. The upstream source revision is provenance, not namespace identity. Each configuration can have different coverage and freshness.
-- Private buckets require a Hugging Face token with read access for import and write access for publication. Set [`HF_TOKEN`](../reference/environment.md#other-respected-variables) or save a token with `hf auth login`; public bucket reads need no token.
+- Publication needs a Hugging Face token with write access to the bucket, and import from a private bucket needs one with read access. Set [`HF_TOKEN`](../reference/environment.md#other-respected-variables) or save a token with `hf auth login`; public bucket reads need no token.
 
 An installed index whose embedding contract differs from the running version's, for example a different model revision or text formatter, is refused rather than silently re-encoded. A republished index with the new contract installs beside it as a new namespace; remove the old one as described in [Inspecting and clearing](#inspecting-and-clearing).
 
@@ -129,7 +129,7 @@ A new refresh resolves its source revision once, compares full normalized record
 How refresh reads the source depends on what the namespace holds:
 
 - Reconciling a complete corpus with a newer revision, such as an index imported from a bucket, streams the source once. It still reads every row; only the encoding is incremental.
-- Every pass that has to process the whole source downloads the pinned revision instead: a namespace without a complete corpus, a pending or resumed refresh, first int8 calibration, and `--adopt`. `datasets` prepares the revision as Arrow in its own cache, and CiteMesh normalizes the rows in parallel on half the logical CPUs once a source has 50,000 rows. For the full arXiv snapshot, expect about 5 GB of prepared Arrow per revision in the `datasets` cache, which later passes reuse. The normalized rows, about 5 GB more, go to a temporary directory under the CiteMesh cache root that is removed when the pass ends, so every pass normalizes with the running code.
+- Every pass that has to process the whole source downloads the pinned revision instead: a namespace without a complete corpus, a pending or resumed refresh, first int8 calibration, and the first `--adopt` of a namespace. `datasets` prepares the revision as Arrow in its own cache, and CiteMesh normalizes the rows in parallel on half the logical CPUs once a source has 50,000 rows. For the full arXiv snapshot, expect about 5 GB of prepared Arrow per revision in the `datasets` cache, which later passes reuse. The normalized rows, about 5 GB more, go to a temporary directory under the CiteMesh cache root that is removed when the pass ends, so every pass normalizes with the running code.
 - One pass serves calibration and encoding: the int8 calibration sample is drawn from the prepared rows with the same seeded reservoir build hydration uses.
 
 Repeated source IDs are resolved the same way whether the source is streamed or downloaded, before calibration, encoding, or newest-N selection:
@@ -224,7 +224,7 @@ Of the corpus flags, only a changed `--dataset-source` or `--dataset-split` clea
 
 A model-fingerprint mismatch is not one of those conditions. When a hydrated corpus was built under a different fingerprint than the active model's, CiteMesh stops and names both fingerprints, the rows and on-disk size at stake, and the remedy - `--force-rebuild-cache`, plus `--overwrite-cache` for scripts, or `citemesh cache clear`. Candidate-pool and graph-similarity namespaces re-encode in seconds and still clear silently; corpus hydration metadata is what earns a namespace the protection.
 
-Hydration compatibility uses dataset source, split, and cap; the recorded commit decides only which revision a resume, an in-place cap extension, or a metadata migration reads. A sliced `--dataset-split` skips growth checks, and the same slice expression refers to the same records only at the same commit.
+Hydration compatibility uses dataset source, split, and cap, not the recorded commit; the commit decides which revision a resume, an in-place cap extension, a metadata migration, or an adoption without `--dataset-revision` reads, and whether builds check upstream growth. A sliced `--dataset-split` skips growth checks, and the same slice expression refers to the same records only at the same commit.
 
 ### Quantization
 
