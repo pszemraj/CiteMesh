@@ -97,22 +97,36 @@ def _precomputed_text(texts: Mapping[str, str], metadata: CacheInputMetadata) ->
     return texts[str(metadata.get("paper_id", "")).strip()]
 
 
+def _single_revision_remedy(namespace: str) -> str:
+    """Name the cheapest way to bring a corpus cache onto one source revision.
+
+    :param str namespace: Native namespace ID of the cache.
+    :return str: Sentence naming adoption first and a full rebuild as the fallback.
+    """
+    return (
+        f"Run `citemesh cache refresh --adopt --namespace {namespace}` to finish it "
+        "at the current upstream revision, encoding only papers whose text is "
+        "missing or changed, or rerun with --force-rebuild-cache --overwrite-cache "
+        "to rebuild the corpus from scratch."
+    )
+
+
 def _unloadable_revision_error(
-    operation: str, source: str, revision: str, exc: Exception
+    operation: str, source: str, revision: str, namespace: str, exc: Exception
 ) -> RuntimeError:
     """Explain that the source commit a corpus cache is pinned to cannot be read.
 
     :param str operation: Pass that needed rows at the pinned commit.
     :param str source: Dataset source recorded on the cache.
     :param str revision: Commit the cache was hydrated from.
+    :param str namespace: Native namespace ID of the cache.
     :param Exception exc: Failure raised while loading that commit.
-    :return RuntimeError: Error naming the commit and the rebuild remedy.
+    :return RuntimeError: Error naming the commit and the remedies.
     """
     return RuntimeError(
         f"{operation} could not load {source} at revision {revision}, the source "
         f"commit this corpus cache was hydrated from: {exc}. Re-run to retry; if "
-        "that revision is no longer available, rerun with --force-rebuild-cache "
-        "--overwrite-cache to rebuild the corpus from one current revision."
+        f"that revision is no longer available: {_single_revision_remedy(namespace)}"
     )
 
 
@@ -665,8 +679,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             raise RuntimeError(
                 f"The incomplete corpus cache for {source}/{self.dataset_split} "
                 "records no source revision, so resuming it could mix rows from "
-                "two upstream revisions. Rerun with --force-rebuild-cache "
-                "--overwrite-cache to rebuild the corpus from one revision."
+                "two upstream revisions. "
+                + _single_revision_remedy(self.embedding_cache.namespace_id)
             )
         logger.debug(
             "Resuming %s/%s at its pinned source revision %s.",
@@ -899,7 +913,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             if revision is None:
                 raise
             raise _unloadable_revision_error(
-                "Corpus metadata refresh", source, revision, exc
+                "Corpus metadata refresh", source, revision, cache.namespace_id, exc
             ) from exc
         legacy_aliases = cache.get_legacy_corpus_identity_aliases(
             _anonymous_dataset_paper_id
@@ -1522,7 +1536,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         except Exception as exc:
             if revision is None:
                 raise
-            raise _unloadable_revision_error(operation, source, revision, exc) from exc
+            raise _unloadable_revision_error(
+                operation, source, revision, self.embedding_cache.namespace_id, exc
+            ) from exc
         if resolved_source != source:
             raise RuntimeError(
                 f"{operation} resolved unexpected dataset source {resolved_source!r} "
