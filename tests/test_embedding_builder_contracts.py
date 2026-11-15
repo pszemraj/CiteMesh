@@ -7161,7 +7161,7 @@ def test_incomplete_cache_without_recorded_revision_refuses_to_resume(
     with pytest.raises(RuntimeError, match="records no source revision") as caught:
         builder._ensure_cache_hydrated(use_streaming=False)
 
-    adopt = f"cache refresh --adopt --namespace {cache.namespace_id}"
+    adopt = f"cache refresh --adopt --namespace {cache.namespace_id} --dataset-revision main"
     assert adopt in str(caught.value)
     assert "--force-rebuild-cache" in str(caught.value)
     assert datasets.loads == []
@@ -7203,8 +7203,16 @@ def test_resume_reports_an_unloadable_pinned_revision(
     with pytest.raises(RuntimeError, match=PINNED_COMMIT) as caught:
         builder._ensure_cache_hydrated(use_streaming=False)
 
-    adopt = f"cache refresh --adopt --namespace {cache.namespace_id}"
+    adopt = f"cache refresh --adopt --namespace {cache.namespace_id} --dataset-revision main"
     assert adopt in str(caught.value)
+    # ``cache refresh`` reads no config.toml, so the command names the selectors.
+    for flag, value in (
+        ("--model", builder.model_name),
+        ("--storage-precision", builder.storage_precision),
+        ("--dataset-source", builder.dataset_source),
+        ("--dataset-split", builder.dataset_split),
+    ):
+        assert f"{flag} {value}" in str(caught.value)
     assert "--force-rebuild-cache" in str(caught.value)
     assert isinstance(caught.value.__cause__, FileNotFoundError)
     assert datasets.loads == [(PINNED_COMMIT, False)]

@@ -1299,7 +1299,10 @@ def select_existing_cache(
     )
     if not state or not state.get("contract"):
         raise RuntimeError(
-            "Selected cache has no certified embedding contract; refresh/adopt it first"
+            f"Selected cache {namespace_id} has no certified embedding contract; "
+            "certify it first with "
+            f"`citemesh cache refresh --adopt --namespace {namespace_id}`, adding "
+            "any non-default model and storage options it was built with"
         )
     contract = EmbeddingContract(**state["contract"])
     pending = state.get("pending")
