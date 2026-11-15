@@ -1049,7 +1049,7 @@ def test_graph_payload_normalizes_invalid_citation_metadata(
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     """GraphML should round-trip nullable metadata and XML-invalid text."""
     graph, seed_id = _build_graph()
-    graph.nodes[seed_id]["title"] = "Bad\x0btitle￾"
+    graph.nodes[seed_id]["title"] = "Bad\x08title￾"
     graph.nodes[seed_id].pop("paper", None)
     for field in ("venue", "doi", "arxiv_id", "abstract", "authors", "categories"):
         graph.nodes[seed_id][field] = None
@@ -4878,3 +4878,26 @@ def test_visualize_graph_uses_local_agg_canvas_for_macosx(
     )
 
     assert output_path.stat().st_size > 0
+
+
+def test_exports_collapse_hard_wrapped_title_and_abstract() -> None:
+    """arXiv-style hard wraps leave exported text single-spaced, not the Paper."""
+    graph, seed_id = _build_graph()
+    paper = graph.nodes[seed_id]["paper"]
+    paper.title = (
+        "Megalodon: Efficient LLM Pretraining with Unlimited\n  Context Length"
+    )
+    paper.abstract = "The quadratic complexity of Transformers limits\ntheir ability."
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)}
+    )
+
+    seed_node = next(n for n in exporter.graph_payload()["nodes"] if n["id"] == seed_id)
+
+    assert seed_node["title"] == (
+        "Megalodon: Efficient LLM Pretraining with Unlimited Context Length"
+    )
+    assert seed_node["abstract"] == (
+        "The quadratic complexity of Transformers limits their ability."
+    )
+    assert "\n" in paper.title

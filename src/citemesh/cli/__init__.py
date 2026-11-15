@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """CiteMesh CLI entry point and public command helpers.
 
 Builds the parser, configures logging, and loads the selected subcommand from
@@ -7,6 +6,8 @@ Builds the parser, configures logging, and loads the selected subcommand from
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Sequence
 from importlib import import_module
 from types import ModuleType
@@ -42,7 +43,7 @@ from .outputs import (
     resolve_graph_config_path,
     resolve_output_paths,
 )
-from .parser import _create_parser, _pop_tracked_option_dests
+from .parser import _create_parser, _missing_command, _pop_tracked_option_dests
 
 __all__ = [
     "DASHBOARD_COLLECTION_KIND",
@@ -87,8 +88,8 @@ def _command_module(name: str) -> ModuleType:
     return import_module(f".commands.{name}", __name__)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Main CLI entry point.
+def _run(argv: Sequence[str] | None) -> int:
+    """Parse arguments and dispatch the selected subcommand.
 
     :param Sequence[str] | None argv: Optional CLI argument list without executable.
     :return int: Process-style exit code.
@@ -96,16 +97,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser, build_parser, cache_parser, config_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
-    _configure_logging(
-        log_level=args.log_level,
-        log_width=args.log_width,
-        log_file=getattr(args, "log_file", None),
-    )
+    try:
+        _configure_logging(
+            log_level=args.log_level,
+            log_width=args.log_width,
+            log_file=getattr(args, "log_file", None),
+        )
+    except OSError as exc:
+        parser.error(f"cannot write --log-file {exc.filename}: {exc.strerror}")
     provided_build_options = _pop_tracked_option_dests(args)
 
     if not args.command:
-        parser.print_help()
-        return 1
+        return _missing_command(parser)
 
     if args.command == "config":
         return _command_module("config")._run_config_command(args, config_parser)
@@ -133,5 +136,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def _discard_stdout() -> None:
+    """Point stdout at the null device once its pipe reader has gone away.
+
+    Python flushes the standard streams at exit; flushing into the closed pipe
+    would print a second ``BrokenPipeError`` and replace the exit status.
+    """
+    try:
+        stdout_fd = sys.stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        # No real descriptor to redirect, as with captured or replaced streams.
+        return
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, stdout_fd)
+    finally:
+        os.close(devnull_fd)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Main CLI entry point.
+
+    Ctrl-C returns 130 without a traceback. A reader that closes stdout early,
+    as in ``citemesh cache scan | head``, ends the run quietly with status 1.
+
+    :param Sequence[str] | None argv: Optional CLI argument list without executable.
+    :return int: Process-style exit code.
+    """
+    try:
+        try:
+            return _run(argv)
+        finally:
+            # Buffered output reaches a closed pipe here, not during shutdown.
+            # stdout is None when the process started with descriptor 1 closed.
+            if sys.stdout is not None:
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        logger.info("Interrupted.")
+        return 130
+    except BrokenPipeError:
+        _discard_stdout()
+        return 1

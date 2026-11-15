@@ -214,17 +214,30 @@ def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
             partial.replace(target)
 
 
+def _fetch_text(bucket_id: str, remote: str) -> str:
+    """Fetch a mutable bucket file afresh rather than reusing a disk copy.
+
+    :param str bucket_id: Hugging Face bucket identifier.
+    :param str remote: Bucket path of the file.
+    :return str: The file's current UTF-8 text.
+    """
+    with TemporaryDirectory(prefix="citemesh-bucket-") as directory:
+        path = Path(directory) / PurePosixPath(remote).name
+        _download_files(bucket_id, [(remote, path)])
+        return path.read_text(encoding="utf-8")
+
+
 def _catalog(bucket_id: str) -> IndexCatalog:
     """Fetch and parse the bucket's current catalog.
 
     :param str bucket_id: Hugging Face bucket identifier.
     :return IndexCatalog: Current published configurations.
+    :raises ValueError: If the catalog is not a JSON object or is malformed.
     """
-    # The catalog is mutable; fetch it afresh rather than reusing its disk copy.
-    with TemporaryDirectory(prefix="citemesh-catalog-") as directory:
-        path = Path(directory) / "catalog.json"
-        _download_files(bucket_id, [("catalog.json", path)])
-        return IndexCatalog.from_dict(_load_json(path))
+    value = json.loads(_fetch_text(bucket_id, "catalog.json"))
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object: catalog.json")
+    return IndexCatalog.from_dict(value)
 
 
 def resolve_publication(
@@ -397,13 +410,16 @@ def publish_snapshot(
     """Publish a validated snapshot and update its catalog entry.
 
     Payload files are uploaded before the manifest, then the catalog is updated
-    to point at the completed snapshot. A starter README is created if missing.
+    to point at the completed snapshot. The snapshot replaces the configuration's
+    current one, including when its embedding contract or calibration changed;
+    consumers import it into a new native namespace. The README is created when
+    missing and regenerated while it still matches the generated overview.
 
-    :param str bucket_id: Private Hugging Face bucket identifier.
+    :param str bucket_id: Hugging Face bucket identifier.
     :param Path snapshot_dir: Validated portable snapshot directory.
     :param Path | None cache_dir: Optional Hub cache root override.
     :return str: Published snapshot identifier.
-    :raises ValueError: If the bucket, previous publication, or snapshot conflicts.
+    :raises ValueError: If the previous publication or snapshot conflicts.
     """
     from huggingface_hub import HfApi
 
@@ -413,8 +429,6 @@ def publish_snapshot(
     selected_path = _manifest_bucket_path(manifest.config_name, manifest.snapshot_id)
     with _hub_errors(bucket_id):
         api = HfApi()
-        if not api.bucket_info(bucket_id).private:
-            raise ValueError("Publishing is authorized only to private buckets")
         bucket_paths = {
             item.path
             for item in api.list_bucket_tree(bucket_id, recursive=True)
@@ -430,7 +444,7 @@ def publish_snapshot(
             raise ValueError("Missing catalog in an established index bucket")
         else:
             previous = IndexCatalog({})
-        manifests = {}
+        previous_manifests = {}
         for name, path in previous.configs.items():
             local = _cache_root(bucket_id, cache_dir) / path
             if not local.is_file():
@@ -443,40 +457,7 @@ def publish_snapshot(
                 raise ValueError(
                     "Published manifest disagrees with its catalog snapshot"
                 )
-            if name == manifest.config_name:
-                if old.contract != manifest.contract:
-                    raise ValueError(
-                        "A changed embedding contract requires a new configuration name"
-                    )
-                if old.calibration_ranges is not None:
-                    import numpy as np
-
-                    assert manifest.calibration_ranges is not None
-                    old_ranges = local.parent / old.calibration_ranges
-                    if not old_ranges.is_file():
-                        _download_files(
-                            bucket_id,
-                            [
-                                (
-                                    str(
-                                        PurePosixPath(path).parent
-                                        / old.calibration_ranges
-                                    ),
-                                    old_ranges,
-                                )
-                            ],
-                        )
-                    if not np.array_equal(
-                        np.load(old_ranges, allow_pickle=False),
-                        np.load(
-                            snapshot_dir / manifest.calibration_ranges,
-                            allow_pickle=False,
-                        ),
-                    ):
-                        raise ValueError(
-                            "Changed calibration ranges require a new configuration name"
-                        )
-            manifests[name] = old
+            previous_manifests[name] = old
         if selected_path in bucket_paths:
             remote = _cache_root(bucket_id, cache_dir) / selected_path
             if not remote.is_file():
@@ -485,7 +466,7 @@ def publish_snapshot(
                 raise ValueError("A different snapshot must use a new snapshot ID")
         configs = {**previous.configs, manifest.config_name: selected_path}
         catalog = IndexCatalog(configs, previous.default_config or manifest.config_name)
-        manifests[manifest.config_name] = manifest
+        manifests = {**previous_manifests, manifest.config_name: manifest}
         directory = PurePosixPath(selected_path).parent
         payloads: list[tuple[str | Path | bytes, str]] = [
             (snapshot_dir / name, str(directory / name))
@@ -497,17 +478,22 @@ def publish_snapshot(
             api.batch_bucket_files(
                 bucket_id, add=[(snapshot_dir / "index.json", selected_path)]
             )
+        # An owner-edited README is preserved; the generated one tracks the catalog.
+        # It moves in the same batch as the catalog, so a failed prune cannot leave
+        # it describing the previous snapshot, which a retry would then take for
+        # an owner edit.
+        readme = _readme(catalog, manifests)
+        generated = _readme(previous, previous_manifests)
+        updates: list[tuple[str | Path | bytes, str]] = []
         if previous.configs.get(manifest.config_name) != selected_path:
-            api.batch_bucket_files(
-                bucket_id,
-                add=[
-                    (json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")
-                ],
+            updates.append(
+                (json.dumps(catalog.to_dict(), indent=2).encode(), "catalog.json")
             )
+        if "README.md" not in bucket_paths or (
+            readme != generated and _fetch_text(bucket_id, "README.md") == generated
+        ):
+            updates.append((readme.encode(), "README.md"))
+        if updates:
+            api.batch_bucket_files(bucket_id, add=updates)
         _prune_snapshots(api, bucket_id, manifest.config_name, manifest.snapshot_id)
-        # Bucket owners maintain their README after its initial creation.
-        if "README.md" not in bucket_paths:
-            api.batch_bucket_files(
-                bucket_id, add=[(_readme(catalog, manifests).encode(), "README.md")]
-            )
         return manifest.snapshot_id

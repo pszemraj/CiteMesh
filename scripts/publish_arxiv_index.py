@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Refresh, export, and publish one complete CiteMesh arXiv index privately.
+"""Refresh, export, and publish one complete CiteMesh arXiv index.
 
-Requires the installed CiteMesh embeddings extra and an existing private
-Hugging Face bucket.
-Existing configurations retain their pinned model contract and calibration.
+Requires the installed CiteMesh embeddings extra and an existing Hugging Face
+bucket. The snapshot replaces its configuration's current one.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from pathlib import Path
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse the private publication destination and local corpus settings.
+    """Parse the publication destination and local corpus settings.
 
     :param list[str] argv: Optional argument list; defaults to process arguments.
     :return argparse.Namespace: Parsed publication options.
@@ -24,9 +23,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument(
-        "bucket", help="existing private Hugging Face bucket (owner/name)"
-    )
+    parser.add_argument("bucket", help="existing Hugging Face bucket (owner/name)")
     parser.add_argument(
         "output", type=Path, help="new directory for the complete portable export"
     )
@@ -44,7 +41,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-revision",
-        help="source revision; latest for new work, recorded target for interrupted work",
+        help="source revision; latest for new work, the recorded pin for interrupted "
+        "work and adoption",
     )
     parser.add_argument(
         "--model-revision", help="model revision for a new native configuration"
@@ -87,7 +85,7 @@ def publish_arxiv_index(
 ) -> str:
     """Refresh or adopt a corpus, export it, and publish the snapshot.
 
-    :param str bucket_id: Existing private Hugging Face bucket identifier.
+    :param str bucket_id: Existing Hugging Face bucket identifier.
     :param Path output: Directory for the portable snapshot.
     :param str | None config_name: Published name; inferred from the stored contract when omitted.
     :param Optional[str] namespace: Existing native cache namespace to refresh.

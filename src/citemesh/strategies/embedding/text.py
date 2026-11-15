@@ -10,15 +10,13 @@ from __future__ import annotations
 from enum import Enum
 
 from citemesh.core import Paper
+from citemesh.core.text_normalization import normalize_text
 from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
     EmbeddingInputMetadata,
 )
-from citemesh.data.model_profiles import (
-    EmbeddingModelProfile,
-    compose_title_abstract_text,
-)
+from citemesh.data.model_profiles import EmbeddingModelProfile, join_title_abstract
 
 _RETRIEVAL_DOCUMENT_REPRESENTATION = "retrieval-document-v1"
 _GRAPH_SIMILARITY_REPRESENTATION = "graph-similarity-v1"
@@ -30,6 +28,8 @@ _FORMATTER_FINGERPRINT_PROBES: tuple[EmbeddingInputMetadata, ...] = (
     {"title": "Alpha", "abstract": ""},
     {"title": "", "abstract": "Beta"},
     {"title": "  Alpha  ", "abstract": "  Beta  "},
+    # Exercises text normalization, so changing it changes the formatter identity.
+    {"title": "Alpha\n  “Beta”", "abstract": "Gamma​ — delta…"},
 )
 
 
@@ -48,12 +48,12 @@ def _embedding_text_metadata(title: object, abstract: object) -> EmbeddingInputM
     :param object abstract: Raw paper abstract.
     :return EmbeddingInputMetadata: Clean text metadata for prompt formatting.
     """
-    normalized_title = str(title or "").strip()
+    normalized_title = normalize_text(str(title or ""))
     if normalized_title.casefold() in _PLACEHOLDER_EMBEDDING_TITLES:
         normalized_title = ""
     return {
         "title": normalized_title,
-        "abstract": str(abstract or "").strip(),
+        "abstract": normalize_text(str(abstract or "")),
     }
 
 
@@ -95,14 +95,18 @@ def format_embedding_metadata(
     text_metadata = _embedding_text_metadata(
         metadata.get("title"), metadata.get("abstract")
     )
+    title = text_metadata.get("title") or ""
+    abstract = text_metadata.get("abstract") or ""
     metadata_paper_id = metadata.get("paper_id", "") if "paper_id" in metadata else ""
     fallback_id = str(paper_id or metadata_paper_id or "unknown-paper")
-    content = compose_title_abstract_text(text_metadata) or fallback_id
+    # Each field is normalized once here; normalization is idempotent, so joining
+    # the normalized fields equals composing the raw ones.
+    content = join_title_abstract(title, abstract) or fallback_id
     if task is EmbeddingTask.RETRIEVAL_QUERY:
         return str(profile.format_query(content, text_metadata))
     if task is EmbeddingTask.RETRIEVAL_DOCUMENT:
         document_metadata = text_metadata
-        if not compose_title_abstract_text(document_metadata):
+        if not (title or abstract):
             document_metadata["title"] = fallback_id
         return str(profile.format_document(document_metadata)) or content
     if task is EmbeddingTask.GRAPH_SIMILARITY:

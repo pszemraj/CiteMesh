@@ -40,6 +40,7 @@ from citemesh.core.paper_ids import (
 )
 from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.core.text_batching import l2_normalize_embeddings
+from citemesh.core.text_normalization import normalize_text
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
@@ -936,6 +937,11 @@ class EmbeddingGraphBuilder(
             if source is not None:
                 metadata["installed_corpus_selection"] = source.selection
                 metadata["installed_corpus_limit"] = source.limit
+        elif self.semantic_source == "arxiv-corpus":
+            # A build-hydrated corpus reports the source commit it is pinned to.
+            dataset_revision = self.embedding_cache.get_hydration_source_revision()
+            if dataset_revision is not None:
+                metadata["dataset_revision"] = dataset_revision
         return metadata
 
     def _cache_model_identity(self) -> str:
@@ -1495,7 +1501,12 @@ class EmbeddingGraphBuilder(
     def cached_bibliography_metadata(
         self, keys: Sequence[BibliographyKey]
     ) -> dict[BibliographyKey, Paper]:
-        """Resolve title, first author, and year within the prepared corpus."""
+        """Resolve title, first author, and year within the prepared corpus.
+
+        :param Sequence[BibliographyKey] keys: Identifier-free references to resolve.
+        :return dict[BibliographyKey, Paper]: Corpus paper for each key that matches
+            exactly one cached record; unresolved keys are omitted.
+        """
         metadata = self.embedding_cache.get_paper_metadata_for_bibliography(
             keys,
             corpus_size=self.corpus_size if self._cache_selection is not None else None,
@@ -1758,7 +1769,7 @@ class EmbeddingGraphBuilder(
         :raises InstalledCorpusError: If installed state, coverage, source or
             vector contract prevents reuse.
         """
-        normalized_query = str(query).strip()
+        normalized_query = normalize_text(str(query))
         if not normalized_query:
             raise ValueError("query must not be empty")
         if int(top_k) < 1:

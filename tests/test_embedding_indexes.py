@@ -1,4 +1,4 @@
-"""Bucket snapshot selection, bounded retention, and private publication."""
+"""Bucket snapshot selection, bounded retention, and publication."""
 
 from __future__ import annotations
 
@@ -88,7 +88,6 @@ def test_catalog_configuration_must_name_one_variant_directory(name):
 @pytest.fixture
 def hub(tmp_path, monkeypatch):
     class Hub:
-        private = True
         fail_path = None
         download_failure = False
         fail_delete = False
@@ -98,11 +97,6 @@ def hub(tmp_path, monkeypatch):
             self.root.mkdir()
             self.downloads = []
             self.uploads = []
-            self.info_calls = 0
-
-        def bucket_info(self, bucket_id):
-            self.info_calls += 1
-            return SimpleNamespace(private=self.private)
 
         def list_bucket_tree(self, bucket_id, prefix=None, recursive=None):
             return [
@@ -301,7 +295,7 @@ def test_publish_preserves_other_config_and_prunes_selected_config_history(
         "two": "variants/two/snapshot-two/index.json",
     }
     assert hub.uploads[0]["add"] == ["variants/one/new-snapshot/index.json"]
-    assert hub.uploads[1]["add"] == ["catalog.json"]
+    assert hub.uploads[1]["add"] == ["catalog.json", "README.md"]
     readme = (hub.root / "README.md").read_text()
     assert "[CiteMesh](https://github.com/pszemraj/CiteMesh)" in readme
     assert "independent-source" in readme
@@ -324,14 +318,14 @@ def test_publish_failure_preserves_prior_catalog(hub, tmp_path, failure):
     )
 
 
-def test_empty_private_bucket_accepts_first_publication(hub, tmp_path):
-    export = local_export(tmp_path)
-    hub.private = False
-    with pytest.raises(ValueError, match="private"):
-        indexes.publish_snapshot("owner/index", export)
-    assert not hub.uploads
-    hub.private = True
-    assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"
+def test_empty_bucket_accepts_first_publication(hub, tmp_path):
+    assert (
+        indexes.publish_snapshot("owner/index", local_export(tmp_path))
+        == "new-snapshot"
+    )
+    result = json.loads((hub.root / "catalog.json").read_text())
+    assert result["default_config"] == "one"
+    assert "new-snapshot" in (hub.root / "README.md").read_text()
 
 
 def test_missing_catalog_does_not_discard_other_existing_variants(hub, tmp_path):
@@ -353,15 +347,21 @@ def test_preflight_happens_before_payload_downloads(hub, tmp_path):
     assert hub.downloads == ["catalog.json", "variants/one/snapshot-one/index.json"]
 
 
-def test_changed_contract_requires_distinct_configuration(hub, tmp_path):
+def test_changed_contract_replaces_the_configuration_snapshot(hub, tmp_path):
     install(hub)
-    export = local_export(tmp_path)
-    value = json.loads((export / "index.json").read_text())
+    indexes.publish_snapshot("owner/index", local_export(tmp_path))
+    export = tmp_path / "changed"
+    value = manifest(snapshot="changed-snapshot")
     value["contract"]["model_revision"] = "b" * 40
     write_json(export / "index.json", value)
-    with pytest.raises(ValueError, match="new configuration"):
-        indexes.publish_snapshot("owner/index", export)
-    assert not hub.uploads
+    assert indexes.publish_snapshot("owner/index", export) == "changed-snapshot"
+    result = json.loads((hub.root / "catalog.json").read_text())
+    assert result["configs"]["one"] == "variants/one/changed-snapshot/index.json"
+    assert not (hub.root / "variants/one/new-snapshot/index.json").exists()
+    readme = (hub.root / "README.md").read_text()
+    assert "changed-snapshot" in readme
+    assert "b" * 40 in readme
+    assert "new-snapshot" not in readme
 
 
 def test_missing_local_payload_prevents_hub_operations(hub, tmp_path):
@@ -369,7 +369,7 @@ def test_missing_local_payload_prevents_hub_operations(hub, tmp_path):
     write_json(export / "index.json", manifest(shard="data/missing.parquet"))
     with pytest.raises(FileNotFoundError):
         indexes.publish_snapshot("owner/index", export)
-    assert hub.info_calls == 0
+    assert not hub.downloads
     assert not hub.uploads
 
 
@@ -440,6 +440,7 @@ def test_owner_readme_and_assets_survive_publication_and_do_not_affect_download(
 
     content += "\nOwner edit after publication.\n"
     readme.write_text(content, encoding="utf-8")
+    hub.downloads.clear()
     publication = indexes.resolve_publication("owner/index")
     downloaded = indexes.download_publication(publication)
     assert validate_snapshot(downloaded).row_count == 1
@@ -464,7 +465,7 @@ def test_snapshot_id_cannot_overwrite_different_manifest(hub, tmp_path):
         indexes.publish_snapshot("owner/index", export)
 
 
-def test_same_configuration_cannot_recalibrate_stored_int8_ranges(hub, tmp_path):
+def test_recalibrated_int8_ranges_replace_the_configuration_snapshot(hub, tmp_path):
     import numpy as np
 
     old = manifest()
@@ -488,9 +489,12 @@ def test_same_configuration_cannot_recalibrate_stored_int8_ranges(hub, tmp_path)
         export / "calibration_ranges.npy",
         np.array([[-2, -2], [2, 2]], dtype=np.float32),
     )
-    with pytest.raises(ValueError, match="calibration ranges"):
-        indexes.publish_snapshot("owner/index", export)
-    assert not hub.uploads
+    assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"
+    assert np.array_equal(
+        np.load(hub.root / "variants/one/new-snapshot/calibration_ranges.npy"),
+        np.array([[-2, -2], [2, 2]], dtype=np.float32),
+    )
+    assert not (hub.root / "variants/one/snapshot-one/calibration_ranges.npy").exists()
 
 
 @pytest.fixture
@@ -590,7 +594,7 @@ def test_manual_publisher_failure_returns_exit_code_with_optional_traceback(
             )
         if failure == "database":
             raise sqlite3.DatabaseError("file is not a database")
-        raise ValueError("bucket must be private")
+        raise ValueError("output directory already exists")
 
     monkeypatch.setattr(publisher, "publish_arxiv_index", fail)
     flags = ["-vv"] if verbose else []
@@ -598,7 +602,7 @@ def test_manual_publisher_failure_returns_exit_code_with_optional_traceback(
     captured = capsys.readouterr()
     assert not captured.out
     expected = {
-        "validation": "bucket must be private",
+        "validation": "output directory already exists",
         "database": "file is not a database",
         "offline": "Cannot resolve dataset test/source@main: offline",
     }[failure]
@@ -639,6 +643,9 @@ def test_failed_pruning_can_retry_without_reuploading_payload(hub, tmp_path):
         indexes.publish_snapshot("owner/index", export)
     assert indexes.resolve_publication("owner/index").snapshot_id == "new-snapshot"
     assert (hub.root / "variants/one/snapshot-one/index.json").is_file()
+    # The README moved with the catalog, so the retry cannot mistake a stale one
+    # for an owner edit and keep it.
+    assert "`new-snapshot`" in (hub.root / "README.md").read_text()
     hub.fail_delete = False
     hub.uploads.clear()
     assert indexes.publish_snapshot("owner/index", export) == "new-snapshot"

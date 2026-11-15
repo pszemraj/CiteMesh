@@ -2,7 +2,7 @@
 # Loadable form: an uncommented key holds its built-in default, and a commented-out key has no single literal default and shows an example value.
 # Hand-maintained. tests/test_config_reference.py checks its keys and default values against the loader and the build parser.
 # Location: config.toml in the cache root, as printed by `citemesh config path`. CITEMESH_CACHE_DIR moves the cache root (docs/reference/environment.md).
-# Read once per command. `citemesh build` and `citemesh search` apply it, and docs/guides/configuration.md covers editing it with `citemesh config`.
+# Read once per command, and applied only by `citemesh build` and `citemesh search`. docs/guides/configuration.md covers the `citemesh config` commands.
 # Precedence, lowest to highest: built-in defaults, this file, command-line flags.
 # Each [defaults] key is the default of the build flag spelled with `-` for `_`, so max_papers is --max-papers. Exceptions are named on the key.
 # A configured value is a default, not a flag: it never causes an unsupported-option error, and a strategy that does not use it ignores it.
@@ -36,18 +36,19 @@ strategy = "recommendation"
 # int, at least 0. How many of the seed's references to fetch.
 # max_references = 1000
 
-# int. Edges each paper keeps in an embedding graph, strongest first.
+# int. Maximum edges per paper in an embedding graph, strongest kept first.
 # Only used when: strategy is embedding.
 top_k = 4
 
 # ---------- Output ----------
 
 # list of 'png' | 'html' | 'plotly' | 'dashboard' | 'json' | 'csv' | 'bibtex' | 'graphml' | 'all'. Formats `citemesh build` writes, where 'all' is every format.
-# Also accepts one comma-separated string such as "json,dashboard". Duplicates are dropped.
-# An explicit --export replaces this list instead of adding to it.
+# Also accepts one comma-separated string such as "json,dashboard". Duplicates are dropped, and an explicit --export replaces the list.
+# 'html', 'plotly' and 'dashboard' need the viz extra, and a build without it fails when it writes them.
 export = ["png"]
 
-# 'light' | 'dark' | 'solarized' | 'auto'. Color theme of every export. 'auto' reads the terminal background from COLORFGBG or DARKMODE.
+# 'light' | 'dark' | 'solarized' | 'auto'. Color theme of the png, html, plotly and dashboard exports.
+# 'auto' tries COLORFGBG, then DARKMODE=1, then the macOS appearance, and falls back to 'light'.
 theme = "dark"
 
 # ---------- Semantic discovery ----------
@@ -65,9 +66,9 @@ semantic_source = "candidates"
 # Only used when: strategy is embedding and semantic_source is 'candidates'. Hybrid takes whole provider lists instead.
 candidate_pool_size = 400
 
-# float, 0.0 to 1.0. Minimum embedding cosine for a graph edge. Hybrid also scores a weaker pair when it shares references.
+# float, 0.0 to 1.0. Minimum embedding cosine for an edge. Hybrid also passes a pair that shares references.
 # Recommended: re-tune after changing model or truncate_dim, because 0.74 was calibrated for EmbeddingGemma at 512 dimensions (other settings log a warning).
-# See: docs/reference/defaults-tuning-study.md
+# See: docs/guides/how-it-works.md#6-edge-scoring and docs/reference/defaults-tuning-study.md#semantic-edge-threshold-september-2026
 min_semantic_similarity = 0.74
 
 # ---------- Embedding model and storage ----------
@@ -126,7 +127,7 @@ dataset_source = "librarian-bots/arxiv-metadata-snapshot"
 # string. Split of dataset_source to hydrate. A slice such as "train[:5%]" bounds the papers considered.
 dataset_split = "train"
 
-# int (optional). Hydrate only the N newest submissions of the split, by arXiv ID.
+# int (optional). Hydrate only the N newest submissions of the split, by arXiv ID. An installed index searches only its N newest members.
 # Unset: the full split.
 # Overridden by: --all-corpus. With --cache-namespace, the index's recorded cap also bounds it.
 # corpus_size = 100000
@@ -146,7 +147,7 @@ search_mode = "auto"
 
 [api]
 
-# string (optional). Semantic Scholar API key for authenticated requests.
+# string (optional). Semantic Scholar API key, which doubles the request rate and lifts the 90-second recovery budget (docs/guides/cli.md#troubleshooting).
 # Overridden by: the S2_API_KEY environment variable whenever it is set, even to an empty string, which forces anonymous access.
 # Warning: stored in plain text. CiteMesh writes the file owner-only, `citemesh config list` masks the key, and `citemesh config get` prints it.
 # s2_api_key = ""

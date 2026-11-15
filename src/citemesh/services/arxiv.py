@@ -156,7 +156,16 @@ class BibliographyEntry:
 
 
 def _bibliography_key(blocks: list[list[str]]) -> BibliographyKey | None:
-    """Read author, title, and unambiguous year from LaTeXML bibblocks."""
+    """Read author, title, and unambiguous year from LaTeXML bibblocks.
+
+    The first block is the author list, the second the title, and the rest the
+    publication details. A trailing ``, YYYY`` on the title is read as a year and
+    removed from the title.
+
+    :param list[list[str]] blocks: Text fragments of each bibblock, in entry order.
+    :return BibliographyKey | None: Title, first author and year, or ``None`` when
+        there are fewer than two blocks or the years found are absent or conflict.
+    """
     if len(blocks) < 2:
         return None
     authors, title, *publication = ("".join(block).strip() for block in blocks)
@@ -279,7 +288,12 @@ class _BibliographyParser(HTMLParser):
 
 
 def _extract_bibliography(html: str) -> list[BibliographyEntry]:
-    """Extract bibliography entries in document order."""
+    """Extract bibliography entries in document order.
+
+    :param str html: LaTeXML article HTML.
+    :return list[BibliographyEntry]: One entry per bibliography item, carrying
+        explicit identifiers or, when it has none, a title/author/year key.
+    """
     parser = _BibliographyParser()
     parser.feed(html)
     parser.close()
@@ -287,7 +301,12 @@ def _extract_bibliography(html: str) -> list[BibliographyEntry]:
 
 
 def extract_reference_identifiers(html: str) -> list[tuple[str, ...]]:
-    """Extract explicit aliases grouped by bibliography entry, in document order."""
+    """Extract explicit aliases grouped by bibliography entry, in document order.
+
+    :param str html: LaTeXML article HTML.
+    :return list[tuple[str, ...]]: Canonical aliases of each entry, empty for an
+        entry without an explicit identifier.
+    """
     return [entry.identifiers for entry in _extract_bibliography(html)]
 
 

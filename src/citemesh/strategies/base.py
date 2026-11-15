@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Hashable, Iterable, Mapping
+from collections.abc import Callable, Collection, Hashable, Iterable, Mapping
+from itertools import zip_longest
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -125,13 +126,21 @@ def select_capped_undirected_edges(
     max_edges_per_node: int,
     *,
     seed_id: Hashable | None = None,
+    priority_seed_neighbors: Collection[Hashable] = (),
 ) -> list[tuple[Hashable, Hashable, float]]:
     """Select edges for an undirected graph while capping per-node degree.
+
+    Seed edges are considered before all others, strongest first. When
+    ``priority_seed_neighbors`` is given, the seed's edges alternate between
+    those papers and the rest, starting with a priority paper, so neither group
+    can take every seed slot while the other has an edge to offer.
 
     :param Iterable[tuple[Hashable, Hashable, Mapping[str, object]]] edges: Edge tuples with optional
         ``weight`` metadata.
     :param int max_edges_per_node: Maximum degree per node.
     :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
+    :param Collection[Hashable] priority_seed_neighbors: Papers that take every
+        other seed slot, such as the seed's own references and citers.
     :return List[Tuple[Hashable, Hashable, float]]: Selected canonicalized edges with weights.
     """
     canonical_edges: dict[tuple[str, str], tuple[Hashable, Hashable, float]] = {}
@@ -148,13 +157,22 @@ def select_capped_undirected_edges(
         if best is None or weight > best[2]:
             canonical_edges[key] = (left, right, weight)
 
-    sorted_edges = sorted(
+    by_strength = sorted(
         canonical_edges.values(),
-        key=lambda item: (
-            seed_id is not None and seed_id not in item[:2],
-            deterministic_sort_key(item[2], item[0], item[1]),
-        ),
+        key=lambda item: deterministic_sort_key(item[2], item[0], item[1]),
     )
+    seed_key = None if seed_id is None else str(seed_id)
+    priority = {str(node) for node in priority_seed_neighbors}
+    seed_edges = [e for e in by_strength if seed_key in (str(e[0]), str(e[1]))]
+    other_edges = [e for e in by_strength if seed_key not in (str(e[0]), str(e[1]))]
+    preferred = [e for e in seed_edges if {str(e[0]), str(e[1])} & priority]
+    remaining = [e for e in seed_edges if not {str(e[0]), str(e[1])} & priority]
+    sorted_edges = [
+        edge
+        for pair in zip_longest(preferred, remaining)
+        for edge in pair
+        if edge is not None
+    ] + other_edges
 
     if max_edges_per_node <= 0:
         return sorted_edges
@@ -180,13 +198,19 @@ def select_capped_undirected_edges(
 
 
 def build_capped_undirected_graph(
-    graph: PaperGraph, max_edges_per_node: int, *, seed_id: Hashable | None = None
+    graph: PaperGraph,
+    max_edges_per_node: int,
+    *,
+    seed_id: Hashable | None = None,
+    priority_seed_neighbors: Collection[Hashable] = (),
 ) -> PaperGraph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
     :param PaperGraph graph: Source graph whose nodes and metadata should be preserved.
     :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
     :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
+    :param Collection[Hashable] priority_seed_neighbors: Papers that take every
+        other seed slot; see :func:`select_capped_undirected_edges`.
     :return PaperGraph: Rebuilt graph with selected weighted edges.
     """
     filtered_graph: PaperGraph = nx.Graph()
@@ -194,7 +218,10 @@ def build_capped_undirected_graph(
     filtered_graph.add_nodes_from(graph.nodes(data=True))
 
     for u, v, weight in select_capped_undirected_edges(
-        graph.edges(data=True), max_edges_per_node, seed_id=seed_id
+        graph.edges(data=True),
+        max_edges_per_node,
+        seed_id=seed_id,
+        priority_seed_neighbors=priority_seed_neighbors,
     ):
         filtered_graph.add_edge(u, v, weight=weight)
 

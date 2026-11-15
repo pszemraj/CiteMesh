@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -13,6 +14,7 @@ import pytest
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_cache import EMBEDDINGS_DATASET_NAME
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.embedding import corpus_source as corpus_source_module
 
 pytestmark = [pytest.mark.slow, pytest.mark.cuda]
 
@@ -139,19 +141,25 @@ def test_real_cuda_int8_corpus_cache_round_trip(
     ]
     loader_calls: list[tuple[int | None, int | None]] = []
 
+    source_commit = "c" * 40
+
     def load_local_dataset(
         use_streaming: bool,
         row_limit: int | None = None,
         row_offset: int | None = None,
+        *,
+        revision: str | None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """Return a fresh slice of the network-free CUDA smoke corpus.
 
         :param bool use_streaming: Requested dataset loading mode.
         :param Optional[int] row_limit: Optional number of records to return.
         :param Optional[int] row_offset: Optional starting record index.
+        :param str | None revision: Source commit the hydration pinned.
         :return tuple[str, list[dict[str, Any]]]: Source token and copied rows.
         """
         assert use_streaming is False
+        assert revision == source_commit
         loader_calls.append((row_limit, row_offset))
         start = int(row_offset or 0)
         stop = None if row_limit is None else start + int(row_limit)
@@ -169,9 +177,16 @@ def test_real_cuda_int8_corpus_cache_round_trip(
         encode_batch_size=len(records),
         client=client,
     )
+    monkeypatch.setattr(
+        corpus_source_module,
+        "resolve_source_snapshot",
+        lambda selection, revision="main": replace(selection, revision=source_commit),
+    )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_local_dataset)
     monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _source: len(records)
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(records),
     )
 
     builder._load_model()

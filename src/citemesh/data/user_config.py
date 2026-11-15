@@ -197,6 +197,7 @@ def _cast_export(value: object) -> list[str]:
 ConfigCaster = Callable[[object], ConfigValue]
 
 
+# Every key in these tables is documented in docs/reference/config/config_reference.toml, and tests/test_config_reference.py fails when they disagree.
 CONFIG_DEFAULT_KEY_SPECS: dict[str, ConfigCaster] = {
     "strategy": _choice_caster(STRATEGY_CHOICES),
     "export": _cast_export,

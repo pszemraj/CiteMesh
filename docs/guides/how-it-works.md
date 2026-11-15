@@ -23,7 +23,11 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
 ## 2. Candidate acquisition
 
-S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. The embedding candidate mode allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder. Hybrid takes no pool size and applies no quota. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests 200 of S2's `all-cs` recommendations, and in `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the seed in each of two roles: the seed encoded as a retrieval query and as a retrieval document. Each paper joins the pool once and carries a citation tag (references, citers), a semantic tag (recommendations, corpus neighbors), or both; the tags set its provenance and its edge-scoring weights.
+S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. What each strategy collects:
+
+- **Embedding, `candidates` mode**: allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder.
+- **Hybrid** takes no pool size. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests 200 of S2's `all-cs` recommendations, and in `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the seed in each of two roles: the seed encoded as a retrieval query and as a retrieval document.
+- **Provenance**: each paper joins the pool once and carries a citation tag (references, citers), a semantic tag (recommendations, corpus neighbors), or both; the tags set its provenance and its edge-scoring weights.
 
 When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references). Recovered references enter the pool like provider references, with the same seed relation, up to the reference limit; a bibliography that recovers more references than the limit is cut by title and abstract similarity to the seed, then citation count.
 
@@ -41,7 +45,7 @@ Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py) and
 
 ## 3. Embedding
 
-CiteMesh ranks candidates in a retrieval space and scores selected pairs in a symmetric space, using [task-specific prompts](../reference/embedding-runtime.md#task-specific-vector-spaces).
+CiteMesh ranks candidates in a retrieval space and scores selected pairs in a symmetric space, using [task-specific prompts](../reference/embedding-runtime.md#task-specific-vector-spaces). Every title, abstract, and free-text query is normalized before any role formats it: invisible characters are removed, typographic punctuation is folded, and line breaks and whitespace runs collapse, so arXiv's hard-wrapped metadata and a provider's clean copy of the same paper encode identically.
 
 Hybrid ranks every pool member by a retrieval-document vector: the stored corpus vector when the member is a corpus row, otherwise an encoding of its title and abstract. In `candidates` mode those encodings are stored in the embedding cache, so a warm rebuild encodes no candidate again. In the corpus modes the cache is the corpus itself, which takes no provider rows, so each build encodes the provider candidates that are not corpus rows in memory. The seed also gets a retrieval-query vector, which is encoded on every build.
 
@@ -70,7 +74,7 @@ Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each c
 score = Σ 1 / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
 ```
 
-Candidates sort by score, then paper ID, and the first `max_papers - 1` join the seed. Nothing is fitted: there is no year term, no citation-count term, no source quota and no semantic-only ceiling, and a candidate absent from a list simply adds nothing for it. Ranking uses only embedding cosines, seed links and recommendation order, so it runs before any selected paper's reference list is fetched; those lists come afterwards, for the selected citation-sourced papers only, and feed the bibliographic-coupling term of [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and rank in every list are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson); it is separate from `seed_relevance`, which is computed later over the final graph.
+Candidates sort by score, then paper ID, and the first `max_papers - 1` join the seed. Nothing is fitted: there is no year term and no citation-count term, every candidate competes on the same fused score whatever its source, and a candidate absent from a list simply adds nothing for it. Ranking uses only embedding cosines, seed links and recommendation order, so it runs before any selected paper's reference list is fetched; those lists come afterwards, for the selected citation-sourced papers only, and feed the bibliographic-coupling term of [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and rank in every list are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson); it is separate from `seed_relevance`, which is computed later over the final graph.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
@@ -91,9 +95,15 @@ author_factor = 1.5 if the papers share an author, else 1.0
 
 The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), scoring `0.2` at exactly five years and flattening at `0.1` for greater differences. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate - they never create an edge.
 
-Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` - `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed - then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
+Hybrid has provenance the embedding strategy lacks, so it scores differently:
 
-Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's strongest neighbors are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
+- **Gate**: a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar.
+- **Weights** adapt over `(embedding, temporal, citation, bibliographic)`: `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed.
+- **Floors** are asymmetric: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
+
+Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's edges are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
+
+In hybrid the seed's slots alternate between its direct references and citers and its other neighbors, strongest first within each group and starting with a direct link, so the seed keeps both its cited neighborhood and its closest discoveries. Both groups compete only among edges that cleared the gate and the seed floor, and a group with nothing left to offer yields its turns to the other.
 
 Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py); the reference lists that bibliographic coupling compares come from `ReferenceHydrator` in [reference_hydration.py](../../src/citemesh/strategies/reference_hydration.py), shared by the citation, recommendation, and hybrid strategies.
 

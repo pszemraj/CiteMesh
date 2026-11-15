@@ -7,10 +7,10 @@
 ### Build a graph
 
 ```bash
-# Minimal citation graph
+# Minimal citation graph (static PNG, the default export)
 citemesh build "arxiv:1706.03762" --strategy citation -p 20
 
-# Dashboard collection in ./out (default); a second build adds to it
+# Dashboard collection in ./out, the default output directory; a second build adds to it
 citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -e csv --theme dark
 citemesh build "arxiv:1810.04805" -s recommendation -e dashboard --theme dark
 
@@ -22,7 +22,7 @@ citemesh build "arxiv:1810.04805" -s embedding --dataset-split "train[:2%]" \
   -e plotly --verbose --log-file out/run.log
 ```
 
-Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
+Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dashboard` exports need the [viz extra](../../README.md#quick-start). Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
 
 ### Accepted identifiers
 
@@ -44,13 +44,23 @@ Search modes:
 
 - `local` encodes the query and ranks it against cached retrieval-document vectors, returning cosine scores and full paper IDs. It fetches no paper metadata and fails if the selected cache is empty.
 - `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
-- `auto` tries local search first and falls back to S2 when the selected cache is empty or local dependencies or model loading are unavailable, logging the reason. An installed corpus that is unusable exits with status 1 instead of falling back: a pending import or refresh, uncertified membership, a requested view larger than the installed coverage, a source or runtime mismatch, or a model-fingerprint mismatch. Resume the pending operation or select matching settings before retrying.
+- `auto` tries local search first and falls back to S2 when the selected cache is empty or local dependencies or model loading are unavailable, logging the reason. An installed corpus that is unusable exits with status 1 instead of falling back. Causes: a pending import or refresh, uncertified membership, a requested view larger than the installed coverage, a source or runtime mismatch, or a model-fingerprint mismatch. Resume the pending operation or select matching settings before retrying.
 
-Select an installed portable index directly with `--cache-namespace NAMESPACE`. Its fixed model and source settings override unrelated saved defaults, and explicit conflicts are usage errors (exit 2). This selection never falls back to S2, including under `--mode auto`. Without it, search reads the namespace derived from the current model settings, which reaches an installed index only when those settings match its fixed ones; the default candidates source never does. When that namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command. For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
+Searching an installed portable index:
+
+- `--cache-namespace NAMESPACE` selects the index directly. Its fixed model and source settings override unrelated saved defaults, and explicit conflicts are usage errors (exit 2).
+- This selection never falls back to S2, including under `--mode auto`.
+- Without it, search reads the namespace derived from the current model settings. That reaches an installed index only when those settings match its fixed ones; the default `candidates` source never does.
+- When that namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command.
+- For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
-`--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. It is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
+Other search behavior:
+
+- `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source.
+- Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. The command is omitted with a warning if the cache has no recorded split.
+- [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard
 
@@ -74,18 +84,30 @@ See [User Configuration](configuration.md) for saved defaults and [cache mainten
 
 ### Install, export, and refresh a corpus index
 
-See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the
-commands and their import, export, refresh, selection, and recovery behavior.
+See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the commands and their import, export, refresh, selection, and recovery behavior.
 
 ### Missing Semantic Scholar references
 
-Hybrid builds request up to `--max-references` seed references from Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates; there is no separate admission floor or relevance-based cut. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the seed.
+Hybrid builds request up to `--max-references` seed references from Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the seed.
 
 If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
 
-Recovery uses explicit arXiv IDs and DOIs in bibliography entries, resolves available local metadata before S2, and uses arXiv's metadata API for remaining arXiv IDs. When S2 returns an empty reference list and hybrid has a prepared corpus, entries without explicit identifiers can also match a unique corpus paper by normalized title, full first-author name, and year. An arXiv preprint may be one year earlier than the bibliography's publication year; multiple matches across either year remain unresolved. This lookup scans the active corpus metadata once and makes no additional metadata API requests.
+What recovery matches:
 
-Recovered references still compete under the existing reference and total-paper limits. Hybrid puts every recovered reference into the candidate pool up to the reference limit, where it is ranked like any other candidate; only a bibliography larger than the limit is cut first, by title and abstract similarity to the seed and then citation count. A supplied arXiv version selects that HTML version, while graph identities remain version-independent. Missing HTML and unresolved references leave other available sources usable. Recovery finds outgoing references, not incoming citations, and does not imply complete bibliography coverage. Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists. No PDF/LaTeX extraction or extra dependency is required.
+- Explicit arXiv IDs and DOIs in bibliography entries. Available local metadata is resolved before S2, and arXiv's metadata API resolves the remaining arXiv IDs.
+- Entries without explicit identifiers, only when S2 returned an empty reference list and hybrid has a prepared corpus: a unique corpus paper with the same normalized title, full first-author name, and year. An arXiv preprint may be one year earlier than the bibliography's publication year; multiple matches across either year remain unresolved. This lookup scans the active corpus metadata once and makes no additional metadata API requests.
+
+How recovered references are used:
+
+- They compete under the existing reference and total-paper limits. Hybrid puts every recovered reference into the candidate pool up to the reference limit, where it is ranked like any other candidate; only a bibliography larger than the limit is cut first, by title and abstract similarity to the seed and then citation count.
+- A supplied arXiv version selects that HTML version, while graph identities remain version-independent.
+- Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists.
+
+What recovery does not do:
+
+- Missing HTML and unresolved references leave other available sources usable.
+- It finds outgoing references, not incoming citations, and does not imply complete bibliography coverage.
+- It needs no PDF/LaTeX extraction or extra dependency.
 
 ### Help and console output
 
@@ -118,9 +140,17 @@ _`--theme light` with a paper selected._
 
 ## Troubleshooting
 
-CiteMesh paces authenticated Semantic Scholar requests at 1 request/second and anonymous requests at 0.5. Calls retry with exponential full jitter: up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and recovery waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
+Semantic Scholar request policy:
+
+- **Pacing**: authenticated requests run at 1 request/second, anonymous requests at 0.5.
+- **Retries**: exponential full jitter, up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
+- **Recovery budget, anonymous**: builds share a 90-second budget for a candidate collection. Failed requests, retry attempts, and recovery waits consume it; healthy first requests, local embedding work, and rendering do not.
+- **Recovery budget, authenticated**: builds keep the attempt limit with no elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts.
+- An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary.
+
+Common symptoms:
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
 - **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
-- **Slow first embedding run or an older corpus cap in the logs**: see [hydration and resume](caching.md#corpus-hydration-and-resume).
+- **Slow first embedding run, or a warning that results come from a larger cached corpus**: see [hydration and resume](caching.md#corpus-hydration-and-resume).

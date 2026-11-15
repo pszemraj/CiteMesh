@@ -2,12 +2,15 @@
 
 import json
 import runpy
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Literal
 
+import datasets
 import h5py
 import numpy as np
 import pytest
@@ -15,9 +18,12 @@ from huggingface_hub.utils import httpx
 
 from citemesh.data import get_cache_dir
 from citemesh.data.embedding_cache import select_existing_cache
+from citemesh.data.embedding_cache.lifecycle import CorpusOperationSession
+from citemesh.data.embedding_cache.models import CorpusSourceRecord
+from citemesh.data.embedding_cache.store import EmbeddingCache
 from citemesh.data.embedding_contract import CorpusSource, InstalledCorpusError
 from citemesh.strategies.embedding import builder as builder_module
-from citemesh.strategies.embedding import corpus_source, deps
+from citemesh.strategies.embedding import corpus_source, deps, refresh
 from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
 from citemesh.strategies.embedding.records import DatasetRecord
 from citemesh.strategies.embedding.refresh import (
@@ -66,25 +72,54 @@ def make_builder(*, storage_precision="float32", **kwargs):
     )
 
 
-def install_source(monkeypatch, revisions, active):
+def source_dataset(rows: Iterable[DatasetRecord]) -> datasets.Dataset:
+    """Download rows as an Arrow dataset, as a non-streaming load prepares them.
+
+    Consuming the rows here surfaces a transport failure from the load call.
+    Missing fields become nulls so every row keeps all of its columns.
+    """
+    records = list(rows)
+    columns = dict.fromkeys(field for record in records for field in record)
+    return datasets.Dataset.from_list(
+        [{field: record.get(field) for field in columns} for record in records]
+    )
+
+
+def install_source(monkeypatch, revisions, active, loads=None):
+    """Serve revisions from memory: streamed as rows, downloaded as a Dataset.
+
+    :param loads: Optional list collecting each load's revision and streaming flag.
+    """
     reads = []
     resolutions = []
 
     def load_dataset(repo, **kwargs):
         reads.append(kwargs["revision"])
-        return iter(revisions[kwargs["revision"]])
+        if loads is not None:
+            loads.append((kwargs["revision"], kwargs["streaming"]))
+        rows = revisions[kwargs["revision"]]
+        return iter(rows) if kwargs["streaming"] else source_dataset(rows)
 
     def resolve(source, revision="main"):
         resolutions.append(revision)
         return replace(source, revision=active[0] if revision == "main" else revision)
 
-    monkeypatch.setattr(
-        deps,
-        "_import_datasets_module",
-        lambda: SimpleNamespace(load_dataset=load_dataset),
-    )
+    monkeypatch.setattr(datasets, "load_dataset", load_dataset)
     monkeypatch.setattr(corpus_source, "resolve_source_snapshot", resolve)
     return reads, resolutions
+
+
+def read_source(
+    reader: Literal["stream", "download"],
+    source: CorpusSource,
+    stats: corpus_source.SourceScanStats | None = None,
+) -> list[CorpusSourceRecord]:
+    """Read the selected records of a source with one of the two readers."""
+    if reader == "stream":
+        return list(corpus_source.iter_source_records(source, stats))
+    with TemporaryDirectory() as workdir:
+        selection = corpus_source.prepare_source_selection(source, Path(workdir), stats)
+        return [record for batch in selection.batches(2) for record in batch]
 
 
 def row(identifier, abstract="body", **metadata):
@@ -423,9 +458,10 @@ def test_refresh_refuses_missing_matrix_of_open_selected_cache(monkeypatch, runt
     assert not runtime[0]
 
 
+@pytest.mark.parametrize("reader", ["stream", "download"])
 @pytest.mark.parametrize("selection", ["all", "newest"])
 def test_source_selection_identical_duplicates_keep_first_ordinal(
-    monkeypatch, selection
+    monkeypatch, selection, reader
 ):
     revisions = {
         "one": [
@@ -445,7 +481,7 @@ def test_source_selection_identical_duplicates_keep_first_ordinal(
         2 if selection == "newest" else None,
     )
     stats = {}
-    records = list(corpus_source.iter_source_records(source, stats))
+    records = read_source(reader, source, stats)
     expected = ["arxiv:2501.00001", "arxiv:2401.00001"]
     ordinals = [0, 2]
     if selection == "all":
@@ -460,7 +496,8 @@ def test_source_selection_identical_duplicates_keep_first_ordinal(
 def test_explicit_legacy_adoption_retains_requested_main_address(
     monkeypatch, runtime, missing_chronology
 ):
-    install_source(monkeypatch, {"one": [row("2401.00001")]}, ["one"])
+    loads = []
+    install_source(monkeypatch, {"one": [row("2401.00001")]}, ["one"], loads)
     builder = make_builder()
     builder.model_revision = None
     monkeypatch.setattr(
@@ -494,10 +531,99 @@ def test_explicit_legacy_adoption_retains_requested_main_address(
         lambda: pytest.fail("legacy adoption resolved moving main"),
     )
     adopt_legacy_cache(builder, namespace_id)
+    assert loads == [("one", False)]
     assert builder.embedding_cache.db_path == cache.db_path
     assert "revision=main::" in builder._cache_selection.namespace_serialization
     assert builder.model_revision == "a" * 40
     assert builder.embedding_cache.get_max_chronology_key() is not None
+
+
+@pytest.mark.parametrize("explicit_revision", [None, "two"])
+def test_adoption_defaults_to_the_pinned_hydration_revision(
+    monkeypatch, runtime, explicit_revision
+):
+    loads = []
+    sources = {
+        "one": [row("2401.00001")],
+        "two": [row("2401.00001"), row("2401.00002")],
+    }
+    # ``main`` has moved past both; nothing may resolve or read it.
+    reads, resolutions = install_source(monkeypatch, sources, ["three"], loads)
+    builder = make_builder()
+    builder.model_revision = None
+    fingerprint = "hf::org/example::" + "a" * 40
+    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+    namespace = builder._embedding_cache_namespace(artifact_identity=fingerprint)
+    cache = builder._create_embedding_cache(namespace)
+    cache.set_model_fingerprint(fingerprint)
+    builder._load_model()
+    cache.upsert_embeddings(
+        {"arxiv:2401.00001": {"title": "2401.00001", "abstract": "body"}},
+        builder.model,
+        text_builder=builder._format_retrieval_document_metadata,
+    )
+    cache.mark_hydrated(
+        builder.dataset_source, builder.dataset_split, None, complete=True
+    )
+    cache.set_hydration_source_revision("one")
+    target = explicit_revision or "one"
+
+    result = adopt_legacy_cache(builder, cache.namespace_id, revision=explicit_revision)
+
+    assert result["source"]["revision"] == target
+    assert resolutions == [target]
+    assert reads == [target]
+    assert loads == [(target, False)]
+    assert result["active_rows"] == len(sources[target])
+    assert builder.embedding_cache.get_hydration_source_revision() == target
+
+
+def test_plain_adoption_resumes_an_interrupted_adoption_at_its_target(
+    monkeypatch, runtime
+):
+    """A pending adoption's target wins over the older build pin."""
+    sources = {
+        "one": [row("2401.00001")],
+        "two": [row("2401.00001"), row("2401.00002")],
+    }
+    install_source(monkeypatch, sources, ["three"])
+    fingerprint = "hf::org/example::" + "a" * 40
+
+    def legacy_builder():
+        builder = make_builder()
+        builder.model_revision = None
+        monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+        return builder
+
+    builder = legacy_builder()
+    namespace = builder._embedding_cache_namespace(artifact_identity=fingerprint)
+    cache = builder._create_embedding_cache(namespace)
+    cache.set_model_fingerprint(fingerprint)
+    builder._load_model()
+    cache.upsert_embeddings(
+        {"arxiv:2401.00001": {"title": "2401.00001", "abstract": "body"}},
+        builder.model,
+        text_builder=builder._format_retrieval_document_metadata,
+    )
+    cache.mark_hydrated(
+        builder.dataset_source, builder.dataset_split, None, complete=True
+    )
+    cache.set_hydration_source_revision("one")
+    upsert = EmbeddingCache.upsert_embeddings
+
+    def interrupted(self, *args, **kwargs):
+        upsert(self, *args, **kwargs)
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(EmbeddingCache, "upsert_embeddings", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        adopt_legacy_cache(builder, cache.namespace_id, revision="two")
+    monkeypatch.setattr(EmbeddingCache, "upsert_embeddings", upsert)
+
+    result = adopt_legacy_cache(legacy_builder(), cache.namespace_id)
+
+    assert result["source"]["revision"] == "two"
+    assert result["active_rows"] == len(sources["two"])
 
 
 @pytest.mark.parametrize("stored_size", [None, 2])
@@ -577,10 +703,11 @@ def test_conflicting_duplicates_refresh_one_deterministic_winner(monkeypatch, ru
     )
 
 
+@pytest.mark.parametrize("reader", ["stream", "download"])
 @pytest.mark.parametrize("selection", ["all", "newest"])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_dated_duplicate_winner_is_shared_and_precedes_newest_cap(
-    monkeypatch, selection, reverse
+    monkeypatch, selection, reverse, reader
 ):
     duplicate = [
         row("2501.00001", "old", update_date="2023-05-25", categories="math-ph"),
@@ -596,18 +723,17 @@ def test_dated_duplicate_winner_is_shared_and_precedes_newest_cap(
     rows = [duplicate[0], row("2401.00001"), duplicate[1], row("2301.00001")]
     install_source(monkeypatch, {"one": rows}, ["one"])
     stats = {}
-    records = list(
-        corpus_source.iter_source_records(
-            CorpusSource(
-                "org/source",
-                None,
-                "train",
-                "one",
-                selection,
-                2 if selection == "newest" else None,
-            ),
-            stats,
-        )
+    records = read_source(
+        reader,
+        CorpusSource(
+            "org/source",
+            None,
+            "train",
+            "one",
+            selection,
+            2 if selection == "newest" else None,
+        ),
+        stats,
     )
     by_id = {record["paper_id"]: record for record in records}
     winner = by_id["arxiv:2501.00001"]
@@ -655,22 +781,50 @@ def test_dated_duplicate_winner_is_shared_and_precedes_newest_cap(
         ({"id": "2401.00001v9"}, {"id": "2401.00001v10"}),
     ],
 )
-def test_source_duplicate_recency_fallbacks(monkeypatch, older, newer):
+@pytest.mark.parametrize("reader", ["stream", "download"])
+def test_source_duplicate_recency_fallbacks(monkeypatch, older, newer, reader):
     for records in (
         [row("2401.00001", "z old", **older), row("2401.00001", "a new", **newer)],
         [row("2401.00001", "a new", **newer), row("2401.00001", "z old", **older)],
     ):
         install_source(monkeypatch, {"one": records}, ["one"])
         source = CorpusSource("org/source", None, "train", "one", "all", None)
-        resolved = list(corpus_source.iter_source_records(source))
+        resolved = read_source(reader, source)
         assert len(resolved) == 1
         assert resolved[0]["paper_id"] == "arxiv:2401.00001"
         assert resolved[0]["abstract"] == "a new"
 
 
+def test_streaming_staging_pass_runs_on_the_calling_thread(monkeypatch):
+    """Ctrl-C must stop the staging pass at once, so it must not run on the worker."""
+    staging_threads = set()
+
+    def rows():
+        for index in range(20):
+            staging_threads.add(threading.current_thread())
+            yield row(f"2401.{index:05d}")
+
+    install_source(monkeypatch, {"one": rows()}, ["one"])
+    source = CorpusSource("org/source", None, "train", "one", "all", None)
+    prepared = list(
+        refresh._prepared_batches(
+            corpus_source.iter_source_batches(source, 8),
+            lambda record: f"text {record['paper_id']}",
+        )
+    )
+
+    assert staging_threads == {threading.current_thread()}
+    # The worker reads the later batches through the same staging connection.
+    assert [len(records) for records, _ in prepared] == [8, 8, 4]
+    texts = {key: value for _, batch in prepared for key, value in batch.items()}
+    assert len(texts) == 20
+    assert texts["arxiv:2401.00019"] == "text arxiv:2401.00019"
+
+
+@pytest.mark.parametrize("reader", ["stream", "download"])
 @pytest.mark.parametrize("update_date", [None, "2026-10-16", "invalid"])
 def test_ambiguous_duplicates_resolve_stably_with_aggregate_warning(
-    monkeypatch, caplog, update_date
+    monkeypatch, caplog, update_date, reader
 ):
     records = [
         row(identifier, abstract, update_date=update_date)
@@ -681,7 +835,7 @@ def test_ambiguous_duplicates_resolve_stably_with_aggregate_warning(
     for rows in (records, list(reversed(records))):
         install_source(monkeypatch, {"one": rows}, ["one"])
         source = CorpusSource("org/source", None, "train", "one", "all", None)
-        resolved = list(corpus_source.iter_source_records(source))
+        resolved = read_source(reader, source)
         winners.append({record["paper_id"]: record["abstract"] for record in resolved})
         warnings = [
             record for record in caplog.records if record.levelname == "WARNING"
@@ -922,6 +1076,7 @@ def test_sliced_source_uses_nonstreaming_with_same_pinned_revision(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("reader", ["stream", "download"])
 @pytest.mark.parametrize("failure_stage", ["load", "iterate"])
 @pytest.mark.parametrize(
     "source_error",
@@ -931,8 +1086,13 @@ def test_source_transport_failures_are_operation_errors(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: Literal["load", "iterate"],
     source_error: type[httpx.HTTPError],
+    reader: Literal["stream", "download"],
 ) -> None:
-    """Normalize transport errors from opening and consuming the pinned dataset."""
+    """Normalize transport errors from opening and consuming the pinned dataset.
+
+    A download consumes every row inside the load, so no row counts as examined
+    until it completes.
+    """
     failure = source_error("source transport unavailable")
 
     def broken_source() -> Iterator[DatasetRecord]:
@@ -940,11 +1100,15 @@ def test_source_transport_failures_are_operation_errors(
         yield row("2401.00001")
         raise failure
 
-    def load_dataset(repo: str, **kwargs: str | bool) -> Iterator[DatasetRecord]:
-        """Fail at dataset construction or return the interrupted source stream."""
+    def load_dataset(
+        repo: str, **kwargs: str | bool | int
+    ) -> Iterator[DatasetRecord] | datasets.Dataset:
+        """Fail at dataset construction or return the interrupted source."""
         if failure_stage == "load":
             raise failure
-        return broken_source()
+        return (
+            broken_source() if kwargs["streaming"] else source_dataset(broken_source())
+        )
 
     monkeypatch.setattr(
         deps,
@@ -955,11 +1119,12 @@ def test_source_transport_failures_are_operation_errors(
     stats: corpus_source.SourceScanStats = {"source_records_examined": 0}
 
     with pytest.raises(OSError, match="source transport unavailable") as captured:
-        list(corpus_source.iter_source_records(source, stats))
+        read_source(reader, source, stats)
 
     assert "org/source@pinned-revision" in str(captured.value)
     assert captured.value.__cause__ is failure
-    assert stats["source_records_examined"] == (1 if failure_stage == "iterate" else 0)
+    examined = 1 if failure_stage == "iterate" and reader == "stream" else 0
+    assert stats["source_records_examined"] == examined
 
 
 def test_pending_refresh_retains_owned_handle_across_transient_model_reset(
@@ -1044,3 +1209,270 @@ def test_explicit_rebuild_resets_managed_missing_half_before_initialization(
     assert reset.embedding_cache.db_path == cache.db_path
     assert reset.embedding_cache.corpus_state() == {}
     assert reset.embedding_cache.embedding_count() == 0
+
+
+def test_refresh_streams_only_to_reconcile_a_complete_cache(monkeypatch, runtime):
+    """Download whenever the whole source is processed; stream an incremental refresh."""
+    loads = []
+    revisions = {
+        "one": [row("2401.00001")],
+        "two": [row("2401.00001", "new"), row("2401.00002")],
+        "three": [row("2401.00001", "newer"), row("2401.00003")],
+    }
+    active = ["one"]
+    install_source(monkeypatch, revisions, active, loads)
+    builder = make_builder()
+    builder.refresh_corpus()
+    active[0] = "two"
+    builder.refresh_corpus()
+    cache = builder.embedding_cache
+    original = cache.upsert_embeddings
+
+    def interrupt(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("interrupted after vector commit")
+
+    monkeypatch.setattr(cache, "upsert_embeddings", interrupt)
+    active[0] = "three"
+    with pytest.raises(RuntimeError, match="interrupted"):
+        builder.refresh_corpus()
+    monkeypatch.setattr(cache, "upsert_embeddings", original)
+    builder.refresh_corpus()
+    assert loads == [("one", False), ("two", True), ("three", True), ("three", False)]
+    assert cache.corpus_state()["source"]["revision"] == "three"
+
+
+@pytest.mark.parametrize("lost_tail", [False, True])
+def test_resumed_refresh_skips_recorded_members_and_certifies_coverage(
+    monkeypatch, runtime, lost_tail
+):
+    """Resume validates and encodes only papers the interrupted refresh did not record.
+
+    With ``lost_tail`` the last committed vector row is missing on resume, so
+    recovery drops its mapping and the member pointing at it is re-encoded.
+    """
+    encoded, _ = runtime
+    paper_ids = [f"arxiv:2401.0000{index}" for index in range(1, 6)]
+    install_source(
+        monkeypatch,
+        {"one": [row(paper_id.removeprefix("arxiv:")) for paper_id in paper_ids]},
+        ["one"],
+    )
+    monkeypatch.setattr(refresh, "HYDRATION_FLUSH_SIZE", 2)
+    original = EmbeddingCache.upsert_embeddings
+    batches = []
+
+    def interrupt_third(self, papers, *args, **kwargs):
+        batches.append(list(papers))
+        if len(batches) == 3:
+            raise RuntimeError("interrupted before the third batch committed")
+        return original(self, papers, *args, **kwargs)
+
+    monkeypatch.setattr(EmbeddingCache, "upsert_embeddings", interrupt_third)
+    builder = make_builder()
+    with pytest.raises(RuntimeError, match="third batch"):
+        builder.refresh_corpus()
+    cache = builder.embedding_cache
+    with cache._inspect_db() as connection:
+        recorded = dict(
+            connection.execute("SELECT paper_id,source_ordinal FROM corpus_membership")
+        )
+    assert recorded == {
+        paper_id: ordinal for ordinal, paper_id in enumerate(paper_ids[:4])
+    }
+    if lost_tail:
+        with h5py.File(cache.h5_path, "a") as handle:
+            handle["embeddings"].resize((3, 2))
+    monkeypatch.setattr(EmbeddingCache, "upsert_embeddings", original)
+    validate = CorpusOperationSession.validate_records
+    validated = []
+
+    def record_validation(self, records):
+        validated.extend(record["paper_id"] for record in records)
+        return validate(self, records)
+
+    monkeypatch.setattr(CorpusOperationSession, "validate_records", record_validation)
+    encoded.clear()
+
+    result = builder.refresh_corpus()
+
+    resumed = paper_ids[3:] if lost_tail else paper_ids[4:]
+    assert set(validated) == set(resumed)
+    assert len(encoded) == len(resumed)
+    assert result["active_rows"] == 5
+    assert result["encoded_rows"] == len(resumed)
+    assert result["source_records_examined"] == 5
+    state = cache.corpus_state()
+    assert state["membership_complete"] and "pending" not in state
+    with cache._inspect_db() as connection:
+        assert dict(
+            connection.execute("SELECT paper_id,source_ordinal FROM corpus_membership")
+        ) == {paper_id: ordinal for ordinal, paper_id in enumerate(paper_ids)}
+    assert cache.embedding_count() == 5
+    assert cache.get_cached_paper_ids() == set(paper_ids)
+
+
+def test_resume_restores_interrupted_replacement_before_skipping_members(
+    monkeypatch, runtime
+):
+    """A replacement interrupted before its mappings commit is rolled back and redone."""
+    encoded, _ = runtime
+    one = [row(f"2401.0000{index}") for index in range(1, 5)]
+    two = [
+        row("2401.00001"),
+        row("2401.00002", "revised"),
+        row("2401.00003"),
+        row("2401.00004", "revised"),
+    ]
+    active = ["one"]
+    install_source(monkeypatch, {"one": one, "two": two}, active)
+    monkeypatch.setattr(refresh, "HYDRATION_FLUSH_SIZE", 2)
+    builder = make_builder()
+    builder.refresh_corpus()
+    cache = builder.embedding_cache
+    with h5py.File(cache.h5_path, "r") as handle:
+        before = handle["embeddings"][:]
+    commit = cache._commit_row_mappings
+    commits = []
+
+    def interrupt_second(**kwargs):
+        commits.append(kwargs)
+        if len(commits) == 2:
+            raise RuntimeError("interrupted before mappings committed")
+        return commit(**kwargs)
+
+    monkeypatch.setattr(cache, "_commit_row_mappings", interrupt_second)
+    active[0] = "two"
+    with pytest.raises(RuntimeError, match="mappings committed"):
+        builder.refresh_corpus()
+    with cache._inspect_db() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM replacement_journal"
+        ).fetchone() == (1,)
+        assert {
+            paper_id
+            for (paper_id,) in connection.execute(
+                "SELECT paper_id FROM corpus_membership"
+            )
+        } == {"arxiv:2401.00001", "arxiv:2401.00002"}
+    with h5py.File(cache.h5_path, "r") as handle:
+        replaced = handle["embeddings"][:]
+    assert not np.array_equal(replaced[3], before[3])
+    monkeypatch.setattr(cache, "_commit_row_mappings", commit)
+    validate = CorpusOperationSession.validate_records
+    validated = []
+
+    def record_validation(self, records):
+        validated.extend(record["paper_id"] for record in records)
+        return validate(self, records)
+
+    monkeypatch.setattr(CorpusOperationSession, "validate_records", record_validation)
+    encoded.clear()
+
+    result = builder.refresh_corpus()
+
+    assert set(validated) == {"arxiv:2401.00003", "arxiv:2401.00004"}
+    assert len(encoded) == 1 and "revised" in encoded[0]
+    assert result["active_rows"] == 4 and result["encoded_rows"] == 1
+    with cache._inspect_db() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM replacement_journal"
+        ).fetchone() == (0,)
+    with h5py.File(cache.h5_path, "r") as handle:
+        after = handle["embeddings"][:]
+    np.testing.assert_array_equal(after[[0, 1, 2]], replaced[[0, 1, 2]])
+    np.testing.assert_array_equal(after[3], replaced[3])
+    assert (
+        cache.get_paper_metadata_batch(["arxiv:2401.00004"])["arxiv:2401.00004"][
+            "abstract"
+        ]
+        == "revised"
+    )
+    assert cache.corpus_state()["membership_complete"]
+
+
+@pytest.mark.parametrize("selection", ["all", "newest"])
+def test_stream_and_download_select_identical_records(monkeypatch, selection):
+    """Both readers keep the same winners, ordinals, order and examined count."""
+    rows = [
+        row("2501.00002", "dated old", update_date="2023-05-25"),
+        row("2401.00001"),
+        row("2501.00002", "dated new", update_date="2026-10-16 00:00:00"),
+        {"title": "Undated paper", "abstract": "no identifier"},
+        row("2401.00001"),
+        row("2301.00003", "alpha"),
+        row("2301.00003", "zulu"),
+        row(
+            "2401.00004v2",
+            versions=[{"version": "v2", "created": "Thu, 25 May 2023 00:00:00 GMT"}],
+        ),
+        row("2401.00004v3"),
+        row(
+            "hep-th/9901001",
+            authors_parsed=[["Doe", "Jane", ""]],
+            categories="hep-th math-ph",
+            doi="doi: 10.1000/example",
+        ),
+    ]
+    install_source(monkeypatch, {"one": rows}, ["one"])
+    source = CorpusSource(
+        "org/source",
+        None,
+        "train",
+        "one",
+        selection,
+        4 if selection == "newest" else None,
+    )
+    stream_stats: corpus_source.SourceScanStats = {"source_records_examined": 0}
+    download_stats: corpus_source.SourceScanStats = {"source_records_examined": 0}
+    streamed = read_source("stream", source, stream_stats)
+    downloaded = read_source("download", source, download_stats)
+    assert downloaded == streamed
+    assert [record["source_ordinal"] for record in streamed] == (
+        [2, 8, 1, 6] if selection == "newest" else [1, 2, 3, 6, 8, 9]
+    )
+    assert stream_stats == download_stats == {"source_records_examined": len(rows)}
+
+
+def test_calibration_sample_matches_hydration_reservoir(monkeypatch, runtime, tmp_path):
+    """One prepared selection yields hydration's calibration sample."""
+    rows = [row(f"2401.{index:05d}") for index in range(1, 12)]
+    rows.insert(3, row("2401.00002"))
+    install_source(monkeypatch, {"one": rows}, ["one"])
+    builder = make_builder(storage_precision="int8", calibration_sample_size=3)
+    source = CorpusSource("org/source", None, "train", "one", "all", None)
+    expected = builder._sample_calibration_records(
+        corpus_source.iter_source_records(source),
+        progress_total=None,
+        progress_label="Calibrating source",
+        corpus_size=None,
+    )
+    selection = corpus_source.prepare_source_selection(source, tmp_path)
+    assert refresh._calibration_sample(selection, 3) == expected
+
+
+@pytest.mark.parametrize("rows", [2, 3])
+def test_source_normalizes_in_workers_only_from_row_threshold(
+    monkeypatch, rows, tmp_path
+):
+    """Small sources such as fixtures are normalized without worker processes."""
+    install_source(
+        monkeypatch,
+        {"one": [row(f"2401.{index:05d}") for index in range(rows)]},
+        ["one"],
+    )
+    monkeypatch.setattr(corpus_source, "PARALLEL_SOURCE_MIN_ROWS", 3)
+    monkeypatch.setattr(corpus_source, "_source_processes", lambda: 2)
+    original = datasets.Dataset.map
+    requested = []
+
+    def record_map(self, *args, num_proc=None, **kwargs):
+        requested.append(num_proc)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(datasets.Dataset, "map", record_map)
+    selection = corpus_source.prepare_source_selection(
+        CorpusSource("org/source", None, "train", "one", "all", None), tmp_path
+    )
+    assert len(selection) == rows
+    assert requested == [2 if rows >= 3 else None]

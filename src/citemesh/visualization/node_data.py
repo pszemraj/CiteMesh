@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Hashable, Iterable, Mapping
 
 from citemesh.core import Paper
+from citemesh.core.text_normalization import normalize_text
 
 from .dashboard.contracts import EffectiveNodeMetadata
 
@@ -34,6 +35,20 @@ def validate_canonical_node_ids(node_ids: Iterable[Hashable]) -> None:
         serialized_owners[identifier] = node_id
 
 
+def _display_text(value: object) -> object:
+    """Normalize a title or abstract for export, leaving non-strings unchanged.
+
+    arXiv metadata hard-wraps titles and abstracts and other sources carry
+    invisible or typographic characters; exports show the same normalized text
+    that embedding inputs use.
+
+    :param object value: Raw title or abstract field.
+    :return object: :func:`normalize_text` of ``value`` when it is a string,
+        otherwise ``value`` itself.
+    """
+    return normalize_text(value) if isinstance(value, str) else value
+
+
 def effective_node_metadata(
     node_id: Hashable, attrs: Mapping[str, object]
 ) -> EffectiveNodeMetadata:
@@ -42,6 +57,7 @@ def effective_node_metadata(
     An attached :class:`~citemesh.core.models.Paper` owns bibliographic metadata.
     The graph's explicit ``is_seed`` attribute remains authoritative because seed
     role belongs to one graph build rather than to the reusable paper record.
+    Titles and abstracts are normalized here exactly as embedding inputs are.
 
     :param Hashable node_id: Graph node identifier.
     :param Mapping[str, object] attrs: Raw graph node attributes.
@@ -51,11 +67,11 @@ def effective_node_metadata(
     if isinstance(paper, Paper):
         return {
             "id": node_id,
-            "title": paper.title,
+            "title": _display_text(paper.title),
             "year": paper.year,
             "authors": [author.name for author in paper.authors],
             "citation_count": paper.citation_count,
-            "abstract": paper.abstract,
+            "abstract": _display_text(paper.abstract),
             "venue": paper.venue,
             "arxiv_id": paper.arxiv_id,
             "doi": paper.doi,
@@ -66,11 +82,11 @@ def effective_node_metadata(
 
     return {
         "id": node_id,
-        "title": attrs.get("title", ""),
+        "title": _display_text(attrs.get("title", "")),
         "year": attrs.get("year"),
         "authors": attrs.get("authors") or [],
         "citation_count": attrs.get("citation_count", 0),
-        "abstract": attrs.get("abstract", ""),
+        "abstract": _display_text(attrs.get("abstract", "")),
         "venue": attrs.get("venue", ""),
         "arxiv_id": attrs.get("arxiv_id", ""),
         "doi": attrs.get("doi", ""),

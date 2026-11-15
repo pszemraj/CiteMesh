@@ -21,7 +21,7 @@ from citemesh.data.user_config import (
 
 from .. import console
 from ..console import logger
-from ..parser import _output_table
+from ..parser import _missing_command, _output_table
 
 
 def _masked_secret(value: str) -> str:
@@ -46,8 +46,7 @@ def _run_config_command(
     """
     command = getattr(args, "config_command", None)
     if not command:
-        config_parser.print_help()
-        return 1
+        return _missing_command(config_parser)
 
     if command == "path":
         # Plain print keeps `citemesh config path`/`get` output unwrapped and
@@ -131,5 +130,4 @@ def _run_config_command(
             logger.info("Config key '%s' was not set.", args.key)
         return 0
 
-    config_parser.print_help()
-    return 1
+    return _missing_command(config_parser)

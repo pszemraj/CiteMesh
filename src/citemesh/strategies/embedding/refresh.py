@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+import random
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, TypedDict
 
+import numpy as np
 from numpy.typing import ArrayLike
 
 from citemesh.core.text_batching import (
@@ -16,6 +22,7 @@ from citemesh.core.text_batching import (
     _PrefetchBatchEncoder,
     _TextEncoder,
 )
+from citemesh.data.embedding_cache.models import CacheInputMetadata, CorpusSourceRecord
 from citemesh.data.embedding_contract import (
     INT8_QUANTIZATION,
     CorpusSource,
@@ -26,7 +33,9 @@ from citemesh.data.embedding_contract import (
 from citemesh.data.model_profiles import embedding_model_profile_key
 
 from . import corpus_source
-from .hydration import HYDRATION_FLUSH_SIZE
+from .config import CALIBRATION_RESERVOIR_SEED
+from .hydration import HYDRATION_FLUSH_SIZE, _precomputed_text
+from .records import ExtractedPaperMetadata, _extract_dataset_paper_metadata
 
 if TYPE_CHECKING:
     from typing_extensions import Unpack
@@ -190,6 +199,77 @@ def _builder_contract(
     )
 
 
+def _calibration_sample(
+    selection: corpus_source.SourceSelection, sample_size: int
+) -> list[ExtractedPaperMetadata]:
+    """Draw build hydration's int8 calibration sample from a prepared selection.
+
+    The reservoir consumes the same seeded draws as
+    ``_sample_calibration_records`` over the selected records in corpus order,
+    but normalizes only the records it keeps.
+
+    :param selection: Selected source records.
+    :param sample_size: Number of records to keep.
+    :return: Metadata of the sampled records, in reservoir order.
+    """
+    rng = random.Random(CALIBRATION_RESERVOIR_SEED)
+    positions: list[int] = []
+    for index in range(len(selection)):
+        if len(positions) < sample_size:
+            positions.append(index)
+            continue
+        slot = rng.randint(0, index)
+        if slot < sample_size:
+            positions[slot] = index
+    records = selection.records(selection.order[positions])
+    return [
+        _extract_dataset_paper_metadata(record, position)
+        for record, position in zip(records, positions, strict=True)
+    ]
+
+
+def _prepared_batches(
+    batches: Generator[list[CorpusSourceRecord], None, None],
+    format_text: Callable[[CacheInputMetadata], str],
+) -> Iterator[tuple[list[CorpusSourceRecord], dict[str, str]]]:
+    """Read and format each next source batch while the caller writes the current one.
+
+    Cache writes stay on the operation's owning thread; one worker thread reads
+    the next batch and formats its retrieval text, which releases the GIL. The
+    first batch is read on the calling thread: for the streaming reader that
+    read is the whole staging pass, which Ctrl-C must stop at once rather than
+    after it finishes. Reads never overlap, so the staging connection can move
+    to the worker for the rest.
+
+    :param batches: Source record batches.
+    :param format_text: Retrieval-document formatter for one record.
+    Yields:
+        A batch and its formatted text keyed by stripped paper ID, the keys
+        ``_precomputed_text`` looks up.
+    """
+
+    def prepare() -> tuple[list[CorpusSourceRecord], dict[str, str]] | None:
+        """Read one batch and format its records on the worker thread."""
+        records = next(batches, None)
+        if records is None:
+            return None
+        return records, {
+            record["paper_id"].strip(): format_text(record) for record in records
+        }
+
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="citemesh-source"
+    ) as worker:
+        try:
+            prepared = prepare()
+            while prepared is not None:
+                pending = worker.submit(prepare)
+                yield prepared
+                prepared = pending.result()
+        finally:
+            worker.submit(batches.close).result()
+
+
 def refresh_builder_corpus(
     builder: EmbeddingGraphBuilder, revision: str | None = None
 ) -> RefreshResult:
@@ -284,52 +364,83 @@ def refresh_builder_corpus(
             ):
                 return {"unchanged": True, "source": target.to_dict()}
         builder.model_revision = contract.model_revision
+        # Only reconciling a complete cache with a newer revision streams; every
+        # pass that processes the whole source downloads it.
+        incremental = bool(state and state.get("membership_complete")) and not pending
         logger.info(
             "Refreshing corpus %s at source revision %s",
             target.repo_id,
             target.revision,
         )
-        with cache.operation_session(
-            kind="refresh",
-            identity={"source": target.to_dict()},
-            target_source=target,
-            contract=contract,
-            namespace_selectors=selectors,
-        ) as session:
+        with (
+            cache.operation_session(
+                kind="refresh",
+                identity={"source": target.to_dict()},
+                target_source=target,
+                contract=contract,
+                namespace_selectors=selectors,
+            ) as session,
+            ExitStack() as scratch,
+        ):
             target = session.target_source
-            if (
+            calibrate = (
                 builder.storage_precision == "int8"
                 and not cache.has_calibration_ranges()
-            ):
-                if cache.has_cached_payload():
-                    raise ValueError(
-                        "Populated int8 cache has no calibration ranges; cannot adopt it"
-                    )
-                sample = builder._sample_calibration_records(
-                    corpus_source.iter_source_records(target),
-                    progress_total=None,
-                    progress_label="Calibrating source",
-                    corpus_size=None,
+            )
+            if calibrate and cache.has_cached_payload():
+                raise ValueError(
+                    "Populated int8 cache has no calibration ranges; cannot adopt it"
                 )
-                builder._load_model()
-                builder._ensure_cache_model_fingerprint()
-                builder._initialize_calibration_ranges(sample)
             scan_stats: corpus_source.SourceScanStats = {"source_records_examined": 0}
+            recorded = 0
+            if incremental and not calibrate:
+                logger.info("Streaming source rows to reconcile the complete cache")
+                batches = corpus_source.iter_source_batches(
+                    target, HYDRATION_FLUSH_SIZE, scan_stats
+                )
+            else:
+                logger.info("Downloading the source snapshot to process every row")
+                # Normalized rows live beside the cache for this operation only.
+                workdir = scratch.enter_context(
+                    TemporaryDirectory(
+                        prefix="citemesh-source-", dir=cache.cache_dir.parent
+                    )
+                )
+                selection = corpus_source.prepare_source_selection(
+                    target, Path(workdir), scan_stats
+                )
+                if calibrate:
+                    sample = _calibration_sample(
+                        selection, builder.calibration_sample_size
+                    )
+                    builder._load_model()
+                    builder._ensure_cache_model_fingerprint()
+                    builder._initialize_calibration_ranges(sample)
+                skip = np.zeros(selection.source_rows, dtype=bool)
+                skip[session.retain_members(selection.selects)] = True
+                recorded = int(skip.sum())
+                if recorded:
+                    logger.info(
+                        "Resuming after %s of %s selected papers already recorded",
+                        f"{recorded:,}",
+                        f"{len(selection):,}",
+                    )
+                batches = selection.batches(HYDRATION_FLUSH_SIZE, skip)
             encoder = _LazyEncoder(builder)
-            for records in corpus_source.iter_source_batches(
-                target, HYDRATION_FLUSH_SIZE, scan_stats
-            ):
+            active_rows = recorded
+            format_text = builder._format_retrieval_document_metadata
+            for records, texts in _prepared_batches(batches, format_text):
+                active_rows += len(records)
                 records = session.validate_records(records)
                 cache.upsert_embeddings(
                     {row["paper_id"]: row for row in records},
                     encoder,
                     batch_size=builder.encode_batch_size,
                     show_progress=False,
-                    text_builder=builder._format_retrieval_document_metadata,
+                    text_builder=partial(_precomputed_text, texts),
                 )
                 session.record_membership(records)
             source_rows = scan_stats["source_records_examined"]
-            active_rows = session.membership_count
             session.finish(
                 expected_rows=active_rows,
                 source_records_examined=source_rows,
@@ -393,7 +504,9 @@ def adopt_legacy_cache(
     :param builder: Builder configured with the source selectors for the cache.
     :param namespace_id: Legacy cache namespace to open.
     :param cache_dir: Cache directory containing the legacy namespace.
-    :param revision: Optional dataset revision to reconcile.
+    :param revision: Optional dataset revision to reconcile, defaulting to a
+        pending adoption's target, then to the revision build hydration pinned,
+        so certification checks the corpus against the snapshot it was built from.
     :return: Source identity and either an unchanged marker or refresh counts.
     """
     from citemesh.data.embedding_cache import constants, open_existing_cache
@@ -440,4 +553,10 @@ def adopt_legacy_cache(
     )
     builder._cache_selection = selection
     builder.embedding_cache = cache
+    # A pending adoption resumes at its own target, which may be newer than the
+    # build pin.
+    if revision is None and not cache.corpus_state().get("pending"):
+        revision = metadata.get(constants.HYDRATION_SOURCE_REVISION_KEY) or None
+        if revision is not None:
+            logger.debug("Adopting at the pinned hydration revision %s", revision)
     return refresh_builder_corpus(builder, revision)

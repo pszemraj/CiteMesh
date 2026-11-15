@@ -4,11 +4,13 @@ This note records what the `hybrid` strategy does after the discovery rework and
 
 ## What hybrid does now
 
-Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the seed in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the seed, similarity to the seed's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term, citation-count term, source quota or semantic-only ceiling, and edge scoring is unchanged.
+Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the seed in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the seed, similarity to the seed's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term and no citation-count term, whatever a candidate's source. Edges follow [edge scoring](../guides/how-it-works.md#6-edge-scoring), where the seed's own references and citers take every other one of the seed's edge slots.
 
 ## How it was evaluated
 
 Related papers were graded 0 (tangent), 1 (useful) or 2 (important) from title and abstract by a blind LLM judge that did not see which system produced a paper. The same judge graded every arm, 2,388 seed and paper pairs in all. The ranking design was chosen on an offline replay of the policy; every number below for the current hybrid comes from builds through the CLI, with each selected paper graded. Regrading hidden duplicates gave the identical grade about 85 to 96 percent of the time and never differed by two grades, and two judge models agreed on 91.5 percent of 200 pairs. An earlier set of grades from primary-source reading was about one grade more lenient and is not used for these numbers. The evaluation data lives in the ignored `local-scratch/hybrid-discovery/v2/` directory: it is machine-local and not part of the repository.
+
+The tables below were measured before embedding text was normalized with `rehuman` and the public arXiv index was rebuilt on 2026-11-12. Rerunning `both` mode on the rebuilt index gave 358 useful (74%) and 184 important (38%) of the 483 held-out papers, and 137 useful (71%) and 62 important (32%) of the 194 development slots. Twelve of those papers were new to the label set and were graded by the same model through its API. The other two modes were not rerun.
 
 ## Results on the development seeds
 
@@ -49,13 +51,17 @@ Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31
 
 ## Limits
 
-- One judge family, reading abstracts only.
+- Related papers are graded from title and abstract. On the development seeds, a second judge family (GPT-6.1 Sol) put CiteMesh ahead of the hosted tool on every seed, and giving the judge the seed's full text on three of them raised the hosted lists by 6 to 8 useful papers of 115 and CiteMesh's by at most 1.
 - The development seeds are not independent evidence, because the ranking design was chosen on them.
 - Recall against the whole literature is not measured.
 - For seeds with more than 1,000 citers the provider returns only the most recent 1,000, so older follow-up work reaches the list only through recommendations or corpus neighbors.
-- Edges and their scoring were not evaluated or changed.
+- Edges were not evaluated. Giving the seed's own references and citers seed edge slots changes edges only, not which papers are selected.
 - CLI builds reproduce the offline replay closely in the corpus modes (97 percent of selected papers shared in `both`, 96 percent in `arxiv-corpus`). In `candidates` mode a build encodes the provider's title and abstract where the replay used stored index vectors, so it shares about 81 percent of the replay's selections; the graded result above is the measurement, not the replay.
 - The seed's reference list comes from the provider, and the arXiv bibliography is read only when the provider returns none. The provider's list can omit a few references (one to five on ten of the sixteen seeds), which then rank without their direct-citation evidence. Without the local index, bibliography recovery resolves only entries that carry an explicit identifier.
 - A publication and its preprint are folded when they share an identifier, or when title and first author agree and the publication year is the preprint's or the next. A version republished under a different title is not recognized and can take a second slot; one such pair appeared across the 48 validation builds (16 seeds in three modes).
+
+## Possible follow-ups
+
+- Compare with the hosted literature-mapping tool on held-out seeds. Its exports exist only for the five development seeds, so the comparison above rests on seeds the design was chosen on. Exporting its graphs for some of the eleven held-out seeds and grading them with the same judge would show whether the lead holds on seeds that played no part in the design.
 
 The supported behavior is described in [strategies](../guides/strategies.md#hybrid) and [how it works](../guides/how-it-works.md#5-ranking-and-selection).

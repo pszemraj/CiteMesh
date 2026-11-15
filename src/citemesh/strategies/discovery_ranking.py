@@ -99,26 +99,49 @@ class RankedCandidate:
 
 
 def _semantic_key(paper_id: str, features: CandidateFeatures) -> _SortKey:
-    """Order the whole pool by document cosine, then query cosine and ID."""
+    """Order the whole pool by document cosine, then query cosine and ID.
+
+    :param str paper_id: Pool ID, the final tie-break.
+    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :return _SortKey: Ascending sort key, with cosines negated so larger sorts first.
+    """
     return (-features.cos_dd, -features.cos_q, paper_id)
 
 
 def _reference_context_key(
     paper_id: str, features: CandidateFeatures
 ) -> _SortKey | None:
-    """Order candidates with a reference context by it, then as ``semantic``."""
+    """Order candidates with a reference context by it, then as ``semantic``.
+
+    :param str paper_id: Pool ID, the final tie-break.
+    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :return _SortKey | None: Ascending sort key with the context and query cosines
+        negated, or ``None`` when the candidate has no reference context.
+    """
     if features.ctx_ref_top5 is None:
         return None
     return (-features.ctx_ref_top5, -features.cos_q, paper_id)
 
 
 def _direct_key(paper_id: str, features: CandidateFeatures) -> _SortKey | None:
-    """Order direct citation links by document cosine, then ID."""
+    """Order direct citation links by document cosine, then ID.
+
+    :param str paper_id: Pool ID, the tie-break.
+    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :return _SortKey | None: Ascending sort key with the document cosine negated,
+        or ``None`` when the candidate is not directly linked to the seed.
+    """
     return (-features.cos_dd, paper_id) if features.direct else None
 
 
 def _recommended_key(paper_id: str, features: CandidateFeatures) -> _SortKey | None:
-    """Order recommendations by provider position, then ID."""
+    """Order recommendations by provider position, then ID.
+
+    :param str paper_id: Pool ID, the tie-break.
+    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :return _SortKey | None: Ascending sort key led by the recommendation position,
+        or ``None`` when the provider did not recommend the candidate.
+    """
     if features.recommendation_rank is None:
         return None
     return (float(features.recommendation_rank), paper_id)

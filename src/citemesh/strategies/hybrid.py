@@ -86,6 +86,7 @@ HYBRID_RECOMMENDATION_LIMIT = 200
 HYBRID_CORPUS_NEIGHBOURS = 180
 _REFERENCE_RELATIONS = frozenset({"referenced_by_seed", "overlap"})
 _CITER_RELATIONS = frozenset({"cites_seed", "overlap"})
+SEED_CITATION_RELATIONS = _REFERENCE_RELATIONS | _CITER_RELATIONS
 
 
 class EmbeddingInferenceError(RuntimeError):
@@ -925,7 +926,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             return graph, actual_seed_id
 
         filtered_graph = build_capped_undirected_graph(
-            graph, max_edges, seed_id=actual_seed_id
+            graph,
+            max_edges,
+            seed_id=actual_seed_id,
+            priority_seed_neighbors={
+                paper_id
+                for paper_id, relation in self.seed_relations.items()
+                if relation in SEED_CITATION_RELATIONS and paper_id in graph
+            },
         )
 
         logger.debug(

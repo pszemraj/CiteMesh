@@ -6,9 +6,10 @@ import json
 import shlex
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
+from itertools import compress
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -68,6 +69,7 @@ else:
     _EmbeddingCacheHost = object
 
 CORPUS_STATE_KEY = "corpus_state"
+_MEMBERSHIP_SCAN_ROWS = 65_536
 
 
 class RefreshOperationIdentity(TypedDict):
@@ -911,7 +913,10 @@ class CorpusOperationSession(Generic[_CacheT]):
                 )
             if pending and pending["target_source"] != asdict(self.target_source):
                 raise ValueError("Resume must use the recorded source target")
-            if self.kind == "refresh" or not pending:
+            # Resuming the same operation keeps what it recorded: every member
+            # was inserted only after its vector row committed.
+            resuming = pending is not None
+            if not resuming:
                 conn.execute("DELETE FROM corpus_membership")
             state["contract"] = self.contract.to_dict()
             state["namespace_serialization"] = self.cache.model_name
@@ -950,7 +955,64 @@ class CorpusOperationSession(Generic[_CacheT]):
                     with h5py.File(self.cache.h5_path, "a") as h5:
                         self.cache._set_h5_attrs(h5)
                         self.cache._flush_h5_file(h5)
+            if resuming:
+                self._forget_uncommitted_members()
         self.cache._operation_owner = (threading.get_ident(), _json(self.identity))
+
+    def _forget_uncommitted_members(self) -> None:
+        """Recover interrupted writes, then drop members left without a vector row.
+
+        Journal replay restores only rows whose mappings never committed, and
+        members are recorded after their mappings commit, so no kept member can
+        point at a rolled-back vector. Only mappings removed because their
+        vectors were lost leave members to drop; those papers are re-encoded.
+        """
+        with (
+            self.cache.namespace_lock_only(),
+            self.cache._connect_db() as conn,
+            h5py.File(self.cache.h5_path, "a") as h5,
+        ):
+            self.cache._recover_pending_replacements_locked(
+                conn=conn, h5_file=h5, validate_runtime_contract=False
+            )
+            conn.execute(
+                "DELETE FROM corpus_membership WHERE paper_id NOT IN "
+                "(SELECT paper_id FROM papers WHERE row_idx IS NOT NULL)"
+            )
+
+    def retain_members(
+        self,
+        selects: Callable[[list[str], npt.NDArray[np.int64]], npt.NDArray[np.bool_]],
+    ) -> npt.NDArray[np.int64]:
+        """Keep recorded members the source still selects and forget the rest.
+
+        A resumed operation keeps its membership. A member stays only while its
+        paper ID and source ordinal still name a selected source row, so rows
+        recorded under another selection are reconciled instead of trusted.
+
+        :param selects: Reports which paper ID and source ordinal pairs name a selected row.
+        :return: Source ordinals of the kept members.
+        """
+        kept: list[npt.NDArray[np.int64]] = []
+        stale: list[str] = []
+        with self.cache.namespace_lock_only(), self.cache._connect_db() as conn:
+            self.cache._require_write_owned_locked(conn)
+            cursor = conn.execute(
+                "SELECT paper_id,source_ordinal FROM corpus_membership"
+            )
+            while rows := cursor.fetchmany(_MEMBERSHIP_SCAN_ROWS):
+                paper_ids = [row[0] for row in rows]
+                ordinals = np.fromiter(
+                    (row[1] for row in rows), dtype=np.int64, count=len(rows)
+                )
+                current = selects(paper_ids, ordinals)
+                kept.append(ordinals[current])
+                stale.extend(compress(paper_ids, ~current))
+            conn.executemany(
+                "DELETE FROM corpus_membership WHERE paper_id=?",
+                [(paper_id,) for paper_id in stale],
+            )
+        return np.concatenate(kept) if kept else np.empty(0, dtype=np.int64)
 
     @property
     def committed_rows(self) -> int:
@@ -985,14 +1047,6 @@ class CorpusOperationSession(Generic[_CacheT]):
                     )
                 self._committed_rows = count
                 return count
-
-    @property
-    def membership_count(self) -> int:
-        """Return the number of active source records in corpus membership."""
-        with self.cache.namespace_lock_only(), self.cache._inspect_db() as conn:
-            return int(
-                conn.execute("SELECT COUNT(*) FROM corpus_membership").fetchone()[0]
-            )
 
     def validate_records(
         self, records: Sequence[_CorpusRecordT]
@@ -1185,6 +1239,7 @@ class CorpusOperationSession(Generic[_CacheT]):
                 {
                     constants.HYDRATION_COMPLETE_KEY: "1",
                     constants.HYDRATION_DATASET_SOURCE_KEY: self.target_source.repo_id,
+                    constants.HYDRATION_SOURCE_REVISION_KEY: self.target_source.revision,
                     constants.HYDRATION_SPLIT_KEY: self.target_source.split,
                     constants.HYDRATION_CORPUS_SIZE_KEY: constants._corpus_size_token(
                         self.target_source.limit
@@ -1244,7 +1299,10 @@ def select_existing_cache(
     )
     if not state or not state.get("contract"):
         raise RuntimeError(
-            "Selected cache has no certified embedding contract; refresh/adopt it first"
+            f"Selected cache {namespace_id} has no certified embedding contract; "
+            "certify it first with "
+            f"`citemesh cache refresh --adopt --namespace {namespace_id}`, adding "
+            "any non-default model and storage options it was built with"
         )
     contract = EmbeddingContract(**state["contract"])
     pending = state.get("pending")

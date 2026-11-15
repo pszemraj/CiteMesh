@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from unittest.mock import MagicMock
 from urllib.parse import unquote
 
@@ -25,6 +25,7 @@ from citemesh.services.semantic_scholar.endpoints import (
 from citemesh.strategies import hybrid as hybrid_module
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.embedding import corpus_source as corpus_source_module
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from citemesh.visualization.export import GraphExporter
 from tests._helpers import (
@@ -72,6 +73,11 @@ def install_runtime(
         builder,
         "_load_dataset_for_hydration",
         lambda **_kwargs: (_DATASET_SOURCE, [dict(row) for row in corpus_rows]),
+    )
+    monkeypatch.setattr(
+        corpus_source_module,
+        "resolve_source_snapshot",
+        lambda selection, revision="main": replace(selection, revision="f" * 40),
     )
 
 

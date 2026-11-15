@@ -18,8 +18,9 @@ matplotlib.use("Agg")
 
 @pytest.fixture(autouse=True)
 def _isolate_citemesh_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate CITEMESH cache paths per-test to avoid mutating user cache state."""
+    """Isolate cache paths and drop the developer's S2 key so tests see a clean env."""
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "citemesh-cache"))
+    monkeypatch.delenv("S2_API_KEY", raising=False)
 
 
 @pytest.fixture(autouse=True)

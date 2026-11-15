@@ -1,6 +1,6 @@
 # Defaults tuning studies
 
-Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and, as a historical record, an earlier set of hybrid discovery budgets.
+Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and embedding text.
 
 ## Semantic edge threshold (September 2026)
 
@@ -28,7 +28,7 @@ These small, manually labeled fixtures are regressions rather than a representat
 With the designated model cached locally:
 
 ```bash
-python -m pytest -m slow tests/test_semantic_quality.py
+pytest -n 0 -m slow tests/test_semantic_quality.py
 ```
 
 ## Embedding dimensions (September 2026)
@@ -120,81 +120,50 @@ Both saved caches reopened with 100,000 rows and reused hydration without loadin
 
 The decision favors retention of the full model's retrieval behavior over the lowest storage and search cost. Explicit 256d remains available when those costs matter more.
 
-## Hybrid defaults (February 2026)
+## Embedding text (November 2026)
 
-This sweep is historical. It tuned the citation, reference, and semantic-only budgets of an earlier hybrid ranker; the `--max-semantic` flag and those budgets have since been removed, because hybrid now ranks every reference, citer, and recommendation it fetches by rank fusion ([ranking](../guides/how-it-works.md#5-ranking-and-selection)). It did not compare embedding dimensions.
+### Decision
 
-### Scope
+Retrieval documents keep both the title and the abstract, in EmbeddingGemma's two document fields (`title: T | text: A`), and the seed's retrieval query keeps `T. A`. Dropping the title did not raise precision and lost important papers at the top of the list. Encoding the title alone, or giving the title its own vector, was worse throughout and would also double encoding cost.
 
-#### Seeds
+### Method
 
-- [arXiv:2506.05209](https://arxiv.org/abs/2506.05209)
-- [arXiv:2511.22699](https://arxiv.org/abs/2511.22699)
-- [arXiv:2509.20354](https://arxiv.org/abs/2509.20354)
-- [arXiv:2508.14040](https://arxiv.org/abs/2508.14040)
-- [arXiv:1706.03762](https://arxiv.org/abs/1706.03762)
+Sixteen machine-learning seeds from 2021 to 2026 were replayed offline through the shipped hybrid ranking. Each pool held the seed's references, citers, and 200 recommendations, plus its 180 nearest corpus papers in the query role and in the document role, ranked by reciprocal rank fusion and cut at 44 papers. Every candidate and the seed were re-encoded under each variant from rehuman-normalized text: corpus papers from their arXiv text, the rest from their Semantic Scholar text. Grades are a blind Claude Sonnet judge's relevance labels from title and abstract: useful is 1 or 2, important is 2, tangent is 0. Papers that no earlier arm had surfaced stay ungraded and count only in the denominator.
 
-#### Common settings
-
-- `--strategy hybrid`
-- `--dataset-split train`
-- `--corpus-size 100000`
-- `--max-papers 40`
-- `--batch-size 96`
-- `--no-torch-compile`
-- `--theme dark`
-- isolated temp cache root (`CITEMESH_CACHE_DIR=/tmp/citemesh-agent-cache...`)
-
-### Hybrid sweep matrix
-
-Configs tested end-to-end with full CLI execution:
-
-- `h20_20_10`
-- `h20_20_12`
-- `h20_20_15`
-- `h20_20_20`
-- `h20_20_25`
-- `h20_20_30`
-- `h25_25_25`
-
-Naming format is `h<max_refs>_<max_cites>_<max_semantic>`, where `max_semantic` was the since-removed semantic-only budget.
+- **TA**: title and abstract, as shipped.
+- **A**: abstract only (`title: none | text: A`); papers without an abstract keep their TA text.
+- **T**: title only (`title: T | text:`, as a paper without an abstract is encoded).
+- **SUM**: one stored vector, the normalized sum of the T and A vectors, at two encodes per paper.
+- **PAIR**: two stored vectors per paper; a pair scores the mean of its title-title and abstract-abstract cosines.
 
 ### Results
 
-#### Overall (all 5 seeds)
+Shares of the returned list over all 16 seeds (160 slots at k = 10, 320 at k = 20, 704 at k = 44):
 
-| Config | Quality Score | Mean Runtime (s) | Mean Nodes | Mean Edges | LCR (largest component ratio) | Median Weight | P25 Weight |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `h25_25_25` | 0.904825 | 168.047 | 39.4 | 96.0 | 0.930 | 0.894618 | 0.855580 |
-| `h20_20_30` | 0.897266 | 165.207 | 40.0 | 98.2 | 0.905 | 0.896479 | 0.860641 |
-| `h20_20_25` | 0.893416 | 189.599 | 39.4 | 96.6 | 0.905 | 0.895379 | 0.852805 |
-| `h20_20_20` | 0.891471 | 155.504 | 38.4 | 94.2 | 0.905 | 0.892208 | 0.846904 |
-| `h20_20_15` | 0.879880 | 66.348 | 36.6 | 89.6 | 0.905 | 0.883747 | 0.829730 |
-| `h20_20_12` | 0.869481 | 113.113 | 35.4 | 86.6 | 0.905 | 0.878746 | 0.820961 |
-| `h20_20_10` | 0.868924 | 167.070 | 34.6 | 84.6 | 0.905 | 0.875584 | 0.820299 |
+| variant | k | useful | important | tangent | ungraded |
+|---|---|---|---|---|---|
+| TA | 10 | 86.2% | 61.9% | 13.8% | 0.0% |
+| TA | 20 | 81.2% | 46.9% | 18.8% | 0.0% |
+| TA | 44 | 72.2% | 35.8% | 26.3% | 1.6% |
+| A | 10 | 85.0% | 54.4% | 14.4% | 0.6% |
+| A | 20 | 79.4% | 45.6% | 18.4% | 2.2% |
+| A | 44 | 65.8% | 32.2% | 25.4% | 8.8% |
+| T | 10 | 63.1% | 37.5% | 18.1% | 18.8% |
+| T | 44 | 41.6% | 19.6% | 16.9% | 41.5% |
+| SUM | 10 | 83.8% | 52.5% | 15.0% | 1.2% |
+| SUM | 20 | 74.4% | 41.6% | 21.6% | 4.1% |
+| SUM | 44 | 59.4% | 30.1% | 25.7% | 14.9% |
+| PAIR | 10 | 80.6% | 50.6% | 18.8% | 0.6% |
+| PAIR | 20 | 76.9% | 43.8% | 19.7% | 3.4% |
+| PAIR | 44 | 61.5% | 31.0% | 24.6% | 13.9% |
 
-#### Recent-paper subset (first 4 seeds)
+Per seed, TA and A tie on useful and tangent papers at k = 10 (TA ahead on 3 seeds, behind on 4) and at k = 20, but TA has more important papers in its top 10 on 10 seeds and fewer on 3 (sign test p = 0.09). TA has more useful papers than SUM in its top 20 on 10 seeds and fewer on none (p = 0.002), more than PAIR in its top 10 on 7 seeds and fewer on 1 (p = 0.07), and more than T in its top 10 on 15 of 16 seeds, tying on the other.
 
-Recent subset quality was highest for `h20_20_30` (0.928966), with `h25_25_25` nearly tied (0.927900).
+The same replay with the stored pre-normalization vectors scores 86.9% useful, 60.0% important and 13.1% tangent at k = 10, and 70.7% useful and 29.3% tangent at k = 44 with nothing ungraded, so normalization matches the old text at the top and returns 3 points fewer tangents over the full list.
 
-#### Legacy-paper subset (`arxiv:1706.03762`)
+### Limits
 
-Legacy connectivity separated candidates clearly:
-
-- `h25_25_25`: largest component ratio `0.65`
-- `h20_20_*`: largest component ratio `0.525`
-
-This was the deciding signal within the initial sweep matrix.
-
-#### Runtime note
-
-Per-run elapsed time has heavy-tail behavior driven by network-bound citation-count enrichment. Use median and upper-quantile runtime when comparing configs; means alone are noisy.
-
-### Default decision
-
-The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. Run `citemesh build --help` for [current defaults](../guides/cli.md#option-reference).
-
-Why:
-
-- The broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
-- The selected defaults support practical triage for "recent follow-up + foundational prior work" without per-run tuning.
+- Each variant re-selected its corpus neighbours from each seed's wide candidate table (2,260 to 20,093 corpus papers per seed: the TA neighbourhoods of the seed, its references, and its citers), not from the whole index, so a variant could not retrieve a paper TA never reached.
+- At k = 44, A leaves 8.8% of its list ungraded. If every one of those papers were useful, A would reach 74.6% against TA's 72.2-73.8%, so the most A can achieve on the full list is a tie.
+- The judge reads only titles and abstracts, which may favour semantically retrieved papers over structurally relevant ones.
+- Graph edges were not compared: the symmetric similarity role keeps `T. A`, and the 0.74 threshold above was calibrated on that text.

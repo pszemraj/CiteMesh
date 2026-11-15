@@ -80,7 +80,7 @@ Each node carries:
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`seed_relevance` is unchanged and measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every non-seed paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
+`seed_relevance` measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every non-seed paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
@@ -123,7 +123,7 @@ Toolbar controls and data actions:
 
 ![CiteMesh dashboard with the Filters row open and a search term narrowing the graph](../../assets/ui-dashboard-search-filter.png)
 
-_Filters open with `attention` typed: the list narrows from 45 to 28 papers and the graph dims everything else._
+_Filters open with `recurrent` typed on a hybrid graph seeded by "Attention Is All You Need" (45 papers, 109 links): the list narrows from 45 to 24 papers and the graph dims everything else._
 
 Downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
@@ -135,15 +135,13 @@ The sidecar records `schema_version`, `build`, `outputs` (resolved artifact path
 
 `build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record `max_citations` and `max_references`, which for hybrid are provider fetch limits), `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus-only runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. Hybrid runs never record a candidate-pool budget, since no such budget sizes their pool; `arxiv-corpus` and `both` runs record the corpus settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` disables the elapsed cap (see the [API request policy](../guides/cli.md#troubleshooting)).
 
-A sidecar written by an earlier hybrid build cannot be replayed verbatim: its `build.hybrid` section records a `max_semantic` value for a flag that no longer exists, and the meaning of its citation and reference limits changed, since every record those limits fetch is now ranked rather than a quota-selected subset.
-
 `metadata` carries:
 
 - run metadata `paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`
 - `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence describing the rank fusion
 - `candidate_source_status` - per requested candidate source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); hybrid runs that search the corpus (`arxiv-corpus` and `both`) also record `arxiv_corpus`. See [source-failure handling](../guides/cli.md#troubleshooting).
 - embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
-- selected corpus provenance when available - `cache_namespace`, completed upstream `dataset_revision`, `installed_corpus_selection` (`all` or `newest`), `installed_corpus_limit` for a capped index, and `index_origin` identifying the imported `bucket_id`, `config_name`, and `snapshot_id`. Coverage and requested views follow the [installed-index selection rules](../guides/caching.md#import-and-selection). Explicit refresh advances the dataset revision while preserving the original import origin.
+- selected corpus provenance when available - `cache_namespace`, `dataset_revision` (the upstream commit the installed or build-hydrated corpus is pinned to), `installed_corpus_selection` (`all` or `newest`), `installed_corpus_limit` for a capped index, and `index_origin` identifying the imported `bucket_id`, `config_name`, and `snapshot_id`. Coverage and requested views follow the [installed-index selection rules](../guides/caching.md#import-and-selection). Explicit refresh advances the dataset revision while preserving the original import origin.
 
 ## Graph input
 

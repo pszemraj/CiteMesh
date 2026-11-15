@@ -301,7 +301,12 @@ def _extract_authors(raw_authors: object) -> list[Author]:
 
 
 def _arxiv_id_from_journal(journal: object) -> str:
-    """Read an explicit arXiv volume when the provider omits its external ID."""
+    """Read an explicit arXiv volume when the provider omits its external ID.
+
+    :param object journal: Raw ``journal`` payload from Semantic Scholar.
+    :return str: arXiv suffix from an ``arXiv`` journal's ``abs/<suffix>`` volume,
+        or an empty string when the journal or volume is not an explicit arXiv ID.
+    """
     name = _payload_get(journal, "name")
     volume = _payload_get(journal, "volume")
     if not isinstance(name, str) or name.strip().lower() != "arxiv":

@@ -20,7 +20,14 @@ _BIBLIOGRAPHY_TOKEN = re.compile(r"[^\W_]+")
 
 
 def bibliography_text_key(text: str, first_tokens: set[str] | None = None) -> str:
-    """Normalize bibliographic words, optionally rejecting unrelated first words."""
+    """Normalize bibliographic words, optionally rejecting unrelated first words.
+
+    :param str text: Title or author name from a reference or a paper record.
+    :param set[str] | None first_tokens: Normalized words a title may start with.
+        When given, text whose first word is not among them is rejected.
+    :return str: NFKC-normalized, case-folded words joined by single spaces, or
+        an empty string when the first word is rejected.
+    """
     text = unicodedata.normalize("NFKC", text).casefold()
     if first_tokens is not None:
         first = _BIBLIOGRAPHY_TOKEN.search(text)

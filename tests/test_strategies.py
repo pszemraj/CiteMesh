@@ -2734,6 +2734,48 @@ def test_strategy_caps_reserve_existing_seed_neighbors(
     }
 
 
+@pytest.mark.parametrize(
+    ("direct", "expected"),
+    [
+        ({"d0", "d1", "d2", "d3"}, {"d0", "o0", "d1"}),
+        ({"d0"}, {"d0", "o0", "o1"}),
+        (set(), {"o0", "o1", "o2"}),
+    ],
+)
+def test_capped_selection_alternates_seed_slots_with_direct_links(
+    direct: set[str], expected: set[str]
+) -> None:
+    """Weaker direct links share the seed's slots instead of losing all of them."""
+    edges = [("seed", f"o{i}", {"weight": 0.9 - i / 100}) for i in range(4)]
+    edges += [("seed", f"d{i}", {"weight": 0.5 - i / 100}) for i in range(4)]
+
+    selected = select_capped_undirected_edges(
+        edges, 3, seed_id="seed", priority_seed_neighbors=direct
+    )
+
+    assert {u if v == "seed" else v for u, v, _ in selected} == expected
+
+
+@pytest.mark.parametrize("relation", ["referenced_by_seed", "cites_seed", "overlap"])
+def test_hybrid_seed_citation_pairs_face_the_seed_edge_thresholds(
+    relation: str,
+) -> None:
+    """A seed's own reference or citer earns an edge only by similarity, like any pair."""
+    builder = HybridGraphBuilder(client=MagicMock())
+    seed = Paper(paper_id="seed", title="Algebra", abstract="Rings", year=2024)
+    seed.is_seed = True
+    cited = Paper(paper_id="cited", title="Biology", abstract="Coral", year=2024)
+    builder.embedding_builder.embeddings = {
+        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "cited": np.asarray([0.0, 1.0], dtype=np.float32),
+    }
+    builder.seed_relations = {"seed": "seed", "cited": relation}
+
+    assert builder.compute_similarity(seed, cited) == 0.0
+    assert not builder.should_create_edge(seed, cited, 0.3)
+    assert not builder.should_create_edge(cited, seed, 0.3)
+
+
 def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

@@ -12,6 +12,7 @@ from rich.text import Text
 from .. import console
 from ..cache_ops import _clear_cache_directory, _scan_cache_directory
 from ..console import logger
+from ..parser import _missing_command
 
 _ADOPTION_SELECTORS = (
     "model",
@@ -219,7 +220,6 @@ def run_cache_command(
         if exit_code != 0:
             return exit_code
     else:
-        cache_parser.print_help()
-        return 1
+        return _missing_command(cache_parser)
 
     return 0

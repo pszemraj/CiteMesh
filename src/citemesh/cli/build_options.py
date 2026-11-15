@@ -483,8 +483,8 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
             "are ranked by reciprocal rank fusion (k=60) of document-embedding "
             "similarity to the seed, similarity to the seed's references, direct "
             "citation links and recommendation order; the best max_papers - 1 "
-            "are kept, with no per-source quota. Edge scores weight embedding "
-            "similarity and bibliographic coupling by each paper's source."
+            "are kept. Edge scores weight embedding similarity and bibliographic "
+            "coupling by each paper's source."
         )
     return contract
 

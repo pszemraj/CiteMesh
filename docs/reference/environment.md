@@ -28,7 +28,7 @@ A non-empty `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` suppresses the legacy macOS
 | --- | --- |
 | `MPLBACKEND` | Selects Matplotlib's backend before import. CiteMesh preserves the global selection; a static figure using the main-thread-only MacOSX backend receives its own Agg canvas. |
 | `COLORFGBG` | First `--theme auto` hint. The final terminal background-color index selects light or dark. |
-| `DARKMODE` | When set to `1`, selects dark mode for `--theme auto` if `COLORFGBG` did not resolve a theme. |
+| `DARKMODE` | When set to `1`, selects dark mode for `--theme auto` if `COLORFGBG` did not resolve a theme. Otherwise macOS uses the system appearance and other platforms fall back to light. |
 | `CUDA_VISIBLE_DEVICES` | Honored by torch for CUDA device visibility/selection. |
 | `PYTORCH_ENABLE_MPS_FALLBACK` | Honored by torch: falls back to CPU for individual ops missing MPS kernels. |
 | `NO_COLOR` | Honored by Rich: disables ANSI color in console and help output; non-color emphasis such as bold may remain. |

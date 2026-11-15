@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import runpy
 import shlex
 import sqlite3
 import subprocess
@@ -18,7 +17,13 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager, nullcontext, redirect_stderr
+from contextlib import (
+    closing,
+    contextmanager,
+    nullcontext,
+    redirect_stderr,
+    redirect_stdout,
+)
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -49,6 +54,7 @@ from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import outputs as outputs_module
 from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import build as build_module
+from citemesh.cli.commands import config as config_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
 from citemesh.core import API_CONFIG, Author, Paper
@@ -1232,7 +1238,8 @@ def test_search_mode_s2_rejects_local_flags(
     )
     assert result.returncode == 2
     message = str(error_mock.call_args)
-    assert "only apply to local semantic search" in message
+    assert "Only local semantic search accepts" in message
+    assert ("'it'" if len(local_flags) == 2 else "'them'") in message
     for flag in local_flags[::2]:
         assert flag in message
 
@@ -5474,6 +5481,107 @@ def test_cli_help_survives_unusable_terminal_width(
     assert "Options:" in help_text
 
 
+def test_cli_options_with_defaults_document_them_in_help() -> None:
+    """Every valued option or optional positional with a default should say so.
+
+    Many defaults are ``None`` sentinels resolved later from config.toml or the
+    strategy, so the stock defaults formatter cannot be used; this keeps the
+    hand-written help from silently omitting a real default.
+
+    :return None: Assertions name each command and option that omits its default.
+    """
+
+    def actions(
+        command: argparse.ArgumentParser, name: str
+    ) -> list[tuple[str, argparse.Action]]:
+        found: list[tuple[str, argparse.Action]] = []
+        for action in command._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for child_name, child in action.choices.items():
+                    found.extend(actions(child, f"{name} {child_name}"))
+            else:
+                found.append((name, action))
+        return found
+
+    undocumented = [
+        f"{command}: {action.option_strings or action.dest}"
+        for command, action in actions(parser_module._create_parser()[0], "citemesh")
+        if action.nargs != 0
+        and action.default is not None
+        and action.default is not argparse.SUPPRESS
+        and "default" not in (action.help or "").lower()
+    ]
+
+    assert undocumented == []
+
+
+@pytest.mark.parametrize("command", [[], ["cache"], ["config"]])
+def test_bare_command_group_is_a_usage_error_with_help_on_stderr(
+    command: list[str],
+) -> None:
+    """A missing subcommand should exit 2 and list the choices on stderr.
+
+    :param list[str] command: Bare root, cache, or config invocation.
+    :return None: Checks the usage-error status and stream routing.
+    """
+    result = run_cli_command(command)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "usage: citemesh" in result.stderr
+    assert "Examples" in result.stderr
+
+
+def test_main_returns_130_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C during a command should end quietly with the SIGINT status.
+
+    :param pytest.MonkeyPatch monkeypatch: Interrupts the command mid-run.
+    :return None: Checks the exit status and the absence of a traceback.
+    """
+
+    def interrupted() -> Path:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(config_module, "user_config_path", interrupted)
+
+    result = run_cli_command(["config", "path"])
+
+    assert result.returncode == 130
+    assert "Traceback" not in result.stderr
+
+
+def test_main_exits_quietly_when_stdout_reader_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed stdout pipe should return 1 and silence the shutdown flush.
+
+    :param Path tmp_path: Directory holding the file standing in for the pipe.
+    :param pytest.MonkeyPatch monkeypatch: Fails the command with a broken pipe.
+    :return None: Checks the status and that stdout now points at the null device.
+    """
+
+    def closed_pipe() -> Path:
+        raise BrokenPipeError
+
+    monkeypatch.setattr(config_module, "user_config_path", closed_pipe)
+    stand_in = tmp_path / "stdout.txt"
+    stderr = io.StringIO()
+
+    with (
+        stand_in.open("w", encoding="utf-8") as stdout,
+        redirect_stdout(stdout),
+        redirect_stderr(stderr),
+    ):
+        returncode = cli_module.main(["config", "path"])
+        os.write(stdout.fileno(), b"after the pipe closed")
+
+    assert returncode == 1
+    assert stand_in.read_text(encoding="utf-8") == ""
+    assert "Traceback" not in stderr.getvalue()
+
+
 def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
     """Output path resolver and auto-output slug generation should stay stable.
 
@@ -5607,24 +5715,6 @@ def test_output_writes_into_an_existing_directory(
     )
 
     assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
-
-
-def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
-    called: dict[str, object] = {}
-
-    def fake_main(argv: list[str] | None = None) -> int:
-        called["argv"] = argv
-        return 0
-
-    monkeypatch.setattr("citemesh.cli.main", fake_main)
-    monkeypatch.setattr(
-        "sys.argv", ["python", "build", "seed", "--strategy", "citation"]
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("citemesh.__main__", run_name="__main__")
-    assert exc_info.value.code == 0
-    assert called["argv"] is None
 
 
 def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:
