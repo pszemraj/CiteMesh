@@ -1,6 +1,10 @@
 # Output artifacts
 
-File names, path resolution, and the schema of every format CiteMesh writes. Dashboard runs maintain one reusable viewer plus one versioned data package per collection, not a dashboard per seed.
+File names, path resolution, and the schema of every format CiteMesh writes. Dashboard runs maintain one reusable viewer plus one versioned data package per collection, not a dashboard per focal paper.
+
+## Terminology
+
+The **focal paper** is the paper a graph is built around. Existing Python parameters and saved fields such as `seed_id`, `is_seed`, `seed_relation`, and `seed_relevance` retain `seed` for this concept. The `--seed` flag instead sets the random layout seed.
 
 ## Artifact set
 
@@ -11,7 +15,7 @@ A dashboard run writes two shared files at the collection root, and sharing a fi
 
 A hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots (60-second timeout).
 
-Every collection build also writes a per-seed directory `<title-slug>-<hash>/` holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.
+Every collection build also writes a directory `<title-slug>-<hash>/` for the focal paper, holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.
 
 - `<strategy>.png` - static Matplotlib render
 - `<strategy>.html` - Pyvis interactive network; self-contained, with vis-network inlined, so it opens offline and needs no sibling asset folder
@@ -34,7 +38,7 @@ _Pyvis settles under browser physics and labels every node; Plotly keeps the Pyt
 
 ## Output location
 
-Omit `--output` to use `out/` under the current working directory; a source checkout tracks `out/.gitkeep` and ignores generated contents. `<title-slug>` is a filesystem-safe paper title, falling back to the canonical seed ID, and `<hash>` is the first 8 characters of `sha256(seed_id)`. Later builds reuse a directory with the same hash suffix, so correcting a title keeps the directory name and lets a refresh replace its exports in place.
+Omit `--output` to use `out/` under the current working directory; a source checkout tracks `out/.gitkeep` and ignores generated contents. `<title-slug>` is a filesystem-safe paper title, falling back to the canonical focal paper ID, and `<hash>` is the first 8 characters of `sha256(seed_id)`. Later builds reuse a directory with the same hash suffix, so correcting a title keeps the directory name and lets a refresh replace its exports in place.
 
 - `--output` omitted: non-dashboard artifacts go to `out/<title-slug>-<hash>/<strategy>.<ext>`; a dashboard export writes `out/dashboard.html`, `out/dashboard.citemesh.json`, and `out/<title-slug>-<hash>/<strategy>.json` plus its sidecar.
 - An existing `--output` directory wins over suffix rules, even when its name ends in `.json` or `.dashboard.html`: non-dashboard exports go inside it, dashboard exports use it as the collection root.
@@ -45,9 +49,9 @@ The sidecar follows the resolved output: `<strategy>.config.json` beside strateg
 
 ## Collection package (`dashboard.citemesh.json`)
 
-UTF-8 JSON with `kind: "citemesh-dashboard-collection"`, `schema_version: 1`, `current_result_id`, and `results` ordered most-recently-updated first. Each result holds its stable identity, a seed/title/strategy summary, an `updated_at` timestamp, the graph payload, and portable `build` settings. Machine-local output paths are excluded, so the package moves between machines as one file.
+UTF-8 JSON with `kind: "citemesh-dashboard-collection"`, `schema_version: 1`, `current_result_id`, and `results` ordered most-recently-updated first. Each result holds its stable identity, a summary of the focal paper, title, and strategy, an `updated_at` timestamp, the graph payload, and portable `build` settings. Machine-local output paths are excluded, so the package moves between machines as one file.
 
-Results are keyed by `(strategy, seed_id)`: a new seed adds a result, the same seed under a different strategy adds a separate one, and the same seed and strategy replaces that slot even when model or build settings changed - collections keep no history of reruns. A refresh also drops optional formats for that strategy that an earlier run produced and this one did not select; other strategies' and unrelated user files are untouched.
+Results are keyed by `(strategy, seed_id)`: a new focal paper adds a result, the same focal paper under a different strategy adds a separate one, and the same focal paper and strategy replaces that slot even when model or build settings changed - collections keep no history of reruns. A refresh also drops optional formats for that strategy that an earlier run produced and this one did not select; other strategies' and unrelated user files are untouched.
 
 Collections in the former `dashboard.manifest.json` layout are migrated on the next build: valid legacy entries are merged in, and the legacy manifest and its artifacts are left in place.
 
@@ -67,11 +71,11 @@ The graph payload requires its `seed_id` to identify a node present in the graph
 Each node carries:
 
 - core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
-- analysis fields `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), and [`seed_relevance`](../guides/how-it-works.md#8-exports-and-the-dashboard-collection)
+- analysis fields `provenance` (`seed`/`citation`/`semantic`/`both`), `provenance_base`, `seed_relation` (`cites_seed`/`referenced_by_seed`/`semantic_only`/`overlap`/`seed`), and [`seed_relevance`](../guides/how-it-works.md#8-exports-and-the-dashboard-collection)
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
-- discovery evidence on every related paper of a hybrid build (never on the seed or on other strategies' papers): `discovery_rank` (one-based position in the fused order of the whole candidate pool), `discovery_score` (the fused score), `discovery_features`, and `discovery_list_ranks`
+- discovery evidence on every related paper of a hybrid build (never on the focal paper or on other strategies' papers): `discovery_rank` (one-based position in the fused order of the whole candidate pool), `discovery_score` (the fused score), `discovery_features`, and `discovery_list_ranks`
 
-`discovery_features` holds `seed_similarity` (the document-role cosine with the seed), `bibliography_similarity` (`null` when fewer than five other seed references exist), `direct_citation` (the seed cites the paper or it cites the seed), and `recommendation_rank` (`null` when the provider did not recommend it). `discovery_list_ranks` gives the paper's one-based rank in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The values below are illustrative:
+`discovery_features` holds `seed_similarity` (the document-role cosine with the focal paper), `bibliography_similarity` (`null` when fewer than five other references from the focal paper exist), `direct_citation` (the focal paper cites the paper or it cites the focal paper), and `recommendation_rank` (`null` when the provider did not recommend it). `discovery_list_ranks` gives the paper's one-based rank in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The values below are illustrative:
 
 ```json
 "discovery_rank": 3,
@@ -80,7 +84,7 @@ Each node carries:
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`seed_relevance` measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every non-seed paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | seed similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
+`seed_relevance` measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every related paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | focal similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
@@ -106,15 +110,15 @@ At 1100px and below, the panes stack as graph, details, then paper list, and **L
 
 ![CiteMesh dashboard with Prior works active and a paper selected](../../assets/ui-prior-works.png)
 
-_**Prior works** active with a paper selected: the graph and paper list narrow to papers the seed references, plus undirected ones published no later than the seed, and the detail pane explains that paper's path to the seed._
+_**Prior works** active with a paper selected: the graph and paper list narrow to papers the focal paper references, plus undirected ones published no later than the focal paper, and the detail pane explains that paper's path to the focal paper._
 
 Toolbar controls and data actions:
 
 - **CiteMesh / GitHub / Docs / Issues** - open the repository, [documentation](../README.md), or issue tracker in a new tab
-- **Prior works / Derivative works** - scope the graph and list by citation direction relative to the seed - papers it references, or papers that cite it - falling back to publication year at or before (or at or after) the seed only for papers the citation graph gives no direction, so the seed, `overlap` papers, and papers without a usable year stay in both
+- **Prior works / Derivative works** - scope the graph and list by citation direction relative to the focal paper - papers it references, or papers that cite it - falling back to publication year at or before (or at or after) the focal paper only for papers the citation graph gives no direction, so the focal paper, `overlap` papers, and papers without a usable year stay in both
 - **List view** - scroll the paper list pane into view; shown only on the stacked layout at 1100px and below, where the list sits under the graph
 - **Filters** - text search, sort, year range, provenance chips (citation/semantic/both), `Saved` chip
-- **Semantic Scholar ↗** - open the selected paper, or the seed, on Semantic Scholar; disabled when that paper has no Semantic Scholar link
+- **Semantic Scholar ↗** - open the selected paper, or the focal paper, on Semantic Scholar; disabled when that paper has no Semantic Scholar link
 - **Graph selector** - switch between graph slots in the active collection
 - **Export JSON / CSV / All BibTeX** - download the embedded payload, a client-side CSV, or every paper's BibTeX
 - **Saved BibTeX / Copy Saved Links** - appear once papers are starred: the reading list as `.bib`, or as markdown links
@@ -123,11 +127,11 @@ Toolbar controls and data actions:
 
 ![CiteMesh dashboard with the Filters row open and a search term narrowing the graph](../../assets/ui-dashboard-search-filter.png)
 
-_Filters open with `recurrent` typed on a hybrid graph seeded by "Attention Is All You Need" (45 papers, 109 links): the list narrows from 45 to 24 papers and the graph dims everything else._
+_Filters open with `recurrent` typed on a hybrid graph built around "Attention Is All You Need" (45 papers, 109 links): the list narrows from 45 to 24 papers and the graph dims everything else._
 
-Downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
+Downloads are named from the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
-Node color is a publication-year gradient shared with the legend and year timeline, node size tracks citation count, the seed wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
+Node color is a publication-year gradient shared with the legend and year timeline, node size tracks citation count, the focal paper wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
 
 ## Sidecar (`<strategy>.config.json`)
 

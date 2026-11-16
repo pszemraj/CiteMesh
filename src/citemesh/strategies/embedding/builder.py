@@ -1196,7 +1196,7 @@ class EmbeddingGraphBuilder(
             provider_papers = self.client.get_papers([lookup_id])
         except SemanticScholarRequestError as exc:
             logger.warning(
-                "Seed citation enrichment was rejected; keeping corpus metadata: %s",
+                "Citation enrichment for the focal paper was rejected; keeping corpus metadata: %s",
                 exc,
             )
             return
@@ -1232,7 +1232,7 @@ class EmbeddingGraphBuilder(
             )
         if local_only_id:
             raise ValueError(
-                f"Local corpus seed ID '{seed_id}' was not found in the selected "
+                f"Local corpus focal paper ID '{seed_id}' was not found in the selected "
                 "embedding cache namespace. Re-run local search with the same "
                 "model, profile, revision, dimensions, and cache settings, then "
                 "build that result again."
@@ -1261,7 +1261,7 @@ class EmbeddingGraphBuilder(
             and self.semantic_source != "arxiv-corpus"
         ):
             raise ValueError(
-                f"Local corpus seed ID '{seed_id}' requires "
+                f"Local corpus focal paper ID '{seed_id}' requires "
                 "semantic_source='arxiv-corpus'. Re-run the build with "
                 "--semantic-source arxiv-corpus and the same embedding settings "
                 "used for local search."
@@ -1278,8 +1278,8 @@ class EmbeddingGraphBuilder(
             return replace(resolved_seed_paper, is_seed=True)
 
         # Treat as text query
-        logger.info("Using text query as seed.")
-        logger.debug("Text-query seed: %s", seed_id)
+        logger.info("Using text query as focal input.")
+        logger.debug("Focal text query: %s", seed_id)
         # Create dummy seed paper
         return Paper(
             paper_id=_query_seed_id(seed_id),
@@ -1310,7 +1310,7 @@ class EmbeddingGraphBuilder(
         :param Paper seed_paper: Resolved seed paper.
         :return NDArray[np.float32]: Normalized seed embedding stored for graph export.
         """
-        logger.debug("Computing seed embedding...")
+        logger.debug("Computing focal embedding...")
         formatted_seed_text = format_paper_for_embedding(
             profile=self.model_profile,
             paper=seed_paper,
@@ -1589,7 +1589,7 @@ class EmbeddingGraphBuilder(
         self.candidate_source_status = dict(pool.source_status)
         if not pool.papers:
             logger.warning(
-                "Candidate pool for %s is empty; graph will only contain the seed.",
+                "Candidate pool for %s is empty; graph will only contain the focal paper.",
                 seed_paper.paper_id,
             )
             return []

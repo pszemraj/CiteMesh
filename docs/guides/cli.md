@@ -1,6 +1,6 @@
 # CLI usage guide
 
-`citemesh build` creates a graph; `search` finds seeds, `view` opens results, `cache` manages persisted data, and `config` saves defaults. See [installation](../../README.md#quick-start) and the [build pipeline](how-it-works.md).
+`citemesh build` creates a graph; `search` finds focal papers, `view` opens results, `cache` manages persisted data, and `config` saves defaults. See [installation](../../README.md#quick-start) and the [build pipeline](how-it-works.md).
 
 ## Common workflows
 
@@ -31,7 +31,7 @@ Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dash
 - Semantic Scholar paper ID
 - Free-form text under `--strategy embedding`, when S2 says the input is not a known paper (outages stay errors)
 
-### Find a seed paper
+### Find a focal paper
 
 ```bash
 citemesh search "attention mechanism transformers" --limit 5
@@ -88,9 +88,9 @@ See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the comman
 
 ### Missing Semantic Scholar references
 
-Hybrid builds request up to `--max-references` seed references from Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the seed.
+Hybrid builds request up to `--max-references` references from the focal paper through Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the focal paper.
 
-If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
+If Semantic Scholar returns no usable references for the focal paper or reference discovery is unavailable, CiteMesh tries the focal paper's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
 
 What recovery matches:
 
@@ -99,7 +99,7 @@ What recovery matches:
 
 How recovered references are used:
 
-- They compete under the existing reference and total-paper limits. Hybrid puts every recovered reference into the candidate pool up to the reference limit, where it is ranked like any other candidate; only a bibliography larger than the limit is cut first, by title and abstract similarity to the seed and then citation count.
+- They compete under the existing reference and total-paper limits. Hybrid puts every recovered reference into the candidate pool up to the reference limit, where it is ranked like any other candidate; only a bibliography larger than the limit is cut first, by title and abstract similarity to the focal paper and then citation count.
 - A supplied arXiv version selects that HTML version, while graph identities remain version-independent.
 - Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists.
 
@@ -155,5 +155,5 @@ Common symptoms:
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
-- **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
+- **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a graph containing only the focal paper. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
 - **Slow first embedding run**: see [hydration and resume](caching.md#corpus-hydration-and-resume).

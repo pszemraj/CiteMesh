@@ -5,9 +5,9 @@
 # Every other key, with its default, is in config_reference.toml. The `citemesh config` commands are in docs/guides/configuration.md.
 
 [defaults]
-# Hybrid ranks the seed's references, citers and Semantic Scholar recommendations with local embeddings, the strategy built for finding related work.
+# Hybrid ranks the focal paper's references, citers and Semantic Scholar recommendations with local embeddings, the strategy built for finding related work.
 # It downloads the embedding model on first use. Choose "recommendation" instead to skip the embeddings extra and the model download.
 strategy = "hybrid"
 
-# The dashboard keeps every seed's graph in one viewer, and each build also saves its graph JSON in out/, so no other format is needed.
+# The dashboard keeps every focal paper's graph in one viewer, and each build also saves its graph JSON in out/, so no other format is needed.
 export = ["dashboard"]

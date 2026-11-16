@@ -377,7 +377,7 @@ def _build_hover_texts(*, graph: PaperGraph, node_ids: list[Hashable]) -> list[s
             lines.append(html.escape(" | ".join(fact_bits)))
         node_str = str(node)
         relation_label = (
-            "seed paper"
+            "focal paper"
             if bool(attrs.get("is_seed", False))
             else _HOVER_RELATION_LABELS.get(
                 seed_relations.get(node_str, ""),

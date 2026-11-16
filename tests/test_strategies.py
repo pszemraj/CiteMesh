@@ -2329,7 +2329,7 @@ def test_hybrid_collection_fails_when_seed_embedding_unavailable(
 
     with pytest.raises(
         EmbeddingInferenceError,
-        match="Hybrid seed embedding failed: RuntimeError: temporary seed encode",
+        match="Hybrid focal embedding failed: RuntimeError: temporary seed encode",
     ):
         builder.collect_papers("seed")
 

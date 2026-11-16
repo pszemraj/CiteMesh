@@ -271,7 +271,7 @@ def _validate_dashboard_graph_payload(
     if len(node_id_set) != len(node_ids) or seed_id not in node_id_set:
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} requires unique node IDs "
-            "including its seed."
+            "including its focal paper."
         )
     for edge in edges:
         if not _is_object_dict(edge):

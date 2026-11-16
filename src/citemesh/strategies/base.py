@@ -345,7 +345,7 @@ class GraphBuilderStrategy(ABC):
         # Find actual seed paper ID (may have been normalized)
         seed_paper = next((p for p in self.papers.values() if p.is_seed), None)
         if not seed_paper:
-            raise ValueError("Seed paper not found in collected papers")
+            raise ValueError("Focal paper not found in collected papers")
 
         actual_seed_id = seed_paper.paper_id
 
@@ -354,7 +354,7 @@ class GraphBuilderStrategy(ABC):
             logger.info(summary)
         else:
             logger.info("Collected %s papers", len(self.papers))
-        logger.debug("Seed paper: %s", seed_paper.title)
+        logger.debug("Focal paper: %s", seed_paper.title)
         self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes

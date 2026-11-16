@@ -45,4 +45,4 @@ The viewer rebuilds its Plotly figure client-side from the embedded payload, so 
 
 ## External dependencies
 
-The core CLI uses the Semantic Scholar API and, only when seed-reference discovery is empty or unavailable, arXiv HTML and its metadata API. The arXiv fallback uses the standard library and adds no package dependency. Everything torch- or Plotly-shaped lives behind the `embeddings` and `viz` extras; h5py, NetworkX, Matplotlib, scikit-learn, and Rich ship in the base install.
+The core CLI uses the Semantic Scholar API and, only when reference discovery for the focal paper is empty or unavailable, arXiv HTML and its metadata API. The arXiv fallback uses the standard library and adds no package dependency. Everything torch- or Plotly-shaped lives behind the `embeddings` and `viz` extras; h5py, NetworkX, Matplotlib, scikit-learn, and Rich ship in the base install.

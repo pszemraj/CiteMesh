@@ -23,13 +23,13 @@ For embedding files, see [physical layout](../internals/embedding-cache.md#physi
 
 ## Paper metadata and reference IDs
 
-Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record; identifiers do not hold separate metadata copies. Later lookups check disk first, seed resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached.
+Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record; identifiers do not hold separate metadata copies. Later lookups check disk first, focal paper resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached.
 
-Discovery listings are the exception: reference, citer, and recommendation responses carry each related paper's metadata inline, so they make no batch request and write nothing to `papers/`. The arXiv bibliography fallback, used when a seed's reference listing is empty or unavailable, still resolves its entries through the batch endpoint and the paper cache.
+Discovery listings are the exception: reference, citer, and recommendation responses carry each related paper's metadata inline, so they make no batch request and write nothing to `papers/`. The arXiv bibliography fallback, used when a focal paper's reference listing is empty or unavailable, still resolves its entries through the batch endpoint and the paper cache.
 
 Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and replaces metadata, including citation counts, from successful responses; a failed fetch preserves the old entry. Unchanged title and abstract text reuses its embedding.
 
-Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API. A seed's reference listing fetched for discovery refreshes its entry here only when it is complete, meaning the provider ran out of references before the fetch limit.
+Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API. A focal paper's reference listing fetched for discovery refreshes its entry here only when it is complete, meaning the provider ran out of references before the fetch limit.
 
 Local semantic search over a ready namespace uses cached vectors and metadata without fetching the corpus, though query encoding still uses the recorded model, which may need downloading. Uncached Semantic Scholar search and citation, reference, or recommendation discovery need network access; graph builds may also request provider metadata.
 
@@ -43,7 +43,7 @@ A failed page or failed `all-cs` fallback stops the required acquisition without
 
 Hybrid needs a retrieval-document vector for every pool member:
 
-- In `candidates` mode the pool is the seed's references and citers plus up to 200 recommendations, and their vectors are kept in the embedding cache's candidate namespace (see [Embedding namespaces](#embedding-namespaces)). A warm rebuild encodes only the seed's query-role vector. The first build encodes the whole pool, at most about 2,200 title-and-abstract texts at the default 1000-paper limits, dominated by the citers of a heavily cited seed.
+- In `candidates` mode the pool is the focal paper's references and citers plus up to 200 recommendations, and their vectors are kept in the embedding cache's candidate namespace (see [Embedding namespaces](#embedding-namespaces)). A warm rebuild encodes only the focal paper's query-role vector. The first build encodes the whole pool, at most about 2,200 title-and-abstract texts at the default 1000-paper limits, dominated by the citers of a heavily cited focal paper.
 - In the corpus modes the namespace is the corpus itself and takes no provider rows. Stored corpus vectors are read for corpus rows; the references, citers, and recommendations outside the installed index are encoded in memory on every build and never stored, so they do not change the corpus namespace or its membership.
 - In every mode, the selected papers' symmetric graph-similarity vectors are written to their own cache.
 
@@ -108,7 +108,7 @@ Corpus views of an installed index:
 - `--corpus-size N` ranks only the newest N active members at the completed revision; `--all-corpus` uses every installed active member.
 - Chronology ties prefer later source rows; undated papers fill remaining places in source order.
 - A smaller view changes neither stored coverage nor membership. A capped index cannot supply a larger view or claim full coverage.
-- Seed lookup is independent of neighbor eligibility, so an older seed can search newer papers.
+- Focal paper lookup is independent of neighbor eligibility, so an older focal paper can search newer papers.
 - The same membership and view rules apply when ordinary model settings resolve to a certified namespace. Explicit local-search corpus-view flags require certified membership; uncertified caches reject them.
 
 ### Refresh

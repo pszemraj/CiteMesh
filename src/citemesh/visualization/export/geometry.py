@@ -136,9 +136,9 @@ def theme_label_text_alpha(theme_obj: Theme) -> float:
 
 # as fallback. The tooltip's job is answering "why is this paper here".
 _HOVER_RELATION_LABELS: dict[str, str] = {
-    "seed": "seed paper",
-    "referenced_by_seed": "referenced by seed",
-    "cites_seed": "cites seed",
+    "seed": "focal paper",
+    "referenced_by_seed": "referenced by focal paper",
+    "cites_seed": "cites focal paper",
     "overlap": "prior + derivative work",
     "semantic_only": "semantic match",
     "citation": "citation graph",

@@ -27,13 +27,13 @@
 # embedding and hybrid need the embeddings extra and download the embedding model on first use.
 strategy = "recommendation"
 
-# int. Maximum papers in the graph, seed included.
+# int. Maximum papers in the graph, focal paper included.
 # max_papers = 45
 
-# int, at least 0. How many papers citing the seed to fetch.
+# int, at least 0. How many papers citing the focal paper to fetch.
 # max_citations = 1000
 
-# int, at least 0. How many of the seed's references to fetch.
+# int, at least 0. How many of the focal paper's references to fetch.
 # max_references = 1000
 
 # int. Maximum edges per paper in an embedding graph, strongest kept first.

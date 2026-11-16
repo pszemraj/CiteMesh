@@ -877,7 +877,7 @@ def test_reference_recovery_progress_counts_completed_batches(
     ]
     progress.assert_called_once_with(
         total=105,
-        description="Recovering seed references",
+        description="Recovering focal references",
         unit="references",
         enabled=None,
     )

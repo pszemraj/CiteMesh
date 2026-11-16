@@ -23,8 +23,8 @@ Default model `unsloth/embeddinggemma-300m`, falling back to `google/embeddingge
 
 Retrieval ranking and graph topology live in separate prompt-conditioned spaces:
 
-- paper and free-text seeds use the retrieval-query role; hybrid also encodes the seed in the retrieval-document role, because it ranks candidates by document-to-document cosine and searches the corpus in both roles
-- candidate and corpus papers use the retrieval-document role, for seed-to-paper ranking and local search
+- focal papers and free-text inputs use the retrieval-query role; hybrid also encodes the focal paper in the retrieval-document role, because it ranks candidates by document-to-document cosine and searches the corpus in both roles
+- candidate and corpus papers use the retrieval-document role, for ranking by similarity to the focal paper and local search
 - papers selected for the final graph are re-encoded with the symmetric sentence-similarity role, and only those vectors score paper-to-paper edges
 
 For EmbeddingGemma the symmetric formatter is exactly `task: sentence similarity | query: <title/abstract>`; other profiles use an identity formatter until they declare their own. Encoder outputs are normalized float32 before any retrieval-cache quantization.

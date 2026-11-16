@@ -549,7 +549,7 @@ class _EndpointsMixin:
             fields=",".join(payloads._default_paper_fields()),
             limit=parsed_limit,
             raise_on_unavailable=raise_on_unavailable,
-            progress_description=f"Collecting seed {relation}",
+            progress_description=f"Collecting focal {relation}",
         )
         if listing is None:
             if raise_on_unavailable:

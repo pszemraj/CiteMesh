@@ -456,7 +456,7 @@ def _create_root_parser() -> tuple[
                         "Build a graph from a known paper",
                         'citemesh build "arxiv:1706.03762" --strategy hybrid',
                     ),
-                    ("Find a seed paper", 'citemesh search "attention mechanisms"'),
+                    ("Find a focal paper", 'citemesh search "attention mechanisms"'),
                     ("Open saved results", "citemesh view"),
                     ("Inspect local storage", "citemesh cache scan"),
                 ),
@@ -515,7 +515,7 @@ def _add_build_graph_arguments(
         default=None,
         help=(
             "File or directory (default: out/ with automatic names). Dashboard collections share "
-            "dashboard.html + dashboard.citemesh.json and save each seed's JSON "
+            "dashboard.html + dashboard.citemesh.json and save each focal paper's JSON "
             "under <title-slug>-<hash>/; use *.dashboard.html for a standalone file."
         ),
     )
@@ -548,7 +548,7 @@ def _add_build_graph_arguments(
         metavar="N",
         default=DEFAULT_MAX_PAPERS,
         help=(
-            f"Maximum papers including the seed (default: {DEFAULT_MAX_PAPERS}; "
+            f"Maximum papers including the focal paper (default: {DEFAULT_MAX_PAPERS}; "
             f"hybrid: {HYBRID_DEFAULT_MAX_PAPERS})"
         ),
     )
@@ -577,7 +577,7 @@ def _add_build_graph_arguments(
         metavar="N",
         default=None,
         help=(
-            "Seed for deterministic layout generation in layout-based exports "
+            "Random seed for deterministic layout generation in layout-based exports "
             "(default: deterministic built-in seed)"
         ),
     )
@@ -922,7 +922,7 @@ def _add_build_runtime_arguments(
         choices=HYBRID_SEMANTIC_SOURCE_CHOICES,
         default="candidates",
         help=(
-            "candidates uses S2 seed neighbors (hybrid: with S2 recommendations); "
+            "candidates uses S2 neighbors of the focal paper (hybrid: with S2 recommendations); "
             "arxiv-corpus searches a local corpus; both combines the two "
             "(hybrid only). Default: %(default)s. Corpus flags imply arxiv-corpus."
         ),

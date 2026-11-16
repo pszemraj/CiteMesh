@@ -683,12 +683,12 @@ def test_graph_payload_rejects_absent_seed_before_replacing_json(
     graph.add_node("other", title="Other paper")
     exporter = GraphExporter(graph, "missing", layout={"other": (0.0, 0.0)})
 
-    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+    with pytest.raises(ValueError, match="focal node 'missing'.*not present"):
         exporter.graph_payload()
 
     json_path = tmp_path / "existing.json"
     json_path.write_text("previous valid output", encoding="utf-8")
-    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+    with pytest.raises(ValueError, match="focal node 'missing'.*not present"):
         exporter.to_json(json_path)
     assert json_path.read_text(encoding="utf-8") == "previous valid output"
 
@@ -1684,7 +1684,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="export-saved-bib-btn"',
         'id="copy-saved-links-btn"',
         'id="list-view-btn" class="nav-btn" type="button">List view',
-        'title="Open the selected paper, or the seed, on Semantic Scholar"',
+        'title="Open the selected paper, or the focal paper, on Semantic Scholar"',
         "Semantic Scholar ↗",
         "legend-gradient",
         "star-btn",
@@ -1811,7 +1811,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert "Related Journal" in related_hover
     assert "semantic match" in related_hover
     assert "10 citations" in related_hover
-    assert "seed paper" in seed_hover
+    assert "focal paper" in seed_hover
     # Hover cards use the dashboard panel chrome, not the marker color.
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
 
@@ -3487,9 +3487,9 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("years", "expected_labels"),
     [
-        ((None, None), ["Seed", "Year unknown"]),
-        ((2024, 2024), ["Seed", "2024"]),
-        ((2020, 2025), ["Seed", "2020 (older)", "2025 (newer)"]),
+        ((None, None), ["Focal paper", "Year unknown"]),
+        ((2024, 2024), ["Focal paper", "2024"]),
+        ((2020, 2025), ["Focal paper", "2020 (older)", "2025 (newer)"]),
     ],
 )
 @pytest.mark.parametrize("theme_name", ["dark", "light", "solarized"])
@@ -3620,9 +3620,9 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
 @pytest.mark.parametrize(
     ("seed_title", "heading"),
     [
-        (None, "Seed paper"),
-        ("", "Seed paper"),
-        ("   ", "Seed paper"),
+        (None, "Focal paper"),
+        ("", "Focal paper"),
+        ("   ", "Focal paper"),
         ("attention mechanism", "attention mechanism"),
     ],
 )
@@ -3643,7 +3643,7 @@ def test_visualize_graph_labels_authorless_seed(
     )
     axis = close_spy.call_args.args[0].axes[0]
     assert axis.get_title() == f"CiteMesh Visualization: {heading}"
-    assert [text.get_text() for text in axis.texts] == ["Seed"]
+    assert [text.get_text() for text in axis.texts] == ["Focal paper"]
     assert graph.nodes[seed_id]["title"] == seed_title
 
 
@@ -3920,7 +3920,7 @@ def test_static_labels_are_capped_by_citation_priority() -> None:
 
     labels = {text.get_text() for text in axis.texts}
     assert len(labels) == MAX_STATIC_NON_SEED_LABELS + 1
-    assert "Author, 2025 (seed)" in labels
+    assert "Author, 2025 (focal)" in labels
     assert "19, 2019" in labels
     assert "0, 2000" not in labels
     plt.close(figure)
@@ -3967,7 +3967,7 @@ def test_static_labels_suppress_overlapping_text_bounds() -> None:
     )
 
     labels = {text.get_text() for text in axis.texts}
-    assert "Author, 2025 (seed)" in labels
+    assert "Author, 2025 (focal)" in labels
     assert sum(label.startswith("Extraordinarilylongsurname") for label in labels) == 1
     plt.close(figure)
 

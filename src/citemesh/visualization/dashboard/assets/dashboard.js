@@ -238,9 +238,9 @@
       lines.push(escapeHtml(factBits.join(" | ")));
 
       const relationLabels = {
-        seed: "seed paper",
-        referenced_by_seed: "referenced by seed",
-        cites_seed: "cites seed",
+        seed: "focal paper",
+        referenced_by_seed: "referenced by focal paper",
+        cites_seed: "cites focal paper",
         overlap: "prior + derivative work",
         semantic_only: "semantic match",
         citation: "citation graph",
@@ -959,10 +959,10 @@
     function relationBadgeLabel(node) {
       const relation = String(node.seed_relation || "").trim();
       if (relation === "referenced_by_seed") {
-        return "referenced by seed";
+        return "referenced by focal paper";
       }
       if (relation === "cites_seed") {
-        return "cites seed";
+        return "cites focal paper";
       }
       if (relation === "semantic_only") {
         return "semantic-only";
@@ -971,7 +971,7 @@
         return "prior+derivative";
       }
       if (relation === "seed") {
-        return "origin";
+        return "focal paper";
       }
       return String(node.provenance_base || node.provenance || "citation");
     }
@@ -1261,7 +1261,7 @@
         ? declaredStrategy
         : String(importedDashboardMeta.strategy || importedMeta.strategy || "");
       if (!seedId || !nodeIds.includes(seedId)) {
-        throw new Error("Graph results must identify a seed node present in nodes.");
+        throw new Error("Graph results must identify a focal node present in nodes.");
       }
       if (!strategy) {
         throw new Error("Graph results must identify the build strategy.");
@@ -1324,7 +1324,7 @@
       const normalizedPayload = normalized.payload;
       const resultId = currentResultIdForPayload(normalizedPayload);
       if (!resultId) {
-        throw new Error("Graph results do not provide a stable strategy and seed ID.");
+        throw new Error("Graph results do not provide a stable strategy and focal paper ID.");
       }
       const seedId = String(normalizedPayload.meta.seed_id || "");
       const seedNode = normalizedPayload.nodes.find(
@@ -1386,7 +1386,7 @@
         );
         if (declaredResultId && declaredResultId !== normalizedEntry.result_id) {
           throw new Error(
-            `Collection result ${index + 1} ID does not match its graph strategy and seed.`
+            `Collection result ${index + 1} ID does not match its graph strategy and focal paper.`
           );
         }
         if (!declaredResultId && isVersionedCollection) {
@@ -1699,7 +1699,7 @@
       if (node.is_seed) {
         controls.detailWhy.classList.remove("muted");
         controls.detailWhy.innerHTML = [
-          `<div>${escapeHtml("Seed paper - every other node in this graph was gathered around it.")}</div>`,
+          `<div>${escapeHtml("Focal paper - every other node in this graph was gathered around it.")}</div>`,
           `<div>${escapeHtml(neighborLine)}</div>`,
         ].join("");
         return;
@@ -1707,9 +1707,9 @@
       const seedId = (payload.meta && payload.meta.seed_id) || null;
       const path = seedId ? shortestPathIds(seedId, node.id) : [];
       const pathLine = path.length
-        ? `Shortest path to seed: ${path.map((pid) => compactNodeLabel(pid)).join(" -> ")}`
-        : "Shortest path to seed: unavailable";
-      const relevanceLine = `Seed relevance: ${Number(node.seed_relevance || 0).toFixed(4)} | Relation: ${relationLabel}`;
+        ? `Shortest path to focal paper: ${path.map((pid) => compactNodeLabel(pid)).join(" -> ")}`
+        : "Shortest path to focal paper: unavailable";
+      const relevanceLine = `Focal relevance: ${Number(node.seed_relevance || 0).toFixed(4)} | Relation: ${relationLabel}`;
       const discoveryLine = discoveryWhyLine(node);
 
       controls.detailWhy.classList.remove("muted");
@@ -1728,7 +1728,7 @@
       const features = node.discovery_features || {};
       const parts = [
         `Discovery rank ${node.discovery_rank} (score ${Number(node.discovery_score || 0).toFixed(4)})`,
-        `seed similarity ${Number(features.seed_similarity || 0).toFixed(3)}`,
+        `focal similarity ${Number(features.seed_similarity || 0).toFixed(3)}`,
       ];
       if (Number.isFinite(features.bibliography_similarity)) {
         parts.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
@@ -1782,7 +1782,7 @@
       controls.detailSubtitle.textContent = `${authorText} | ${yearText}${venueText}`;
 
       const provenance = node.provenance || "unknown";
-      const provenanceLabel = provenance === "seed" ? `seed (${node.provenance_base || "citation"})` : provenance;
+      const provenanceLabel = provenance === "seed" ? `focal paper (${node.provenance_base || "citation"})` : provenance;
       const metrics = [
         `Citations: ${Number(node.citation_count || 0).toLocaleString()}`,
         `Source: ${provenanceLabel}`,

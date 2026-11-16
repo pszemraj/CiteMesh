@@ -824,7 +824,7 @@ def draw_labels(
     sizes: list[float] | None = None,
 ) -> None:
     """
-    Draw compact author and year labels, using "Seed" for an authorless seed.
+    Draw compact author and year labels, naming an authorless focal paper.
 
     :param plt.Axes ax: Matplotlib axes
     :param PaperGraph graph: NetworkX graph
@@ -873,7 +873,7 @@ def draw_labels(
         # Keep the full seed title in the heading, clear of the graph itself.
         is_seed = node == seed_id
         if is_seed:
-            label = f"{label} (seed)" if author_parts else "Seed"
+            label = f"{label} (focal)" if author_parts else "Focal paper"
             fontsize = 9
             xytext = (0, node_radius + 8)
             vertical_alignment = "bottom"
@@ -1025,7 +1025,7 @@ def visualize_graph(
 
     # Add title
     seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-    title = " ".join(str(seed_attrs.get("title") or "").split()) or "Seed paper"
+    title = " ".join(str(seed_attrs.get("title") or "").split()) or "Focal paper"
     wrapped_title = textwrap.fill(
         title,
         width=72,
@@ -1045,7 +1045,7 @@ def visualize_graph(
     year_bounds = optional_publication_year_bounds(
         attrs.get("year") for _, attrs in graph.nodes(data=True)
     )
-    legend_items = [("Seed", theme.seed_color)]
+    legend_items = [("Focal paper", theme.seed_color)]
     if year_bounds is None:
         legend_items.append(("Year unknown", theme.interpolate(0.5)))
     elif year_bounds[0] == year_bounds[1]:

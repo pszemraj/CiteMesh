@@ -123,7 +123,9 @@ class CorpusOnlyClient(SemanticScholarClient):
 seed = Paper(**json.loads(Path("out/unseen-paper.json").read_text(encoding="utf-8")))
 selection = select_existing_cache(NAMESPACE)
 cache = open_existing_cache(selection)
-assert not cache.get_paper_metadata_batch([seed.paper_id]), "Choose an unseen seed"
+assert not cache.get_paper_metadata_batch([seed.paper_id]), (
+    "Choose an unseen focal paper"
+)
 state, count = cache.corpus_state(), cache.embedding_count()
 print(
     "namespace", selection.namespace_id, "contract", selection.contract, "state", state
@@ -160,7 +162,7 @@ for cap in (None, 8):
     print(label, "PASS", runtime)
 ```
 
-**Pass:** both runs print `PASS`. Each dashboard contains the actual unseen seed and five papers from the installed corpus. The full and newest-eight views leave the retrieval corpus and source provenance unchanged; graph vectors occupy a separate float32 namespace. Repeating the script should reuse graph vectors. Open both dashboard files and confirm titles, abstracts, and navigation work.
+**Pass:** both runs print `PASS`. Each dashboard contains the actual unseen focal paper and five papers from the installed corpus. The full and newest-eight views leave the retrieval corpus and source provenance unchanged; graph vectors occupy a separate float32 namespace. Repeating the script should reuse graph vectors. Open both dashboard files and confirm titles, abstracts, and navigation work.
 
 The Python selection API is subject to the project's [pre-1.0 API policy](python-api.md).
 
@@ -173,7 +175,7 @@ citemesh build arxiv:YOUR_REAL_ID --strategy embedding --cache-namespace NAMESPA
 citemesh cache scan
 ```
 
-**Pass:** the output contains the real paper as seed and corpus neighbors. A `query:` seed containing only the unresolved identifier is not a pass for this paper-metadata test. If the provider does not know the paper yet, use step 4; that is a metadata-acquisition limitation rather than an index failure. Do not refresh/rebuild the corpus just to query a new seed.
+**Pass:** the output contains the real focal paper and its corpus neighbors. A synthetic `query:` record containing only the unresolved identifier is not a pass for this paper-metadata test. If the provider does not know the paper yet, use step 4; that is a metadata-acquisition limitation rather than an index failure. Do not refresh/rebuild the corpus just to query a new focal paper.
 
 ## Record each laptop's result
 

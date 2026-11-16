@@ -4,17 +4,17 @@ This note records what the `hybrid` strategy does after the discovery rework and
 
 ## What hybrid does now
 
-Hybrid pools every seed reference and citer that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the seed in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the seed, similarity to the seed's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term and no citation-count term, whatever a candidate's source. Edges follow [edge scoring](../guides/how-it-works.md#6-edge-scoring), where the seed's own references and citers take every other one of the seed's edge slots.
+Hybrid pools every reference and citer of the focal paper that Semantic Scholar returns (fetch limits `-r` and `-c`, 1000 each by default), 200 provider recommendations in `candidates` and `both` modes, and, in `arxiv-corpus` and `both` modes, the 180 nearest corpus rows to the focal paper in each of two embedding roles. Every candidate gets a document-role vector, publication and preprint versions of one work are reconciled across the pool, and candidates are ranked by reciprocal rank fusion (k = 60) over similarity to the focal paper, similarity to the focal paper's bibliography, direct citation links, and recommendation order. The best `max_papers - 1` are kept, with no year term and no citation-count term, whatever a candidate's source. Edges follow [edge scoring](../guides/how-it-works.md#6-edge-scoring), where the focal paper's own references and citers take every other one of the focal paper's edge slots.
 
 ## How it was evaluated
 
-Related papers were graded 0 (tangent), 1 (useful) or 2 (important) from title and abstract by a blind LLM judge that did not see which system produced a paper. The same judge graded every arm, 2,388 seed and paper pairs in all. The ranking design was chosen on an offline replay of the policy; every number below for the current hybrid comes from builds through the CLI, with each selected paper graded. Regrading hidden duplicates gave the identical grade about 85 to 96 percent of the time and never differed by two grades, and two judge models agreed on 91.5 percent of 200 pairs. An earlier set of grades from primary-source reading was about one grade more lenient and is not used for these numbers. The evaluation data lives in the ignored `local-scratch/hybrid-discovery/v2/` directory: it is machine-local and not part of the repository.
+Related papers were graded 0 (tangent), 1 (useful) or 2 (important) from title and abstract by a blind LLM judge that did not see which system produced a paper. The same judge graded every arm, 2,388 pairs of focal and related papers in all. The ranking design was chosen on an offline replay of the policy; every number below for the current hybrid comes from builds through the CLI, with each selected paper graded. Regrading hidden duplicates gave the identical grade about 85 to 96 percent of the time and never differed by two grades, and two judge models agreed on 91.5 percent of 200 pairs. An earlier set of grades from primary-source reading was about one grade more lenient and is not used for these numbers. The evaluation data lives in the ignored `local-scratch/hybrid-discovery/v2/` directory: it is machine-local and not part of the repository.
 
 The tables below were measured before embedding text was normalized with `rehuman` and the public arXiv index was rebuilt on 2026-11-12. Rerunning `both` mode on the rebuilt index gave 358 useful (74%) and 184 important (38%) of the 483 held-out papers, and 137 useful (71%) and 62 important (32%) of the 194 development slots. Twelve of those papers were new to the label set and were graded by the same model through its API. The other two modes were not rerun.
 
-## Results on the development seeds
+## Results on the development focal papers
 
-Five development seeds, at the list sizes of a hosted literature-mapping tool's exports for the same seeds (194 slots in total). Useful counts papers graded 1 or 2; important counts papers graded 2; tangent counts papers graded 0. Every system is scored on the same 194 slots, so each count is a share of the returned list. The ranking design was chosen on these seeds.
+Five development focal papers, at the list sizes of a hosted literature-mapping tool's exports for the same focal papers (194 slots in total). Useful counts papers graded 1 or 2; important counts papers graded 2; tangent counts papers graded 0. Every system is scored on the same 194 slots, so each count is a share of the returned list. The ranking design was chosen on these focal papers.
 
 | System | Useful | Important | Tangent |
 | --- | ---: | ---: | ---: |
@@ -24,9 +24,9 @@ Five development seeds, at the list sizes of a hosted literature-mapping tool's 
 | Current hybrid, default `candidates` mode | 136 (70%) | 59 (30%) | 58 (30%) |
 | Current hybrid, `arxiv-corpus` | 128 (66%) | 64 (33%) | 66 (34%) |
 
-## Results on held-out seeds
+## Results on held-out focal papers
 
-Eleven held-out seeds that played no part in the design, 44 related papers each.
+Eleven held-out focal papers that played no part in the design, 44 related papers each.
 
 | System | Useful | Important | Tangent | Papers graded |
 | --- | ---: | ---: | ---: | ---: |
@@ -35,11 +35,11 @@ Eleven held-out seeds that played no part in the design, 44 related papers each.
 | Current hybrid, `candidates` | 343 (71%) | 174 (36%) | 140 (29%) | 483 |
 | Current hybrid, `arxiv-corpus` | 328 (68%) | 150 (31%) | 156 (32%) | 484 |
 
-In `both` mode nine seeds gained useful papers, one tied and one lost one useful paper, within the judge's repeat noise. In `candidates` mode nine gained and two tied on useful papers while losing one to three important ones. `both` is the strongest mode: against `arxiv-corpus` the recommendation list adds 17 useful and 30 important papers on these seeds.
+In `both` mode nine focal papers gained useful papers, one tied and one lost one useful paper, within the judge's repeat noise. In `candidates` mode nine gained and two tied on useful papers while losing one to three important ones. `both` is the strongest mode: against `arxiv-corpus` the recommendation list adds 17 useful and 30 important papers on these focal papers.
 
 ## Precision by list length
 
-The list length is set by `-p` and did not change: the wider pool feeds the same 44 slots the previous hybrid filled, so the counts above are precision, not recall. Share of the first k papers graded useful / important on the held-out seeds:
+The list length is set by `-p` and did not change: the wider pool feeds the same 44 slots the previous hybrid filled, so the counts above are precision, not recall. Share of the first k papers graded useful / important on the held-out focal papers:
 
 | Mode | First 10 | First 20 | First 30 | All 44 |
 | --- | ---: | ---: | ---: | ---: |
@@ -47,21 +47,21 @@ The list length is set by `-p` and did not change: the wider pool feeds the same
 | `candidates` | 82% / 55% | 79% / 47% | 76% / 42% | 71% / 36% |
 | `arxiv-corpus` | 84% / 52% | 77% / 42% | 73% / 36% | 68% / 31% |
 
-Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31 to 44 are 60 percent useful and 23 percent important. The dashboard opens hybrid graphs in this order; in its previous default order (relevance over the final graph) the first 10 papers in `both` mode were 76 percent useful and 49 percent important. The list is always filled to the requested size, so a seed with few relevant candidates is padded with tangents. Tangents per 44-paper graph in `both` mode ran from 5 to 27 across the held-out seeds, median 11; for the previous hybrid they ran from 14 to 28, median 19.
+Precision falls gradually with rank, with no sharp knee: in `both` mode ranks 31 to 44 are 60 percent useful and 23 percent important. The dashboard opens hybrid graphs in this order; in its previous default order (relevance over the final graph) the first 10 papers in `both` mode were 76 percent useful and 49 percent important. The list is always filled to the requested size, so a focal paper with few relevant candidates is padded with tangents. Tangents per 44-paper graph in `both` mode ran from 5 to 27 across the held-out focal papers, median 11; for the previous hybrid they ran from 14 to 28, median 19.
 
 ## Limits
 
-- Related papers are graded from title and abstract. On the development seeds, a second judge family (GPT-6.1 Sol) put CiteMesh ahead of the hosted tool on every seed, and giving the judge the seed's full text on three of them raised the hosted lists by 6 to 8 useful papers of 115 and CiteMesh's by at most 1.
-- The development seeds are not independent evidence, because the ranking design was chosen on them.
+- Related papers are graded from title and abstract. On the development focal papers, a second judge family (GPT-6.1 Sol) put CiteMesh ahead of the hosted tool on every focal paper, and giving the judge the focal paper's full text on three of them raised the hosted lists by 6 to 8 useful papers of 115 and CiteMesh's by at most 1.
+- The development focal papers are not independent evidence, because the ranking design was chosen on them.
 - Recall against the whole literature is not measured.
-- For seeds with more than 1,000 citers the provider returns only the most recent 1,000, so older follow-up work reaches the list only through recommendations or corpus neighbors.
-- Edges were not evaluated. Giving the seed's own references and citers seed edge slots changes edges only, not which papers are selected.
+- For focal papers with more than 1,000 citers the provider returns only the most recent 1,000, so older follow-up work reaches the list only through recommendations or corpus neighbors.
+- Edges were not evaluated. Giving the focal paper's own references and citers its edge slots changes edges only, not which papers are selected.
 - CLI builds reproduce the offline replay closely in the corpus modes (97 percent of selected papers shared in `both`, 96 percent in `arxiv-corpus`). In `candidates` mode a build encodes the provider's title and abstract where the replay used stored index vectors, so it shares about 81 percent of the replay's selections; the graded result above is the measurement, not the replay.
-- The seed's reference list comes from the provider, and the arXiv bibliography is read only when the provider returns none. The provider's list can omit a few references (one to five on ten of the sixteen seeds), which then rank without their direct-citation evidence. Without the local index, bibliography recovery resolves only entries that carry an explicit identifier.
-- A publication and its preprint are folded when they share an identifier, or when title and first author agree and the publication year is the preprint's or the next. A version republished under a different title is not recognized and can take a second slot; one such pair appeared across the 48 validation builds (16 seeds in three modes).
+- The focal paper's reference list comes from the provider, and the arXiv bibliography is read only when the provider returns none. The provider's list can omit a few references (one to five on ten of the sixteen focal papers), which then rank without their direct-citation evidence. Without the local index, bibliography recovery resolves only entries that carry an explicit identifier.
+- A publication and its preprint are folded when they share an identifier, or when title and first author agree and the publication year is the preprint's or the next. A version republished under a different title is not recognized and can take a second slot; one such pair appeared across the 48 validation builds (16 focal papers in three modes).
 
 ## Possible follow-ups
 
-- Compare with the hosted literature-mapping tool on held-out seeds. Its exports exist only for the five development seeds, so the comparison above rests on seeds the design was chosen on. Exporting its graphs for some of the eleven held-out seeds and grading them with the same judge would show whether the lead holds on seeds that played no part in the design.
+- Compare with the hosted literature-mapping tool on held-out focal papers. Its exports exist only for the five development focal papers, so the comparison above rests on focal papers the design was chosen on. Exporting its graphs for some of the eleven held-out focal papers and grading them with the same judge would show whether the lead holds on focal papers that played no part in the design.
 
 The supported behavior is described in [strategies](../guides/strategies.md#hybrid) and [how it works](../guides/how-it-works.md#5-ranking-and-selection).

@@ -16,7 +16,9 @@ build_graph(seed_id: str, **kwargs) -> tuple[networkx.Graph, str]  # (graph, res
 collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 ```
 
-`build_graph` returns the *resolved* seed ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream - that is what `GraphExporter` and the layout helpers expect.
+`build_graph` returns the *resolved* focal paper ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream - that is what `GraphExporter` and the layout helpers expect.
+
+Existing `seed_id` parameters and saved field names follow the [focal paper terminology](../reference/output-artifacts.md#terminology).
 
 ## Exporting
 

@@ -191,7 +191,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         serialized_node_ids = {str(node_id) for node_id, _ in sorted_nodes}
         if str(self.seed_id) not in serialized_node_ids:
             raise ValueError(
-                f"Cannot export graph payload: seed node {self.seed_id!r} "
+                f"Cannot export graph payload: focal node {self.seed_id!r} "
                 "is not present in the graph."
             )
         enriched = self._enriched_nodes()

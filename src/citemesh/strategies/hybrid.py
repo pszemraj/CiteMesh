@@ -299,12 +299,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         embedding._load_model()
         timings["model"] = perf_counter() - started
         started = perf_counter()
-        logger.info("Preparing seed embeddings...")
+        logger.info("Preparing focal embeddings...")
         try:
             seed_query = embedding._encode_seed_embedding(seed)
         except Exception as exc:
             raise EmbeddingInferenceError(
-                f"Hybrid seed embedding failed: {type(exc).__name__}: {exc}"
+                f"Hybrid focal embedding failed: {type(exc).__name__}: {exc}"
             ) from exc
         seed_row = self._seed_corpus_row(seed, corpus_seed)
         seed_vectors = (
@@ -414,14 +414,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
         elif is_local_corpus_paper_id(seed_id):
             raise ValueError(
-                f"Local corpus seed ID '{seed_id}' requires a corpus. Re-run the "
+                f"Local corpus focal paper ID '{seed_id}' requires a corpus. Re-run the "
                 "hybrid build with --semantic-source arxiv-corpus or both and the "
                 "same embedding settings used for local search."
             )
         seed = cached or self.client.get_paper(seed_id, raise_on_unavailable=True)
         if seed is None:
             raise ValueError(
-                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
+                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
                 "know this identifier; check the DOI/arXiv/S2 ID)."
             )
         # Seed role belongs to this build, not the client-owned metadata record.
@@ -482,7 +482,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             return CandidateSourceResult(
                 "recommendations",
                 CandidateSourceState.UNAVAILABLE,
-                error="The corpus seed has no Semantic Scholar lookup identifier.",
+                error="The focal paper has no Semantic Scholar lookup identifier.",
             )
         logger.info("Fetching paper recommendations...")
         return fetch_candidate_source(
@@ -614,7 +614,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     ):
                         added += 1
                 progress.update()
-        logger.debug("Corpus neighbours: %d across both seed roles.", added)
+        logger.debug("Corpus neighbours: %d across both focal paper roles.", added)
         return CandidateSourceResult(
             "arxiv_corpus",
             CandidateSourceState.COMPLETE if added else CandidateSourceState.EMPTY,

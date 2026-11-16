@@ -483,10 +483,10 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
     elif strategy == "hybrid":
         contract["score_type"] = "hybrid_similarity_composite"
         contract["adjudication_policy"] = (
-            "Every provider reference and citer of the seed, its recommendations "
+            "Every provider reference and citer of the focal paper, its recommendations "
             "(candidates, both) and its nearest corpus rows (arxiv-corpus, both) "
             "are ranked by reciprocal rank fusion (k=60) of document-embedding "
-            "similarity to the seed, similarity to the seed's references, direct "
+            "similarity to the focal paper, similarity to the focal paper's references, direct "
             "citation links and recommendation order; the best max_papers - 1 "
             "are kept. Edge scores weight embedding similarity and bibliographic "
             "coupling by each paper's source."

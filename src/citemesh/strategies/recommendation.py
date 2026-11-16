@@ -87,14 +87,14 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {}
         self.reference_hydrator.reset()
 
-        logger.debug("Fetching seed paper: %s", seed_id)
+        logger.debug("Fetching focal paper: %s", seed_id)
         seed = self.client.get_paper(
             seed_id,
             raise_on_unavailable=True,
         )
         if not seed:
             raise ValueError(
-                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
+                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
                 "know this identifier; check the DOI/arXiv/S2 ID)."
             )
 
@@ -103,7 +103,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         papers[seed.paper_id] = seed
 
         logger.info("Collecting recommendations...")
-        logger.debug("Recommendation seed: %s", seed.paper_id)
+        logger.debug("Recommendation focal paper: %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(

@@ -51,11 +51,11 @@ The study completed on September 5, 2026 (UTC), using separate temporary CiteMes
 
 Each dimension had its own GPU corpus inference run through CiteMesh's normal calibration and hydration path, with the prepared local rows supplied as input. During the 512d run, the recorder retained the model's full 768d output before truncating and normalizing to 512d for the cache. This provided a reference without a third corpus inference run. The independently encoded 256d vectors agreed with normalized 256d prefixes of that reference to mean cosine 1.000000 and minimum 0.999992.
 
-### Seed selection and comparison method
+### Focal paper selection and comparison method
 
-Thirty queries used seed titles and abstracts with CiteMesh's retrieval-query formatting. Twelve established papers covered language modeling, retrieval, vision, graph learning, and gravitational waves. Eighteen recent seeds were selected with NumPy RNG seed `20260905`, two per primary category from the selected corpus. Self matches were removed before comparing the top 20 results.
+Thirty queries used focal paper titles and abstracts with CiteMesh's retrieval-query formatting. Twelve established papers covered language modeling, retrieval, vision, graph learning, and gravitational waves. Eighteen recent focal papers were selected with NumPy RNG seed `20260905`, two per primary category from the selected corpus. Self matches were removed before comparing the top 20 results.
 
-| Seed group | arXiv IDs |
+| Focal paper group | arXiv IDs |
 | --- | --- |
 | Established | `2404.08801` (Megalodon), `1706.03762` (Transformer), `2312.00752` (Mamba), `2305.18290` (DPO), `2005.11401` (RAG), `2103.00020` (CLIP), `2006.11239` (DDPM), `2003.08934` (NeRF), `2304.02643` (SAM), `1609.02907` (GCN), `1602.03837` (binary black hole merger), `2303.08774` (GPT-4 report) |
 | cs.CL | `2606.08932`, `2606.05494` |
@@ -68,7 +68,7 @@ Thirty queries used seed titles and abstracts with CiteMesh's retrieval-query fo
 | cond-mat.mtrl-sci | `2606.29456`, `2608.11687` |
 | math.PR | `2606.27839`, `2607.24561` |
 
-The reference was exact cosine search over full **768-dimensional FP32 outputs** from the same model and corpus. Top-20 retention is the fraction of reference neighbors found in a compared list, averaged equally across the 30 seeds. It is agreement with the untruncated model, **not relevance accuracy**: that model can also retrieve poor matches, and a different neighbor may be equally relevant.
+The reference was exact cosine search over full **768-dimensional FP32 outputs** from the same model and corpus. Top-20 retention is the fraction of reference neighbors found in a compared list, averaged equally across the 30 focal papers. It is agreement with the untruncated model, **not relevance accuracy**: that model can also retrieve poor matches, and a different neighbor may be equally relevant.
 
 Two search budgets were measured:
 
@@ -84,7 +84,7 @@ Two search budgets were measured:
 | Graph candidate search | 53.3% | 74.7% |
 | Local cache search | 46.5% | 69.7% |
 
-512d retained more reference neighbors on **all 30 seeds** in the graph candidate comparison. Its list overlapped the 256d list by 59.3% on average. For Megalodon, reference retention increased from 35% to 55%; for RAG, from 45% to 75%; for Mamba, from 75% to 85%.
+512d retained more reference neighbors on **all 30 focal papers** in the graph candidate comparison. Its list overlapped the 256d list by 59.3% on average. For Megalodon, reference retention increased from 35% to 55%; for RAG, from 45% to 75%; for Mamba, from 75% to 85%.
 
 | Build and storage measurement | 256d | 512d |
 | --- | ---: | ---: |
@@ -110,10 +110,10 @@ Only 0.0964% / 0.0957% of coordinates were clipped in the respective fresh cache
 
 ### Qualitative review and limits
 
-Two GPT-5.6 Sol reviewers each assessed six different established seeds using blinded A/B top-five lists, titles, and abstracts, ignoring cosine scores as evidence of relevance. Preferences were **512d: 7, 256d: 4, tie: 1**. These are model-assisted judgments, not human labels or duplicate independent reviews. Several preferences depended on one differing result.
+Two GPT-5.6 Sol reviewers each assessed six different established focal papers using blinded A/B top-five lists, titles, and abstracts, ignoring cosine scores as evidence of relevance. Preferences were **512d: 7, 256d: 4, tie: 1**. These are model-assisted judgments, not human labels or duplicate independent reviews. Several preferences depended on one differing result.
 
 - 512d was preferred for Megalodon, Transformer, RAG, CLIP, DDPM, SAM, and the binary black hole merger paper. For RAG, it offered more retrieval-method coverage and fewer repetitive historical-document/OCR applications.
-- 256d was preferred for DPO, NeRF, GCN, and the GPT-4 report; differing results were closer to the seed's method or breadth. Mamba was tied.
+- 256d was preferred for DPO, NeRF, GCN, and the GPT-4 report; differing results were closer to the focal paper's method or breadth. Mamba was tied.
 - Both Megalodon lists still contained tangential papers. Higher dimensions did not make every neighbor useful.
 
 Both saved caches reopened with 100,000 rows and reused hydration without loading the dataset. CiteMesh's actual graph candidate search reproduced all 60 ranked lists exactly. The evaluation did not measure the full 3.15-million-paper corpus, Semantic Scholar fusion, graph topology, or real CPU/MPS execution. The 11.4% complete-cache increase applies to these INT8 corpus caches; it is not an estimate for FP32 candidate or graph-similarity stores.
@@ -124,11 +124,11 @@ The decision favors retention of the full model's retrieval behavior over the lo
 
 ### Decision
 
-Retrieval documents keep both the title and the abstract, in EmbeddingGemma's two document fields (`title: T | text: A`), and the seed's retrieval query keeps `T. A`. Dropping the title did not raise precision and lost important papers at the top of the list. Encoding the title alone, or giving the title its own vector, was worse throughout and would also double encoding cost.
+Retrieval documents keep both the title and the abstract, in EmbeddingGemma's two document fields (`title: T | text: A`), and the focal paper's retrieval query keeps `T. A`. Dropping the title did not raise precision and lost important papers at the top of the list. Encoding the title alone, or giving the title its own vector, was worse throughout and would also double encoding cost.
 
 ### Method
 
-Sixteen machine-learning seeds from 2021 to 2026 were replayed offline through the shipped hybrid ranking. Each pool held the seed's references, citers, and 200 recommendations, plus its 180 nearest corpus papers in the query role and in the document role, ranked by reciprocal rank fusion and cut at 44 papers. Every candidate and the seed were re-encoded under each variant from rehuman-normalized text: corpus papers from their arXiv text, the rest from their Semantic Scholar text. Grades are a blind Claude Sonnet judge's relevance labels from title and abstract: useful is 1 or 2, important is 2, tangent is 0. Papers that no earlier arm had surfaced stay ungraded and count only in the denominator.
+Sixteen machine-learning focal papers from 2021 to 2026 were replayed offline through the shipped hybrid ranking. Each pool held the focal paper's references, citers, and 200 recommendations, plus its 180 nearest corpus papers in the query role and in the document role, ranked by reciprocal rank fusion and cut at 44 papers. Every candidate and the focal paper were re-encoded under each variant from rehuman-normalized text: corpus papers from their arXiv text, the rest from their Semantic Scholar text. Grades are a blind Claude Sonnet judge's relevance labels from title and abstract: useful is 1 or 2, important is 2, tangent is 0. Papers that no earlier arm had surfaced stay ungraded and count only in the denominator.
 
 - **TA**: title and abstract, as shipped.
 - **A**: abstract only (`title: none | text: A`); papers without an abstract keep their TA text.
@@ -138,7 +138,7 @@ Sixteen machine-learning seeds from 2021 to 2026 were replayed offline through t
 
 ### Results
 
-Shares of the returned list over all 16 seeds (160 slots at k = 10, 320 at k = 20, 704 at k = 44):
+Shares of the returned list over all 16 focal papers (160 slots at k = 10, 320 at k = 20, 704 at k = 44):
 
 | variant | k | useful | important | tangent | ungraded |
 |---|---|---|---|---|---|
@@ -157,13 +157,13 @@ Shares of the returned list over all 16 seeds (160 slots at k = 10, 320 at k = 2
 | PAIR | 20 | 76.9% | 43.8% | 19.7% | 3.4% |
 | PAIR | 44 | 61.5% | 31.0% | 24.6% | 13.9% |
 
-Per seed, TA and A tie on useful and tangent papers at k = 10 (TA ahead on 3 seeds, behind on 4) and at k = 20, but TA has more important papers in its top 10 on 10 seeds and fewer on 3 (sign test p = 0.09). TA has more useful papers than SUM in its top 20 on 10 seeds and fewer on none (p = 0.002), more than PAIR in its top 10 on 7 seeds and fewer on 1 (p = 0.07), and more than T in its top 10 on 15 of 16 seeds, tying on the other.
+Per focal paper, TA and A tie on useful and tangent papers at k = 10 (TA ahead on 3 focal papers, behind on 4) and at k = 20, but TA has more important papers in its top 10 on 10 focal papers and fewer on 3 (sign test p = 0.09). TA has more useful papers than SUM in its top 20 on 10 focal papers and fewer on none (p = 0.002), more than PAIR in its top 10 on 7 focal papers and fewer on 1 (p = 0.07), and more than T in its top 10 on 15 of 16 focal papers, tying on the other.
 
 The same replay with the stored pre-normalization vectors scores 86.9% useful, 60.0% important and 13.1% tangent at k = 10, and 70.7% useful and 29.3% tangent at k = 44 with nothing ungraded, so normalization matches the old text at the top and returns 3 points fewer tangents over the full list.
 
 ### Limits
 
-- Each variant re-selected its corpus neighbours from each seed's wide candidate table (2,260 to 20,093 corpus papers per seed: the TA neighbourhoods of the seed, its references, and its citers), not from the whole index, so a variant could not retrieve a paper TA never reached.
+- Each variant re-selected its corpus neighbours from each focal paper's wide candidate table (2,260 to 20,093 corpus papers per focal paper: the TA neighbourhoods of the focal paper, its references, and its citers), not from the whole index, so a variant could not retrieve a paper TA never reached.
 - At k = 44, A leaves 8.8% of its list ungraded. If every one of those papers were useful, A would reach 74.6% against TA's 72.2-73.8%, so the most A can achieve on the full list is a tie.
 - The judge reads only titles and abstracts, which may favour semantically retrieved papers over structurally relevant ones.
 - Graph edges were not compared: the symmetric similarity role keeps `T. A`, and the 0.74 threshold above was calibrated on that text.

@@ -616,7 +616,7 @@ def fetch_seed_references(
     identified = [entry.identifiers for entry in entries if entry.identifiers]
     with progress_task(
         total=len(identified),
-        description="Recovering seed references",
+        description="Recovering focal references",
         unit="references",
         enabled=False if not identified else None,
     ) as progress:

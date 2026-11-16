@@ -757,7 +757,7 @@ def test_relation_discovery_pages_inline_metadata_without_batch(
     factory, context = provider_progress
     factory.assert_called_once_with(
         total=None,
-        description=f"Collecting seed {relation}",
+        description=f"Collecting focal {relation}",
         unit="papers",
     )
     assert context.__enter__.return_value.update.call_args_list == [call(1), call(1)]
@@ -860,7 +860,7 @@ def test_discovery_progress_obeys_shared_terminal_and_verbosity_policy(
         assert [paper.paper_id for paper in client.get_paper_citations("seed")] == [
             "citer"
         ]
-    assert ("Collecting seed citations" in output.getvalue()) is (tty and enabled)
+    assert ("Collecting focal citations" in output.getvalue()) is (tty and enabled)
 
 
 @pytest.mark.parametrize("missing", [0, 1, 500])

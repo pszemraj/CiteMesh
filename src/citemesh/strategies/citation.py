@@ -192,7 +192,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # Step 1: Fetch seed paper
         seed = seed_paper
         if seed is None:
-            logger.debug("Fetching seed paper: %s", seed_id)
+            logger.debug("Fetching focal paper: %s", seed_id)
             seed = self.client.get_paper(
                 seed_id,
                 raise_on_unavailable=True,
@@ -200,7 +200,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         if not seed:
             raise ValueError(
-                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
+                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
                 "know this identifier; check the DOI/arXiv/S2 ID)."
             )
 
@@ -211,7 +211,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations[seed.paper_id] = "seed"
         pool = DiscoveryPool(seed)
 
-        logger.debug("Seed: %s", seed.title)
+        logger.debug("Focal paper: %s", seed.title)
 
         if self.max_papers > len(papers) and (
             self.max_references > 0 or self.max_citations > 0
