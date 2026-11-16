@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING
 
 import networkx as nx
 
-from citemesh.core import Paper
-from citemesh.core.values import parse_float
+from citemesh.core import Author, Paper
+from citemesh.core.values import coerce_citation_count, parse_float
 from citemesh.data.cache import atomic_output_path, atomic_write_text
 
 from ..dashboard.contracts import (
@@ -69,8 +69,10 @@ from .loaders import (
 )
 from .nodes import (
     NodesMixin,
+    _discovery_evidence,
     _node_short_label,
     _node_title,
+    _normalized_text_values,
     _ordered_attrs,
     _serialize_node,
     _sorted_edges,
@@ -172,6 +174,88 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         self._color_map_cache: dict[
             str, dict[Hashable, tuple[float, float, float]]
         ] = {}
+
+    @classmethod
+    def from_json(cls, path: Path) -> GraphExporter:
+        """Load a graph JSON export for NetworkX analysis and further exports.
+
+        Restore provenance, focal-paper relations, discovery evidence, and the
+        saved layout and theme. The NetworkX graph is available as ``graph``,
+        with reconstructed ``Paper`` objects and scalar node metadata. Author
+        IDs and reference lists are not part of graph JSON and are not restored.
+        Only the versioned ``citemesh-graph`` format is supported,
+        not dashboard collection packages or arbitrary NetworkX JSON.
+
+        :param Path path: Graph JSON written by :meth:`to_json`.
+        :return GraphExporter: Exporter bound to the reconstructed graph.
+        :raises OSError: If the file cannot be read.
+        :raises ValueError: If the JSON or graph payload is invalid.
+        """
+        from ..dashboard.package import _validate_dashboard_graph_payload
+
+        payload = _validate_dashboard_graph_payload(
+            json.loads(path.read_text(encoding="utf-8")), result_id=str(path)
+        )
+        seed_id = payload["seed_id"]
+        graph: PaperGraph = nx.Graph()
+        graph.graph.update(payload["meta"])
+        graph.graph["seed_id"] = seed_id
+        paper_sources: dict[str, object] = {}
+        seed_relations: dict[str, object] = {}
+        discovery_ranking: dict[str, dict[str, object]] = {}
+        for node in payload["nodes"]:
+            attrs: dict[str, object] = dict(node)
+            node_id = node["id"]
+            attrs.pop("id")
+            attrs["is_seed"] = node_id == seed_id
+            year = coerce_publication_year(attrs.get("year"))
+            attrs["paper"] = Paper(
+                paper_id=node_id,
+                title=str(attrs.get("title") or ""),
+                year=year or None,
+                authors=[
+                    Author(name)
+                    for name in _normalized_text_values(attrs.get("authors"))
+                ],
+                citation_count=coerce_citation_count(attrs.get("citation_count")),
+                abstract=str(attrs.get("abstract") or ""),
+                venue=str(attrs.get("venue") or ""),
+                arxiv_id=str(attrs.get("arxiv_id") or ""),
+                doi=str(attrs.get("doi") or ""),
+                categories=_normalized_text_values(attrs.get("categories")),
+                is_seed=node_id == seed_id,
+                is_local_corpus=bool(attrs.get("is_local_corpus")),
+            )
+            graph.add_node(node_id, **attrs)
+            paper_sources[node_id] = attrs.get("provenance_base", "")
+            seed_relations[node_id] = attrs.get("seed_relation", "")
+            if "discovery_rank" in attrs:
+                discovery_ranking[node_id] = dict(_discovery_evidence(attrs))
+        graph.graph["paper_sources"] = paper_sources
+        graph.graph["seed_relations"] = seed_relations
+        if discovery_ranking:
+            graph.graph["discovery_ranking"] = discovery_ranking
+        for edge in payload["edges"]:
+            edge_attrs: dict[str, object] = dict(edge)
+            edge_attrs.pop("source")
+            edge_attrs.pop("target")
+            graph.add_edge(edge["source"], edge["target"], **edge_attrs)
+
+        dashboard_meta = payload["dashboard"]["meta"]
+        layout: dict[Hashable, Iterable[float]] = dict(
+            zip(
+                dashboard_meta["plotly_node_order"],
+                dashboard_meta["plotly_positions"],
+                strict=True,
+            )
+        )
+        return cls(
+            graph,
+            seed_id,
+            metadata=payload["meta"],
+            theme_name=str(dashboard_meta.get("theme", "dark")),
+            layout=layout,
+        )
 
     # ------------------------------------------------------------------
     # Public export methods

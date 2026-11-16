@@ -671,6 +671,245 @@ def test_graph_json_carries_discovery_evidence_and_rejects_malformed_evidence(
         GraphExporter(graph, seed_id).graph_payload()
 
 
+def test_graph_json_python_import_round_trips_analysis_and_exports(
+    tmp_path: Path,
+) -> None:
+    """Reimport graph JSON with the graph-level maps used by Python exporters."""
+    graph = _build_seed_relation_graph()
+    graph.nodes["seed"]["paper"] = Paper(
+        paper_id="seed",
+        title="A paper about graphs",
+        year=2020,
+        authors=[Author("Alice Smith"), Author("Béatrice Jones")],
+        citation_count=42,
+        abstract="An abstract about papers and their relationships.",
+        venue="Graph Conference",
+        arxiv_id="2010.00001",
+        doi="10.1234/graph",
+        categories=["cs.AI", "cs.IR"],
+        is_seed=True,
+    )
+    graph.nodes["early-semantic"]["is_local_corpus"] = True
+    graph.graph["strategy"] = "hybrid"
+    graph.graph["paper_sources"] = {
+        "seed": "both",
+        "late-reference": "citation",
+        "early-citer": "citation",
+        "both-ways": "both",
+        "early-semantic": "semantic",
+        "same-year-semantic": "semantic",
+        "late-semantic": "semantic",
+        "undated-semantic": "semantic",
+    }
+    graph.graph["candidate_source_status"] = {
+        "references": "complete",
+        "citations": "empty",
+        "recommendations": "unavailable",
+    }
+    graph.graph["discovery_ranker"] = {
+        "method": "reciprocal_rank_fusion",
+        "k": 60,
+        "lists": ["semantic", "direct"],
+    }
+    graph.graph["discovery_ranking"] = {
+        "early-semantic": {
+            "discovery_rank": 1,
+            "discovery_score": 1 / 61,
+            "discovery_features": {
+                "seed_similarity": 0.8,
+                "bibliography_similarity": None,
+                "direct_citation": False,
+                "recommendation_rank": None,
+            },
+            "discovery_list_ranks": {"semantic": 1, "direct": None},
+        }
+    }
+    layout = {
+        node_id: (float(index), float(index % 3))
+        for index, node_id in enumerate(sorted(graph))
+    }
+    exporter = GraphExporter(graph, "seed", theme_name="light", layout=layout)
+    source = tmp_path / "graph.json"
+    exporter.to_json(source)
+    original_payload = json.loads(source.read_text(encoding="utf-8"))
+
+    imported = GraphExporter.from_json(source)
+
+    assert isinstance(imported.graph, nx.Graph)
+    assert imported.seed_id == "seed"
+    assert imported.theme.name == "light"
+    assert imported.graph.graph["seed_id"] == "seed"
+    for key in (
+        "strategy",
+        "paper_sources",
+        "seed_relations",
+        "candidate_source_status",
+        "discovery_ranker",
+        "discovery_ranking",
+    ):
+        assert imported.graph.graph[key] == graph.graph[key]
+    assert {
+        node_id
+        for node_id, attrs in imported.graph.nodes(data=True)
+        if attrs["is_seed"]
+    } == {"seed"}
+    assert imported.graph.nodes["seed"]["title"] == "A paper about graphs"
+    assert imported.graph.nodes["seed"]["authors"] == ["Alice Smith", "Béatrice Jones"]
+    assert imported.graph.nodes["early-semantic"]["is_local_corpus"] is True
+    assert imported.graph.nodes["undated-semantic"]["year"] == 0
+    assert imported.graph.nodes["undated-semantic"]["paper"].year is None
+    assert imported.graph["seed"]["early-citer"]["weight"] == 0.6
+    assert nx.shortest_path(imported.graph, "late-reference", "early-citer") == [
+        "late-reference",
+        "seed",
+        "early-citer",
+    ]
+    # Re-enrichment reads the reconstructed graph maps, not per-node copies of
+    # fields such as provenance and seed_relation.
+    assert imported.graph_payload() == original_payload
+
+    original_csv, imported_csv = tmp_path / "original.csv", tmp_path / "imported.csv"
+    original_bib, imported_bib = tmp_path / "original.bib", tmp_path / "imported.bib"
+    exporter.to_csv(original_csv)
+    imported.to_csv(imported_csv)
+    exporter.to_bibtex(original_bib)
+    imported.to_bibtex(imported_bib)
+    assert imported_csv.read_text(encoding="utf-8") == original_csv.read_text(
+        encoding="utf-8"
+    )
+    assert imported_bib.read_text(encoding="utf-8") == original_bib.read_text(
+        encoding="utf-8"
+    )
+    # Imported state remains an ordinary, editable NetworkX graph.
+    imported.graph.graph["paper_sources"]["early-citer"] = "semantic"
+    modified = {node["id"]: node for node in imported.graph_payload()["nodes"]}
+    assert modified["early-citer"]["provenance"] == "semantic"
+
+
+@pytest.mark.parametrize("writer", ["to_plotly_html", "to_dashboard_html"])
+def test_graph_json_python_import_preserves_plotly_labels_and_hover_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """Imported builder graphs retain compact labels and bibliographic hover facts."""
+    figure = MagicMock(side_effect=_JsonFakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=figure)
+    graph, seed_id = _build_graph()
+    graph.graph["paper_sources"] = {"seed": "citation", "related": "citation"}
+    graph.graph["seed_relations"] = {"seed": "seed", "related": "cites_seed"}
+    original = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    source = tmp_path / "graph.json"
+    original.to_json(source)
+    imported = GraphExporter.from_json(source)
+
+    getattr(original, writer)(tmp_path / "original.html")
+    original_figure = figure.call_args.kwargs
+    getattr(imported, writer)(tmp_path / "imported.html")
+    imported_figure = figure.call_args.kwargs
+
+    assert imported_figure == original_figure
+    node_trace = next(
+        trace for trace in imported_figure["data"] if trace.get("name") == "nodes"
+    )
+    assert node_trace["text"] == ["Jones, 2021", "Smith, 2020"]
+    assert "Bob Jones" in node_trace["hovertext"][0]
+    assert "2021 | 10 citations | Related Journal" in node_trace["hovertext"][0]
+    assert "Alice Smith" in node_trace["hovertext"][1]
+    assert "2020 | 42 citations | TestConf" in node_trace["hovertext"][1]
+    assert "focal paper" in node_trace["hovertext"][1]
+    assert isinstance(imported.graph.nodes[seed_id]["paper"], Paper)
+
+
+def test_graph_json_python_import_preserves_pyvis_hover_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Pyvis writer retains author, year, citation, and category facts after import."""
+    network = MagicMock()
+    network.save_graph.side_effect = lambda path: Path(path).write_text(
+        "<html>network</html>", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        loaders_module,
+        "_load_pyvis_network_class",
+        lambda: MagicMock(return_value=network),
+    )
+    graph, seed_id = _build_graph()
+    original = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    source = tmp_path / "graph.json"
+    original.to_json(source)
+    imported = GraphExporter.from_json(source)
+
+    original.to_interactive_html(tmp_path / "original.html")
+    original_nodes = list(network.add_node.call_args_list)
+    network.reset_mock()
+    imported.to_interactive_html(tmp_path / "imported.html")
+
+    assert network.add_node.call_args_list == original_nodes
+    node = network.add_node.call_args_list[1].kwargs
+    assert node["label"] == "Smith, 2020"
+    assert "Smith et al., 2020" in node["title"]
+    assert "Citations: 42" in node["title"]
+    assert "Categories: cs.AI" in node["title"]
+
+
+def test_graph_json_python_import_preserves_static_labels_and_unknown_year(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Static reexports keep compact labels and show unknown years as n.d., not zero."""
+    graph, seed_id = _build_graph()
+    graph.nodes["related"]["paper"].year = None
+    layout = {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    original = GraphExporter(graph, seed_id, layout=layout)
+    source = tmp_path / "graph.json"
+    original.to_json(source)
+    imported = GraphExporter.from_json(source)
+    closed = MagicMock(wraps=render_module.plt.close)
+    monkeypatch.setattr(render_module.plt, "close", closed)
+
+    visualize_graph(graph, seed_id, tmp_path / "original.png", layout=layout, dpi=40)
+    original_axes = closed.call_args.args[0].axes[0]
+    original_labels = [text.get_text() for text in original_axes.texts]
+    visualize_graph(
+        imported.graph,
+        imported.seed_id,
+        tmp_path / "imported.png",
+        layout=imported._get_layout(),
+        dpi=40,
+    )
+    imported_axes = closed.call_args.args[0].axes[0]
+
+    assert imported_axes.get_title() == original_axes.get_title()
+    assert [text.get_text() for text in imported_axes.texts] == original_labels
+    assert "Jones, n.d." in original_labels
+
+
+@pytest.mark.parametrize("invalid_case", ["collection", "schema", "endpoint"])
+def test_graph_json_python_import_uses_existing_payload_contract(
+    tmp_path: Path, invalid_case: str
+) -> None:
+    """Reject other JSON formats and invalid graph identities before reconstruction."""
+    graph, seed_id = _build_graph()
+    payload = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)}
+    ).graph_payload()
+    if invalid_case == "collection":
+        payload["kind"] = "citemesh-dashboard-collection"  # type: ignore[typeddict-item]
+        expected = "unsupported graph kind"
+    elif invalid_case == "schema":
+        payload["schema_version"] = 999  # type: ignore[typeddict-item]
+        expected = "unsupported graph schema version"
+    else:
+        payload["edges"][0]["target"] = "absent"
+        expected = "unknown endpoint"
+    source = tmp_path / "invalid.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=expected):
+        GraphExporter.from_json(source)
+
+
 def test_graph_payload_rejects_absent_seed_before_replacing_json(
     tmp_path: Path,
 ) -> None:

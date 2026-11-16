@@ -28,6 +28,23 @@ Graphs supplied by callers must follow the [graph-input contract](../reference/o
 
 The collection-package machinery behind `out/dashboard.html` is **not** part of this surface: from Python, write standalone dashboards; use the CLI when you want a collection.
 
+## Importing graph JSON
+
+`GraphExporter.from_json(path: Path)` reads a saved [graph JSON](../reference/output-artifacts.md#graph-json-strategyjson) into an exporter. Its `graph` attribute is the reconstructed NetworkX graph, with a `Paper` under each node's `paper` attribute and bibliographic metadata alongside it; `seed_id` identifies the focal paper. Provenance, relations to the focal paper, discovery evidence, and stored layout are restored for subsequent exports.
+
+```python
+from pathlib import Path
+
+from citemesh.visualization import GraphExporter
+
+exporter = GraphExporter.from_json(Path("out/api-demo/hybrid.json"))
+graph, focal_id = exporter.graph, exporter.seed_id
+exporter.to_bibtex(Path("out/api-demo/reloaded.bib"))
+exporter.to_dashboard_html(Path("out/api-demo/reloaded.dashboard.html"))
+```
+
+This reads graph JSON files, not dashboard HTML or collection packages. Use the dashboard's **Add Results** control to open a collection package.
+
 ## Portable corpus access
 
 `citemesh.data.embedding_cache` exports `select_existing_cache` and `open_existing_cache`. The first selects a namespace; the second opens it as an `EmbeddingCache`. If supplied, `cache_dir` is the directory containing namespace files, normally `<cache_root>/embeddings`, not the cache root itself. This example uses the default cache directory; replace `NAMESPACE` with the identifier printed by `citemesh cache scan`:
