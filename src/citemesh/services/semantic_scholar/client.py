@@ -528,26 +528,21 @@ class SemanticScholarClient(_EndpointsMixin):
                 < retry._LONG_RETRY_WARNING_SECONDS
                 <= retry_wait_seconds
             ):
-                logger.warning(
-                    "Semantic Scholar unavailable while %s (attempt %d/%d); "
-                    "waiting %.0fs (%.0fs total retry delay): %s",
-                    context,
-                    attempt,
-                    API_CONFIG.max_retries,
-                    delay,
-                    retry_wait_seconds,
-                    last_error,
+                status = (
+                    "rate-limited"
+                    if last_error is not None and retry._is_rate_limit_error(last_error)
+                    else "temporarily unavailable"
                 )
-            else:
-                logger.debug(
-                    "Semantic Scholar request failed while %s (attempt %d/%d); "
-                    "retrying in %.1fs: %s",
-                    context,
-                    attempt,
-                    API_CONFIG.max_retries,
-                    delay,
-                    last_error,
-                )
+                logger.info("Semantic Scholar is %s; retrying in %.0fs.", status, delay)
+            logger.debug(
+                "Semantic Scholar request failed while %s (attempt %d/%d); "
+                "retrying in %.1fs: %s",
+                context,
+                attempt,
+                API_CONFIG.max_retries,
+                delay,
+                last_error,
+            )
             sleep_started_at = monotonic()
             try:
                 time.sleep(delay)

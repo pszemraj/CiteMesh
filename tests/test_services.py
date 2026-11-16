@@ -1168,38 +1168,68 @@ def test_transient_transport_errors_retry(
     [(30.0, 2), (15.0, 3)],
     ids=["single-wait", "cumulative-waits"],
 )
-def test_retry_waits_warn_once_after_thirty_cumulative_seconds(
+@pytest.mark.parametrize(
+    ("status_code", "status"),
+    [(429, "rate-limited"), (503, "temporarily unavailable")],
+)
+def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     delay: float,
     failed_attempts: int,
+    status_code: int,
+    status: str,
 ) -> None:
-    """Retry delays disclose one actionable warning after a long accumulated wait.
-
-    :param pytest.MonkeyPatch monkeypatch: Replaces retry timing and sleeping.
-    :param pytest.LogCaptureFixture caplog: Captured retry disclosure.
-    :param float delay: Fixed delay after every failed attempt.
-    :param int failed_attempts: Number of transient failures before success.
-    :return None: Verifies quiet retry logs do not hide prolonged recovery.
-    """
+    """Long retries show a brief status and keep request details at DEBUG."""
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: delay)
     monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
     with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
-            side_effect=[_MockResponse(503)] * failed_attempts
+            side_effect=[_MockResponse(status_code)] * failed_attempts
             + [_MockResponse(200, _paper_payload("p1"))]
         )
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
 
-    warnings = [
+    visible = [
         record.getMessage()
         for record in caplog.records
-        if record.levelno == logging.WARNING
+        if record.levelno >= logging.INFO
     ]
-    assert len(warnings) == 1
-    assert f"waiting {delay:.0f}s (30s total retry delay)" in warnings[0]
+    assert visible == [f"Semantic Scholar is {status}; retrying in {delay:.0f}s."]
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+        and "Semantic Scholar request failed" in record.getMessage()
+    ]
+    assert len(diagnostics) == failed_attempts
+    assert all("while fetching p1 (attempt " in message for message in diagnostics)
+    assert all(
+        f"HTTP {status_code} from https://" in message for message in diagnostics
+    )
+
+
+def test_short_retry_waits_only_log_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A quick recovery should not interrupt ordinary progress output."""
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 1.0)
+    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(503),
+                _MockResponse(200, _paper_payload("p1")),
+            ]
+        )
+        with caplog.at_level(logging.DEBUG):
+            assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
+
+    assert not [record for record in caplog.records if record.levelno >= logging.INFO]
+    assert "retrying in 1.0s: HTTP 503 from https://" in caplog.text
 
 
 def test_retry_after_cap_and_nonfinite_values() -> None:

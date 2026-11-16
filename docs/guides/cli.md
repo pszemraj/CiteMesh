@@ -123,6 +123,7 @@ Every command takes `-h`/`--help`, listing built-in defaults; [user configuratio
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
 Progress bars appear only on an interactive terminal at `info` or `debug`.
+Routine HTTP request logs stay hidden; long Semantic Scholar retry waits show a brief status at `info`, with request details at `debug`.
 
 ## Option reference
 

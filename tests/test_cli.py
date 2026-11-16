@@ -995,6 +995,51 @@ def test_configure_logging_sets_progress_policy_from_severity(
     assert progress_policy == [expected_progress]
 
 
+@pytest.mark.parametrize("log_level", ["info", "debug", "warning", "error"])
+def test_http_clients_do_not_crowd_cli_output(log_level: str) -> None:
+    """Real HTTP clients stay quiet while project status and warnings remain visible."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib
+import logging
+import sys
+
+from citemesh.cli.console import _configure_logging
+
+_configure_logging(log_level=sys.argv[1])
+logging.getLogger("citemesh.cli").info("Collecting related papers...")
+logging.getLogger("citemesh.cli").debug("Provider diagnostics")
+for client_name, core_name in (("httpx", "httpcore"), ("httpx2", "httpcore2")):
+    http = importlib.import_module(client_name)
+    transport = http.MockTransport(lambda request: http.Response(200))
+    with http.Client(transport=transport) as client:
+        client.get("https://huggingface.co/api/models/unsloth/embeddinggemma-300m")
+    logging.getLogger(client_name).warning("Transport warning from %s", client_name)
+    logging.getLogger(core_name + ".connection").debug("Transport internals")
+""",
+            log_level,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert "HTTP Request" not in result.stderr
+    assert "Transport internals" not in result.stderr
+    assert ("Collecting related papers..." in result.stderr) == (
+        log_level in {"info", "debug"}
+    )
+    assert ("Provider diagnostics" in result.stderr) == (log_level == "debug")
+    for name in ("httpx", "httpx2"):
+        assert (f"Transport warning from {name}" in result.stderr) == (
+            log_level != "error"
+        )
+
+
 @pytest.mark.parametrize("preconfigured", [False, True])
 def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     tmp_path: Path,
