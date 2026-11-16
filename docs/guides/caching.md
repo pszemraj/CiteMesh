@@ -208,7 +208,7 @@ A complete cache stays at its recorded commit: builds reuse it without checking 
 
 Rows are added, never evicted automatically:
 
-- A capped cache can therefore exceed `--corpus-size`; the run warns and reports the actual count.
+- A capped cache can therefore store more than `--corpus-size` papers; a build's search view still uses only the newest N eligible cached papers.
 - A later count change triggers another scan even if it equals the number of stored vectors.
 - Explicit source IDs remain authoritative, so rebuild after ID remapping.
 - Same-count replacements and revised abstracts are not detected by the count check; rebuild for those ([issue #13](https://github.com/pszemraj/CiteMesh/issues/13)).
@@ -216,9 +216,9 @@ Rows are added, never evicted automatically:
 Changing the cap never costs you vectors you already have:
 
 - A larger `--corpus-size` - or `--all-corpus` - extends the same namespace in place, encoding only the newly selected papers.
-- A smaller one reuses the existing rows as-is, warning that results come from the larger cached corpus and leaving the recorded cap where the vectors actually are.
+- A smaller one limits retrieval to the newest N cached papers before scoring, while reusing the existing rows and leaving the recorded hydration cap unchanged. Chronology ties prefer later stored rows; undated papers fill any shortfall in stored order.
 - An interrupted extension keeps the cache complete at its recorded size rather than discarding it.
-- The recorded cap is a floor, not an inventory - a recency refresh or upstream shrink can retain historical rows past the current selection - so use `citemesh cache clear` or `--force-rebuild-cache` when you want exactly the requested size and current upstream membership.
+- The recorded cap is a floor, not an inventory - a recency refresh or upstream shrink can retain historical rows past the current selection. Clearing or rebuilding is needed only when you want the stored rows themselves to match that selection, not to limit a build's search view.
 
 Of the corpus flags, only a changed `--dataset-source` or `--dataset-split` clears, and that automatic rebuild empties only the retrieval namespace; `--force-rebuild-cache` is the path that also discards graph-similarity vectors. A failed load stops the build before anything is replaced, and local search refuses a source mismatch outright. A failed storage inspection surfaces the paths and the original error rather than reading as an empty cache.
 

@@ -296,7 +296,7 @@ class EmbeddingCache(
         :param int top_k: Number of top documents to return.
         :param bool binary_prefilter: Whether to use binary Hamming prefiltering.
         :param int binary_rescore_multiplier: Candidate oversampling factor for rescoring.
-        :param corpus_size: Newest-N active-member view for a managed corpus; ``None`` uses all.
+        :param corpus_size: Newest-N view of certified members or ordinary cached rows; ``None`` uses all.
         :return List[CacheSearchResult]: Ranked search results.
         """
         if top_k < 1:

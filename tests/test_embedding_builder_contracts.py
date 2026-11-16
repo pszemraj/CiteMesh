@@ -5546,12 +5546,13 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
     """Interrupted capped and sliced hydrations should retain cached vectors.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :param pytest.LogCaptureFixture caplog: Captured cap-overflow warning.
+    :param pytest.LogCaptureFixture caplog: Captured cache-retention details.
     :param int | None corpus_size: Capped corpus size, or ``None`` for a slice.
     :param str dataset_split: Fixed split or split-slice selection.
     :param bool snapshot_advanced: Whether a new paper displaces a cached selection.
     :return None: Asserts only uncached selected rows are encoded on resume.
     """
+    caplog.set_level(logging.DEBUG, logger=hydration_module.__name__)
     source = "fixture/source"
     builder = EmbeddingGraphBuilder(
         storage_precision="float32",
@@ -5602,8 +5603,8 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
     assert cache.is_hydrated(dataset_split, corpus_size, dataset_source=source)
     _assert_encoded_corpus_records(builder, model, records[1:])
     clear_cache_mock.assert_not_called()
-    warning = "Resumed capped corpus has 3 cached rows, exceeding --corpus-size 2"
-    assert (warning in caplog.text) is snapshot_advanced
+    retained = "Resumed capped corpus retained 3 stored rows for recorded newest:2"
+    assert (retained in caplog.text) is snapshot_advanced
 
 
 def _complete_corpus_cache_builder(
@@ -5960,22 +5961,33 @@ def test_capped_extension_over_an_unrankable_dataset_records_its_new_size(
     clear_cache_mock.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "storage_precision,binary_prefilter",
+    [("float32", False), ("int8", False), ("int8", True)],
+)
 def test_complete_cache_reused_for_smaller_corpus_size(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    storage_precision: str,
+    binary_prefilter: bool,
 ) -> None:
-    """Lowering --corpus-size must reuse the larger cache and disclose it.
+    """A smaller view searches only newest rows without shrinking stored coverage.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :param pytest.LogCaptureFixture caplog: Captured disclosure warning.
+    :param pytest.LogCaptureFixture caplog: Captured reuse details.
+    :param str storage_precision: Persistent embedding precision.
+    :param bool binary_prefilter: Whether int8 search uses the binary prefilter.
     :return None: Asserts nothing is encoded and the recorded token stays truthful.
     """
+    caplog.set_level(logging.DEBUG, logger=hydration_module.__name__)
     builder, clear_cache_mock, model = _complete_corpus_cache_builder(
         monkeypatch,
         corpus_size=1,
         cached_corpus_size=2,
         cached_ids=("2601.00001", "2601.00002"),
+        storage_precision=storage_precision,
     )
+    builder.binary_prefilter = binary_prefilter
     cache = builder.embedding_cache
     load = MagicMock()
     cache.set_hydration_rowcount_reconciliation(upstream_rows=2, cached_rows=2)
@@ -5990,12 +6002,104 @@ def test_complete_cache_reused_for_smaller_corpus_size(
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
+    query = np.asarray([1.0, 0.0], dtype=np.float32)
+    candidates = builder._select_candidates(query, use_streaming=False)
+    assert [paper_id for paper_id, _, _ in candidates] == ["arxiv:2601.00002"]
+    # Hybrid's corpus-neighbour queries use this same prepared-corpus entry point.
+    assert [paper.paper_id for paper in builder.search_prepared_corpus(query, 10)] == [
+        "arxiv:2601.00002"
+    ]
+    assert cache.last_search_total_embeddings == 1
+    assert cache.last_search_rescored_embeddings == 1
+    assert cache.last_search_physical_embeddings == 2
+    assert cache.last_search_used_binary_prefilter is binary_prefilter
+    assert cache.corpus_state() == {}
+
     assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
     assert cache.payload_stats().hydration_corpus_size == "newest:2"
     model.encode.assert_not_called()
     load.assert_not_called()
     clear_cache_mock.assert_not_called()
     assert "holds newest:2, which already covers the requested newest:1" in caplog.text
+    assert "results are drawn from the larger cached corpus" not in caplog.text
+    assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.parametrize("use_streaming", [False, True])
+def test_ordinary_newest_view_preserves_hydrated_source_ties(
+    monkeypatch: pytest.MonkeyPatch, use_streaming: bool
+) -> None:
+    """Shrinking a freshly hydrated corpus keeps its latest source-order tie."""
+    # Old-style IDs in separate archives can share year, month, and sequence
+    # while remaining distinct canonical papers throughout ordinary hydration.
+    records = [
+        {"id": "hep-th/0501001", "title": "First tie", "abstract": "A"},
+        {"id": "unknown-first", "title": "First undated", "abstract": "A"},
+        {"id": "hep-th/0401001", "title": "Older", "abstract": "A"},
+        {"id": "math/0501001", "title": "Second tie", "abstract": "A"},
+        {"id": "hep-ph/0501001", "title": "Last tie", "abstract": "A"},
+        {"id": "unknown-second", "title": "Second undated", "abstract": "A"},
+    ]
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+        use_streaming=use_streaming,
+        corpus_size=3,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    monkeypatch.setattr(
+        builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source, *, revision: len(records),
+    )
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *_args, **_kwargs: (
+                iter(records)
+                if use_streaming
+                else _FakeIndexableDataset(records, ["id", "title", "abstract"])
+            )
+        ),
+    )
+    builder._ensure_cache_hydrated(use_streaming=use_streaming)
+
+    cache = builder.embedding_cache
+    expected_stored = [
+        "arxiv:hep-th/0501001",
+        "arxiv:math/0501001",
+        "arxiv:hep-ph/0501001",
+    ]
+    with cache._connect_db() as conn:
+        assert [
+            row[0]
+            for row in conn.execute("SELECT paper_id FROM papers ORDER BY row_idx")
+        ] == expected_stored
+    assert cache.corpus_state() == {}
+    stored = cache.h5_path.read_bytes()
+    model.encode.reset_mock()
+    clear = MagicMock(wraps=builder._clear_embedding_cache)
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear)
+
+    builder.corpus_size = 1
+    candidates = builder._select_candidates(
+        np.asarray([1, 0], dtype=np.float32), use_streaming=use_streaming
+    )
+
+    assert [paper_id for paper_id, _, _ in candidates] == ["arxiv:hep-ph/0501001"]
+    assert cache.last_search_total_embeddings == 1
+    assert cache.last_search_physical_embeddings == 3
+    assert cache.payload_stats().hydration_corpus_size == "newest:3"
+    assert cache.get_cached_paper_ids() == set(expected_stored)
+    assert cache.h5_path.read_bytes() == stored
+    assert cache.corpus_state() == {}
+    model.encode.assert_not_called()
+    clear.assert_not_called()
 
 
 def test_complete_capped_cache_extends_to_all_corpus(
@@ -6086,7 +6190,7 @@ def test_capped_cache_admits_upstream_papers_newer_than_its_watermark(
         ),
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG, logger=hydration_module.__name__):
         builder._ensure_cache_hydrated(use_streaming=use_streaming)
 
     assert cache.get_cached_paper_ids() == {
@@ -6097,10 +6201,9 @@ def test_capped_cache_admits_upstream_papers_newer_than_its_watermark(
     _assert_encoded_corpus_records(builder, model, records[2:])
     assert cache.is_hydrated("train", 2, dataset_source=source)
     assert cache.payload_stats().hydration_corpus_size == "newest:2"
-    # Admitting newer rows without evicting is the already-documented over-cap
-    # condition, so it must keep warning in the same words.
+    # Retained vectors no longer enlarge the search view or warrant a warning.
     assert (
-        "Refreshed capped corpus has 3 cached rows, exceeding --corpus-size 2"
+        "Refreshed capped corpus retained 3 stored rows for recorded newest:2"
         in caplog.text
     )
     assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
@@ -6584,7 +6687,7 @@ def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
     chronology and leave the rest of the corpus the namespace claims stale.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :param pytest.LogCaptureFixture caplog: Captured reuse and over-cap warnings.
+    :param pytest.LogCaptureFixture caplog: Captured cache reuse details.
     :return None: Asserts every newly selected paper is encoded into the cache.
     """
     source = "fixture/source"
@@ -6615,7 +6718,7 @@ def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
         ),
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG, logger=hydration_module.__name__):
         builder._ensure_cache_hydrated(use_streaming=False)
 
     assert cache.get_cached_paper_ids() == {
@@ -6627,12 +6730,12 @@ def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
     }
     _assert_encoded_corpus_records(builder, model, records[3:])
     # The token still describes the rows the namespace holds, and the reuse
-    # disclosure still names the larger cached corpus.
+    # diagnostic still names the larger retained cache.
     assert cache.payload_stats().hydration_corpus_size == "newest:3"
     assert cache.is_hydrated("train", 3, dataset_source=source)
     assert "which already covers the requested newest:1" in caplog.text
     assert (
-        "Refreshed capped corpus has 5 cached rows, exceeding --corpus-size 3"
+        "Refreshed capped corpus retained 5 stored rows for recorded newest:3"
         in caplog.text
     )
     clear_cache_mock.assert_not_called()

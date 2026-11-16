@@ -297,11 +297,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             top_k=top_k,
             binary_prefilter=self.binary_prefilter,
             binary_rescore_multiplier=self.binary_rescore_multiplier,
-            corpus_size=(
-                self.corpus_size
-                if getattr(self, "_cache_selection", None) is not None
-                else None
-            ),
+            corpus_size=self.corpus_size,
         )
         self._last_search_used_binary_prefilter = (
             self.embedding_cache.last_search_used_binary_prefilter
@@ -1146,12 +1142,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if coverage == "covers":
             # Re-stamping the smaller request would make the token lie about the
             # rows the namespace holds, so the cap stays where the vectors are.
-            logger.warning(
+            logger.debug(
                 "Embedding cache for %s/%s holds %s, which already covers the "
-                "requested %s, so it is being reused as-is and results are drawn "
-                "from the larger cached corpus (%d rows). Run `citemesh cache "
-                "clear` or --force-rebuild-cache to rebuild at exactly the "
-                "requested size.",
+                "requested %s; searching the requested view while retaining "
+                "all %d stored rows.",
                 source,
                 self.dataset_split,
                 stats.hydration_corpus_size,
@@ -1331,10 +1325,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             )
         else:
             if updated_rows > self.corpus_size:
-                logger.warning(
-                    "Extended corpus has %d cached rows, exceeding --corpus-size "
-                    "%d after the source selection changed. Retained existing "
-                    "vectors; rebuild the corpus to apply the cap exactly.",
+                logger.debug(
+                    "Extended corpus retained %d stored rows after the source "
+                    "selection changed; search remains bounded to newest:%d.",
                     updated_rows,
                     self.corpus_size,
                 )
@@ -1437,13 +1430,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return False
         updated_rows = self._cached_payload_row_count()
         if resumed_corpus_size is not None and updated_rows > resumed_corpus_size:
-            logger.warning(
-                "Resumed capped corpus has %d cached rows, exceeding "
-                "--corpus-size %d after the source selection changed. "
-                "Retained existing vectors; rebuild the corpus to apply "
-                "the cap exactly.",
+            logger.debug(
+                "Resumed capped corpus retained %d stored rows for recorded "
+                "newest:%d coverage; search uses the requested %s view.",
                 updated_rows,
                 resumed_corpus_size,
+                _corpus_size_token(self.corpus_size),
             )
         if unlisted_paper_ids:
             for alias, paper_ids in legacy_aliases.items():
@@ -2463,12 +2455,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return
 
         if updated_rows > corpus_size:
-            logger.warning(
-                "Refreshed capped corpus has %d cached rows, exceeding "
-                "--corpus-size %d after the source selection changed. Retained "
-                "existing vectors; rebuild the corpus to apply the cap exactly.",
+            logger.debug(
+                "Refreshed capped corpus retained %d stored rows for recorded "
+                "newest:%d coverage; search uses the requested %s view.",
                 updated_rows,
                 corpus_size,
+                _corpus_size_token(self.corpus_size),
             )
         if upstream_rows is not None:
             self.embedding_cache.set_hydration_rowcount_reconciliation(

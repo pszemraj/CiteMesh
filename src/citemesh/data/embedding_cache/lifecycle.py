@@ -563,7 +563,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
     def _require_corpus_view_locked(
         self, conn: sqlite3.Connection, corpus_size: int | None
     ) -> CorpusState:
-        """Require a ready corpus whose certified coverage contains the view.
+        """Require ready state and a valid view within any certified coverage.
 
         :param sqlite3.Connection conn: Open cache database connection.
         :param int | None corpus_size: Optional newest-N limit within installed coverage.
@@ -573,20 +573,17 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         """
         state = self._require_ready_locked(conn)
         if corpus_size is not None:
-            if not state.get("membership_complete"):
-                raise RuntimeError(
-                    "Exact corpus views require certified source membership"
-                )
             if corpus_size < 1:
                 raise ValueError("corpus_size must be positive")
-            source = state["source"]
-            if source["selection"] == "newest" and corpus_size > cast(
-                int, source["limit"]
-            ):
-                raise ValueError(
-                    f"Requested corpus view {corpus_size} exceeds installed coverage "
-                    f"{source['limit']}"
-                )
+            if state.get("membership_complete"):
+                source = state["source"]
+                if source["selection"] == "newest" and corpus_size > cast(
+                    int, source["limit"]
+                ):
+                    raise ValueError(
+                        f"Requested corpus view {corpus_size} exceeds installed coverage "
+                        f"{source['limit']}"
+                    )
         return state
 
     def _corpus_view_query_locked(
@@ -594,16 +591,23 @@ class _LifecycleMixin(_EmbeddingCacheHost):
     ) -> tuple[str, tuple[int, ...]] | None:
         """Build SQL for the active corpus view.
 
-        Whole-coverage requests use unordered membership; smaller views rank
-        members by newest submission.
+        Certified requests use source membership. Ordinary hydrated caches rank
+        all stored rows by submission, with insertion order for undated fillers.
 
         :param sqlite3.Connection conn: Open cache database connection.
         :param int | None corpus_size: Optional newest-N limit within installed coverage.
-        :return tuple[str, tuple[int, ...]] | None: Row query and bindings, or ``None`` for unmanaged caches.
+        :return tuple[str, tuple[int, ...]] | None: Row query and bindings, or ``None`` for an unbounded unmanaged cache.
         """
         state = self._require_corpus_view_locked(conn, corpus_size)
         if not state.get("membership_complete"):
-            return None
+            if corpus_size is None:
+                return None
+            return (
+                "SELECT p.row_idx FROM papers p ORDER BY "
+                + newest_corpus_order_sql("p.chronology_key", "p.row_idx")
+                + " LIMIT ?",
+                (corpus_size,),
+            )
         query = (
             "SELECT p.row_idx FROM corpus_membership m "
             "JOIN papers p ON p.paper_id=m.paper_id"
