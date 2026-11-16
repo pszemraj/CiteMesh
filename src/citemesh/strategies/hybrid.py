@@ -38,6 +38,7 @@ from citemesh.core.paper_ids import is_local_corpus_paper_id, normalize_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_contract import ExistingCacheSelection
+from citemesh.progress import progress_task
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -298,6 +299,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         embedding._load_model()
         timings["model"] = perf_counter() - started
         started = perf_counter()
+        logger.info("Preparing seed embeddings...")
         try:
             seed_query = embedding._encode_seed_embedding(seed)
         except Exception as exc:
@@ -482,6 +484,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 CandidateSourceState.UNAVAILABLE,
                 error="The corpus seed has no Semantic Scholar lookup identifier.",
             )
+        logger.info("Fetching paper recommendations...")
         return fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(
@@ -594,19 +597,23 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :raises RuntimeError: If the corpus search fails.
         """
         added = 0
-        for vector in (seed_query, seed_document):
-            try:
-                neighbours = self.embedding_builder.search_prepared_corpus(
-                    vector, HYBRID_CORPUS_NEIGHBOURS
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-            for paper in neighbours:
-                if (
-                    pool.add(paper, source="semantic", relation="semantic_only")
-                    is not None
-                ):
-                    added += 1
+        with progress_task(
+            total=2, description="Searching arXiv corpus", unit="queries"
+        ) as progress:
+            for vector in (seed_query, seed_document):
+                try:
+                    neighbours = self.embedding_builder.search_prepared_corpus(
+                        vector, HYBRID_CORPUS_NEIGHBOURS
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+                for paper in neighbours:
+                    if (
+                        pool.add(paper, source="semantic", relation="semantic_only")
+                        is not None
+                    ):
+                        added += 1
+                progress.update()
         logger.debug("Corpus neighbours: %d across both seed roles.", added)
         return CandidateSourceResult(
             "arxiv_corpus",
@@ -644,7 +651,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             encoded = embedding._encode_texts(
                 texts,
                 batch_size=min(embedding.encode_batch_size, len(texts)),
-                show_progress_bar=False,
+                show_progress_bar=True,
             )
             return dict(zip(papers, encoded, strict=True))
         except Exception as exc:

@@ -37,7 +37,6 @@ from .errors import (
 
 logger = logging.getLogger(__name__)
 
-_anonymous_pool_announced = False
 _MIN_REQUEST_TIMEOUT_SECONDS = 0.001
 _MAX_TRANSIENT_NOT_FOUND_ATTEMPTS = 3
 
@@ -92,14 +91,11 @@ class SemanticScholarClient(_EndpointsMixin):
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
-            logger.debug("Using Semantic Scholar API key")
-        else:
-            global _anonymous_pool_announced
-            if not _anonymous_pool_announced:
-                _anonymous_pool_announced = True
-                logger.debug(
-                    "No S2_API_KEY set; using the shared anonymous Semantic Scholar pool."
-                )
+        logger.info(
+            "Semantic Scholar: %s (local pacing: %g request/s).",
+            "API key configured" if api_key else "anonymous shared pool",
+            self.requests_per_second,
+        )
 
     @contextlib.contextmanager
     def candidate_operation_scope(self) -> Iterator[None]:

@@ -1595,6 +1595,64 @@ def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> No
     assert os.environ["S2_API_KEY"] == ""
 
 
+@pytest.mark.parametrize("source", ["environment", "config", "anonymous", "empty-env"])
+@pytest.mark.parametrize(
+    "level", [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
+)
+def test_s2_access_status_matches_resolved_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    source: str,
+    level: int,
+) -> None:
+    """Startup reports configured authentication without exposing or validating keys."""
+    from citemesh.services import SemanticScholarClient
+
+    environment_key, saved_key = "private-environment-key", "private-config-key"
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    if source == "environment":
+        monkeypatch.setenv("S2_API_KEY", environment_key)
+    elif source == "empty-env":
+        monkeypatch.setenv("S2_API_KEY", "")
+    config = UserConfig(
+        path=Path("unused-config.toml"),
+        s2_api_key=saved_key if source != "anonymous" else None,
+    )
+    expected_key = (
+        environment_key
+        if source == "environment"
+        else saved_key
+        if source == "config"
+        else None
+    )
+    with caplog.at_level(level):
+        key = build_options_module._resolve_user_config_api_key(config)
+        with SemanticScholarClient(api_key=key) as client:
+            assert client._session.headers.get("x-api-key") == expected_key
+            expected_rate = client.requests_per_second
+
+    statuses = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+    ]
+    mode = "API key configured" if expected_key else "anonymous shared pool"
+    assert statuses == (
+        [f"Semantic Scholar: {mode} (local pacing: {expected_rate:g} request/s)."]
+        if level <= logging.INFO
+        else []
+    )
+    assert environment_key not in caplog.text
+    assert saved_key not in caplog.text
+    if level == logging.DEBUG:
+        if source == "environment":
+            assert "Using S2_API_KEY from the environment." in caplog.text
+        elif source == "config":
+            assert "Using api.s2_api_key from unused-config.toml." in caplog.text
+        elif source == "empty-env":
+            assert "S2_API_KEY is empty" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # `citemesh config` subcommand
 # ---------------------------------------------------------------------------

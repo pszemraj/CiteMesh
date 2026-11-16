@@ -35,6 +35,7 @@ from citemesh.core.paper_ids import (
     paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
+from citemesh.progress import progress_task
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
@@ -613,60 +614,71 @@ def fetch_seed_references(
     # Otherwise HTML order (often alphabetical) chooses survivors before useful
     # metadata is available for ranking.
     identified = [entry.identifiers for entry in entries if entry.identifiers]
-    for offset in range(0, len(identified), 50):
-        batch = identified[offset : offset + 50]
-        ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
+    with progress_task(
+        total=len(identified),
+        description="Recovering seed references",
+        unit="references",
+        enabled=False if not identified else None,
+    ) as progress:
+        for offset in range(0, len(identified), 50):
+            batch = identified[offset : offset + 50]
+            ids = list(
+                dict.fromkeys(identifier for entry in batch for identifier in entry)
+            )
 
-        resolver.bind_entries(batch)
-        missing = [
-            value
-            for value in ids
-            if value not in resolver.aliases and value not in attempted
-        ]
-        if local_lookup is not None:
-            local_records = local_lookup(missing)
-            for requested_id, paper in local_records.items():
-                normalized_id = normalize_paper_id(requested_id).lower()
-                if normalized_id in missing:
-                    resolver.aliases[normalized_id] = paper
+            resolver.bind_entries(batch)
+            missing = [
+                value
+                for value in ids
+                if value not in resolver.aliases and value not in attempted
+            ]
+            if local_lookup is not None:
+                local_records = local_lookup(missing)
+                for requested_id, paper in local_records.items():
+                    normalized_id = normalize_paper_id(requested_id).lower()
+                    if normalized_id in missing:
+                        resolver.aliases[normalized_id] = paper
+                resolver.bind_entries(batch)
+                missing = [value for value in missing if value not in resolver.aliases]
+            if missing and not client.refresh_paper_cache:
+                cached_records = client.get_cached_papers(missing)
+                resolver.remember(list(cached_records.values()))
+                resolver.aliases.update(cached_records)
             resolver.bind_entries(batch)
             missing = [value for value in missing if value not in resolver.aliases]
-        if missing and not client.refresh_paper_cache:
-            cached_records = client.get_cached_papers(missing)
-            resolver.remember(list(cached_records.values()))
-            resolver.aliases.update(cached_records)
-        resolver.bind_entries(batch)
-        missing = [value for value in missing if value not in resolver.aliases]
-        if missing:
-            metadata_requested = True
-            try:
-                records = client.get_papers(missing, raise_on_unavailable=True)
-            except (
-                SemanticScholarRequestError,
-                SemanticScholarUnavailableError,
-            ) as exc:
-                logger.debug("S2 metadata unavailable during arXiv recovery: %s", exc)
-                records = {}
-            else:
-                metadata_completed = True
-            resolver.remember(list(records.values()))
-            for requested_id, paper in records.items():
-                resolver.aliases[normalize_paper_id(requested_id).lower()] = paper
-            resolver.bind_entries(batch)
-            missing_arxiv = [
-                value
-                for value in missing
-                if value.startswith("arxiv:") and value not in resolver.aliases
-            ]
-            if missing_arxiv:
-                arxiv_records = arxiv.get_papers(missing_arxiv)
-                if arxiv_records is not None:
+            if missing:
+                metadata_requested = True
+                try:
+                    records = client.get_papers(missing, raise_on_unavailable=True)
+                except (
+                    SemanticScholarRequestError,
+                    SemanticScholarUnavailableError,
+                ) as exc:
+                    logger.debug(
+                        "S2 metadata unavailable during arXiv recovery: %s", exc
+                    )
+                    records = {}
+                else:
                     metadata_completed = True
-                    resolver.remember(list(arxiv_records.values()))
-            resolver.bind_entries(batch)
-        attempted.update(ids)
-        for entry in batch:
-            _add_verified_reference(seed, recovered, resolver.resolve(entry))
+                resolver.remember(list(records.values()))
+                for requested_id, paper in records.items():
+                    resolver.aliases[normalize_paper_id(requested_id).lower()] = paper
+                resolver.bind_entries(batch)
+                missing_arxiv = [
+                    value
+                    for value in missing
+                    if value.startswith("arxiv:") and value not in resolver.aliases
+                ]
+                if missing_arxiv:
+                    arxiv_records = arxiv.get_papers(missing_arxiv)
+                    if arxiv_records is not None:
+                        metadata_completed = True
+                        resolver.remember(list(arxiv_records.values()))
+                resolver.bind_entries(batch)
+            attempted.update(ids)
+            for entry in batch:
+                _add_verified_reference(seed, recovered, resolver.resolve(entry))
+            progress.update(len(batch))
     _enrich_local_reference_records(client, recovered)
     resolved_with_identifiers = len(recovered)
 

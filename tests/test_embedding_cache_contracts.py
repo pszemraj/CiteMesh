@@ -1352,7 +1352,35 @@ def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
     assert list(embeddings) == ["p1", "p2", "p3", "p4"]
 
 
-def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
+def test_length_bucket_progress_counts_completed_inputs_in_original_order() -> None:
+    """Progress counts each finished batch while vectors retain the caller's order."""
+    from citemesh.core.text_batching import encode_texts_in_length_buckets
+
+    texts = ["x" * 120, "tiny", "y" * 90, "small words", "z" * 60]
+    completed: list[int] = []
+    calls: list[list[str]] = []
+
+    def encode_batch(batch: list[str], _show_progress: bool) -> np.ndarray:
+        calls.append(batch)
+        return np.asarray([[float(len(text)), 1.0] for text in batch], dtype=np.float32)
+
+    embeddings = encode_texts_in_length_buckets(
+        texts,
+        batch_size=2,
+        show_progress_bar=False,
+        encode_batch=encode_batch,
+        on_progress=completed.append,
+    )
+
+    assert completed == [0, 2, 4, 5]
+    assert [len(batch) for batch in calls] == [2, 2, 1]
+    assert embeddings[:, 0].tolist() == [float(len(text)) for text in texts]
+
+
+@pytest.mark.parametrize("show_progress", [False, True])
+def test_embedding_cache_dispatches_explicit_prefetch_encoder(
+    show_progress: bool,
+) -> None:
     """Cache encoding should hand the full miss set to an enabled prefetch proxy.
 
     :return None: Verifies explicit fast-path dispatch and complete miss-set input.
@@ -1370,7 +1398,13 @@ def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
             """
             self.calls: list[tuple[list[str], int]] = []
 
-        def encode_prefetched(self, texts: list[str], *, batch_size: int) -> np.ndarray:
+        def encode_prefetched(
+            self,
+            texts: list[str],
+            *,
+            batch_size: int,
+            on_progress: Callable[[int], None] | None = None,
+        ) -> np.ndarray:
             """Record one prefetch dispatch and return deterministic vectors.
 
             :param list[str] texts: Full cache-miss text set.
@@ -1378,6 +1412,10 @@ def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
             :return np.ndarray: Stable FP32 embeddings.
             """
             self.calls.append((list(texts), batch_size))
+            if on_progress is not None:
+                on_progress(0)
+                on_progress(2)
+                on_progress(len(texts))
             return np.asarray(
                 [[float(len(text)), 1.0] for text in texts], dtype=np.float32
             )
@@ -1406,7 +1444,7 @@ def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
         }
 
         embeddings = cache.get_embeddings(
-            papers, model, batch_size=2, show_progress=False
+            papers, model, batch_size=2, show_progress=show_progress
         )
 
     assert model.calls == [
@@ -1521,15 +1559,19 @@ def test_prefetch_proxy_compile_retry_clears_partial_warning_count(
         return True
 
     proxy = _make_prefetch_proxy(monkeypatch, model, restore_eager)
+    completed: list[int] = []
 
     with caplog.at_level(logging.WARNING):
-        embeddings = proxy.encode_prefetched(texts, batch_size=1)
+        embeddings = proxy.encode_prefetched(
+            texts, batch_size=1, on_progress=completed.append
+        )
 
     np.testing.assert_array_equal(
         embeddings, np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
     )
     assert restored_errors == ["compiled forward failed"]
     assert model.forward_calls == 4
+    assert completed == [0, 1, 0, 1, 2]
     assert "truncate 1 of 2 inputs" in caplog.text
     assert "truncate 2 of 2 inputs" not in caplog.text
 

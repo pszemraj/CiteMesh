@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import requests
+from rich.console import Console
 
+from citemesh import progress as progress_module
 from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data.cache import JSONValue
 from citemesh.services import semantic_scholar as s2
@@ -24,6 +27,15 @@ from citemesh.services.semantic_scholar import (
     reset_client,
 )
 from tests._helpers import get_paper_id_normalization_cases
+
+
+@pytest.fixture
+def provider_progress(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
+    """Record provider progress counts and context cleanup without rendering."""
+    context = MagicMock()
+    factory = MagicMock(return_value=context)
+    monkeypatch.setattr(s2.endpoints, "progress_task", factory)
+    return factory, context
 
 
 class _MockResponse:
@@ -529,6 +541,7 @@ def test_get_papers_fetches_only_misses_and_preserves_request_order() -> None:
 
 def test_get_papers_splits_arbitrary_missing_count_at_500(
     monkeypatch: pytest.MonkeyPatch,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """A public bulk call splits missing IDs into valid provider batches.
 
@@ -559,10 +572,25 @@ def test_get_papers_splits_arbitrary_missing_count_at_500(
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500, 1]
     assert [call.args[1] for call in persist_paper.call_args_list] == ids
+    factory, context = provider_progress
+    factory.assert_called_once_with(
+        total=1001,
+        description="Fetching paper metadata",
+        unit="papers",
+        enabled=None,
+    )
+    assert context.__enter__.return_value.update.call_args_list == [
+        call(500),
+        call(500),
+        call(1),
+    ]
+    context.__exit__.assert_called_once()
 
 
 def test_tolerant_get_papers_warns_after_unavailable_batch(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """A failed metadata batch emits one actionable availability warning.
 
@@ -599,6 +627,9 @@ def test_tolerant_get_papers_warns_after_unavailable_batch(
     ]
     assert len(warnings) == 1
     assert "batch fetching 500 papers" in warnings[0]
+    _factory, context = provider_progress
+    context.__enter__.return_value.update.assert_called_once_with(500)
+    context.__exit__.assert_called_once()
 
 
 @pytest.mark.parametrize("refresh_paper_cache", [False, True])
@@ -684,7 +715,12 @@ def test_get_papers_aggregates_malformed_rows_into_one_warning(
     ],
 )
 def test_relation_discovery_pages_inline_metadata_without_batch(
-    method: str, relation: str, nested: str, paper_id: str, url_id: str
+    method: str,
+    relation: str,
+    nested: str,
+    paper_id: str,
+    url_id: str,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """Relation discovery pages and deduplicates rows that carry full metadata.
 
@@ -709,17 +745,28 @@ def test_relation_discovery_pages_inline_metadata_without_batch(
         for related_id in ("a", "b")
     ]
     assert client._session.get.call_count == 2
-    for call in client._session.get.call_args_list:
-        assert call.args[0] == f"{s2.endpoints.PAPER_BASE_URL}/{url_id}/{relation}"
-        assert call.kwargs["params"]["fields"] == ",".join(
+    for request_call in client._session.get.call_args_list:
+        assert (
+            request_call.args[0] == f"{s2.endpoints.PAPER_BASE_URL}/{url_id}/{relation}"
+        )
+        assert request_call.kwargs["params"]["fields"] == ",".join(
             s2.payloads.DEFAULT_PAPER_FIELDS
         )
     client._session.post.assert_not_called()
     assert client._session.get.call_args_list[1].kwargs["params"]["offset"] == 2
+    factory, context = provider_progress
+    factory.assert_called_once_with(
+        total=None,
+        description=f"Collecting seed {relation}",
+        unit="papers",
+    )
+    assert context.__enter__.return_value.update.call_args_list == [call(1), call(1)]
+    context.__exit__.assert_called_once()
 
 
 def test_relation_retries_only_failed_page_and_every_invocation_is_fresh(
     monkeypatch: pytest.MonkeyPatch,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """A failed page retries at its offset and no memo suppresses a later call.
 
@@ -747,6 +794,88 @@ def test_relation_retries_only_failed_page_and_every_invocation_is_fresh(
         call.kwargs["params"]["offset"] for call in client._session.get.call_args_list
     ]
     assert offsets == [0, 1, 1, 0]
+    _factory, context = provider_progress
+    assert context.__enter__.return_value.update.call_args_list == [
+        call(1),
+        call(1),
+        call(1),
+    ]
+    assert context.__exit__.call_count == 2
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_discovery_progress_closes_after_an_unavailable_page(
+    provider_progress: tuple[MagicMock, MagicMock], strict: bool
+) -> None:
+    """A failed discovery closes its display before returning or propagating."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(return_value=_MockResponse(404))
+        if strict:
+            with pytest.raises(SemanticScholarUnavailableError):
+                client.get_paper_citations("missing", raise_on_unavailable=True)
+        else:
+            assert client.get_paper_citations("missing") == []
+    _factory, context = provider_progress
+    context.__enter__.return_value.update.assert_not_called()
+    context.__exit__.assert_called_once()
+
+
+def test_reference_hydration_does_not_create_nested_provider_progress(
+    provider_progress: tuple[MagicMock, MagicMock],
+) -> None:
+    """Only discovery owns page progress; the hydration loop owns paper progress."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(
+                200, _relation_payload(["reference"], "citedPaper")
+            )
+        )
+        assert client.get_reference_ids("seed") == ["reference"]
+    factory, _context = provider_progress
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tty", "enabled"), [(True, True), (False, True), (True, False)]
+)
+def test_discovery_progress_obeys_shared_terminal_and_verbosity_policy(
+    monkeypatch: pytest.MonkeyPatch, tty: bool, enabled: bool
+) -> None:
+    """Discovery progress is visible only on an interactive, permitted console."""
+    output = io.StringIO()
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: tty)
+    monkeypatch.setattr(progress_module, "_progress_enabled", enabled)
+    monkeypatch.setattr(
+        progress_module,
+        "_progress_console",
+        Console(file=output, force_terminal=True, no_color=True, width=100),
+    )
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, _relation_payload(["citer"], "citingPaper"))
+        )
+        assert [paper.paper_id for paper in client.get_paper_citations("seed")] == [
+            "citer"
+        ]
+    assert ("Collecting seed citations" in output.getvalue()) is (tty and enabled)
+
+
+@pytest.mark.parametrize("missing", [0, 1, 500])
+def test_metadata_progress_hides_single_batches(
+    provider_progress: tuple[MagicMock, MagicMock], missing: int
+) -> None:
+    """One request has no incremental batches and must not nest recovery bars."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            return_value=_MockResponse(200, [None] * missing)
+        )
+        assert client.get_papers([f"missing-{index}" for index in range(missing)]) == {}
+    factory, _context = provider_progress
+    assert factory.call_args.kwargs["enabled"] is False
 
 
 def test_relation_null_missing_and_malformed_contracts() -> None:
@@ -1189,6 +1318,7 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
             side_effect=[_MockResponse(status_code)] * failed_attempts
             + [_MockResponse(200, _paper_payload("p1"))]
         )
+        caplog.clear()  # Assert retry output separately from client startup status.
         with caplog.at_level(logging.DEBUG):
             assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
 
@@ -1225,6 +1355,7 @@ def test_short_retry_waits_only_log_diagnostics(
                 _MockResponse(200, _paper_payload("p1")),
             ]
         )
+        caplog.clear()  # Assert retry output separately from client startup status.
         with caplog.at_level(logging.DEBUG):
             assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
 

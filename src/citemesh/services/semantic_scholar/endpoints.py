@@ -22,6 +22,7 @@ from urllib.parse import quote
 from citemesh.core import Paper
 from citemesh.core.paper_ids import normalize_paper_id
 from citemesh.data.cache import JSONValue
+from citemesh.progress import progress_task
 
 from . import disk_cache, payloads
 from .errors import (
@@ -304,41 +305,50 @@ class _EndpointsMixin:
         reused_count = len(papers)
         malformed_records = 0
 
-        for offset in range(0, len(missing), PAPER_BATCH_SIZE):
-            batch_ids = missing[offset : offset + PAPER_BATCH_SIZE]
-            try:
-                response = self._request_json(
-                    f"{PAPER_BASE_URL}/batch",
-                    {"fields": ",".join(payloads._default_paper_fields())},
-                    payload={"ids": batch_ids},
-                    context=f"batch fetching {len(batch_ids)} papers",
-                    raise_on_unavailable=raise_on_unavailable,
-                    retry_not_found=True,
-                )
-            except SemanticScholarRequestError as exc:
-                exc.partial_results = papers
-                raise
-            if response is None:
-                logger.debug(
-                    "Paper metadata: stopped after an unavailable batch; %d "
-                    "missing records were not fetched.",
-                    len(missing) - offset,
-                )
-                break
-            if not isinstance(response, list) or len(response) != len(batch_ids):
-                raise _SemanticScholarResponseContractError(
-                    "Semantic Scholar batch response must contain one row per requested ID."
-                )
-            for requested_id, record in zip(batch_ids, response):
-                if record is None:
-                    continue
-                paper = payloads._convert_api_paper(record)
-                if paper is None:
-                    malformed_records += 1
-                    logger.debug("Skipping malformed batch paper for %s.", requested_id)
-                    continue
-                papers[requested_id] = paper
-                disk_cache._persist_paper(paper, requested_id)
+        with progress_task(
+            total=len(missing),
+            description="Fetching paper metadata",
+            unit="papers",
+            enabled=False if len(missing) <= PAPER_BATCH_SIZE else None,
+        ) as progress:
+            for offset in range(0, len(missing), PAPER_BATCH_SIZE):
+                batch_ids = missing[offset : offset + PAPER_BATCH_SIZE]
+                try:
+                    response = self._request_json(
+                        f"{PAPER_BASE_URL}/batch",
+                        {"fields": ",".join(payloads._default_paper_fields())},
+                        payload={"ids": batch_ids},
+                        context=f"batch fetching {len(batch_ids)} papers",
+                        raise_on_unavailable=raise_on_unavailable,
+                        retry_not_found=True,
+                    )
+                except SemanticScholarRequestError as exc:
+                    exc.partial_results = papers
+                    raise
+                if response is None:
+                    logger.debug(
+                        "Paper metadata: stopped after an unavailable batch; %d "
+                        "missing records were not fetched.",
+                        len(missing) - offset,
+                    )
+                    break
+                if not isinstance(response, list) or len(response) != len(batch_ids):
+                    raise _SemanticScholarResponseContractError(
+                        "Semantic Scholar batch response must contain one row per requested ID."
+                    )
+                for requested_id, record in zip(batch_ids, response):
+                    if record is None:
+                        continue
+                    paper = payloads._convert_api_paper(record)
+                    if paper is None:
+                        malformed_records += 1
+                        logger.debug(
+                            "Skipping malformed batch paper for %s.", requested_id
+                        )
+                        continue
+                    papers[requested_id] = paper
+                    disk_cache._persist_paper(paper, requested_id)
+                progress.update(len(batch_ids))
         logger.debug(
             "Paper metadata: reused %d cached records; fetched %d missing records.",
             reused_count,
@@ -407,6 +417,7 @@ class _EndpointsMixin:
         fields: str,
         limit: int | None,
         raise_on_unavailable: bool,
+        progress_description: str | None = None,
     ) -> _RelationListing | None:
         """Fetch ordered unique relation records through explicit REST pages.
 
@@ -416,76 +427,86 @@ class _EndpointsMixin:
         :param str fields: Paper fields requested for each nested record.
         :param int | None limit: Maximum results, or all available records.
         :param bool raise_on_unavailable: Raise on a failed page.
+        :param str | None progress_description: Discovery progress label; absent
+            for per-paper reference hydration, which owns its progress display.
         :return _RelationListing | None: First record per normalized ID in
             provider order, or ``None`` after a tolerated failed page.
         """
         records: dict[str, object] = {}
         complete = False
         offset = 0
-        while limit is None or len(records) < limit:
-            page_limit = GRAPH_RELATION_PAGE_SIZE
-            if limit is not None:
-                page_limit = min(page_limit, max(1, limit - len(records)))
-            response = self._request_json(
-                f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}/{relation}",
-                {
-                    "fields": fields,
-                    "limit": page_limit,
-                    "offset": offset,
-                },
-                context=f"fetching {relation} for {paper_id} at offset {offset}",
-                raise_on_unavailable=raise_on_unavailable,
-                retry_not_found=offset > 0,
-            )
-            if response is None:
-                return None
-            if not _is_relation_page(response):
-                raise _SemanticScholarResponseContractError(
-                    f"Semantic Scholar returned malformed {relation} pagination data."
+        with (
+            progress_task(total=None, description=progress_description, unit="papers")
+            if progress_description is not None
+            else contextlib.nullcontext()
+        ) as progress:
+            while limit is None or len(records) < limit:
+                page_limit = GRAPH_RELATION_PAGE_SIZE
+                if limit is not None:
+                    page_limit = min(page_limit, max(1, limit - len(records)))
+                response = self._request_json(
+                    f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}/{relation}",
+                    {
+                        "fields": fields,
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    context=f"fetching {relation} for {paper_id} at offset {offset}",
+                    raise_on_unavailable=raise_on_unavailable,
+                    retry_not_found=offset > 0,
                 )
-            rows = response["data"]
-            if rows is None:
-                rows = []
-            if not isinstance(rows, list):
-                raise _SemanticScholarResponseContractError(
-                    f"Semantic Scholar returned non-list {relation} data."
-                )
-            for row in rows:
-                if not isinstance(row, dict) or nested_key not in row:
+                if response is None:
+                    return None
+                if not _is_relation_page(response):
                     raise _SemanticScholarResponseContractError(
-                        f"Semantic Scholar returned malformed {relation} relation data."
+                        f"Semantic Scholar returned malformed {relation} pagination data."
                     )
-                paper = payloads._payload_get(row, nested_key)
-                if not isinstance(paper, dict) or "paperId" not in paper:
+                rows = response["data"]
+                if rows is None:
+                    rows = []
+                if not isinstance(rows, list):
                     raise _SemanticScholarResponseContractError(
-                        f"Semantic Scholar returned malformed {relation} paper data."
+                        f"Semantic Scholar returned non-list {relation} data."
                     )
-                raw_id = payloads._payload_get(paper, "paperId")
-                if raw_id is None:
-                    continue
-                if not isinstance(raw_id, str) or not raw_id.strip():
+                previous_count = len(records)
+                for row in rows:
+                    if not isinstance(row, dict) or nested_key not in row:
+                        raise _SemanticScholarResponseContractError(
+                            f"Semantic Scholar returned malformed {relation} relation data."
+                        )
+                    paper = payloads._payload_get(row, nested_key)
+                    if not isinstance(paper, dict) or "paperId" not in paper:
+                        raise _SemanticScholarResponseContractError(
+                            f"Semantic Scholar returned malformed {relation} paper data."
+                        )
+                    raw_id = payloads._payload_get(paper, "paperId")
+                    if raw_id is None:
+                        continue
+                    if not isinstance(raw_id, str) or not raw_id.strip():
+                        raise _SemanticScholarResponseContractError(
+                            f"Semantic Scholar returned invalid {relation} paper ID."
+                        )
+                    normalized_id = normalize_paper_id(raw_id)
+                    if normalized_id not in records:
+                        records[normalized_id] = paper
+                        if limit is not None and len(records) >= limit:
+                            break
+                if progress is not None:
+                    progress.update(len(records) - previous_count)
+                next_offset = response.get("next")
+                if not rows or next_offset is None:
+                    # A listing that filled its limit may have stopped early.
+                    complete = limit is None or len(records) < limit
+                    break
+                if (
+                    isinstance(next_offset, bool)
+                    or not isinstance(next_offset, int)
+                    or next_offset <= offset
+                ):
                     raise _SemanticScholarResponseContractError(
-                        f"Semantic Scholar returned invalid {relation} paper ID."
+                        f"Semantic Scholar returned invalid {relation} pagination offset."
                     )
-                normalized_id = normalize_paper_id(raw_id)
-                if normalized_id not in records:
-                    records[normalized_id] = paper
-                    if limit is not None and len(records) >= limit:
-                        break
-            next_offset = response.get("next")
-            if not rows or next_offset is None:
-                # A listing that filled its limit may have stopped early.
-                complete = limit is None or len(records) < limit
-                break
-            if (
-                isinstance(next_offset, bool)
-                or not isinstance(next_offset, int)
-                or next_offset <= offset
-            ):
-                raise _SemanticScholarResponseContractError(
-                    f"Semantic Scholar returned invalid {relation} pagination offset."
-                )
-            offset = next_offset
+                offset = next_offset
         logger.debug(
             "Checked %s discovery upstream for %s: %d IDs.",
             relation,
@@ -528,6 +549,7 @@ class _EndpointsMixin:
             fields=",".join(payloads._default_paper_fields()),
             limit=parsed_limit,
             raise_on_unavailable=raise_on_unavailable,
+            progress_description=f"Collecting seed {relation}",
         )
         if listing is None:
             if raise_on_unavailable:

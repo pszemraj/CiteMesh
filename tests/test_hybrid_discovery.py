@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from urllib.parse import unquote
 
@@ -44,6 +45,48 @@ _SEED_ID = f"arxiv:{_SEED_ARXIV}"
 _MODES = ("candidates", "arxiv-corpus", "both")
 
 CorpusRow = dict[str, object]
+
+
+@pytest.mark.parametrize("fail_second", [False, True])
+def test_corpus_progress_counts_completed_queries_and_closes_on_failure(
+    monkeypatch: pytest.MonkeyPatch, fail_second: bool
+) -> None:
+    """Each retrieval role advances only after its search completes."""
+    counts: list[int] = []
+    closed: list[bool] = []
+    queries: list[NDArray[np.float32]] = []
+
+    @contextmanager
+    def progress(**kwargs: object) -> Iterator[SimpleNamespace]:
+        assert kwargs["total"] == 2
+        assert kwargs["unit"] == "queries"
+        try:
+            yield SimpleNamespace(update=lambda: counts.append(1))
+        finally:
+            closed.append(True)
+
+    def search(query: NDArray[np.float32], _top_k: int) -> list[Paper]:
+        assert len(counts) == len(queries)
+        queries.append(query)
+        if fail_second and len(queries) == 2:
+            raise RuntimeError("corpus read failed")
+        return []
+
+    monkeypatch.setattr(hybrid_module, "progress_task", progress)
+    builder = object.__new__(HybridGraphBuilder)
+    builder.embedding_builder = SimpleNamespace(search_prepared_corpus=search)
+    seed_query = np.asarray([1.0, 0.0], dtype=np.float32)
+    seed_document = np.asarray([0.0, 1.0], dtype=np.float32)
+    if fail_second:
+        with pytest.raises(RuntimeError, match="Semantic enrichment failed"):
+            builder._search_corpus(MagicMock(), seed_query, seed_document)
+    else:
+        builder._search_corpus(MagicMock(), seed_query, seed_document)
+
+    assert queries[0] is seed_query
+    assert queries[1] is seed_document
+    assert counts == [1] * (1 if fail_second else 2)
+    assert closed == [True]
 
 
 @pytest.fixture(autouse=True)

@@ -200,9 +200,8 @@ logger = logging.getLogger(__name__)
 def _cache_scan_progress(values: Sequence[_T], description: str) -> Iterable[_T]:
     """Render a progress bar over an embedding-cache scan.
 
-    Injected into :class:`EmbeddingCache` so the storage layer stays free of UI
-    imports: the TTY gate and the bar's presentation options live here, with the
-    rest of this module's progress handling.
+    Injected into :class:`EmbeddingCache` so cache scans use the strategy's
+    TTY policy and the same progress presentation as embedding work.
 
     :param Sequence[_T] values: Items the cache is about to iterate.
     :param str description: Label shown ahead of the bar.
@@ -1672,6 +1671,7 @@ class EmbeddingGraphBuilder(
                         for paper_id in missing
                     ],
                     batch_size=self.encode_batch_size,
+                    show_progress_bar=True,
                 )
                 embeddings.update(zip(missing, vectors, strict=True))
             return embeddings
@@ -1679,7 +1679,7 @@ class EmbeddingGraphBuilder(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
-            show_progress=False,
+            show_progress=True,
             text_builder=self._format_retrieval_document_metadata,
         )
 
@@ -1737,7 +1737,7 @@ class EmbeddingGraphBuilder(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
-            show_progress=False,
+            show_progress=True,
             text_builder=self._format_graph_similarity_metadata,
         )
         self.embeddings = validate_embedding_vectors(

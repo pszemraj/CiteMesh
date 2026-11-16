@@ -28,6 +28,7 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     resolve_embedding_model_profile,
 )
+from citemesh.progress import progress_task
 
 from . import deps, runtime
 from .precision import _model_floating_dtype_names, _PrecisionEncodeProxy
@@ -654,12 +655,19 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
         if effective_batch_size < 1:
             raise ValueError("batch_size must be at least 1 when provided")
 
-        return encode_texts(
-            encode_model,
-            texts,
-            batch_size=min(effective_batch_size, len(texts)),
-            show_progress_bar=show_progress_bar,
-        )
+        with progress_task(
+            total=len(texts),
+            description="Encoding papers",
+            unit="papers",
+            enabled=None if show_progress_bar and len(texts) > 1 else False,
+        ) as progress:
+            return encode_texts(
+                encode_model,
+                texts,
+                batch_size=min(effective_batch_size, len(texts)),
+                show_progress_bar=False,
+                on_progress=lambda completed: progress.update(completed - progress.n),
+            )
 
     def _model_load_candidates(self) -> tuple[str, ...]:
         """Return ordered candidate model IDs used for lazy model loading.

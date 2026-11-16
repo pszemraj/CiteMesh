@@ -404,6 +404,11 @@ def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
     :return str | None: Environment key, configured key, or no configured value.
     """
     if "S2_API_KEY" in os.environ:
+        logger.debug(
+            "Using S2_API_KEY from the environment."
+            if os.environ["S2_API_KEY"]
+            else "S2_API_KEY is empty; using anonymous Semantic Scholar access."
+        )
         return os.environ["S2_API_KEY"]
     if user_config.s2_api_key:
         logger.debug("Using api.s2_api_key from %s.", user_config.path)

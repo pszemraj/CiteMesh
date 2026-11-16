@@ -82,7 +82,7 @@ class ReferenceHydrator:
 
         progress_bar: Generator[tuple[str, Paper], None, None] | None = None
         paper_items: Iterable[tuple[str, Paper]] = papers.items()
-        if self.fetch_references and progress_enabled() and len(papers) > 25:
+        if self.fetch_references and progress_enabled() and papers:
             progress_bar = progress_iterator(
                 paper_items,
                 description="Hydrating reference lists",

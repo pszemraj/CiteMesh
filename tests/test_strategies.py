@@ -1005,14 +1005,19 @@ def test_citation_collect_populates_reference_cache_and_summary(
     assert "Collecting related papers" in caplog.text
 
 
-def test_citation_reference_hydration_reports_interactive_progress() -> None:
+@pytest.mark.parametrize("paper_count", [1, 25])
+def test_citation_reference_hydration_reports_interactive_progress(
+    paper_count: int,
+) -> None:
     """Long interactive reference hydration should expose per-paper progress.
 
     :return None: Checks the hydration loop uses the shared progress iterator.
     """
     seed = _paper("seed", refs=["seed-ref"])
     papers = {seed.paper_id: seed}
-    papers.update({_paper_id: _paper(_paper_id) for _paper_id in map(str, range(25))})
+    papers.update(
+        {_paper_id: _paper(_paper_id) for _paper_id in map(str, range(paper_count))}
+    )
     client = MagicMock()
     client.get_reference_ids.return_value = []
     progress = MagicMock(
@@ -1034,7 +1039,7 @@ def test_citation_reference_hydration_reports_interactive_progress() -> None:
         description="Hydrating reference lists",
         unit="papers",
     )
-    assert client.get_reference_ids.call_count == 25
+    assert client.get_reference_ids.call_count == paper_count
 
 
 def test_citation_collect_discovers_all_sources_before_reference_enrichment() -> None:

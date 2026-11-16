@@ -1330,8 +1330,10 @@ def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
     assert cpu_builder._attention_implementation_hint is None
 
 
+@pytest.mark.parametrize("show_progress", [False, True])
 def test_encode_texts_uses_length_bucketed_batches(
     monkeypatch: pytest.MonkeyPatch,
+    show_progress: bool,
 ) -> None:
     """Encode batching should group similarly sized texts while preserving order."""
 
@@ -1351,7 +1353,9 @@ def test_encode_texts_uses_length_bucketed_batches(
         "small words",
         "z " * 80,
     ]
-    embeddings = builder._encode_texts(texts, batch_size=2, show_progress_bar=False)
+    embeddings = builder._encode_texts(
+        texts, batch_size=2, show_progress_bar=show_progress
+    )
 
     assert [len(batch) for batch in model.calls] == [2, 2, 1]
     batch_estimates = [

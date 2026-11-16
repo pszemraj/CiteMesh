@@ -123,7 +123,7 @@ Redirected logs use plain text without terminal padding or forced line breaks, u
 | `info` | Brief build phases, useful outcomes, and saved output locations. |
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
-Progress bars appear only on an interactive terminal at `info` or `debug`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
+Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
 Routine HTTP request logs stay hidden; long Semantic Scholar retry waits show a brief status at `info`, with request details at `debug`.
 
 ## Option reference

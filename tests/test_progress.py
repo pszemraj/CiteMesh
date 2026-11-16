@@ -153,11 +153,14 @@ def test_progress_labels_preserve_brackets_as_literal_text(
     assert "[red]rows[/red]" in output
 
 
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
 def test_progress_iterator_without_a_total_renders_indeterminate_counts(
     progress_console: Console,
     recorded_displays: list[Progress],
+    width: int,
 ) -> None:
-    """An unsized source should keep the total unknown and count against ``?``."""
+    """Unsized sources show elapsed time and a count, without an empty ETA label."""
+    progress_console.width = width
     items = list(
         progress_module.progress_iterator(
             _unsized_letters(),
@@ -169,7 +172,10 @@ def test_progress_iterator_without_a_total_renders_indeterminate_counts(
     task = recorded_displays[0].tasks[0]
     assert items == ["a", "b"]
     assert task.total is None
-    assert "2/?" in progress_console.export_text()
+    output = progress_console.export_text()
+    assert "2/?" in output
+    assert "ETA" not in output
+    assert "0:00:" in output
 
 
 def test_progress_eta_retains_slow_work_after_a_fast_update_burst(

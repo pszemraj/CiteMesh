@@ -71,8 +71,8 @@ def _resolve_console() -> Console:
     return Console(stderr=True)
 
 
-def _columns(width: int) -> Sequence[ProgressColumn]:
-    """Keep counts and ETA visible before adding optional wide-terminal detail."""
+def _columns(width: int, total: int | None) -> Sequence[ProgressColumn]:
+    """Keep counts visible and show an ETA only when the total is known."""
     compact = width < 80
     columns: list[ProgressColumn] = [
         TextColumn(
@@ -87,9 +87,10 @@ def _columns(width: int) -> Sequence[ProgressColumn]:
     columns.append(MofNCompleteColumn(table_column=Column(no_wrap=True)))
     if width >= 60:
         columns.append(TextColumn("{task.fields[unit]}", style="dim", markup=False))
-    if not compact:
+    if not compact or total is None:
         columns.append(TimeElapsedColumn())
-    columns.extend([TextColumn("ETA", style="dim"), TimeRemainingColumn()])
+    if total is not None:
+        columns.extend([TextColumn("ETA", style="dim"), TimeRemainingColumn()])
     return columns
 
 
@@ -162,7 +163,7 @@ def progress_task(
     show = _progress_enabled and (stderr_isatty() if enabled is None else bool(enabled))
     console = _resolve_console()
     progress = Progress(
-        *_columns(console.width),
+        *_columns(console.width, total),
         console=console,
         disable=not show,
         expand=True,

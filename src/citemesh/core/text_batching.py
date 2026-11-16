@@ -34,7 +34,13 @@ class _TextEncoder(Protocol):
 class _PrefetchBatchEncoder(Protocol):
     """Batch encoder available on the prefetching precision wrapper."""
 
-    def __call__(self, texts: Sequence[str], *, batch_size: int) -> ArrayLike: ...
+    def __call__(
+        self,
+        texts: Sequence[str],
+        *,
+        batch_size: int,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> ArrayLike: ...
 
 
 class _TokenizationLengths(Protocol):
@@ -172,6 +178,7 @@ def encode_texts_in_length_buckets(
     batch_size: int,
     show_progress_bar: bool,
     encode_batch: Callable[[list[str], bool], ArrayLike],
+    on_progress: Callable[[int], None] | None = None,
 ) -> NDArray[np.float32]:
     """Encode texts in length-similar batches while restoring original order.
 
@@ -179,16 +186,22 @@ def encode_texts_in_length_buckets(
     :param int batch_size: Maximum rows per encode batch.
     :param bool show_progress_bar: Whether the encoder may show progress.
     :param Callable[[list[str], bool], ArrayLike] encode_batch: Batch encoder callback.
+    :param on_progress: Report the absolute number of completed inputs.
     :return NDArray[np.float32]: Float32 embeddings in original input order.
     """
     if not texts:
         return np.empty((0, 0), dtype=np.float32)
 
     batches = length_bucketed_index_batches(texts, batch_size)
+    if on_progress is not None:
+        on_progress(0)
     if len(batches) == 1:
-        return np.asarray(
+        embeddings = np.asarray(
             encode_batch(list(texts), show_progress_bar), dtype=np.float32
         )
+        if on_progress is not None:
+            on_progress(len(texts))
+        return embeddings
 
     ordered_embeddings: dict[int, NDArray[np.float32]] = {}
     for batch_indices in batches:
@@ -200,6 +213,8 @@ def encode_texts_in_length_buckets(
             batch_embeddings = batch_embeddings.reshape(1, -1)
         for position, original_idx in enumerate(batch_indices):
             ordered_embeddings[original_idx] = batch_embeddings[position]
+        if on_progress is not None:
+            on_progress(len(ordered_embeddings))
 
     return np.asarray(
         [ordered_embeddings[idx] for idx in range(len(texts))],
@@ -213,6 +228,7 @@ def encode_texts(
     *,
     batch_size: int,
     show_progress_bar: bool = False,
+    on_progress: Callable[[int], None] | None = None,
 ) -> NDArray[np.float32]:
     """Encode text through the model's preferred batching path.
 
@@ -220,13 +236,15 @@ def encode_texts(
     :param Sequence[str] texts: Text payloads to encode.
     :param int batch_size: Maximum rows per encode batch.
     :param bool show_progress_bar: Whether the encoder may show progress.
+    :param on_progress: Report completed inputs without changing the batching path.
     :return NDArray[np.float32]: Float32 embeddings in original input order.
     """
     prefetch_batches: bool = getattr(model, "prefetch_batches", False)
     if prefetch_batches is True and len(texts) > batch_size and not show_progress_bar:
         encode_prefetched: _PrefetchBatchEncoder = getattr(model, "encode_prefetched")
         return np.asarray(
-            encode_prefetched(texts, batch_size=batch_size), dtype=np.float32
+            encode_prefetched(texts, batch_size=batch_size, on_progress=on_progress),
+            dtype=np.float32,
         )
 
     warn_on_truncated_inputs(model, texts)
@@ -234,6 +252,7 @@ def encode_texts(
         texts,
         batch_size=batch_size,
         show_progress_bar=show_progress_bar,
+        on_progress=on_progress,
         encode_batch=lambda batch_texts, batch_progress: np.asarray(
             model.encode(
                 batch_texts,

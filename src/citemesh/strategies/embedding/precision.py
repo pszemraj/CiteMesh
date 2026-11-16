@@ -214,11 +214,13 @@ class _PrecisionEncodeProxy:
         texts: Sequence[str],
         *,
         batch_size: int,
+        on_progress: Callable[[int], None] | None = None,
     ) -> NDArray[np.float32]:
         """Encode normalized FP32 text vectors while prefetching CPU features.
 
         :param Sequence[str] texts: Text payloads to encode.
         :param int batch_size: Maximum rows per prepared batch.
+        :param on_progress: Completed inputs, reset to zero on a compile retry.
         :return NDArray[np.float32]: Normalized FP32 embeddings in original input order.
         """
         if not texts:
@@ -244,6 +246,8 @@ class _PrecisionEncodeProxy:
             nonlocal truncated_count
             ordered_embeddings.clear()
             truncated_count = 0
+            if on_progress is not None:
+                on_progress(0)
             with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as executor:
                 pending = executor.submit(
                     self._prepare_prefetched_batch,
@@ -269,6 +273,8 @@ class _PrecisionEncodeProxy:
                     batch_embeddings = embeddings.float().cpu().numpy()
                     for position, original_idx in enumerate(batch_indices):
                         ordered_embeddings[original_idx] = batch_embeddings[position]
+                    if on_progress is not None:
+                        on_progress(len(ordered_embeddings))
 
         self._call_with_precision(run_batches)
         max_length = model.max_seq_length

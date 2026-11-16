@@ -851,6 +851,62 @@ def test_small_admission_limit_batches_unresolved_metadata(providers: tuple) -> 
     assert len(results[-1].papers) == 1
 
 
+def test_reference_recovery_progress_counts_completed_batches(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Progress covers the whole bibliography before its admission cap is applied."""
+    client, bibliography, metadata = providers
+    identifiers = [f"arxiv:2401.{index:05d}" for index in range(105)]
+    bibliography.return_value = [
+        BibliographyEntry((identifier,)) for identifier in identifiers
+    ]
+    metadata.side_effect = lambda ids: {
+        identifier: paper(identifier) for identifier in ids
+    }
+    context = MagicMock()
+    progress = MagicMock(return_value=context)
+    monkeypatch.setattr("citemesh.strategies.candidates.progress_task", progress)
+
+    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+
+    assert len(results[-1].papers) == 1
+    assert [len(call.args[0]) for call in client.get_papers.call_args_list] == [
+        50,
+        50,
+        5,
+    ]
+    progress.assert_called_once_with(
+        total=105,
+        description="Recovering seed references",
+        unit="references",
+        enabled=None,
+    )
+    assert context.__enter__.return_value.update.call_args_list == [
+        call(50),
+        call(50),
+        call(5),
+    ]
+    context.__exit__.assert_called_once()
+
+
+def test_reference_recovery_progress_closes_after_metadata_failure(
+    providers: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A programming error propagates after closing the bibliography display."""
+    client, bibliography, _metadata = providers
+    bibliography.return_value = [BibliographyEntry(("arxiv:2401.00001",))]
+    client.get_papers.side_effect = ValueError("invalid provider result")
+    context = MagicMock()
+    monkeypatch.setattr(
+        "citemesh.strategies.candidates.progress_task",
+        MagicMock(return_value=context),
+    )
+    with pytest.raises(ValueError, match="invalid provider result"):
+        fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    context.__enter__.return_value.update.assert_not_called()
+    context.__exit__.assert_called_once()
+
+
 def test_candidate_pool_preserves_requested_seed_version(providers: tuple) -> None:
     """The embedding candidate pool passes the original input to arXiv HTML.
 
