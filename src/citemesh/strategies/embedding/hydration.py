@@ -29,7 +29,9 @@ from typing import (
 import numpy as np
 from numpy.typing import NDArray
 
+from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_cache import (
     EMBEDDING_DATASET_CHUNK_ROWS,
     CacheNamespacePayloadStats,
@@ -49,6 +51,7 @@ from . import corpus_source, deps
 from .config import (
     CALIBRATION_RESERVOIR_SEED,
     CANDIDATE_MULTIPLIER,
+    DEFAULT_DATASET_SOURCE,
 )
 from .records import (
     _DATASET_PAPER_ID_FIELDS,
@@ -251,6 +254,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
     ``_embedding_runtime_metadata`` and ``_format_retrieval_document_metadata``.
     """
 
+    _public_index_reminder_shown: bool = False
+
     def _single_revision_remedy(self) -> str:
         """Name the cheapest way to bring this corpus cache onto one source revision.
 
@@ -421,6 +426,29 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 revision=self.embedding_cache.get_hydration_source_revision(),
             )
             return
+
+        if (
+            self.storage_precision == "int8"
+            and not self._public_index_reminder_shown
+            and self.dataset_source == DEFAULT_DATASET_SOURCE
+            and self.dataset_split == "train"
+            and self.model_name == DEFAULT_EMBEDDING_MODEL_NAME
+            and self.model_revision is None
+            and self.requested_model_profile in {"auto", "embeddinggemma"}
+            and self.truncate_dim == 512
+            and self.calibration_sample_size
+            == EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+            and self._cached_payload_row_count() == 0
+        ):
+            self._public_index_reminder_shown = True
+            logger.info(
+                "Starting a new arXiv corpus cache.\n"
+                "Skip corpus encoding with the public precomputed index:\n"
+                "  citemesh cache import \\\n"
+                "    --bucket pszemraj/citemesh-arxiv-indexes \\\n"
+                "    --config embeddinggemma-512-int8\n"
+                "Then rerun with --cache-namespace NAMESPACE printed by import."
+            )
 
         dataset_source, revision, dataset = self._resolve_hydration_dataset(
             cached_dataset_source, use_streaming

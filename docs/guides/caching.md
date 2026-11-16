@@ -69,6 +69,8 @@ Crash safety, the replacement journal, flush ordering, and locking are in [Embed
 
 A portable index installs precomputed retrieval-document embeddings into the native cache. Install the `embeddings` extra first. Import and export copy the stored int8 or float32 values without loading an encoder; query encoding and the selected graph papers' symmetric embeddings still use the recorded model.
 
+Before starting a compatible arXiv corpus from an empty cache, builds show one INFO reminder with the public index import command and `--cache-namespace` selection. Reused caches and resumed hydration skip it. The reminder leaves the build running and requires no network check.
+
 ```bash
 # Import a local export, or one configuration from a Storage Bucket.
 citemesh cache import --path ./arxiv-index

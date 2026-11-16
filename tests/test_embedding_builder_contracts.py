@@ -360,6 +360,139 @@ def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> No
     )
 
 
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid-corpus", "hybrid-both"])
+@pytest.mark.parametrize("use_streaming", [False, True])
+def test_cold_corpus_reminds_about_public_index_once_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    strategy: str,
+    use_streaming: bool,
+) -> None:
+    """Offer the public index once, before either corpus mode loads its dataset."""
+    caplog.set_level(logging.INFO, logger=hydration_module.__name__)
+    if strategy == "embedding":
+        builder = EmbeddingGraphBuilder(
+            semantic_source="arxiv-corpus", client=MagicMock()
+        )
+    else:
+        monkeypatch.setattr(
+            "citemesh.strategies.hybrid._check_embedding_deps", lambda **_kwargs: None
+        )
+        builder = HybridGraphBuilder(
+            semantic_source="both" if strategy == "hybrid-both" else "arxiv-corpus",
+            client=MagicMock(),
+        ).embedding_builder
+    _pin_model_fingerprint(monkeypatch, builder)
+
+    def stop_before_loading(*_args: object) -> None:
+        assert "public precomputed index" in caplog.text
+        raise RuntimeError("stop before dataset loading")
+
+    load = MagicMock(side_effect=stop_before_loading)
+    monkeypatch.setattr(builder, "_resolve_hydration_dataset", load)
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="stop before dataset loading"):
+            builder._ensure_cache_hydrated(use_streaming=use_streaming)
+
+    messages = [
+        record
+        for record in caplog.records
+        if "public precomputed index" in record.getMessage()
+    ]
+    assert len(messages) == 1
+    assert messages[0].levelno == logging.INFO
+    assert "citemesh cache import \\\n" in messages[0].getMessage()
+    assert "--bucket pszemraj/citemesh-arxiv-indexes" in messages[0].getMessage()
+    assert "--config embeddinggemma-512-int8" in messages[0].getMessage()
+    assert "--cache-namespace NAMESPACE printed by import" in messages[0].getMessage()
+    assert load.call_count == 2
+
+    # A new builder should still offer the reminder, even in the same process.
+    next_builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    _pin_model_fingerprint(monkeypatch, next_builder)
+    monkeypatch.setattr(next_builder, "_resolve_hydration_dataset", load)
+    with pytest.raises(RuntimeError, match="stop before dataset loading"):
+        next_builder._ensure_cache_hydrated(use_streaming=use_streaming)
+    assert (
+        sum(
+            "public precomputed index" in record.getMessage()
+            for record in caplog.records
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"semantic_source": "candidates"},
+        {"model_name": "custom-checkpoint"},
+        {"model_revision": "custom-revision"},
+        {"model_profile": "default"},
+        {"dataset_source": "example/custom-corpus"},
+        {"dataset_split": "train[:10]"},
+        {"truncate_dim": 256},
+        {"storage_precision": "float32"},
+        {"calibration_sample_size": 32},
+    ],
+)
+def test_public_index_reminder_skips_other_corpus_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    overrides: dict[str, Any],
+) -> None:
+    """Do not recommend the advertised index for a different corpus contract."""
+    caplog.set_level(logging.INFO, logger=hydration_module.__name__)
+    options = {"semantic_source": "arxiv-corpus", "client": MagicMock(), **overrides}
+    builder = EmbeddingGraphBuilder(**options)
+    _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(
+        builder,
+        "_resolve_hydration_dataset",
+        MagicMock(side_effect=RuntimeError("stop before dataset loading")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop before dataset loading"):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert "public precomputed index" not in caplog.text
+
+
+@pytest.mark.parametrize("reused", ["installed", "warm", "resume", "nonempty"])
+def test_public_index_reminder_skips_reused_or_nonempty_caches(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    reused: str,
+) -> None:
+    """Cache reuse and resumption remain quiet, including non-reusable stored rows."""
+    caplog.set_level(logging.INFO, logger=hydration_module.__name__)
+    builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(builder, "_ready_manual_corpus", lambda: reused == "installed")
+    monkeypatch.setattr(
+        builder, "_revalidate_hydrated_cache", lambda *_args: (reused == "warm", None)
+    )
+    monkeypatch.setattr(
+        builder,
+        "_resume_incomplete_full_corpus_cache",
+        lambda **_kwargs: reused == "resume",
+    )
+    monkeypatch.setattr(builder, "_cached_payload_row_count", lambda: 1)
+    load = MagicMock(side_effect=RuntimeError("stop before dataset loading"))
+    monkeypatch.setattr(builder, "_resolve_hydration_dataset", load)
+
+    if reused == "nonempty":
+        with pytest.raises(RuntimeError, match="stop before dataset loading"):
+            builder._ensure_cache_hydrated(use_streaming=False)
+    else:
+        builder._ensure_cache_hydrated(use_streaming=False)
+        load.assert_not_called()
+
+    assert "public precomputed index" not in caplog.text
+
+
 def _concurrent_hydration_worker(
     cache_dir: str,
     worker_name: str,
