@@ -339,28 +339,33 @@ def _print_search_results(
     :param str | None summary: Optional context between the table and identifiers.
     :return None: Prints the table, optional summary, and full paper IDs.
     """
+    compact = console.output_console.width < 80
     table = _output_table(title)
     table.leading = 1
-    table.add_column("#", style="dim", width=3)
-    table.add_column("Paper / authors", ratio=1)
-    table.add_column("Year", justify="right", no_wrap=True)
-    table.add_column(
-        metric, justify="right", width=metric_width, no_wrap=metric_width is None
-    )
+    table.add_column("#", style="dim", no_wrap=True)
+    table.add_column("Paper / authors", ratio=1, overflow="fold")
+    if not compact:
+        table.add_column("Year", justify="right", no_wrap=True)
+        table.add_column(
+            metric, justify="right", width=metric_width, no_wrap=metric_width is None
+        )
     paper_ids = []
     for i, (paper_id, paper_title, authors, year, value) in enumerate(rows, 1):
-        authors_str = ", ".join(authors[:2])
+        authors_str = ", ".join(normalize_text(name) for name in authors[:2])
         if len(authors) > 2:
             authors_str += " et al."
-        table.add_row(
-            str(i),
-            Text.assemble(
-                (paper_title, "bold"),
-                ("\n" + authors_str, "dim") if authors_str else "",
-            ),
-            str(year) if year is not None else "",
-            value,
+        paper = Text.assemble(
+            (normalize_text(paper_title), "bold"),
+            ("\n" + authors_str, "dim") if authors_str else "",
         )
+        if compact:
+            metadata = f"{year} · " if year is not None else ""
+            paper.append(f"\n{metadata}{metric}: {value}", style="dim")
+            table.add_row(str(i), paper)
+        else:
+            table.add_row(
+                str(i), paper, str(year) if year is not None else "", Text(value)
+            )
         paper_ids.append(paper_id)
     console.output_console.print(table)
     if summary is not None:

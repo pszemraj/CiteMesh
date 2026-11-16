@@ -15,6 +15,8 @@ citemesh config path
 
 `set` validates the value with the same rules the loader applies, and rejects unknown keys and invalid values instead of writing them. On the command line, booleans accept `true`/`false`, `1/0`, `yes/no`, or `on/off`, and `export` takes a comma-separated list such as `json,dashboard`. `get` exits nonzero when the key is not set.
 
+`list` shows saved settings, not every effective default. Narrow terminals place each value below its full key; wider terminals use a table. Long values wrap rather than being shortened. Use `get` for an unwrapped value in scripts.
+
 ## Precedence
 
 Build defaults resolve as explicit CLI flag, then `config.toml`, then the built-in value. Credentials use the separate [API-key precedence](#api-key).

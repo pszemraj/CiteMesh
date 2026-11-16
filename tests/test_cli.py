@@ -135,8 +135,8 @@ def run_cli_command_via_sys_argv(
 def flatten_console_text(text: str) -> str:
     """Collapse Rich's soft line wrapping so phrase assertions survive re-wrapping.
 
-    Log records render through ``RichHandler`` at a fixed 140-column width, so a
-    long interpolated path pushes later words onto the next line and splits
+    Rich tables and explicitly sized logs wrap long lines, so a long
+    interpolated path pushes later words onto the next line and splits
     asserted phrases. Collapsing every whitespace run makes those assertions
     independent of how much of the line the path consumed.
 
@@ -1040,6 +1040,35 @@ for client_name, core_name in (("httpx", "httpcore"), ("httpx2", "httpcore2")):
         )
 
 
+def test_redirected_logs_preserve_long_lines_without_terminal_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Piped diagnostics retain literal paths without display wrapping or spaces."""
+    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
+    stderr = io.StringIO()
+    later_stderr = io.StringIO()
+    message = "Saved output to /" + "long-directory-name/" * 12 + "[draft].html"
+    monkeypatch.setattr(console_module, "stderr_isatty", lambda: False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setattr(
+        console_module,
+        "log_console",
+        cli_module.Console(stderr=True, force_terminal=False),
+    )
+    try:
+        with redirect_stderr(stderr):
+            console_module._configure_logging()
+            cli_module.logger.info(message)
+            cli_module.logger.warning("Results are incomplete.")
+        with redirect_stderr(later_stderr):
+            cli_module.logger.info("A later invocation.")
+    finally:
+        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+
+    assert stderr.getvalue() == f"INFO: {message}\nWARNING: Results are incomplete.\n"
+    assert later_stderr.getvalue() == "INFO: A later invocation.\n"
+
+
 @pytest.mark.parametrize("preconfigured", [False, True])
 def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     tmp_path: Path,
@@ -1162,6 +1191,43 @@ def test_search_command_prints_results_to_stdout(
     for name in author_names[2:]:
         assert name not in plain_stdout
     assert plain_stdout.index("12,345") < plain_stdout.index("Full paper IDs:")
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_search_results_keep_full_metadata_at_narrow_widths(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """Compact results keep titles, authors, counts, and copyable IDs intact."""
+    output = io.StringIO()
+    monkeypatch.setattr(
+        console_module,
+        "output_console",
+        cli_module.Console(file=output, width=width, color_system=None),
+    )
+    paper_id = "316931b899014bd69c0f50f7e773f724f813748f"
+    title = "Efficient\nAttention and Long-Context Language Models [bold]Study[/bold]"
+    author = "Researcher_[bold]Name[/bold]_With_A_Long_Unbroken_Name"
+    search_module._print_search_results(
+        "Search results for '[bold]attention[/bold]'",
+        [(paper_id, title, [author, "Another Researcher"], 2026, "9,876,543")],
+        metric="Citations",
+    )
+
+    rendered = output.getvalue()
+    full_text = unwrapped_console_token(rendered)
+    assert all(word in full_text for word in title.split())
+    assert author in full_text
+    assert "AnotherResearcher" in full_text
+    assert "[bold]attention[/bold]" in full_text
+    assert "2026" in full_text
+    assert "9,876,543" in full_text
+    assert "…" not in rendered
+    assert f"1. {paper_id}" in rendered.splitlines()
+    assert all(
+        len(line) <= width
+        for line in rendered.splitlines()
+        if not line.startswith("1. ")
+    )
 
 
 def test_s2_search_forwards_result_count_and_retry_budget(
@@ -2695,7 +2761,7 @@ def test_cli_argument_validation_contracts() -> None:
     for args, expected_error in numeric_cases:
         result = run_cli_command(args)
         assert result.returncode != 0
-        assert expected_error in result.stderr
+        assert expected_error in flatten_console_text(result.stderr)
 
 
 @pytest.mark.parametrize(
@@ -3013,7 +3079,7 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
     for args, token in cases:
         result = run_cli_command(args)
         assert result.returncode != 0
-        assert token in result.stderr
+        assert token in flatten_console_text(result.stderr)
 
 
 def test_cli_rejects_float16_persistent_storage_precision() -> None:
@@ -3075,7 +3141,7 @@ def test_main_without_argv_preserves_explicit_default_valued_flags(
 
     assert result.returncode != 0
     for token in expected_tokens:
-        assert token in result.stderr
+        assert token in flatten_console_text(result.stderr)
 
 
 def test_hybrid_accepts_embedding_options(
@@ -4755,10 +4821,11 @@ def test_build_run_summary_reports_requested_outputs_once(
     )
 
     info_mock.assert_called_once_with(
-        "Build complete: nodes=%d, edges=%d; outputs: %s",
-        1,
-        0,
-        f"dashboard={output_paths['dashboard']}, json={output_paths['json']}",
+        "Build complete: %s, %s.\nSaved outputs:\n%s",
+        "1 paper",
+        "0 edges",
+        f"  dashboard  {output_paths['dashboard']}\n"
+        f"  json       {output_paths['json']}",
     )
     debug_mock.assert_called_once_with(
         "Build auxiliary artifacts: %s",
@@ -4837,11 +4904,14 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "edges": 0,
         "theme": "dark",
     }
-    assert any(
-        "Build complete: nodes=1, edges=0; "
-        f"{len(build_module.EXPORT_FORMATS)} artifacts saved" in message
-        for message in logged
-    )
+    summaries = [message for message in logged if message.startswith("Build complete:")]
+    assert len(summaries) == 1
+    assert summaries[0].startswith("Build complete: 1 paper, 0 edges.\nSaved outputs:")
+    for format_name in build_module.EXPORT_FORMATS:
+        assert any(
+            line.strip().startswith(format_name + " ")
+            for line in summaries[0].splitlines()
+        )
     assert all("outputs: bibtex=" not in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)

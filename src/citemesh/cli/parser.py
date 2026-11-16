@@ -11,7 +11,8 @@ import argparse
 import math
 import shutil
 import sys
-from collections.abc import Sequence
+import textwrap
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -46,6 +47,7 @@ from citemesh.core.validation import (
     parse_unit_interval_float,
 )
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data.user_config import known_config_keys
 from citemesh.strategies.candidates import DEFAULT_CANDIDATE_POOL_SIZE
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
@@ -86,10 +88,32 @@ class _HelpFormatter(RichHelpFormatter):
         :param str prog: Command name supplied by argparse.
         :return None: Initialize the help renderer.
         """
+        width = max(40, min(110, shutil.get_terminal_size().columns - 2))
         super().__init__(
             prog,
-            max_help_position=32,
-            width=max(40, min(110, shutil.get_terminal_size().columns - 2)),
+            max_help_position=min(32, width // 3),
+            width=width,
+        )
+
+    def _format_usage(
+        self,
+        usage: str | None,
+        actions: Iterable[argparse.Action],
+        groups: Iterable[argparse._MutuallyExclusiveGroup],
+        prefix: str | None,
+    ) -> str:
+        rendered = super()._format_usage(usage, actions, groups, prefix)
+        if not usage:
+            return rendered
+        return (
+            textwrap.fill(
+                rendered.strip(),
+                width=self._width,
+                subsequent_indent=" " * len(prefix or "usage: "),
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            + "\n\n"
         )
 
 
@@ -115,7 +139,7 @@ class _ArgumentParser(argparse.ArgumentParser):
                 ("error: ", "bold red"),
                 (message, "red"),
             ),
-            soft_wrap=True,
+            width=shutil.get_terminal_size().columns,
         )
         self.exit(2)
 
@@ -560,7 +584,7 @@ def _add_build_graph_arguments(
     export_group.add_argument(
         "--include-timestamp",
         action="store_true",
-        help="Include generation timestamp in output metadata annotations",
+        help="Include the generation time in output metadata",
     )
 
 
@@ -667,10 +691,7 @@ def _add_build_corpus_arguments(
         "--model-revision",
         type=_non_empty_str,
         default=None,
-        help=(
-            "Optional model revision token (branch/tag/commit) for hub-backed "
-            "embedding models."
-        ),
+        help=("Hub model branch, tag, or commit for embedding models."),
     )
 
     corpus_group.add_argument(
@@ -747,13 +768,13 @@ def _add_build_corpus_arguments(
         "--streaming",
         dest="streaming",
         action="store_true",
-        help="Stream HuggingFace dataset instead of loading it into memory (requires non-sliced --dataset-split)",
+        help="Stream the dataset (requires unsliced --dataset-split)",
     )
     streaming_group.add_argument(
         "--no-streaming",
         dest="streaming",
         action="store_false",
-        help="Load cached HuggingFace dataset shards instead of streaming them.",
+        help="Read downloaded dataset shards (the default).",
     )
     build_parser.set_defaults(streaming=False)
 
@@ -772,13 +793,13 @@ def _add_build_cache_arguments(
     storage_group.add_argument(
         "--force-rebuild-cache",
         action="store_true",
-        help="Forcefully clear and rebuild embedding cache for this model before running.",
+        help="Clear and rebuild this model's embedding cache.",
     )
     storage_group.add_argument(
         "--overwrite-cache",
         action="store_true",
         help=(
-            "Acknowledge destructive cache overwrite for --force-rebuild-cache and "
+            "Confirm destructive --force-rebuild-cache and "
             "skip interactive confirmation."
         ),
     )
@@ -786,10 +807,7 @@ def _add_build_cache_arguments(
         "--cache-overwrite-reason",
         type=str,
         default=None,
-        help=(
-            "Optional rationale string logged when --force-rebuild-cache clears "
-            "embedding cache state."
-        ),
+        help=("Log a reason when --force-rebuild-cache clears embedding cache state."),
     )
 
     storage_group.add_argument(
@@ -879,10 +897,7 @@ def _add_build_runtime_arguments(
         type=_positive_int,
         metavar="N",
         default=ENCODE_BATCH_SIZE,
-        help=(
-            "Batch size for embedding model encode passes during hydration/search "
-            "(default: %(default)s)"
-        ),
+        help=("Texts per embedding batch (default: %(default)s)"),
     )
 
     torch_compile_group = embedding_group.add_mutually_exclusive_group()
@@ -890,16 +905,13 @@ def _add_build_runtime_arguments(
         "--torch-compile",
         dest="torch_compile",
         action="store_true",
-        help=(
-            "Enable best-effort torch.compile for supported embedding profiles "
-            "(default: disabled)."
-        ),
+        help=("Try torch.compile for supported models (default: disabled)."),
     )
     torch_compile_group.add_argument(
         "--no-torch-compile",
         dest="torch_compile",
         action="store_false",
-        help="Disable torch.compile and keep eager runtime for embedding models.",
+        help="Use eager embedding inference.",
     )
     build_parser.set_defaults(torch_compile=False)
 
@@ -1291,7 +1303,17 @@ def _add_cache_arguments(
     )
 
     export_parser = cache_subparsers.add_parser(
-        "export", help="Export a certified corpus without loading its model"
+        "export",
+        help="Export a certified corpus without loading its model",
+        description="Export an installed corpus for transfer to another machine. No model is loaded.",
+        epilog=_rich_epilog(
+            _help_examples(
+                (
+                    "Export a namespace from cache scan",
+                    "citemesh cache export --namespace NAMESPACE --output out/corpus",
+                )
+            )
+        ),
     )
     export_parser.add_argument(
         "--namespace",
@@ -1306,7 +1328,18 @@ def _add_cache_arguments(
         help="New directory for the portable manifest and Parquet shards",
     )
     import_parser = cache_subparsers.add_parser(
-        "import", help="Install a portable corpus from local files or Hugging Face"
+        "import",
+        help="Install a portable corpus from local files or Hugging Face",
+        description="Install a corpus for local search and graph discovery. Choose a local snapshot or a Hugging Face bucket.",
+        epilog=_rich_epilog(
+            _help_examples(
+                ("Install a local export", "citemesh cache import --path out/corpus"),
+                (
+                    "Install a published corpus",
+                    "citemesh cache import --bucket OWNER/BUCKET",
+                ),
+            )
+        ),
     )
     source = import_parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--path", type=Path, help="Local portable snapshot directory")
@@ -1324,7 +1357,9 @@ def _add_cache_arguments(
         help="Published snapshot ID (default: configuration's current snapshot)",
     )
     refresh_parser = cache_subparsers.add_parser(
-        "refresh", help="Reconcile an installed corpus with a pinned source revision"
+        "refresh",
+        help="Reconcile an installed corpus with a pinned source revision",
+        description="Update an installed corpus from its source dataset. Use --adopt to certify a legacy cache using its original settings.",
     )
     refresh_parser.add_argument(
         "--namespace",
@@ -1343,26 +1378,54 @@ def _add_cache_arguments(
         action="store_true",
         help="Explicitly certify a legacy corpus after proving its model and namespace",
     )
-    adoption = refresh_parser.add_argument_group("Legacy adoption selectors (--adopt)")
-    for option in ("model", "model-revision", "dataset-source", "dataset-split"):
-        adoption.add_argument(f"--{option}", type=_non_empty_str, default=None)
+    adoption = refresh_parser.add_argument_group(
+        "Legacy adoption (--adopt)", "Match the original cache settings."
+    )
+    for option, help_text in (
+        ("model", "Original model name or local checkpoint path"),
+        ("model-revision", "Original model branch, tag, or commit"),
+        ("dataset-source", "Original corpus dataset"),
+        ("dataset-split", "Original dataset split, including any slice"),
+    ):
+        adoption.add_argument(
+            f"--{option}", type=_non_empty_str, default=None, help=help_text
+        )
     adoption.add_argument(
-        "--model-profile", choices=list(MODEL_PROFILE_CHOICES), default=None
+        "--model-profile",
+        metavar="PROFILE",
+        choices=list(MODEL_PROFILE_CHOICES),
+        default=None,
+        help="Original model profile: auto, default, embeddinggemma",
     )
     adoption.add_argument(
-        "--storage-precision", choices=list(STORAGE_PRECISION_CHOICES), default=None
+        "--storage-precision",
+        metavar="PRECISION",
+        choices=list(STORAGE_PRECISION_CHOICES),
+        default=None,
+        help="Original stored vector dtype: int8 or float32",
     )
-    for option in ("truncate-dim", "calibration-sample-size", "corpus-size"):
-        adoption.add_argument(f"--{option}", type=_positive_int, default=None)
-    adoption.add_argument("--all-corpus", action="store_true", default=None)
+    for option, help_text in (
+        ("truncate-dim", "Original embedding dimension"),
+        ("calibration-sample-size", "Original int8 calibration sample count"),
+        ("corpus-size", "Original cap on corpus papers"),
+    ):
+        adoption.add_argument(
+            f"--{option}", metavar="N", type=_positive_int, default=None, help=help_text
+        )
+    adoption.add_argument(
+        "--all-corpus",
+        action="store_true",
+        default=None,
+        help="Original corpus used the full selected split",
+    )
 
     return cache_parser, [
         (cache_parser, "COMMAND [options]"),
         (cache_clear_parser, "[options]"),
         (cache_scan_parser, "[options]"),
-        (export_parser, "[options]"),
-        (import_parser, "[options]"),
-        (refresh_parser, "[options]"),
+        (export_parser, "--namespace NAMESPACE --output PATH [options]"),
+        (import_parser, "(--path PATH | --bucket BUCKET) [options]"),
+        (refresh_parser, "--namespace NAMESPACE [options]"),
     ]
 
 
@@ -1442,6 +1505,21 @@ def _add_config_arguments(
         "path",
         help="Print the config file path",
     )
+    keys = Table(
+        box=None,
+        show_header=False,
+        padding=(0, 2),
+        title="Config keys:",
+        title_style="bold",
+        title_justify="left",
+    )
+    sections: dict[str, list[str]] = {}
+    for key in known_config_keys():
+        sections.setdefault(key.partition(".")[0], []).append(key)
+    for section, names in sections.items():
+        keys.add_row(Text(section, style="bold"), Text("\n".join(names), style="cyan"))
+    for key_parser in (config_get_parser, config_set_parser, config_unset_parser):
+        key_parser.epilog = _rich_epilog(keys)
 
     return config_parser, [
         (config_parser, "COMMAND [options]"),
@@ -1472,7 +1550,7 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
             )
         elif (
             action.option_strings
-            and action.type in (str, _non_empty_str)
+            and action.type in (str, _non_empty_str, Path)
             and action.choices is None
         ):
             action.metavar = {
@@ -1509,7 +1587,11 @@ def _finalize_command_parser(
     command_parser._optionals.title = "Options"
     _add_logging_arguments(command_parser, suppress_defaults=not is_root)
     command_parser._action_groups.sort(
-        key=lambda group: {"Options": 1, "Logging": 2}.get(group.title or "", 0)
+        key=lambda group: {
+            "Options": 1,
+            "Legacy adoption (--adopt)": 2,
+            "Logging": 3,
+        }.get(group.title or "", 0)
     )
     _normalize_action_metavars(command_parser)
 

@@ -498,14 +498,52 @@ def test_recalibrated_int8_ranges_replace_the_configuration_snapshot(hub, tmp_pa
 
 
 @pytest.fixture
-def publisher():
+def publisher(monkeypatch):
     import importlib.util
 
     path = Path(__file__).resolve().parents[1] / "scripts/publish_arxiv_index.py"
     spec = importlib.util.spec_from_file_location("citemesh_manual_publisher", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Keep pytest's log-capture handlers while exercising script behavior.
+    monkeypatch.setattr(module, "_configure_logging", lambda **_kwargs: None)
     return module
+
+
+@pytest.mark.parametrize(
+    ("flags", "level"), [([], "warning"), (["-v"], "info"), (["-vv"], "debug")]
+)
+def test_manual_publisher_uses_cli_logging(
+    publisher, monkeypatch, capsys, tmp_path, flags, level
+):
+    configured = []
+    monkeypatch.setattr(
+        publisher, "_configure_logging", lambda **options: configured.append(options)
+    )
+    monkeypatch.setattr(
+        publisher, "publish_arxiv_index", lambda *_args, **_kwargs: "snapshot-pin"
+    )
+
+    assert publisher.main(["owner/bucket", str(tmp_path / "export"), *flags]) == 0
+    assert configured == [{"log_level": level}]
+    captured = capsys.readouterr()
+    assert captured.out == "snapshot-pin\n"
+    assert captured.err == ""
+
+
+def test_manual_publisher_closed_stdout_exits_quietly(publisher, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        publisher, "publish_arxiv_index", lambda *_args, **_kwargs: "snapshot-pin"
+    )
+    discarded = []
+    monkeypatch.setattr(publisher, "_discard_stdout", lambda: discarded.append(True))
+
+    def closed_stdout(*_args, **_kwargs):
+        raise BrokenPipeError()
+
+    monkeypatch.setattr("builtins.print", closed_stdout)
+    assert publisher.main(["owner/bucket", str(tmp_path / "export")]) == 1
+    assert discarded == [True]
 
 
 @pytest.mark.parametrize("adopt", [False, True])

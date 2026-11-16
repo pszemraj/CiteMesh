@@ -275,7 +275,7 @@ def parse_config_key(dotted_key: str) -> tuple[str, str, ConfigCaster]:
     if not separator or specs is None or key not in specs:
         raise ConfigKeyError(
             f"Unknown config key '{dotted_key}'. "
-            f"Valid keys: {', '.join(known_config_keys())}"
+            "Run 'citemesh config set --help' for supported keys."
         )
     return table, key, specs[key]
 

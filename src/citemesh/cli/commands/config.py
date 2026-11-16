@@ -61,8 +61,10 @@ def _run_config_command(
         )
         if not user_config.path.is_file():
             console.output_console.print(
-                "[dim]File does not exist yet; using built-in defaults. "
-                "Create it with `citemesh config set <key> <value>`.[/dim]"
+                Text(
+                    "No config file yet. Create one with citemesh config set KEY VALUE.",
+                    style="dim",
+                )
             )
         rows: list[tuple[str, str]] = [
             (f"defaults.{key}", format_config_value(value))
@@ -70,14 +72,25 @@ def _run_config_command(
         ]
         if user_config.s2_api_key:
             rows.append(("api.s2_api_key", _masked_secret(user_config.s2_api_key)))
-        table = _output_table("CiteMesh User Config")
-        table.add_column("Key", style="cyan")
-        table.add_column("Value")
-        if rows:
+        if not rows:
+            console.output_console.print(
+                Text("No saved settings. Using built-in defaults.", style="dim")
+            )
+            return 0
+        console.output_console.print()
+        if console.output_console.width < 80:
+            console.output_console.print(Text("Saved settings", style="bold"))
             for key, display_value in rows:
-                table.add_row(Text(key), Text(display_value))
-        else:
-            table.add_row("(no values set)", "")
+                console.output_console.print(Text(key, style="cyan", overflow="fold"))
+                console.output_console.print(
+                    Text("  " + display_value, overflow="fold")
+                )
+            return 0
+        table = _output_table("Saved settings")
+        table.add_column("Key", style="cyan", no_wrap=True)
+        table.add_column("Value", overflow="fold")
+        for key, display_value in rows:
+            table.add_row(Text(key), Text(display_value, overflow="fold"))
         console.output_console.print(table)
         return 0
 
@@ -111,9 +124,8 @@ def _run_config_command(
             if str(args.key).strip() == "api.s2_api_key"
             else format_config_value(value)
         )
-        logger.info(
-            "✓ Set %s = %s in %s", args.key, updated_display_value, user_config_path()
-        )
+        logger.info("Set %s = %s", args.key, updated_display_value)
+        logger.debug("Saved config to %s", user_config_path())
         return 0
 
     if command == "unset":
@@ -125,7 +137,8 @@ def _run_config_command(
             logger.error("%s", exc)
             return 1
         if removed:
-            logger.info("✓ Unset %s in %s", args.key, user_config_path())
+            logger.info("Unset %s", args.key)
+            logger.debug("Saved config to %s", user_config_path())
         else:
             logger.info("Config key '%s' was not set.", args.key)
         return 0

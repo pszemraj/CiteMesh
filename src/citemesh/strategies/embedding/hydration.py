@@ -1810,9 +1810,6 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                         sampled_records[replace_idx] = metadata
                 progress.update(1)
 
-            if progress_total is None:
-                progress.set_postfix_str(f"processed {progress.n}")
-
         return sampled_records
 
     def _ensure_int8_calibration_ranges(
@@ -1974,9 +1971,6 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 if pending_write is not None:
                     hydrated_records += pending_write.result()
                     progress.update(pending_batch_size)
-
-            if progress_total is None:
-                progress.set_postfix_str(f"processed {progress.n}")
 
         return hydrated_records
 

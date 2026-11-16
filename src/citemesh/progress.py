@@ -71,24 +71,26 @@ def _resolve_console() -> Console:
     return Console(stderr=True)
 
 
-def _columns() -> Sequence[ProgressColumn]:
-    """Build the shared column layout for a progress display.
-
-    ``unit`` is passed as a task field rather than interpolated into a column
-    template so a caller-supplied label can never be parsed as console markup.
-
-    :return Sequence[ProgressColumn]: Ordered progress columns.
-    """
-    return (
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=None, table_column=Column(ratio=1)),
-        MofNCompleteColumn(table_column=Column(no_wrap=True)),
-        TextColumn("{task.fields[unit]}", style="dim"),
-        TimeElapsedColumn(),
-        TextColumn("ETA", style="dim"),
-        TimeRemainingColumn(),
-        TextColumn("{task.fields[postfix]}", style="dim"),
-    )
+def _columns(width: int) -> Sequence[ProgressColumn]:
+    """Keep counts and ETA visible before adding optional wide-terminal detail."""
+    compact = width < 80
+    columns: list[ProgressColumn] = [
+        TextColumn(
+            "{task.description}",
+            style="progress.description",
+            markup=False,
+            table_column=Column(ratio=1 if compact else None, no_wrap=True),
+        ),
+    ]
+    if not compact:
+        columns.append(BarColumn(bar_width=None, table_column=Column(ratio=1)))
+    columns.append(MofNCompleteColumn(table_column=Column(no_wrap=True)))
+    if width >= 60:
+        columns.append(TextColumn("{task.fields[unit]}", style="dim", markup=False))
+    if not compact:
+        columns.append(TimeElapsedColumn())
+    columns.extend([TextColumn("ETA", style="dim"), TimeRemainingColumn()])
+    return columns
 
 
 class ProgressTask:
@@ -139,14 +141,6 @@ class ProgressTask:
             self._pending_advance = 0
             self._last_update = self._progress.get_time()
 
-    def set_postfix_str(self, text: str) -> None:
-        """Set the trailing status text shown after the timer.
-
-        :param str text: Status text to display.
-        :return None: Updates the live display.
-        """
-        self._progress.update(self._task_id, postfix=str(text))
-
 
 @contextmanager
 def progress_task(
@@ -166,9 +160,10 @@ def progress_task(
     :return Iterator[ProgressTask]: Handle used to advance the task.
     """
     show = _progress_enabled and (stderr_isatty() if enabled is None else bool(enabled))
+    console = _resolve_console()
     progress = Progress(
-        *_columns(),
-        console=_resolve_console(),
+        *_columns(console.width),
+        console=console,
         disable=not show,
         expand=True,
     )
@@ -177,7 +172,6 @@ def progress_task(
             description,
             total=total,
             unit=unit,
-            postfix="",
         )
         task = ProgressTask(progress, task_id)
         try:

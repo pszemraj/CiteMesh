@@ -91,12 +91,16 @@ def _print_installed_namespace(namespace: str) -> None:
             namespace,
         ]
     )
-    console.output_console.print(Text(f"Installed corpus namespace: {namespace}"))
-    console.output_console.print(Text(f"Search it with: {command}"))
+    console.output_console.print(
+        Text.assemble(("Installed corpus namespace: ", "bold"), (namespace, "cyan"))
+    )
+    console.output_console.print("Search it with:", style="bold")
+    console.output_console.print(Text(command), soft_wrap=True)
     console.output_console.print(
         Text(
             "Corpus embeddings are installed; query and graph encoding still use "
-            "the selected model."
+            "the selected model.",
+            style="dim",
         )
     )
 

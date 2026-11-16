@@ -21,6 +21,7 @@ def progress_console(monkeypatch: pytest.MonkeyPatch) -> Console:
     :param pytest.MonkeyPatch monkeypatch: Fixture used to restore the global.
     :return Console: Console recording rendered output, including live redraws.
     """
+    monkeypatch.setenv("TERM", "xterm-256color")
     console = Console(
         file=io.StringIO(),
         force_terminal=True,
@@ -92,18 +93,15 @@ def test_progress_iterator_with_zero_total_renders_a_bounded_bar(
     assert "0/0" in progress_console.export_text()
 
 
-def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_dataset_progress_keeps_total_and_eta_visible(
     monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
     recorded_displays: list[Progress],
+    width: int,
 ) -> None:
-    """Dataset counts and a measured ETA should fit a standard terminal width.
-
-    :param pytest.MonkeyPatch monkeypatch: Supplies a deterministic progress clock.
-    :param Console progress_console: Recording console with an 80-column width.
-    :param list[Progress] recorded_displays: Captures the final progress display.
-    :return None: Checks the rendered count and ETA share an untruncated line.
-    """
+    """Full dataset counts and ETA survive narrow terminals."""
+    progress_console.width = width
     clock = [0.0]
     monkeypatch.setattr(
         progress_module,
@@ -127,13 +125,32 @@ def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
     progress_console.export_text(clear=True)
     progress_console.print(recorded_displays[0].get_renderable())
     lines = progress_console.export_text().splitlines()
-    assert any(
-        "Calibrating dataset" in line
-        and "2000/3156800 papers" in line
-        and "ETA 0:52:35" in line
-        and len(line) <= 80
-        for line in lines
-    )
+    line = next(line for line in lines if "2000/3156800" in line)
+    assert "ETA 0:52:35" in line
+    assert len(line) <= width
+    if width >= 60:
+        assert "Calibrating dataset" in line
+        assert "2000/3156800 papers" in line
+
+
+def test_progress_labels_preserve_brackets_as_literal_text(
+    progress_console: Console,
+    recorded_displays: list[Progress],
+) -> None:
+    """Labels containing Rich-style tags must not silently lose their brackets."""
+    with progress_module.progress_task(
+        total=2,
+        description="Encoding [bold]data[/bold]",
+        unit="[red]rows[/red]",
+        enabled=True,
+    ) as task:
+        task.update(1)
+
+    progress_console.export_text(clear=True)
+    progress_console.print(recorded_displays[0].get_renderable())
+    output = progress_console.export_text()
+    assert "Encoding [bold]data[/bold]" in output
+    assert "[red]rows[/red]" in output
 
 
 def test_progress_iterator_without_a_total_renders_indeterminate_counts(

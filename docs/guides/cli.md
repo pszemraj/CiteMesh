@@ -112,6 +112,7 @@ What recovery does not do:
 ### Help and console output
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
+Redirected logs use plain text without terminal padding or forced line breaks, unless you set `--log-width` or force color.
 
 `-v`/`--verbose` is shorthand for `--log-level debug`; it works before or after a subcommand. When several verbosity options are present, the last one wins. `--log-level debug --log-file out/run.log` adds option routing, cache and provider details, runtime configuration, retry attempts, and namespace decisions.
 
@@ -122,7 +123,7 @@ Every command takes `-h`/`--help`, listing built-in defaults; [user configuratio
 | `info` | Brief build phases, useful outcomes, and saved output locations. |
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
-Progress bars appear only on an interactive terminal at `info` or `debug`.
+Progress bars appear only on an interactive terminal at `info` or `debug`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
 Routine HTTP request logs stay hidden; long Semantic Scholar retry waits show a brief status at `info`, with request details at `debug`.
 
 ## Option reference

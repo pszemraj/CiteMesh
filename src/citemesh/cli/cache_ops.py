@@ -489,9 +489,9 @@ def _scan_cache_directory() -> int:
         Text.assemble(("Cache root: ", "bold"), str(cache_root))
     )
     table = _output_table("CiteMesh Cache Scan")
-    table.add_column("Section", style="cyan")
-    table.add_column("Files", justify="right")
-    table.add_column("Size", justify="right")
+    table.add_column("Section", style="cyan", ratio=1, overflow="fold")
+    table.add_column("Files", justify="right", no_wrap=True)
+    table.add_column("Size", justify="right", no_wrap=True)
 
     if section_rows:
         for name, files, size_bytes in section_rows:
@@ -506,16 +506,16 @@ def _scan_cache_directory() -> int:
     embedding_namespace_rows = _scan_embedding_namespaces(cache_root / "embeddings")
     if embedding_namespace_rows:
         namespace_table = _output_table("Embedding Namespace Details")
-        namespace_table.add_column("Namespace", style="cyan")
-        namespace_table.add_column("Files", justify="right")
-        namespace_table.add_column("Size", justify="right")
-        namespace_table.add_column("Status")
+        namespace_table.show_header = False
+        namespace_table.leading = 1
+        namespace_table.add_column(overflow="fold")
         for row in embedding_namespace_rows:
             namespace_table.add_row(
-                row.namespace_id,
-                f"{row.file_count:,}",
-                format_bytes(row.size_bytes),
-                row.status,
+                Text.assemble(
+                    (row.namespace_id, "bold cyan"),
+                    f"  {row.file_count:,} files  {format_bytes(row.size_bytes)}",
+                    (f"\n{row.status}", "dim"),
+                )
             )
         console.output_console.print(namespace_table)
         if any(

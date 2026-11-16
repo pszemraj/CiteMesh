@@ -69,6 +69,15 @@ _LOGGING_CONFIGURED = False
 logger = logging.getLogger("citemesh.cli")
 
 
+class _PlainLogHandler(logging.Handler):
+    """Write unwrapped, literal log lines through the shared stderr console."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        log_console.print(
+            self.format(record), markup=False, highlight=False, soft_wrap=True
+        )
+
+
 def _configure_logging(
     *,
     log_level: str = "info",
@@ -90,18 +99,24 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
-    _size_console(log_console, log_width, interactive=stderr_isatty())
+    interactive = stderr_isatty()
+    _size_console(log_console, log_width, interactive=interactive)
     _size_console(output_console, log_width, interactive=stdout_isatty())
     # Progress bars share the logging console so records render above a live bar.
     set_progress_console(log_console)
     set_progress_enabled(resolved_level <= logging.INFO)
-    console_handler = RichHandler(
-        console=log_console,
-        show_time=False,
-        show_path=False,
-        rich_tracebacks=False,
-        markup=False,
-    )
+    console_handler: logging.Handler
+    if interactive or log_console.is_terminal or log_width > 0:
+        console_handler = RichHandler(
+            console=log_console,
+            show_time=False,
+            show_path=False,
+            rich_tracebacks=False,
+            markup=False,
+        )
+    else:
+        console_handler = _PlainLogHandler()
+        console_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     console_handler.setLevel(resolved_level)
     handlers: list[logging.Handler] = [console_handler]
     if log_file is not None:
