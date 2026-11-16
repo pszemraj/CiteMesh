@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
 from citemesh.data.cache import atomic_write_json, path_exists
@@ -483,19 +484,32 @@ def _render_dashboard_viewer(
     return True
 
 
+def _format_runtime(seconds: float) -> str:
+    seconds = round(seconds, 1)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remainder = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{remainder:02d}s"
+    return f"{minutes}m{remainder:02d}s"
+
+
 def _log_run_summary(
     graph: PaperGraph,
     *,
     output_paths: dict[str, Path],
     graph_config_path: Path | None,
     dashboard_package_path: Path | None,
+    elapsed_seconds: float,
 ) -> None:
-    """Log graph counts followed by one labeled path per requested output.
+    """Log graph counts, elapsed runtime, and one path per requested output.
 
     :param PaperGraph graph: Constructed graph being summarized.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
     :param Path | None graph_config_path: Sidecar path, if one was written.
     :param Path | None dashboard_package_path: Collection package path, if any.
+    :param float elapsed_seconds: Total build-command time, including exports.
     :return None: Emits the closing informational and debug log lines.
     """
     nodes, edges = graph.number_of_nodes(), graph.number_of_edges()
@@ -505,9 +519,10 @@ def _log_run_summary(
         for format_name, path in sorted(output_paths.items())
     )
     logger.info(
-        "Build complete: %s, %s.\nSaved outputs:\n%s",
+        "Build complete: %s, %s in %s.\nSaved outputs:\n%s",
         f"{nodes:,} paper{'s' if nodes != 1 else ''}",
         f"{edges:,} edge{'s' if edges != 1 else ''}",
+        _format_runtime(elapsed_seconds),
         primary_outputs,
     )
 
@@ -541,6 +556,7 @@ def run_build_command(
     :param UserConfig user_config: Loaded user configuration supplying defaults.
     :return int: Process-style exit code.
     """
+    started_at = perf_counter()
     config_default_dests = _apply_user_config_defaults(
         args, provided_build_options, user_config
     )
@@ -649,6 +665,7 @@ def run_build_command(
             output_paths=output_paths,
             graph_config_path=graph_config_path,
             dashboard_package_path=dashboard_package_path,
+            elapsed_seconds=perf_counter() - started_at,
         )
 
     except DashboardPackageError as e:

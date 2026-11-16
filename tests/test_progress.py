@@ -130,7 +130,46 @@ def test_dataset_progress_keeps_total_and_eta_visible(
     assert len(line) <= width
     if width >= 60:
         assert "Calibrating dataset" in line
+    if width >= 80:
         assert "2000/3156800 papers" in line
+
+
+def test_progress_timestamp_changes_only_when_work_advances(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+    recorded_displays: list[Progress],
+) -> None:
+    """Redraws and zero-count updates must not look like productive work."""
+    clock = [0.0]
+    wall_clock = ["12:00:00"]
+    monkeypatch.setattr(progress_module, "strftime", lambda _format: wall_clock[0])
+    monkeypatch.setattr(
+        progress_module,
+        "Progress",
+        partial(
+            progress_module.Progress, get_time=lambda: clock[0], auto_refresh=False
+        ),
+    )
+    with progress_module.progress_task(
+        total=2, description="Encoding papers", unit="papers", enabled=True
+    ) as task:
+        display = recorded_displays[0]
+        assert display.tasks[0].fields["updated"] == "12:00:00"
+        clock[0], wall_clock[0] = 10.0, "12:00:10"
+        task.update(1)
+        assert display.tasks[0].fields["updated"] == "12:00:10"
+        clock[0], wall_clock[0] = 20.0, "12:00:20"
+        task.update(0)
+        display.refresh()
+        assert display.tasks[0].fields["updated"] == "12:00:10"
+        task.update(-1)
+        assert display.tasks[0].fields["updated"] == "12:00:10"
+        clock[0], wall_clock[0] = 30.0, "12:00:30"
+        task.update(2)
+
+    progress_console.export_text(clear=True)
+    progress_console.print(display.get_renderable())
+    assert "12:00:30" in progress_console.export_text()
 
 
 def test_progress_labels_preserve_brackets_as_literal_text(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from time import strftime
 from typing import TypeVar
 
 from rich.console import Console
@@ -28,6 +29,8 @@ from rich.table import Column
 from ._runtime import stderr_isatty
 
 T = TypeVar("T")
+
+CONSOLE_TIME_FORMAT = "%H:%M:%S"
 
 _progress_console: Console | None = None
 _progress_enabled = True
@@ -74,18 +77,23 @@ def _resolve_console() -> Console:
 def _columns(width: int, total: int | None) -> Sequence[ProgressColumn]:
     """Keep counts visible and show an ETA only when the total is known."""
     compact = width < 80
-    columns: list[ProgressColumn] = [
+    columns: list[ProgressColumn] = []
+    if width >= 60:
+        columns.append(
+            TextColumn("{task.fields[updated]}", style="log.time", markup=False)
+        )
+    columns.append(
         TextColumn(
             "{task.description}",
             style="progress.description",
             markup=False,
             table_column=Column(ratio=1 if compact else None, no_wrap=True),
-        ),
-    ]
+        )
+    )
     if not compact:
         columns.append(BarColumn(bar_width=None, table_column=Column(ratio=1)))
     columns.append(MofNCompleteColumn(table_column=Column(no_wrap=True)))
-    if width >= 60:
+    if not compact:
         columns.append(TextColumn("{task.fields[unit]}", style="dim", markup=False))
     if not compact or total is None:
         columns.append(TimeElapsedColumn())
@@ -139,6 +147,10 @@ class ProgressTask:
         """
         if self._pending_advance:
             self._progress.advance(self._task_id, self._pending_advance)
+            if self._pending_advance > 0:
+                self._progress.update(
+                    self._task_id, updated=strftime(CONSOLE_TIME_FORMAT)
+                )
             self._pending_advance = 0
             self._last_update = self._progress.get_time()
 
@@ -173,6 +185,7 @@ def progress_task(
             description,
             total=total,
             unit=unit,
+            updated=strftime(CONSOLE_TIME_FORMAT),
         )
         task = ProgressTask(progress, task_id)
         try:

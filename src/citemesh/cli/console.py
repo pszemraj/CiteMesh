@@ -14,7 +14,11 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from citemesh._runtime import stderr_isatty, stdout_isatty
-from citemesh.progress import set_progress_console, set_progress_enabled
+from citemesh.progress import (
+    CONSOLE_TIME_FORMAT,
+    set_progress_console,
+    set_progress_enabled,
+)
 
 DEFAULT_LOG_WIDTH = 0
 
@@ -109,14 +113,19 @@ def _configure_logging(
     if interactive or log_console.is_terminal or log_width > 0:
         console_handler = RichHandler(
             console=log_console,
-            show_time=False,
+            show_time=True,
+            omit_repeated_times=False,
             show_path=False,
             rich_tracebacks=False,
             markup=False,
         )
     else:
         console_handler = _PlainLogHandler()
-        console_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        console_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s: %(message)s", datefmt=CONSOLE_TIME_FORMAT
+            )
+        )
     console_handler.setLevel(resolved_level)
     handlers: list[logging.Handler] = [console_handler]
     if log_file is not None:
@@ -139,7 +148,7 @@ def _configure_logging(
     logging.basicConfig(
         level=resolved_level,
         format="%(message)s",
-        datefmt="[%X]",
+        datefmt=CONSOLE_TIME_FORMAT,
         handlers=handlers,
         force=True,
     )

@@ -1065,8 +1065,46 @@ def test_redirected_logs_preserve_long_lines_without_terminal_padding(
     finally:
         _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
-    assert stderr.getvalue() == f"INFO: {message}\nWARNING: Results are incomplete.\n"
-    assert later_stderr.getvalue() == "INFO: A later invocation.\n"
+    timestamp = r"\d{2}:\d{2}:\d{2}"
+    assert re.fullmatch(
+        rf"{timestamp} INFO: {re.escape(message)}\n"
+        rf"{timestamp} WARNING: Results are incomplete\.\n",
+        stderr.getvalue(),
+    )
+    assert re.fullmatch(
+        rf"{timestamp} INFO: A later invocation\.\n", later_stderr.getvalue()
+    )
+
+
+def test_console_logs_repeat_compact_timestamps_for_each_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two phases in the same second both retain their clock timestamp."""
+    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
+    stderr = io.StringIO()
+    monkeypatch.setattr(
+        console_module,
+        "log_console",
+        cli_module.Console(file=stderr, color_system=None),
+    )
+    monkeypatch.setattr(console_module, "set_progress_console", lambda _console: None)
+    try:
+        console_module._configure_logging(log_width=80)
+        for message in ("First phase", "Second phase"):
+            record = logging.LogRecord(
+                "citemesh.cli", logging.INFO, __file__, 1, message, (), None
+            )
+            record.created = 0.0
+            cli_module.logger.handle(record)
+    finally:
+        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+
+    output = stderr.getvalue()
+    timestamps = re.findall(r"^(\d{2}:\d{2}:\d{2})", output, re.MULTILINE)
+    assert len(timestamps) == 2
+    assert timestamps[0] == timestamps[1]
+    assert "First phase" in output
+    assert "Second phase" in output
 
 
 @pytest.mark.parametrize("preconfigured", [False, True])
@@ -4798,9 +4836,15 @@ def test_dashboard_collection_mode_logs_side_effects(
     assert any("Dashboard collection mode:" in msg for msg in debug_messages)
 
 
+@pytest.mark.parametrize(
+    ("elapsed_seconds", "runtime"),
+    [(0.42, "0.4s"), (59.96, "1m00s"), (527.6, "8m48s"), (3661.2, "1h01m01s")],
+)
 def test_build_run_summary_reports_requested_outputs_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    elapsed_seconds: float,
+    runtime: str,
 ) -> None:
     """The closing INFO record should contain graph counts and requested paths."""
     info_mock = MagicMock()
@@ -4818,12 +4862,14 @@ def test_build_run_summary_reports_requested_outputs_once(
         output_paths=output_paths,
         graph_config_path=tmp_path / "graph.config.json",
         dashboard_package_path=tmp_path / "dashboard.citemesh.json",
+        elapsed_seconds=elapsed_seconds,
     )
 
     info_mock.assert_called_once_with(
-        "Build complete: %s, %s.\nSaved outputs:\n%s",
+        "Build complete: %s, %s in %s.\nSaved outputs:\n%s",
         "1 paper",
         "0 edges",
+        runtime,
         f"  dashboard  {output_paths['dashboard']}\n"
         f"  json       {output_paths['json']}",
     )
@@ -4843,10 +4889,17 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
 
     captured: dict[str, object] = {}
     logged: list[str] = []
+    clock = [0.0]
+
+    def _fake_build(*_args: object, **_kwargs: object) -> tuple[nx.Graph, str]:
+        clock[0] += 100.0
+        return graph, "seed"
+
+    monkeypatch.setattr(build_module, "perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        _fake_build,
     )
     monkeypatch.setattr(
         build_module,
@@ -4866,6 +4919,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     )
 
     def _fake_visualize(*args: Any, **kwargs: Any) -> None:
+        clock[0] += 35.4
         captured["plot_metadata"] = kwargs.get("metadata")
         Path(args[2]).write_bytes(b"png")
 
@@ -4906,7 +4960,9 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     }
     summaries = [message for message in logged if message.startswith("Build complete:")]
     assert len(summaries) == 1
-    assert summaries[0].startswith("Build complete: 1 paper, 0 edges.\nSaved outputs:")
+    assert summaries[0].startswith(
+        "Build complete: 1 paper, 0 edges in 2m15s.\nSaved outputs:"
+    )
     for format_name in build_module.EXPORT_FORMATS:
         assert any(
             line.strip().startswith(format_name + " ")
