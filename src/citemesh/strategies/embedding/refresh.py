@@ -9,7 +9,6 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from functools import partial
-from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, TypedDict
@@ -29,6 +28,7 @@ from citemesh.data.embedding_contract import (
     CorpusSourceData,
     EmbeddingContract,
     ExistingCacheSelection,
+    embedding_namespace_id,
 )
 from citemesh.data.model_profiles import embedding_model_profile_key
 
@@ -306,7 +306,7 @@ def refresh_builder_corpus(
         namespace = builder._embedding_cache_namespace(
             artifact_identity=contract.model_artifact_identity
         )
-        namespace_id = sha256(namespace.encode()).hexdigest()[:12]
+        namespace_id = embedding_namespace_id(namespace)
         directory = get_cache_dir(create=False) / "embeddings"
         occupied = any(
             (directory / name).exists()

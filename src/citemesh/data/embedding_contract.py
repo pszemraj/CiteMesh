@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal, TypedDict
 
 INT8_QUANTIZATION = "affine-int8-v1"
@@ -124,6 +125,11 @@ class ExistingCacheSelection:
     source_repo_id: str
     source_config_name: str | None
     source_split: str
+
+
+def embedding_namespace_id(namespace_serialization: str) -> str:
+    """Return the native file identifier for a serialized namespace address."""
+    return sha256(namespace_serialization.encode("utf-8")).hexdigest()[:12]
 
 
 def serialize_embedding_namespace(

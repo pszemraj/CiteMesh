@@ -51,7 +51,7 @@ Searching an installed portable index:
 - `--cache-namespace NAMESPACE` selects the index directly. Its fixed model and source settings override unrelated saved defaults, and explicit conflicts are usage errors (exit 2).
 - This selection never falls back to S2, including under `--mode auto`.
 - Without it, search reads the namespace derived from the current model settings. That reaches an installed index only when those settings match its fixed ones; the default `candidates` source never does.
-- When that namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command.
+- Search skips model loading and cache creation when stored metadata rules out every namespace. When the selected namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command.
 - For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.

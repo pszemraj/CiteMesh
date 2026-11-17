@@ -103,18 +103,18 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
         :return str: Model fingerprint token.
         :raises RuntimeError: If no strong/weak local fingerprint can be resolved.
         """
-        if self._resolved_model_fingerprint is not None:
-            return self._resolved_model_fingerprint
+        if self._resolved_model_fingerprint is None:
+            self._resolved_model_fingerprint = self._fingerprint_for_model(
+                self._cache_model_identity()
+            )
+        return self._resolved_model_fingerprint
 
-        model_identity = self._cache_model_identity()
+    def _fingerprint_for_model(self, model_identity: str) -> str:
+        """Resolve a checkpoint fingerprint without binding it to the runtime."""
         resolved_path = Path(model_identity).expanduser()
         if resolved_path.exists():
             artifact_digest = self._resolve_inference_artifact_digest(resolved_path)
-            fingerprint = (
-                f"local::{resolved_path.resolve()}::artifact={artifact_digest}"
-            )
-            self._resolved_model_fingerprint = fingerprint
-            return fingerprint
+            return f"local::{resolved_path.resolve()}::artifact={artifact_digest}"
 
         model_id = model_identity
         if "/" not in model_id:
@@ -126,9 +126,7 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
 
         requested_revision = self._requested_hf_revision_token()
         if re.fullmatch(r"[0-9a-f]{40}", requested_revision, flags=re.IGNORECASE):
-            fingerprint = f"hf::{model_id}::{requested_revision.lower()}"
-            self._resolved_model_fingerprint = fingerprint
-            return fingerprint
+            return f"hf::{model_id}::{requested_revision.lower()}"
         resolved_sha = ""
         resolution_error: Exception | None = None
 
@@ -163,7 +161,6 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
                     model_id,
                     requested_revision,
                 )
-                self._resolved_model_fingerprint = local_artifact_fingerprint
                 return local_artifact_fingerprint
 
         if not resolved_sha:
@@ -173,9 +170,7 @@ class _FingerprintMixin(_EmbeddingBuilderHostBase):
                 "refusing to use embedding cache without model fingerprint."
             ) from resolution_error
 
-        fingerprint = f"hf::{model_id}::{resolved_sha}"
-        self._resolved_model_fingerprint = fingerprint
-        return fingerprint
+        return f"hf::{model_id}::{resolved_sha}"
 
     def _requested_hf_revision_token(self) -> str:
         """Return normalized Hugging Face revision token for current builder config.

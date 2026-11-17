@@ -58,10 +58,10 @@ from citemesh.cli.commands import config as config_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
 from citemesh.core import API_CONFIG, Author, Paper
-from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, get_cache_dir
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
-from citemesh.data.user_config import UserConfig
+from citemesh.data.user_config import ConfigValue, UserConfig
 from citemesh.services import SemanticScholarClient
 from citemesh.services import semantic_scholar as s2
 from citemesh.strategies.candidates import CandidateAcquisitionError
@@ -71,6 +71,7 @@ from citemesh.strategies.embedding import (
     EmbeddingCacheFingerprintMismatchError,
     EmbeddingGraphBuilder,
 )
+from citemesh.strategies.embedding import builder as builder_module
 from citemesh.strategies.hybrid import (
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
@@ -81,8 +82,10 @@ from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
     BlockingEncodeModel,
+    ConstantEncodeModel,
     PausedFirstWrite,
     build_seed_graph,
+    disable_embedding_dep_checks,
     fail_stat_for,
     get_paper_id_normalization_cases,
     run_captured_cli,
@@ -2387,6 +2390,128 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
         for record in caplog.records
     )
     s2_search.assert_called_once_with(args)
+
+
+@pytest.mark.parametrize("mode", ["auto", "local"])
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        {"truncate_dim": 4},
+        {"model": "org/different-model"},
+        {"model_revision": "another-revision"},
+    ],
+)
+def test_search_skips_unselected_ordinary_namespace(
+    monkeypatch: pytest.MonkeyPatch, mode: str, defaults: dict[str, ConfigValue]
+) -> None:
+    """A populated candidate cache for other selectors cannot trigger model load."""
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setattr(builder_module, "resolve_embedding_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
+    )
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", lambda _: None)
+    revision = "a" * 40
+    producer = EmbeddingGraphBuilder(
+        model_name="org/example", model_revision=revision, truncate_dim=2
+    )
+    cache = producer.prepare_embedding_cache()
+    cache.upsert_embeddings({"paper": {"title": "Paper"}}, ConstantEncodeModel())
+    destination = get_cache_dir("embeddings")
+    before = sorted(path.name for path in destination.iterdir())
+
+    def unexpected_model_load(_: EmbeddingGraphBuilder) -> None:
+        pytest.fail("an unselected namespace loaded an embedding model")
+
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", unexpected_model_load)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    config = UserConfig(
+        path=Path("config.toml"),
+        defaults={
+            "model": "org/example",
+            "model_revision": revision,
+            "truncate_dim": 2,
+            **defaults,
+        },
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    command = ["search", "attention"]
+    if mode == "local":
+        command.extend(["--mode", mode])
+    exit_code = cli_module.main(command)
+
+    assert sorted(path.name for path in destination.iterdir()) == before
+    if mode == "auto":
+        assert exit_code == 0
+        s2_search.assert_called_once()
+    else:
+        assert exit_code == 1
+        s2_search.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changed_selectors",
+    [{}, {"truncate_dim": 4}, {"storage_precision": "int8"}],
+    ids=["fingerprint-mismatch", "different-dimension", "different-storage"],
+)
+def test_search_preflights_legacy_corpus_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_selectors: dict[str, ConfigValue],
+) -> None:
+    """Skip known different layouts and keep matching-corpus fingerprint refusals."""
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setattr(builder_module, "resolve_embedding_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
+    )
+    load_model = MagicMock()
+    resolve_fingerprint = MagicMock(return_value=f"hf::org/example::{'a' * 40}")
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", load_model)
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_fingerprint_for_model", resolve_fingerprint
+    )
+    producer = EmbeddingGraphBuilder(
+        model_name="org/example",
+        truncate_dim=2,
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+    )
+    cache = producer.prepare_embedding_cache()
+    cache.upsert_embeddings({"paper": {"title": "Paper"}}, ConstantEncodeModel())
+    cache.mark_hydrated(DEFAULT_DATASET_SOURCE, "train", None, complete=True)
+    if not changed_selectors:
+        cache.set_model_fingerprint(f"hf::org/example::{'b' * 40}")
+    load_model.reset_mock()
+    resolve_fingerprint.reset_mock()
+    before = sorted(path.name for path in cache.db_path.parent.iterdir())
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+
+    config = UserConfig(
+        path=Path("config.toml"),
+        defaults={
+            "model": "org/example",
+            "truncate_dim": 2,
+            "semantic_source": "arxiv-corpus",
+            "storage_precision": "float32",
+            **changed_selectors,
+        },
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    result = run_cli_command(["search", "attention"])
+
+    if changed_selectors:
+        assert result.returncode == 0
+        load_model.assert_not_called()
+        resolve_fingerprint.assert_not_called()
+        s2_search.assert_called_once()
+    else:
+        assert result.returncode == 1
+        assert "CiteMesh refused to delete it" in " ".join(result.stderr.split())
+        s2_search.assert_not_called()
+    assert sorted(path.name for path in cache.db_path.parent.iterdir()) == before
+    assert cache.embedding_count() == 1
 
 
 def test_search_auto_treats_missing_embedding_dependencies_as_expected(

@@ -48,16 +48,21 @@ from citemesh.data import (
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
-from citemesh.data.cache import (
-    embedding_namespace_has_papers,
-    path_exists,
-    read_embedding_namespace_schema,
-)
-from citemesh.data.embedding_cache import (
+from citemesh.data.cache import path_exists
+from citemesh.data.embedding_cache import CacheSearchResult
+from citemesh.data.embedding_cache.constants import (
+    CALIBRATION_SAMPLE_SIZE_KEY,
     EMBEDDING_CACHE_SCHEMA_VERSION,
-    CacheSearchResult,
+    HYDRATION_DATASET_SOURCE_KEY,
+    MODEL_FINGERPRINT_KEY,
+    SCHEMA_VERSION_KEY,
+    STORAGE_PRECISION_KEY,
+    TEXT_FORMATTER_FINGERPRINT_KEY,
 )
-from citemesh.data.embedding_cache.lifecycle import embedding_namespace_has_corpus_state
+from citemesh.data.embedding_cache.lifecycle import (
+    probe_embedding_dimension,
+    probe_embedding_namespace,
+)
 from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
@@ -69,6 +74,8 @@ from citemesh.data.embedding_contract import (
     ExistingCacheSelection,
     InstalledCorpusError,
     NamespaceSelectors,
+    embedding_namespace_id,
+    serialize_embedding_namespace,
 )
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
@@ -995,8 +1002,6 @@ class EmbeddingGraphBuilder(
         :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return str: Namespace key used for embedding cache partitioning.
         """
-        from citemesh.data.embedding_contract import serialize_embedding_namespace
-
         return serialize_embedding_namespace(
             **self._namespace_selectors(
                 representation=representation,
@@ -1835,43 +1840,122 @@ class EmbeddingGraphBuilder(
         return get_cache_dir("embeddings", create=False)
 
     def has_persistent_embedding_artifacts(self) -> bool:
-        """Return whether a potentially searchable vector cache exists.
-
-        This cheap probe lets auto local-search avoid loading a model when the
-        user has never built an embedding cache. Exact namespace selection still
-        occurs before any vector is searched.
-
-        Managed corpora are always ``arxiv-corpus`` namespaces, so outside that
-        source they are never searchable here and are skipped.
-
-        :return bool: Whether at least one namespace carries managed corpus state
-            (``arxiv-corpus`` only) or a non-empty HDF5/metadata pair that may
-            contain searchable papers.
-        """
+        """Check whether the requested settings could select a searchable cache."""
+        if self._cache_selection is not None:
+            return True
         cache_directory = self.embedding_cache_directory()
+        model_candidates = self._model_load_candidates()
+        legacy_corpus_namespaces = set()
         for db_path in cache_directory.glob("metadata_*.db"):
-            if embedding_namespace_has_corpus_state(db_path):
-                # The namespace contract rejects non-corpus sources for managed
-                # state, so a candidates builder can never address this namespace.
+            namespace_id = db_path.stem.removeprefix("metadata_")
+            probe = probe_embedding_namespace(db_path)
+            if probe is not None and probe.corpus_state:
                 if self.semantic_source != "arxiv-corpus":
                     continue
-                # An import interrupted before its first batch commits holds corpus
-                # state but no papers, and its HDF5 file may be absent or empty. It
-                # is an installed corpus awaiting resume, not an empty cache.
-                return True
-            namespace_id = db_path.name.removeprefix("metadata_").removesuffix(".db")
+                # Pending imports may have no fingerprint, rows or HDF5 file yet.
+                selectors = probe.corpus_state.get("namespace_selectors")
+                artifact = (
+                    selectors.get("artifact_identity")
+                    if isinstance(selectors, dict)
+                    else None
+                )
+                if not isinstance(artifact, str) or not artifact:
+                    return True
+                if self._may_select_namespace(namespace_id, artifact, model_candidates):
+                    return True
+                continue
             h5_path = cache_directory / f"embeddings_{namespace_id}.h5"
             if not path_exists(h5_path) or h5_path.stat().st_size == 0:
                 continue
-            has_papers = embedding_namespace_has_papers(db_path)
-            if has_papers is False:
+            if probe is None:
+                return True
+            if probe.has_papers is False:
                 continue
-            schema_version = read_embedding_namespace_schema(db_path)
+            metadata = probe.metadata
+            schema_version = metadata.get(SCHEMA_VERSION_KEY, "").strip()
             if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
                 continue
-            # Unreadable metadata or a non-empty malformed HDF5 file is not an
-            # empty-cache signal. Let full cache preparation surface that error.
-            return True
+            fingerprint = metadata.get(MODEL_FINGERPRINT_KEY)
+            if not fingerprint or self._may_select_namespace(
+                namespace_id, fingerprint, model_candidates
+            ):
+                return True
+            if (
+                metadata.get(HYDRATION_DATASET_SOURCE_KEY)
+                and self.semantic_source == "arxiv-corpus"
+                and not self._matches_recorded_legacy_address(
+                    namespace_id, h5_path, fingerprint, metadata, model_candidates
+                )
+            ):
+                legacy_corpus_namespaces.add(namespace_id)
+        if legacy_corpus_namespaces:
+            # A legacy corpus may have a fingerprint mismatch. Independently
+            # check the active artifact address so the existing refusal can run.
+            for model in model_candidates:
+                try:
+                    artifact = self._fingerprint_for_model(model)
+                except (OSError, RuntimeError):
+                    return True
+                if any(
+                    self._may_select_namespace(namespace_id, artifact, (model,))
+                    for namespace_id in legacy_corpus_namespaces
+                ):
+                    return True
+        return False
+
+    def _matches_recorded_legacy_address(
+        self,
+        namespace_id: str,
+        h5_path: Path,
+        artifact: str,
+        metadata: dict[str, str],
+        model_candidates: Sequence[str],
+    ) -> bool:
+        """Confirm a different address from the stored legacy layout selectors."""
+        storage = metadata.get(STORAGE_PRECISION_KEY)
+        formatter = metadata.get(TEXT_FORMATTER_FINGERPRINT_KEY)
+        if not storage or not formatter:
+            return False
+        selectors = self._namespace_selectors(
+            artifact_identity=artifact,
+            storage_precision=storage,
+            formatter_identity=formatter,
+        )
+        if storage == "int8":
+            try:
+                selectors["calibration_sample_size"] = int(
+                    metadata.get(CALIBRATION_SAMPLE_SIZE_KEY, "")
+                )
+            except ValueError:
+                return False
+        # Both an explicit truncation and native width can produce the same
+        # matrix shape. Verify a reconstructed address before excluding it.
+        dimensions = {None, self.truncate_dim, probe_embedding_dimension(h5_path)}
+        for model in model_candidates:
+            selectors["model_identity"] = model
+            for dimension in dimensions:
+                selectors["dimension"] = dimension
+                if namespace_id == embedding_namespace_id(
+                    serialize_embedding_namespace(**selectors)
+                ):
+                    return True
+        return False
+
+    def _may_select_namespace(
+        self, namespace_id: str, artifact: str, model_candidates: Sequence[str]
+    ) -> bool:
+        for model in model_candidates:
+            if (
+                resolve_embedding_model_profile(model, self.requested_model_profile)
+                != self.model_profile
+            ):
+                return True
+            selectors = self._namespace_selectors(artifact_identity=artifact)
+            selectors["model_identity"] = model
+            if namespace_id == embedding_namespace_id(
+                serialize_embedding_namespace(**selectors)
+            ):
+                return True
         return False
 
     def _select_candidates(

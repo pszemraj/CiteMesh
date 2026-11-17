@@ -2481,6 +2481,14 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
     )
     assert runtime_metadata["truncate_dim"] == 512
 
+    builder.embedding_cache.upsert_embeddings(
+        {"paper": {"title": "Paper"}}, ConstantEncodeModel((1.0,) + (0.0,) * 511)
+    )
+    search_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    assert search_builder.has_persistent_embedding_artifacts()
+    assert search_builder.model is None
+    assert search_builder._embedding_cache is None
+
 
 def test_embedding_artifact_probe_does_not_create_provisional_cache(
     monkeypatch: pytest.MonkeyPatch,
@@ -2567,13 +2575,22 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
 
 
 @pytest.mark.parametrize("payload", [None, b"", b"not an HDF5 file"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        '{"pending":{"kind":"import"}}',
+        '{"pending":{"kind":"import"},"namespace_selectors":null}',
+    ],
+    ids=["missing-selectors", "malformed-selectors"],
+)
 def test_embedding_artifact_probe_counts_paperless_managed_corpus_state(
-    monkeypatch: pytest.MonkeyPatch, payload: bytes | None
+    monkeypatch: pytest.MonkeyPatch, payload: bytes | None, state: str
 ) -> None:
     """An interrupted install with zero committed papers is still an installed corpus.
 
     :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
     :param bytes | None payload: Absent, empty, or non-empty HDF5 payload content.
+    :param str state: Persisted state whose address cannot be reconstructed.
     :return None: Verify managed state, not paper rows or file size, drives the probe
         and that probing creates nothing.
     """
@@ -2606,7 +2623,7 @@ def test_embedding_artifact_probe_counts_paperless_managed_corpus_state(
     if payload is not None:
         (cache_dir / "embeddings_cccccccccccc.h5").unlink()
 
-    install("dddddddddddd", json.dumps({"pending": {"kind": "import"}}))
+    install("dddddddddddd", state)
     before = sorted(path.name for path in cache_dir.iterdir())
     assert builder.has_persistent_embedding_artifacts()
     assert sorted(path.name for path in cache_dir.iterdir()) == before

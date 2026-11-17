@@ -296,22 +296,25 @@ def test_interrupted_import_survives_implicit_consumers(
 
 
 @pytest.mark.parametrize("mode", ["auto", "local"])
+@pytest.mark.parametrize("semantic_source", ["candidates", "arxiv-corpus"])
 def test_search_names_installed_corpus_its_settings_do_not_select(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     mode: str,
+    semantic_source: str,
 ) -> None:
-    """Default settings address the candidates namespace, never an installed corpus.
+    """Candidate searches and differently sized corpus searches skip the install.
 
     The cache holds only an installed corpus, so the probe must not load a model or
     leave a provisional namespace behind, and the guidance must name the corpus.
     """
     from citemesh import cli
-    from citemesh.data import get_cache_dir
+    from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, get_cache_dir
     from citemesh.data.embedding_cache.portable import export_snapshot, import_snapshot
     from citemesh.strategies.embedding import builder as builder_module
     from citemesh.strategies.embedding.builder import EmbeddingGraphBuilder
+    from citemesh.strategies.embedding.refresh import _builder_contract
     from tests._helpers import disable_embedding_dep_checks
     from tests.test_embedding_portable import ExportFixture
 
@@ -320,11 +323,12 @@ def test_search_names_installed_corpus_its_settings_do_not_select(
     monkeypatch.setattr(
         EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
     )
-    export_snapshot(
-        ExportFixture(dtype="int8", dimension=4, count=7),
-        tmp_path / "snapshot",
-        shard_rows=4,
+    producer = ExportFixture(dtype="int8", dimension=256, count=7)
+    producer.contract = _builder_contract(
+        EmbeddingGraphBuilder(semantic_source="arxiv-corpus", truncate_dim=256),
+        fingerprint=f"hf::{DEFAULT_EMBEDDING_MODEL_NAME}::{'a' * 40}",
     )
+    export_snapshot(producer, tmp_path / "snapshot", shard_rows=4)
     destination = get_cache_dir("embeddings")
     installed = import_snapshot(tmp_path / "snapshot", destination)
     namespace_id = installed.db_path.stem.removeprefix("metadata_")
@@ -339,7 +343,19 @@ def test_search_names_installed_corpus_its_settings_do_not_select(
     monkeypatch.setattr(cli, "_configure_logging", lambda **kwargs: None)
     caplog.set_level(logging.INFO)
 
-    exit_code = cli.main(["search", "attention mechanism", "--mode", mode])
+    command = ["search", "attention mechanism"]
+    if mode == "local":
+        command.extend(["--mode", mode])
+    if semantic_source == "arxiv-corpus":
+        config = UserConfig(
+            path=tmp_path / "config.toml",
+            defaults={
+                "semantic_source": semantic_source,
+                "dataset_source": "test/source",
+            },
+        )
+        monkeypatch.setattr(cli, "load_user_config", lambda: config)
+    exit_code = cli.main(command)
 
     assert sorted(path.name for path in destination.iterdir()) == before
     expected_command = (

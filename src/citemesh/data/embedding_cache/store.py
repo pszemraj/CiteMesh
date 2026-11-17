@@ -10,7 +10,6 @@ locking/recovery, and scoring, lives in sibling modules and is mixed in here.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 import sqlite3
@@ -38,6 +37,7 @@ from ..cache import (
     get_cache_dir,
     path_exists,
 )
+from ..embedding_contract import embedding_namespace_id
 from ..model_profiles import (
     DEFAULT_EMBEDDING_MODEL_NAME,
 )
@@ -161,7 +161,7 @@ class EmbeddingCache(
             self.cache_dir, configured_cache_root
         )
 
-        model_hash = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:12]
+        model_hash = embedding_namespace_id(model_name)
         self.db_path = self.cache_dir / f"metadata_{model_hash}.db"
         self.h5_path = self.cache_dir / f"embeddings_{model_hash}.h5"
         self.lock_path = self.cache_dir / f"cache_{model_hash}.lock"
