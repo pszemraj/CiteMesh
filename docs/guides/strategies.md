@@ -25,9 +25,9 @@ Embedding is the only strategy that accepts [free-text inputs](how-it-works.md#1
 
 Hybrid pools every reference and every citer that Semantic Scholar returns for the focal paper (up to `--max-references` and `--max-citations`, 1000 each by default), adds candidates from the source chosen by `--semantic-source`, and ranks the whole pool by reciprocal rank fusion. It always needs the embeddings extra and the embedding model; `--strategy citation` is the citation-only option. See [candidate acquisition](how-it-works.md#2-candidate-acquisition), [ranking](how-it-works.md#5-ranking-and-selection), and [edge scoring](how-it-works.md#6-edge-scoring) for the details.
 
-- `candidates` (default) adds 200 of Semantic Scholar's `all-cs` recommendations.
+- `candidates` (default) adds up to 200 Semantic Scholar recommendations. The focal paper's recorded subjects determine the [recommendation pool](how-it-works.md#2-candidate-acquisition).
 - `arxiv-corpus` adds the 180 nearest corpus rows to the focal paper in each of two embedding roles, the focal paper as a retrieval query and as a retrieval document. References and citers still come from Semantic Scholar.
-- `both` adds both sets. It requires the same embeddings and corpus setup as `arxiv-corpus` and makes the additional recommendation request.
+- `both` adds both sets. It requires the same embeddings and corpus setup as `arxiv-corpus` and also checks for recommendations.
 
 For an installed index:
 

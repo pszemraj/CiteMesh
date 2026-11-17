@@ -39,7 +39,7 @@ A normal build always checks upstream for the requested recommendations, citatio
 
 The check preserves upstream membership and ordering among resolvable papers. Candidates come straight from the response rows, with the first row kept for each paper. A row without an ID or usable metadata is omitted while the other papers are retained; each listing logs its dropped rows once, as a warning only when more than half of that listing's rows are dropped and at debug level otherwise.
 
-A failed page or failed `all-cs` fallback stops the required acquisition without replacing existing outputs. Recommendation and candidate modes check `all-cs` when the recent recommendation pool yields no resolvable papers; both checks must succeed before returning an empty recommendation list. Hybrid requests `all-cs` directly in its `candidates` and `both` modes. A reference listing that reached the fetch limit never overwrites the complete reference-ID cache.
+A failed page or failed `all-cs` fallback stops the required acquisition without replacing existing outputs. A request that starts with the `recent` recommendation pool checks `all-cs` if the first response contains no resolvable papers. Both checks must succeed before returning an empty recommendation list. Hybrid's [candidate acquisition](how-it-works.md#2-candidate-acquisition) rules select which provider pool to query first. A reference listing that reached the fetch limit never overwrites the complete reference-ID cache.
 
 Hybrid needs a retrieval-document vector for every pool member:
 

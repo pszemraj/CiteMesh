@@ -26,8 +26,10 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. What each strategy collects:
 
 - **Embedding, `candidates` mode**: allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder.
-- **Hybrid** takes no pool size. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests 200 of S2's `all-cs` recommendations, and in `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the focal paper in each of two roles: the focal paper encoded as a retrieval query and as a retrieval document.
+- **Hybrid** takes no pool size. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests up to 200 Semantic Scholar recommendations. In `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the focal paper in each of two roles: the focal paper encoded as a retrieval query and as a retrieval document.
 - **Provenance**: each paper joins the pool once and carries a citation tag (references, citers), a semantic tag (recommendations, corpus neighbors), or both; the tags set its provenance and its edge-scoring weights.
+
+Hybrid chooses the recommendation pool using the subject labels already recorded on the focal paper. Any computing label (`Computer Science`, `cs`, `cs.*`, `stat.ML`, or legacy `cmp-lg`) selects `all-cs`, including on a paper with multiple subjects. Missing subjects or a sole `Unknown` label also select `all-cs`. A paper with another recorded subject and no computing label uses `recent` first.
 
 When S2 returns no usable references for an arXiv focal paper, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references). Recovered references enter the pool like provider references, with the same relation to the focal paper, up to the reference limit; a bibliography that recovers more references than the limit is cut by title and abstract similarity to the focal paper, then citation count.
 
@@ -66,9 +68,9 @@ The embedding strategy encodes the focal paper as a retrieval query and ranks by
 Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each candidate has a document-role vector, and up to four ranked lists are built from it:
 
 - **similarity to the focal paper**: every candidate, by the cosine between its vector and the focal paper's document vector, with ties broken on the cosine with the focal paper's query vector, then paper ID
-- **similarity to the focal paper's bibliography**: candidates with at least five references from the focal paper other than themselves, by the mean of their five highest cosines to those references, with the same tie-breaks
-- **direct links**: candidates the focal paper cites or that cite the focal paper, by the same cosine as the first list
-- **recommendations**: the provider's recommended candidates in provider order, present only in `candidates` and `both` modes
+- **similarity to the focal paper's bibliography**: candidates with at least five references from the focal paper other than themselves, by the mean of their five highest cosines to those references, with ties broken by query cosine, then paper ID
+- **direct links**: candidates the focal paper cites or that cite the focal paper, by document cosine to the focal paper, then paper ID
+- **recommendations**: the provider's recommended candidates in provider order after deduplication, present only in `candidates` and `both` modes
 
 ```text
 score = Σ 1 / (60 + rank)   over the lists that contain the candidate, ranks starting at 1

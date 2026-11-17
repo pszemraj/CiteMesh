@@ -9,7 +9,7 @@ pool are fused by reciprocal rank fusion with ``k = 60``:
   query-role vector (``cos_q``), then paper ID.
 - ``reference_context``: every candidate with at least five seed references
   other than itself, by the mean of its five largest cosines to those
-  references (``ctx_ref_top5``); ties as ``semantic``.
+  references (``ctx_ref_top5``); ties by query cosine, then paper ID.
 - ``direct``: candidates the seed cites or that cite the seed, by ``cos_dd``;
   ties by paper ID.
 - ``recommended``: the provider's recommendations in provider order, each
@@ -111,7 +111,7 @@ def _semantic_key(paper_id: str, features: CandidateFeatures) -> _SortKey:
 def _reference_context_key(
     paper_id: str, features: CandidateFeatures
 ) -> _SortKey | None:
-    """Order candidates with a reference context by it, then as ``semantic``.
+    """Order by reference context, then query cosine and paper ID.
 
     :param str paper_id: Pool ID, the final tie-break.
     :param CandidateFeatures features: Seed-relative features of the candidate.

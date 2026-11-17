@@ -85,6 +85,7 @@ HYBRID_DEFAULT_MAX_CITATIONS = 1000
 HYBRID_DEFAULT_MAX_REFERENCES = 1000
 HYBRID_RECOMMENDATION_LIMIT = 200
 HYBRID_CORPUS_NEIGHBOURS = 180
+_COMPUTING_SUBJECTS = frozenset({"computer science", "cs", "stat.ml", "cmp-lg"})
 _REFERENCE_RELATIONS = frozenset({"referenced_by_seed", "overlap"})
 _CITER_RELATIONS = frozenset({"cites_seed", "overlap"})
 SEED_CITATION_RELATIONS = _REFERENCE_RELATIONS | _CITER_RELATIONS
@@ -465,17 +466,20 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 )
             )
         if self.semantic_source != "arxiv-corpus":
-            results.append(self._fetch_recommendations(provider_id))
+            results.append(self._fetch_recommendations(provider_id, seed.categories))
         logger.debug(
             "Provider candidates: %s.",
             ", ".join(f"{result.source}={len(result.papers)}" for result in results),
         )
         return results
 
-    def _fetch_recommendations(self, provider_id: str | None) -> CandidateSourceResult:
-        """Fetch the seed's ``all-cs`` recommendations.
+    def _fetch_recommendations(
+        self, provider_id: str | None, categories: Sequence[str]
+    ) -> CandidateSourceResult:
+        """Fetch recommendations using the focal paper's recorded subjects.
 
         :param Optional[str] provider_id: Provider-safe seed identifier.
+        :param Sequence[str] categories: Subjects supplied by the focal record's source.
         :return CandidateSourceResult: Recommendations in provider order.
         """
         if provider_id is None:
@@ -484,14 +488,25 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 CandidateSourceState.UNAVAILABLE,
                 error="The focal paper has no Semantic Scholar lookup identifier.",
             )
+        subjects = {category.strip().casefold() for category in categories} - {
+            "",
+            "unknown",
+        }
+        pool = "all-cs"
+        if subjects and not any(
+            subject in _COMPUTING_SUBJECTS or subject.startswith("cs.")
+            for subject in subjects
+        ):
+            pool = "recent"
         logger.info("Fetching paper recommendations...")
+        logger.debug("Recommendation pool for %s: %s.", provider_id, pool)
         return fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(
                 provider_id,
                 limit=HYBRID_RECOMMENDATION_LIMIT,
                 raise_on_unavailable=True,
-                pool="all-cs",
+                pool=pool,
             ),
         )
 

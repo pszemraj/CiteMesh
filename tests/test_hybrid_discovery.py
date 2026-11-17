@@ -456,6 +456,50 @@ def test_pool_holds_every_list_of_its_mode(
         ]
 
 
+@pytest.mark.parametrize(
+    ("mode", "provider_subjects", "corpus_subjects", "expected_pool"),
+    [
+        ("candidates", ["Medicine", "Physics"], "", "recent"),
+        ("candidates", ["Geology", "Medicine"], "", "recent"),
+        ("candidates", ["Mathematics", "Computer Science"], "", "all-cs"),
+        ("candidates", ["CS", "Physics"], "", "all-cs"),
+        ("candidates", [], "", "all-cs"),
+        ("candidates", ["Unknown"], "", "all-cs"),
+        ("both", ["Computer Science"], "astro-ph.HE astro-ph.CO", "recent"),
+        ("both", ["Physics"], "astro-ph.HE cs.AI", "all-cs"),
+        ("both", ["Physics"], "stat.ML math.ST", "all-cs"),
+        ("both", ["Physics"], "cmp-lg", "all-cs"),
+        ("both", ["Physics"], "", "all-cs"),
+    ],
+)
+def test_recommendation_pool_uses_the_resolved_focal_subjects(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    provider_subjects: list[str],
+    corpus_subjects: str,
+    expected_pool: str,
+) -> None:
+    """Hybrid selects a recommendation pool without additional focal lookups."""
+    scenario = _scenario(citers=1)
+    scenario.world.papers["f" * 40]["fieldsOfStudy"] = provider_subjects
+    scenario.corpus[0]["categories"] = corpus_subjects
+    with fake_client(scenario.world) as client:
+        builder = _builder(client, scenario, mode, max_papers=4, fetch_references=False)
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        builder.collect_papers(_SEED_ID)
+
+    assert scenario.world.requests["paper"] == int(mode == "candidates")
+    assert scenario.world.requests["recommendations"] == 1
+    assert (
+        scenario.world.recommendation_params[0].get("from", "recent") == expected_pool
+    )
+
+
 @pytest.mark.parametrize("mode", ["arxiv-corpus", "both"])
 def test_indexed_provider_records_use_their_corpus_rows(
     monkeypatch: pytest.MonkeyPatch, mode: str
