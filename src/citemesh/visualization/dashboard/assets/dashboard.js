@@ -672,6 +672,7 @@
     };
 
     const controls = {
+      root: document.getElementById("dashboard-root"),
       list: document.getElementById("paper-list"),
       count: document.getElementById("paper-count"),
       search: document.getElementById("search-input"),
@@ -682,19 +683,20 @@
       chips: Array.from(document.querySelectorAll("#provenance-filters .chip")),
       scopeButtons: Array.from(document.querySelectorAll("#scope-nav [data-scope]")),
       filtersToggle: document.getElementById("filters-toggle"),
-      listViewBtn: document.getElementById("list-view-btn"),
+      paneButtons: Array.from(document.querySelectorAll("#pane-nav [data-pane]")),
       moreBtn: document.getElementById("more-btn"),
       toolbar: document.getElementById("dashboard-toolbar"),
       detailMode: document.getElementById("detail-mode"),
+      detailContent: document.getElementById("detail-content"),
       detailTitle: document.getElementById("detail-title"),
       detailSubtitle: document.getElementById("detail-subtitle"),
       detailMetrics: document.getElementById("detail-metrics"),
       detailCategories: document.getElementById("detail-categories"),
       detailLinks: document.getElementById("detail-links"),
       detailWhy: document.getElementById("detail-why-lines"),
+      detailRanking: document.getElementById("detail-ranking"),
       detailActions: document.getElementById("detail-actions"),
       detailAbstract: document.getElementById("detail-abstract"),
-      graphHint: document.getElementById("graph-hint"),
       timelineYearMin: document.getElementById("timeline-year-min"),
       timelineYearMax: document.getElementById("timeline-year-max"),
       resultSelect: document.getElementById("result-select"),
@@ -757,6 +759,7 @@
       if (controls.savedChip) {
         controls.savedChip.textContent = count ? `Saved (${count})` : "Saved";
         controls.savedChip.classList.toggle("active", state.savedOnly);
+        controls.savedChip.setAttribute("aria-pressed", String(state.savedOnly));
       }
       const showExports = count > 0;
       if (controls.savedBibBtn) {
@@ -792,7 +795,7 @@
       updateSavedUi();
       renderList();
       if (state.hoverId === key) {
-        renderDetail(key, true);
+        renderDetail(key, key !== state.selectedId);
       } else if (state.selectedId === key && !state.hoverId) {
         renderDetail(key, false);
       }
@@ -958,22 +961,36 @@
 
     function relationBadgeLabel(node) {
       const relation = String(node.seed_relation || "").trim();
+      if (node.is_seed || relation === "seed") {
+        return "Focal paper";
+      }
       if (relation === "referenced_by_seed") {
-        return "referenced by focal paper";
+        return "Referenced by focal paper";
       }
       if (relation === "cites_seed") {
-        return "cites focal paper";
+        return "Cites focal paper";
       }
       if (relation === "semantic_only") {
-        return "semantic-only";
+        return "No direct citation recorded";
       }
       if (relation === "overlap") {
-        return "prior+derivative";
+        return "Cites and is cited by focal paper";
       }
-      if (relation === "seed") {
-        return "focal paper";
+      return "";
+    }
+
+    function paperSourceLabel(node) {
+      const source = node.provenance === "seed" ? node.provenance_base : node.provenance;
+      if (source === "both") {
+        return "Citation and semantic";
       }
-      return String(node.provenance_base || node.provenance || "citation");
+      if (source === "citation") {
+        return "Citation";
+      }
+      if (source === "semantic") {
+        return "Semantic";
+      }
+      return "";
     }
 
     function filteredNodes() {
@@ -1004,43 +1021,23 @@
       const doiUrl = safeExternalUrl(links && links.doi);
       const semanticScholarUrl = safeExternalUrl(links && links.semantic_scholar);
       if (pdfUrl) {
-        entries.push({ kind: "pdf", title: "Open PDF", href: pdfUrl });
+        entries.push({ label: "PDF", href: pdfUrl });
       }
       if (arxivUrl) {
-        entries.push({ kind: "arxiv", title: "Open arXiv page", href: arxivUrl });
+        entries.push({ label: "arXiv", href: arxivUrl });
       }
       if (doiUrl) {
-        entries.push({ kind: "doi", title: "Open DOI", href: doiUrl });
+        entries.push({ label: "DOI", href: doiUrl });
       }
       if (semanticScholarUrl) {
-        entries.push({ kind: "s2", title: "Open Semantic Scholar", href: semanticScholarUrl });
+        entries.push({ label: "Semantic Scholar", href: semanticScholarUrl });
       }
       return entries;
     }
 
-    function linkIconSvg(kind) {
-      if (kind === "pdf") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"></path><polyline points="14 2 14 7 19 7"></polyline><line x1="8" y1="12" x2="16" y2="12"></line><line x1="8" y1="16" x2="13" y2="16"></line></svg>';
-      }
-      if (kind === "arxiv") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18L10 6l2 6 2-4 6 10"></path><circle cx="10" cy="6" r="1.2"></circle><circle cx="12" cy="12" r="1.2"></circle><circle cx="14" cy="8" r="1.2"></circle></svg>';
-      }
-      if (kind === "doi") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7h6"></path><path d="M9 12h6"></path><path d="M9 17h6"></path><circle cx="6.5" cy="7" r="1"></circle><circle cx="6.5" cy="12" r="1"></circle><circle cx="6.5" cy="17" r="1"></circle><path d="M17.5 7a2.5 2.5 0 0 1 0 5"></path><path d="M17.5 12a2.5 2.5 0 0 0 0 5"></path></svg>';
-      }
-      if (kind === "s2") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h12"></path><path d="M6 12h9"></path><path d="M6 19h12"></path><path d="M17 10l2 2-2 2"></path></svg>';
-      }
-      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"></path><path d="M8 8h8v8H8z"></path></svg>';
-    }
-
     function detailLinksHtml(links) {
-      const entries = detailLinkEntries(links);
-      if (!entries.length) {
-        return "";
-      }
-      return entries
-        .map((entry) => `<a class="icon-link" href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(entry.title)}" aria-label="${escapeHtml(entry.title)}">${linkIconSvg(entry.kind)}</a>`)
+      return detailLinkEntries(links)
+        .map((entry, index) => `<a${index === 0 ? ' class="primary-link"' : ""} href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer">${entry.label} <span aria-hidden="true">↗</span></a>`)
         .join("");
     }
 
@@ -1503,6 +1500,23 @@
       return Array.isArray(collectionBundle.results) ? collectionBundle.results : [];
     }
 
+    function renderGraphHeading() {
+      document.getElementById("focal-title").textContent = seedNode?.title || payload.meta.seed_id || "Paper graph";
+      const strategy = String(payload.meta.strategy || "");
+      const strategyLabel = strategy && strategy !== "unknown"
+        ? strategy[0].toUpperCase() + strategy.slice(1) + " discovery" : "";
+      const sources = payload.meta.candidate_source_status || {};
+      const names = { references: "references", citations: "citing papers", recommendations: "recommendations", arxiv_corpus: "arXiv corpus" };
+      const unavailable = Object.keys(sources).filter(key => sources[key] === "unavailable");
+      document.getElementById("graph-summary").textContent = [
+        strategyLabel,
+        sources.arxiv_corpus === "complete" ? "Includes arXiv corpus" : "",
+        `${nodes.length.toLocaleString()} ${nodes.length === 1 ? "paper" : "papers"}`,
+        `${payload.edges.length.toLocaleString()} ${payload.edges.length === 1 ? "link" : "links"}`,
+        unavailable.length ? "Unavailable: " + unavailable.map(key => names[key] || key).join(", ") : "",
+      ].filter(Boolean).join(" · ");
+    }
+
     function populateCollectionSelector() {
       const select = controls.resultSelect;
       if (!select) {
@@ -1592,7 +1606,7 @@
       controls.sort.value = state.sortKey;
       controls.yearMin.value = "";
       controls.yearMax.value = "";
-      controls.scopeButtons.forEach((entry) => entry.classList.remove("active"));
+      syncScopeButtons();
       controls.chips.forEach((chip) => {
         const filterKey = chip.getAttribute("data-filter");
         if (!filterKey) {
@@ -1600,7 +1614,9 @@
         }
         state.filters[filterKey] = true;
         chip.classList.add("active");
+        chip.setAttribute("aria-pressed", "true");
       });
+      renderGraphHeading();
       populateCollectionSelector();
       updateYearPlaceholders();
       syncDiscoverySortOption();
@@ -1613,8 +1629,6 @@
           renderDetail(null, false);
         }
         renderList();
-        const loadedTitle = nodeById.get(state.selectedId || "");
-        controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : label);
       });
     }
 
@@ -1678,72 +1692,105 @@
       return [];
     }
 
+    function detailEvidenceHtml(evidence) {
+      return evidence
+        .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+        .join("");
+    }
+
+    function discoveryBreakdownHtml(node) {
+      if (!Number.isFinite(node.discovery_score)) {
+        return "";
+      }
+      const score = node.discovery_score.toFixed(4);
+      const ranks = node.discovery_list_ranks || {};
+      const entries = [
+        ["semantic", "Focal similarity list"],
+        ["reference_context", "Bibliography similarity list"],
+        ["direct", "Direct citation list"],
+        ["recommended", "Recommendation list"],
+      ];
+      const positions = entries
+        .filter(([key]) => Number.isInteger(ranks[key]))
+        .map(([key, label]) => [label, `#${ranks[key]}`]);
+      if (!positions.length) {
+        return `<p>Discovery score ${score}</p>`;
+      }
+      const ranker = payload.meta?.discovery_ranker;
+      const formula = ranker?.method === "reciprocal_rank_fusion" && Number.isInteger(ranker.k)
+        ? `<p>Each list adds 1 / (${ranker.k} + position) to the score.</p>`
+        : "";
+      return `<details>
+        <summary>Discovery score ${score}</summary>
+        ${formula}
+        <dl class="detail-evidence">${detailEvidenceHtml(positions)}</dl>
+      </details>`;
+    }
+
     function renderWhyLines(nodeId) {
-      const node = nodeId ? nodeById.get(nodeId) : null;
-      if (!node) {
-        controls.detailWhy.textContent = "Select a paper to inspect neighborhood evidence.";
-        controls.detailWhy.classList.add("muted");
-        return;
+      const node = nodeById.get(nodeId);
+      const ranked = Number.isInteger(node.discovery_rank);
+      const relation = relationBadgeLabel(node);
+      const evidence = [];
+      if (ranked) {
+        evidence.push(["Discovery rank", `#${node.discovery_rank} in the candidate pool`]);
+      }
+      evidence.push(["Relation", relation || "Unavailable"]);
+      if (ranked) {
+        const features = node.discovery_features || {};
+        const signals = [`Focal similarity ${Number(features.seed_similarity || 0).toFixed(3)}`];
+        if (Number.isFinite(features.bibliography_similarity)) {
+          signals.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
+        }
+        if (features.direct_citation && !relation) {
+          signals.push("direct citation");
+        }
+        if (Number.isInteger(features.recommendation_rank)) {
+          signals.push(`provider recommendation #${features.recommendation_rank}`);
+        }
+        evidence.push(["Discovery signals", signals.join(" · ")]);
       }
 
-      // Share the list badge's label map so one paper never reads
-      // "semantic-only" in the list and "semantic_only" in this card.
-      const relationLabel = relationBadgeLabel(node);
+      if (!node.is_seed) {
+        evidence.push(["Graph relevance", Number(node.seed_relevance || 0).toFixed(4)]);
+      }
       const neighbors = (adjacency.get(node.id) || [])
         .slice()
         .sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0))
         .slice(0, 3);
-      const neighborLine = neighbors.length
-        ? `Top links: ${neighbors.map((entry) => `${compactNodeLabel(entry.id)} (w=${Number(entry.weight || 0).toFixed(2)})`).join("; ")}`
-        : "Top links: none";
-      if (node.is_seed) {
-        controls.detailWhy.classList.remove("muted");
-        controls.detailWhy.innerHTML = [
-          `<div>${escapeHtml("Focal paper - every other node in this graph was gathered around it.")}</div>`,
-          `<div>${escapeHtml(neighborLine)}</div>`,
-        ].join("");
-        return;
+      evidence.push([
+        "Strongest similarity links",
+        neighbors.map((entry) => `${compactNodeLabel(entry.id)} (${Number(entry.weight || 0).toFixed(2)})`).join(" · ") || "None",
+      ]);
+      if (!node.is_seed) {
+        const seedId = (payload.meta && payload.meta.seed_id) || null;
+        const path = seedId ? shortestPathIds(seedId, node.id).reverse() : [];
+        evidence.push([
+          "Similarity path to focal paper",
+          path.map((id) => compactNodeLabel(id)).join(" → ") || "Unavailable",
+        ]);
       }
-      const seedId = (payload.meta && payload.meta.seed_id) || null;
-      const path = seedId ? shortestPathIds(seedId, node.id) : [];
-      const pathLine = path.length
-        ? `Shortest path to focal paper: ${path.map((pid) => compactNodeLabel(pid)).join(" -> ")}`
-        : "Shortest path to focal paper: unavailable";
-      const relevanceLine = `Focal relevance: ${Number(node.seed_relevance || 0).toFixed(4)} | Relation: ${relationLabel}`;
-      const discoveryLine = discoveryWhyLine(node);
-
-      controls.detailWhy.classList.remove("muted");
-      controls.detailWhy.innerHTML = [
-        `<div>${escapeHtml(relevanceLine)}</div>`,
-        discoveryLine ? `<div>${escapeHtml(discoveryLine)}</div>` : "",
-        `<div>${escapeHtml(neighborLine)}</div>`,
-        `<div>${escapeHtml(pathLine)}</div>`,
-      ].join("");
+      controls.detailWhy.innerHTML = detailEvidenceHtml(evidence);
+      controls.detailRanking.innerHTML = ranked ? discoveryBreakdownHtml(node) : "";
     }
 
-    function discoveryWhyLine(node) {
-      if (!Number.isInteger(node.discovery_rank)) {
-        return "";
+    function paperAuthorText(node, limit) {
+      const authors = Array.isArray(node.authors) ? node.authors : [];
+      if (authors.length > limit) {
+        return `${authors.slice(0, limit).join(", ")} +${authors.length - limit} more`;
       }
-      const features = node.discovery_features || {};
-      const parts = [
-        `Discovery rank ${node.discovery_rank} (score ${Number(node.discovery_score || 0).toFixed(4)})`,
-        `focal similarity ${Number(features.seed_similarity || 0).toFixed(3)}`,
-      ];
-      if (Number.isFinite(features.bibliography_similarity)) {
-        parts.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
-      }
-      if (features.direct_citation) {
-        parts.push("direct citation");
-      }
-      if (Number.isInteger(features.recommendation_rank)) {
-        parts.push(`recommended #${features.recommendation_rank}`);
-      }
-      return parts.join(" | ");
+      return authors.join(", ") || "Unknown authors";
     }
+
+    let detailNodeId = null;
 
     function renderDetail(nodeId, previewOnly) {
       const node = nodeId ? nodeById.get(nodeId) : null;
+      controls.detailContent.classList.toggle("is-empty", !node);
+      if (detailNodeId !== nodeId) {
+        controls.detailContent.scrollTop = 0;
+        detailNodeId = nodeId;
+      }
       if (!node) {
         controls.detailMode.textContent = "No selection";
         controls.detailTitle.textContent = "Select a paper";
@@ -1751,46 +1798,23 @@
         controls.detailMetrics.innerHTML = "";
         controls.detailCategories.innerHTML = "";
         controls.detailLinks.innerHTML = "";
-        controls.detailWhy.textContent = "Select a paper to inspect neighborhood evidence.";
-        controls.detailWhy.classList.add("muted");
+        controls.detailWhy.innerHTML = "";
+        controls.detailRanking.innerHTML = "";
         controls.detailActions.innerHTML = "";
-        controls.detailAbstract.textContent = "Hover or click a paper to inspect abstract and metadata.";
+        controls.detailAbstract.textContent = "Choose a paper from the graph or list.";
         controls.detailAbstract.classList.add("muted");
-        controls.graphHint.textContent = "Hover to preview, click to lock";
         return;
       }
 
       controls.detailMode.textContent = previewOnly ? "Preview" : "Selected";
-      if (previewOnly && state.selectedId && state.selectedId !== node.id) {
-        controls.graphHint.textContent = "Previewing node (selection locked)";
-      } else if (previewOnly) {
-        controls.graphHint.textContent = "Previewing node • arcs show strongest direct links";
-      } else {
-        controls.graphHint.textContent = "Selection locked • red arcs are strongest direct links";
-      }
       controls.detailTitle.textContent = node.title || node.id;
-      let authorText = "Unknown authors";
-      if (Array.isArray(node.authors) && node.authors.length > 0) {
-        if (node.authors.length > 2) {
-          authorText = `${node.authors[0]} + ${node.authors.length - 1} authors`;
-        } else {
-          authorText = node.authors.join(", ");
-        }
-      }
       const yearText = hasYear(node) ? String(node.year) : "n.d.";
-      const venueText = node.venue ? `, ${node.venue}` : "";
-      controls.detailSubtitle.textContent = `${authorText} | ${yearText}${venueText}`;
+      const publication = node.venue ? `${yearText} · ${node.venue}` : yearText;
+      controls.detailSubtitle.innerHTML = `<div>${escapeHtml(paperAuthorText(node, 4))}</div><div>${escapeHtml(publication)}</div>`;
 
-      const provenance = node.provenance || "unknown";
-      const provenanceLabel = provenance === "seed" ? `focal paper (${node.provenance_base || "citation"})` : provenance;
-      const metrics = [
-        `Citations: ${Number(node.citation_count || 0).toLocaleString()}`,
-        `Source: ${provenanceLabel}`,
-        `Year: ${yearText}`,
-      ];
-      controls.detailMetrics.innerHTML = metrics
-        .map((metric) => `<span class="metric-pill">${escapeHtml(metric)}</span>`)
-        .join("");
+      const source = paperSourceLabel(node);
+      const citations = Number(node.citation_count || 0).toLocaleString();
+      controls.detailMetrics.textContent = `${citations} citations${source ? ` · Source: ${source}` : ""}`;
 
       const categories = Array.isArray(node.categories) ? node.categories.filter(Boolean).slice(0, 8) : [];
       controls.detailCategories.innerHTML = categories
@@ -1805,12 +1829,17 @@
       controls.detailActions.innerHTML = "";
       const saveBtn = document.createElement("button");
       saveBtn.type = "button";
-      saveBtn.textContent = isSaved(node.id) ? "★ Saved" : "☆ Save";
-      saveBtn.title = isSaved(node.id)
+      saveBtn.className = "detail-save";
+      const saved = isSaved(node.id);
+      saveBtn.textContent = saved ? "★ Saved" : "☆ Save";
+      saveBtn.setAttribute("aria-label", "Save to reading list");
+      saveBtn.setAttribute("aria-pressed", String(saved));
+      saveBtn.title = saved
         ? "Remove from reading list"
         : "Save to reading list";
       saveBtn.addEventListener("click", () => {
         toggleSaved(node.id);
+        controls.detailActions.querySelector(".detail-save")?.focus({ preventScroll: true });
       });
       controls.detailActions.appendChild(saveBtn);
 
@@ -2002,6 +2031,10 @@
 
     function renderList() {
       const listNodes = filteredNodes();
+      const focusedButton = document.activeElement?.closest(".paper-select, .star-btn");
+      const focusedId = focusedButton?.parentElement.getAttribute("data-node-id");
+      const focusedStar = focusedButton?.classList.contains("star-btn");
+      let focusTarget;
       listPreviewArmed = false;
       syncSemanticScholarButton();
       controls.count.textContent = `${listNodes.length.toLocaleString()} ${listNodes.length === 1 ? "paper" : "papers"}`;
@@ -2013,9 +2046,14 @@
 
       if (!listNodes.length) {
         const empty = document.createElement("li");
-        empty.className = "paper-row";
-        empty.innerHTML = '<div class="paper-title">No papers match current filters.</div>';
+        empty.className = "paper-list-empty";
+        empty.textContent = state.savedOnly && !state.savedIds.size
+          ? "Star a paper to add it to your reading list."
+          : "No papers match the current filters.";
         controls.list.appendChild(empty);
+        if (focusedId) {
+          controls.list.focus();
+        }
         syncHighlights();
         return;
       }
@@ -2026,34 +2064,42 @@
         row.setAttribute("data-node-id", node.id);
 
         const yearText = hasYear(node) ? String(node.year) : "n.d.";
-        const authors = Array.isArray(node.authors) && node.authors.length
-          ? node.authors.slice(0, 4).join(", ")
-          : "Unknown authors";
-        const provenance = relationBadgeLabel(node);
-        const provenanceClass = node.is_seed ? "meta-origin" : "";
-        const provenanceLabel = provenance;
-
+        const title = node.title || node.id;
+        const relation = relationBadgeLabel(node) || paperSourceLabel(node);
+        const rank = Number.isInteger(node.discovery_rank)
+          ? `<span class="paper-rank">Rank #${node.discovery_rank}</span>`
+          : "";
         const saved = isSaved(node.id);
         row.innerHTML = `
-          <div class="paper-row-head">
-            <div class="paper-title">${escapeHtml(node.title || node.id)}</div>
-            <button class="star-btn${saved ? " saved" : ""}" type="button" title="${saved ? "Remove from reading list" : "Save to reading list"}" aria-label="${saved ? "Remove from reading list" : "Save to reading list"}" aria-pressed="${saved ? "true" : "false"}">${saved ? "&#9733;" : "&#9734;"}</button>
-            <div class="paper-year">${escapeHtml(yearText)}</div>
-          </div>
-          <div class="paper-subline">${escapeHtml(authors)}</div>
-          <div class="paper-meta">
-            <span>${Number(node.citation_count || 0).toLocaleString()} citations</span>
-            <span class="meta-dot"></span>
-            <span class="${provenanceClass}">${escapeHtml(provenanceLabel)}</span>
-          </div>
+          <button class="paper-select" type="button" aria-current="${node.id === state.selectedId}" aria-controls="detail-content">
+            <span class="paper-title">${escapeHtml(title)}</span>
+            <span class="paper-subline">
+              <span class="paper-year">${yearText}</span>
+              <span class="paper-authors">${escapeHtml(paperAuthorText(node, 2))}</span>
+            </span>
+            <span class="paper-meta">
+              ${rank}
+              <span>${Number(node.citation_count || 0).toLocaleString()} citations</span>
+              ${relation ? `<span${node.is_seed ? ' class="meta-origin"' : ""}>${escapeHtml(relation)}</span>` : ""}
+            </span>
+          </button>
+          <button class="star-btn${saved ? " saved" : ""}" type="button" title="${saved ? "Remove from reading list" : "Save to reading list"}" aria-label="Save ${escapeHtml(title)} to reading list" aria-pressed="${saved}">${saved ? "&#9733;" : "&#9734;"}</button>
         `;
 
+        const selectBtn = row.querySelector(".paper-select");
+        selectBtn?.addEventListener("click", () => {
+          state.selectedId = node.id;
+          state.hoverId = null;
+          renderDetail(node.id, false);
+          renderList();
+          showPane("detail", true);
+        });
         const starBtn = row.querySelector(".star-btn");
-        if (starBtn) {
-          starBtn.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleSaved(node.id);
-          });
+        starBtn?.addEventListener("click", () => {
+          toggleSaved(node.id);
+        });
+        if (node.id === focusedId) {
+          focusTarget = focusedStar ? starBtn : selectBtn;
         }
 
         row.addEventListener("mouseenter", () => {
@@ -2068,21 +2114,36 @@
           }
           syncHighlights();
         });
-        row.addEventListener("click", () => {
-          state.selectedId = node.id;
-          renderDetail(node.id, false);
-          syncHighlights();
-          renderList();
-        });
         controls.list.appendChild(row);
       });
 
+      if (focusTarget) {
+        focusTarget.focus({ preventScroll: true });
+      } else if (focusedId) {
+        controls.list.querySelector(".paper-select")?.focus();
+      }
       syncHighlights();
     }
 
     function setControlsCollapsed(collapsed) {
       controls.toolbar.classList.toggle("collapsed", collapsed);
       controls.filtersToggle.classList.toggle("active", !collapsed);
+      controls.filtersToggle.setAttribute("aria-expanded", String(!collapsed));
+    }
+
+    function syncScopeButtons() {
+      controls.scopeButtons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.scope === state.scopeMode));
+      });
+    }
+
+    function showPane(pane, focusTitle = false) {
+      if (!window.matchMedia("(max-width: 1100px)").matches) return;
+      controls.root.dataset.pane = pane;
+      controls.paneButtons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.pane === pane));
+      });
+      if (focusTitle && pane === "detail") controls.detailTitle.focus();
     }
 
     function setupControls() {
@@ -2091,6 +2152,7 @@
       controls.list.addEventListener("mousemove", armListPreview);
       controls.search.addEventListener("input", (event) => {
         state.searchText = String(event.target.value || "").trim().toLowerCase();
+        showPane("paper-list");
         renderList();
       });
       controls.sort.addEventListener("change", (event) => {
@@ -2128,6 +2190,7 @@
           }
           state.filters[filterKey] = !state.filters[filterKey];
           chip.classList.toggle("active", state.filters[filterKey]);
+          chip.setAttribute("aria-pressed", String(state.filters[filterKey]));
           renderList();
         });
       });
@@ -2139,10 +2202,10 @@
             return;
           }
           state.scopeMode = state.scopeMode === scope ? "all" : scope;
-          controls.scopeButtons.forEach((entry) => {
-            const entryScope = entry.getAttribute("data-scope");
-            entry.classList.toggle("active", !!entryScope && entryScope === state.scopeMode);
-          });
+          syncScopeButtons();
+          if (controls.root.dataset.pane === "detail") {
+            showPane("paper-list");
+          }
           renderList();
         });
       });
@@ -2150,12 +2213,12 @@
       controls.filtersToggle.addEventListener("click", () => {
         const collapsed = !controls.toolbar.classList.contains("collapsed");
         setControlsCollapsed(collapsed);
-      });
-      controls.listViewBtn.addEventListener("click", () => {
-        const listPane = document.getElementById("paper-list-pane");
-        if (listPane) {
-          listPane.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (!collapsed && controls.root.dataset.pane === "detail") {
+          showPane("paper-list");
         }
+      });
+      controls.paneButtons.forEach((button) => {
+        button.addEventListener("click", () => showPane(button.dataset.pane));
       });
       controls.moreBtn.addEventListener("click", () => {
         const target = semanticScholarTarget();
@@ -2260,6 +2323,7 @@
       controls.savedChip.addEventListener("click", () => {
         state.savedOnly = !state.savedOnly;
         updateSavedUi();
+        showPane("paper-list");
         renderList();
       });
 
@@ -2325,6 +2389,7 @@
         if (!files.length) {
           return;
         }
+        document.getElementById("graph-tools").hidePopover();
         addResultFiles(files).catch((err) => {
           setDashboardStatus("Failed to add results: " + err.message, "warning");
         });
@@ -2334,12 +2399,14 @@
         if (!resultId) {
           return;
         }
+        document.getElementById("graph-tools").hidePopover();
         loadCollectionResult(resultId).catch((err) => {
           setDashboardStatus("Failed to switch graphs: " + err.message, "warning");
         });
       });
 
       setControlsCollapsed(true);
+      renderGraphHeading();
       populateCollectionSelector();
       updateYearPlaceholders();
       updateSavedUi();
@@ -2392,9 +2459,11 @@
           return;
         }
         state.selectedId = nodeId;
+        state.hoverId = null;
         renderDetail(nodeId, false);
         syncHighlights();
         renderList();
+        showPane("detail", true);
       });
     }
 
@@ -2417,7 +2486,9 @@
       syncDiscoverySortOption();
       controls.sort.value = state.sortKey;
       // Toolbar changes resize the pane without triggering a window resize.
-      const graphResizeObserver = new ResizeObserver(() => Plotly.Plots.resize(graphDiv));
+      const graphResizeObserver = new ResizeObserver(() => {
+        if (graphDiv.clientWidth && graphDiv.clientHeight) Plotly.Plots.resize(graphDiv);
+      });
       graphResizeObserver.observe(graphDiv);
       renderTimeline();
       // Result IDs survive rebuilds, so the saved payload can be newer than the

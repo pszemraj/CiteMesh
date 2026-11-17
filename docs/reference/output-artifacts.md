@@ -75,7 +75,7 @@ Each node carries:
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
 - discovery evidence on every related paper of a hybrid build (never on the focal paper or on other strategies' papers): `discovery_rank` (one-based position in the fused order of the whole candidate pool), `discovery_score` (the fused score), `discovery_features`, and `discovery_list_ranks`
 
-`discovery_features` holds `seed_similarity` (the document-role cosine with the focal paper), `bibliography_similarity` (`null` when fewer than five other references from the focal paper exist), `direct_citation` (the focal paper cites the paper or it cites the focal paper), and `recommendation_rank` (`null` when the provider did not recommend it). `discovery_list_ranks` gives the paper's one-based rank in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The values below are illustrative:
+`discovery_features` holds `seed_similarity` (the document-role cosine with the focal paper), `bibliography_similarity` (`null` when fewer than five other references from the focal paper exist), `direct_citation` (the focal paper cites the paper or it cites the focal paper), and `recommendation_rank` (its position among the provider's returned recommendations, or `null`). `discovery_list_ranks` gives the paper's one-based position in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The fused score uses these positions. The recommendation list position can differ from the provider position after candidates are deduplicated. The values below are illustrative:
 
 ```json
 "discovery_rank": 3,
@@ -84,7 +84,7 @@ Each node carries:
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`seed_relevance` measures something else: personalized PageRank over the final graph's edges, not the candidate ranking. In the dashboard, the sort control gains a "Sort: Discovery rank" option, shown only when the graph carries discovery ranks (papers without one sort last), and it is the default sort when every related paper has a rank; any other graph, including older files without ranks, opens sorted by "Sort: Relevance". **Add Results** resets the sort to that default for the graph it loads, along with the search, year and scope controls. The "Why This Paper" panel adds a line such as `Discovery rank 3 (score 0.0479) | focal similarity 0.710 | bibliography similarity 0.660 | direct citation`, with `recommended #N` appended when the provider recommended the paper.
+`seed_relevance` is personalized PageRank over the final similarity graph. The dashboard labels it **Graph relevance**. The dashboard defaults to **Discovery rank** when every related paper has a rank, and **Graph relevance** otherwise. When ranks exist for only some papers, sorting by discovery rank puts unranked papers last. **Why this paper** shows the paper's place in the candidate pool, its discovery signals, and the separate graph evidence. Expand **Discovery score** to see the positions used in fusion. **Add Results** resets the sort, search, year, and scope controls for the loaded graph.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
@@ -106,32 +106,24 @@ A reduced node schema: `provenance`, `provenance_base`, `seed_relation`, `seed_r
 
 `dashboard.html` in collection mode, `<name>.dashboard.html` standalone: a tri-pane interface with an embedded Plotly graph, paper list, and detail panel. Collection-mode HTML embeds a package snapshot because browsers do not reliably let a `file://` page fetch adjacent local files; the package itself stays authoritative.
 
-At 1100px and below, the panes stack as graph, details, then paper list, and **List view** jumps directly to the list. Navigation, filters, legends, and long paper metadata reflow on narrow screens without expanding the document beyond the viewport.
+The header names the focal paper, discovery strategy, and graph size. When recorded in a build, it also identifies an arXiv corpus that supplied candidates and any requested source that was unavailable. Search titles, authors, and abstracts from the search box. On a narrow screen, use **Graph**, **Papers**, and **Details** to switch panels. Typing a query shows matching papers, and selecting a paper opens its details.
 
 ![CiteMesh dashboard with Prior works active and a paper selected](../../assets/ui-prior-works.png)
 
-_**Prior works** active with a paper selected: the graph and paper list narrow to papers the focal paper references, plus undirected ones published no later than the focal paper, and the detail pane explains that paper's path to the focal paper._
+**Prior works** includes papers the focal paper references. **Derivative works** includes papers that cite it. For papers without a recorded direction, CiteMesh uses the publication year relative to the focal paper. The focal paper, papers with links in both directions, and undirected papers with unknown years appear in both views. Choose **All papers** to return to the full scope.
 
-Toolbar controls and data actions:
+The paper list shows discovery rank where available. Select a title to read its abstract, open its source, and inspect **Why this paper**. A missing direct citation in the collected data can reflect incomplete provider coverage.
 
-- **CiteMesh / GitHub / Docs / Issues** - open the repository, [documentation](../README.md), or issue tracker in a new tab
-- **Prior works / Derivative works** - scope the graph and list by citation direction relative to the focal paper - papers it references, or papers that cite it - falling back to publication year at or before (or at or after) the focal paper only for papers the citation graph gives no direction, so the focal paper, `overlap` papers, and papers without a usable year stay in both
-- **List view** - scroll the paper list pane into view; shown only on the stacked layout at 1100px and below, where the list sits under the graph
-- **Filters** - text search, sort, year range, provenance chips (citation/semantic/both), `Saved` chip
-- **Semantic Scholar ↗** - open the selected paper, or the focal paper, on Semantic Scholar; disabled when that paper has no Semantic Scholar link
-- **Graph selector** - switch between graph slots in the active collection
-- **Export JSON / CSV / All BibTeX** - download the embedded payload, a client-side CSV, or every paper's BibTeX
-- **Saved BibTeX / Copy Saved Links** - appear once papers are starred: the reading list as `.bib`, or as markdown links
-- **Add Results** - import `citemesh-graph` files, packages, or dashboard HTML into the session, refreshing matching `(strategy, seed_id)` slots rather than duplicating them
-- **Export Collection** - download the browser session as `dashboard.citemesh.json`, the only way to persist an imported set
+- **Filters** changes the sort order, publication years, and candidate sources.
+- **Saved** shows papers you have starred in this graph.
+- **Graph tools** contains the graph selector for collections, project links, and the Semantic Scholar shortcut for the selected or focal paper. **Export JSON**, **Export CSV**, and **All BibTeX** download the active graph. **Saved BibTeX** and **Copy Saved Links** appear after you star a paper.
+- **Add Results** in Graph tools imports graph JSON, collection packages, or dashboard HTML. It updates matching graph slots in the current browser session. Use **Export Collection** to keep a copy of the imported set.
 
-![CiteMesh dashboard with the Filters row open and a search term narrowing the graph](../../assets/ui-dashboard-search-filter.png)
-
-_Filters open with `recurrent` typed on a hybrid graph built around "Attention Is All You Need" (45 papers, 109 links): the list narrows from 45 to 24 papers and the graph dims everything else._
+![Search narrowing the Megalodon paper list and similarity graph](../../assets/ui-dashboard-search-filter.png)
 
 Downloads are named from the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
-Node color is a publication-year gradient shared with the legend and year timeline, node size tracks citation count, the focal paper wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
+Node color is a publication-year gradient shown in the year legend, node size tracks citation count, the focal paper wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
 
 ## Sidecar (`<strategy>.config.json`)
 

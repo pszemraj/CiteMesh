@@ -1922,10 +1922,11 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="saved-filter"',
         'id="export-saved-bib-btn"',
         'id="copy-saved-links-btn"',
-        'id="list-view-btn" class="nav-btn" type="button">List view',
+        'id="pane-nav"',
+        'popovertarget="graph-tools"',
         'title="Open the selected paper, or the focal paper, on Semantic Scholar"',
         "Semantic Scholar ↗",
-        "legend-gradient",
+        'id="timeline-bar"',
         "star-btn",
         "citemesh-saved:",
     ]:
@@ -1936,7 +1937,6 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "legend-marker citation",
         "legend-marker semantic",
         "legend-marker both",
-        # Nothing toggles "List view", so it must not ship pre-highlighted.
         'class="nav-btn active"',
     ]:
         assert stale_token not in rendered
@@ -2615,7 +2615,7 @@ const genericClasses = {
   add() {},
   contains() { return false; },
 };
-const fallbackElement = new Proxy({
+const makeElement = () => new Proxy({
   textContent: "",
   value: "",
   files: [],
@@ -2631,14 +2631,11 @@ const fallbackElement = new Proxy({
   get(target, property) {
     return property in target ? target[property] : noOp;
   },
-  set(target, property, value) {
-    target[property] = value;
-    return true;
-  },
 });
+const elements = new Map();
 global.document = {
   documentElement: {},
-  body: fallbackElement,
+  body: makeElement(),
   getElementById(id) {
     if (id === "citemesh-dashboard-data"
         || id === "citemesh-dashboard-figure"
@@ -2646,13 +2643,15 @@ global.document = {
       return { textContent: scriptText(id) };
     }
     if (id === "dashboard-status") return status;
-    return fallbackElement;
+    if (!elements.has(id)) elements.set(id, makeElement());
+    return elements.get(id);
   },
   querySelectorAll() { return []; },
-  createElement() { return fallbackElement; },
+  createElement: makeElement,
 };
 const savedStore = new Map(JSON.parse(process.env.CITEMESH_SAVED_STORE || "[]"));
 global.window = {
+  matchMedia() { return { matches: false }; },
   localStorage: {
     getItem(key) { return savedStore.has(key) ? savedStore.get(key) : null; },
     setItem(key, value) { savedStore.set(key, String(value)); },
@@ -2900,6 +2899,7 @@ def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> 
     )
 
     latest_graph, _ = _build_graph()
+    latest_graph.graph["candidate_source_status"] = {"citations": "unavailable"}
     latest_graph.add_node("new-paper", title="New paper", year=2024)
     latest_exporter = GraphExporter(latest_graph, seed_id)
     update_dashboard_package(
@@ -2925,6 +2925,8 @@ def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> 
         " active: payload.nodes.map(node => node.id),"
         " stored: collectionBundle.results[0].payload.nodes.map(node => node.id),"
         " positions: figureSpec.data[nodeTraceIndex].x.length,"
+        " heading: document.getElementById('focal-title').textContent,"
+        " summary: document.getElementById('graph-summary').textContent,"
         " resultId: collectionResultId"
         "})",
     )
@@ -2932,6 +2934,8 @@ def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> 
         "active": ["new-paper", "related", "seed"],
         "stored": ["new-paper", "related", "seed"],
         "positions": 3,
+        "heading": "Seed Paper",
+        "summary": "Citation discovery · 3 papers · 1 link · Unavailable: citing papers",
         "resultId": "citation:seed",
     }
 
@@ -3284,6 +3288,39 @@ process.stdout.write(JSON.stringify(log));
     }
 
 
+def test_dashboard_compact_panel_navigation(two_node_dashboard: Path) -> None:
+    """Show the chosen panel on small screens and focus the paper after selection."""
+    result = _probe_dashboard_runtime_in_node(
+        two_node_dashboard,
+        """
+        (() => {
+          let compact = true;
+          let focused = false;
+          window.matchMedia = () => ({matches: compact});
+          controls.root = {dataset: {pane: "graph"}};
+          controls.detailTitle = {focus() { focused = true; }};
+          controls.paneButtons = ["graph", "paper-list", "detail"].map(pane => ({
+            dataset: {pane}, setAttribute(key, value) { this[key] = value; }
+          }));
+          const states = [];
+          showPane("paper-list");
+          states.push(controls.root.dataset.pane);
+          showPane("detail", true);
+          states.push(controls.root.dataset.pane);
+          compact = false;
+          showPane("graph");
+          states.push(controls.root.dataset.pane);
+          return {states, focused, pressed: controls.paneButtons.map(b => b["aria-pressed"])};
+        })()
+        """,
+    )
+    assert result == {
+        "states": ["paper-list", "detail", "detail"],
+        "focused": True,
+        "pressed": ["false", "false", "true"],
+    }
+
+
 def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
     two_node_dashboard: Path,
 ) -> None:
@@ -3297,7 +3334,6 @@ def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
         two_node_dashboard,
         "(() => {"
         ' controls.detailMode = { textContent: "" };'
-        ' controls.graphHint = { textContent: "" };'
         ' state.selectedId = "seed";'
         " renderList();"
         ' previewRowOnHover("related");'
@@ -3317,6 +3353,124 @@ def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
     assert probed["afterRerender"] == ""
     assert probed["hoverSelected"] == "Selected"
     assert probed["hoverOther"] == "Preview"
+
+
+def test_dashboard_paper_controls_keep_focus_and_show_discovery_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving and opening a ranked paper use separate, focusable controls."""
+    path = _export_discovery_dashboard(tmp_path, monkeypatch, ranked=1)
+    result = _probe_dashboard_runtime_in_node(
+        path,
+        r"""
+(() => {
+  const rows = new Map();
+  const createElement = document.createElement;
+  document.createElement = (tag) => {
+    if (tag !== "li") return createElement(tag);
+    const row = {
+      setAttribute(name, value) { this.id = value; },
+      getAttribute() { return this.id; },
+      querySelector(selector) { return selector === ".star-btn" ? this.save : this.select; },
+      addEventListener() {},
+    };
+    const button = (className) => ({
+      parentElement: row,
+      classList: { contains(name) { return name === className; } },
+      closest() { return this; },
+      focus() { document.activeElement = this; },
+      addEventListener(name, callback) { this.activate = callback; },
+    });
+    row.save = button("star-btn");
+    row.select = button("paper-select");
+    return row;
+  };
+  controls.list = {
+    set innerHTML(value) { rows.clear(); },
+    appendChild(row) { rows.set(row.id, row); },
+  };
+  controls.detailWhy = { innerHTML: "" };
+  controls.detailRanking = { innerHTML: "" };
+  controls.detailLinks = { innerHTML: "" };
+  controls.detailMode = { textContent: "" };
+  window.matchMedia = () => ({ matches: false });
+
+  const id = "undated-semantic";
+  const candidate = nodeById.get(id);
+  candidate.discovery_features.recommendation_rank = 153;
+  candidate.discovery_list_ranks.recommended = 152;
+  candidate.discovery_score = 1 / 61 + 1 / 212;
+  candidate.links = {
+    arxiv_pdf: "https://arxiv.org/pdf/1234",
+    arxiv_abs: "https://arxiv.org/abs/1234",
+    semantic_scholar: "javascript:alert(1)",
+  };
+  state.selectedId = "seed";
+  renderList();
+  const ranked = rows.get(id).innerHTML;
+  const unranked = rows.get("late-reference").innerHTML;
+
+  rows.get(id).save.focus();
+  rows.get(id).save.activate();
+  const afterSave = {
+    selected: state.selectedId,
+    saved: isSaved(id),
+    focusRestored: document.activeElement === rows.get(id).save,
+    html: rows.get(id).innerHTML,
+  };
+
+  state.hoverId = "seed";
+  rows.get(id).select.focus();
+  rows.get(id).select.activate();
+  return {
+    ranked,
+    unranked,
+    afterSave,
+    selected: state.selectedId,
+    hover: state.hoverId,
+    mode: controls.detailMode.textContent,
+    focusRestored: document.activeElement === rows.get(id).select,
+    html: rows.get(id).innerHTML,
+    evidence: controls.detailWhy.innerHTML,
+    breakdown: controls.detailRanking.innerHTML,
+    links: controls.detailLinks.innerHTML,
+  };
+})()
+""",
+    )
+    ranked = result["ranked"]
+    assert 'class="paper-select" type="button"' in ranked
+    assert re.search(r'</button>\s*<button class="star-btn"', ranked)
+    assert 'class="paper-rank">Rank #1' in ranked
+    assert "No direct citation recorded" in ranked
+    assert "paper-rank" not in result["unranked"]
+    assert "Referenced by focal paper" in result["unranked"]
+
+    saved = result["afterSave"]
+    assert saved["selected"] == "seed"
+    assert saved["saved"] and saved["focusRestored"]
+    assert 'aria-pressed="true"' in saved["html"]
+    assert result["selected"] == "undated-semantic"
+    assert result["hover"] is None
+    assert result["mode"] == "Selected"
+    assert result["focusRestored"]
+    assert 'aria-current="true"' in result["html"]
+    assert "<dt>Discovery rank</dt><dd>#1 in the candidate pool" in result["evidence"]
+    assert "<dt>Relation</dt><dd>No direct citation recorded" in result["evidence"]
+    assert "<dt>Discovery signals</dt><dd>Focal similarity 0.500" in result["evidence"]
+    assert "provider recommendation #153" in result["evidence"]
+    assert "<dt>Graph relevance</dt>" in result["evidence"]
+    assert (
+        "<dt>Similarity path to focal paper</dt><dd>Paper undated-semantic → Person, 2020"
+        in result["evidence"]
+    )
+    assert "<summary>Discovery score 0.0211</summary>" in result["breakdown"]
+    assert "Each list adds 1 / (60 + position)" in result["breakdown"]
+    assert "<dt>Recommendation list</dt><dd>#152" in result["breakdown"]
+    assert 'class="primary-link" href="https://arxiv.org/pdf/1234"' in result["links"]
+    assert ">PDF " in result["links"]
+    assert ">arXiv " in result["links"]
+    assert "javascript:" not in result["links"]
 
 
 def test_dashboard_semantic_scholar_button_disables_without_a_link(
@@ -3481,14 +3635,8 @@ def test_dashboard_highlights_fallback_to_path_order_and_use_theme_styles(
     exporter.to_dashboard_html(out_path, theme="light")
     rendered = out_path.read_text(encoding="utf-8")
 
-    for opacity in ("0.74", "0.18", "0.12"):
+    for opacity in ("0.74", "0.54", "0.12"):
         assert f"opacity: {opacity} !important;" in rendered
-    assert (
-        rendered.count(
-            "background: color-mix(in srgb, var(--panel-bg) 82%, transparent);"
-        )
-        == 2
-    )
     assert (
         "filter: drop-shadow(0 0 10px color-mix(in srgb, var(--seed-ring) 85%, transparent)) brightness(1.14);"
         in rendered
