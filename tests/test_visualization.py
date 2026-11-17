@@ -690,6 +690,23 @@ def test_graph_json_python_import_round_trips_analysis_and_exports(
         is_seed=True,
     )
     graph.nodes["early-semantic"]["is_local_corpus"] = True
+    graph.nodes["late-reference"]["focal_reference_evidence"] = {
+        "context_count": 2,
+        "excerpt": "We use this reference to bound the approximation error.",
+        "is_influential": False,
+    }
+    graph.graph["discovery_leads"] = {
+        "references": [
+            {
+                "paper_id": "outside",
+                "title": "Estimates for the approximation",
+                "doi": "10.1234/outside",
+                "arxiv_id": "",
+                "context_count": 3,
+                "rank": 18,
+            }
+        ],
+    }
     graph.graph["strategy"] = "hybrid"
     graph.graph["paper_sources"] = {
         "seed": "both",
@@ -709,7 +726,8 @@ def test_graph_json_python_import_round_trips_analysis_and_exports(
     graph.graph["discovery_ranker"] = {
         "method": "reciprocal_rank_fusion",
         "k": 60,
-        "lists": ["semantic", "direct"],
+        "lists": ["semantic", "direct", "focal_reference"],
+        "weights": {"focal_reference": 0.5},
     }
     graph.graph["discovery_ranking"] = {
         "early-semantic": {
@@ -721,7 +739,11 @@ def test_graph_json_python_import_round_trips_analysis_and_exports(
                 "direct_citation": False,
                 "recommendation_rank": None,
             },
-            "discovery_list_ranks": {"semantic": 1, "direct": None},
+            "discovery_list_ranks": {
+                "semantic": 1,
+                "direct": None,
+                "focal_reference": None,
+            },
         }
     }
     layout = {
@@ -746,6 +768,7 @@ def test_graph_json_python_import_round_trips_analysis_and_exports(
         "candidate_source_status",
         "discovery_ranker",
         "discovery_ranking",
+        "discovery_leads",
     ):
         assert imported.graph.graph[key] == graph.graph[key]
     assert {
@@ -756,6 +779,10 @@ def test_graph_json_python_import_round_trips_analysis_and_exports(
     assert imported.graph.nodes["seed"]["title"] == "A paper about graphs"
     assert imported.graph.nodes["seed"]["authors"] == ["Alice Smith", "Béatrice Jones"]
     assert imported.graph.nodes["early-semantic"]["is_local_corpus"] is True
+    assert (
+        imported.graph.nodes["late-reference"]["focal_reference_evidence"]
+        == graph.nodes["late-reference"]["focal_reference_evidence"]
+    )
     assert imported.graph.nodes["undated-semantic"]["year"] == 0
     assert imported.graph.nodes["undated-semantic"]["paper"].year is None
     assert imported.graph["seed"]["early-citer"]["weight"] == 0.6
@@ -3004,6 +3031,125 @@ def test_copy_saved_links_escapes_bracketed_titles(two_node_dashboard: Path) -> 
     )
 
     assert probed == ["Attention \\[Is\\] All You Need", "Plain"]
+
+
+def test_dashboard_discovery_leads_and_passages_roundtrip_in_node(
+    two_node_dashboard: Path,
+) -> None:
+    """Show safe leads and citation evidence, then clear both on an older import."""
+    completed = _run_dashboard_runtime_in_node(
+        two_node_dashboard,
+        r"""
+const button = document.getElementById("more-papers-btn");
+const dialog = document.getElementById("more-papers-dialog");
+let activate;
+let closes = 0;
+button.addEventListener = (name, callback) => {
+  if (name === "click") activate = callback;
+};
+dialog.open = false;
+dialog.showModal = () => { dialog.open = true; };
+dialog.close = () => { dialog.open = false; closes++; };
+eval(runtime + `
+(() => {
+  const old = portableGraphPayload(payload);
+  const withLeads = JSON.parse(JSON.stringify(old));
+  const originalHidden = button.hidden;
+  const passages = {
+    context_count: 3,
+    excerpt: '<img onerror="alert(1)"> & words',
+    is_influential: true,
+  };
+  const leads = {
+    references: [
+      {paper_id: "javascript:alert(1)", title: "<unsafe>", rank: 1, context_count: 1},
+      {paper_id: "s2:" + "a".repeat(40), title: "Provider paper", rank: 2, context_count: 3},
+    ],
+    corpus: [
+      {paper_id: "arxiv:math.GT/0309136", title: "arXiv paper", rank: 19},
+      {paper_id: "doi:10.5555/paper?part", title: "Publisher paper", rank: 27},
+    ],
+  };
+  const related = withLeads.nodes.find((node) => !node.is_seed);
+  related.focal_reference_evidence = passages;
+  related.discovery_rank = 1;
+  related.discovery_score = 0.022;
+  related.discovery_list_ranks = {focal_reference: 4};
+  withLeads.meta.discovery_leads = leads;
+  withLeads.meta.discovery_ranker = {
+    method: "reciprocal_rank_fusion", k: 60, weights: {focal_reference: 0.5},
+  };
+  applyImportedPayload(withLeads, "lead graph");
+  const shown = !button.hidden;
+  activate();
+  const opened = dialog.open;
+  const references = document.getElementById("more-papers-references-list").innerHTML;
+  const corpus = document.getElementById("more-papers-corpus-list").innerHTML;
+  renderWhyLines(related.id);
+  const quote = controls.detailReference.innerHTML;
+  const breakdown = controls.detailRanking.innerHTML;
+  const saved = buildPortableJsonPayload();
+  const imported = normalizeImportedDashboardPayload(saved, "saved", false).payload;
+  const roundtrip = {
+    graph: saved.meta.discovery_leads,
+    dashboard: saved.dashboard.meta.discovery_leads,
+    imported: imported.meta.discovery_leads,
+    evidence: imported.nodes.find((node) => node.id === related.id).focal_reference_evidence,
+  };
+  applyImportedPayload(old, "older graph");
+  renderWhyLines(related.id);
+  activate();
+  const result = {
+    originalHidden, shown, opened, references, corpus, quote, breakdown, roundtrip,
+    closes, oldHidden: button.hidden, oldOpen: dialog.open,
+    oldLeadList: document.getElementById("more-papers-references-list").innerHTML,
+    oldQuote: controls.detailReference.innerHTML,
+    emptyEvidence: focalReferenceEvidenceHtml({
+      focal_reference_evidence: {context_count: 0, excerpt: "", is_influential: false},
+    }),
+  };
+  process.stdout.write(JSON.stringify(result));
+})()
+`);
+""",
+        [],
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["originalHidden"] and result["shown"] and result["opened"]
+    assert result["closes"] == 1
+    assert result["oldHidden"] and not result["oldOpen"]
+    assert result["oldLeadList"] == result["oldQuote"] == result["emptyEvidence"] == ""
+
+    references = result["references"]
+    assert "&lt;unsafe&gt;" in references and "javascript:" not in references
+    assert "1 mention in the focal paper" in references
+    assert "3 mentions in the focal paper" in references
+    assert f"https://www.semanticscholar.org/paper/{'a' * 40}" in references
+    assert 'href="https://arxiv.org/abs/math.GT/0309136"' in result["corpus"]
+    assert 'href="https://doi.org/10.5555/paper%3Fpart"' in result["corpus"]
+    assert "arXiv index query rank #19" in result["corpus"]
+
+    quote = result["quote"]
+    assert "<details>" in quote and "<details open" not in quote
+    assert "<summary>3 citation passages in the focal paper</summary>" in quote
+    assert "&lt;img onerror=&quot;alert(1)&quot;&gt; &amp; words" in quote
+    assert "<img" not in quote
+    assert "Marked influential by Semantic Scholar" in quote
+    assert "<dt>Focal reference use</dt><dd>#4" in result["breakdown"]
+    assert (
+        "The focal reference list contributes half that amount." in result["breakdown"]
+    )
+    assert (
+        result["roundtrip"]["graph"]
+        == result["roundtrip"]["dashboard"]
+        == result["roundtrip"]["imported"]
+    )
+    assert result["roundtrip"]["evidence"] == {
+        "context_count": 3,
+        "excerpt": '<img onerror="alert(1)"> & words',
+        "is_influential": True,
+    }
 
 
 def _build_seed_relation_graph() -> nx.Graph:

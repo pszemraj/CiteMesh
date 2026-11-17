@@ -152,12 +152,18 @@ class DiscoveryFeatures(TypedDict):
     recommendation_rank: int | None
 
 
-class DiscoveryRanker(TypedDict):
+class _DiscoveryRankerRequired(TypedDict):
     """The fusion method, its constant and the lists fused for one build."""
 
     method: str
     k: int
     lists: list[str]
+
+
+class DiscoveryRanker(_DiscoveryRankerRequired, total=False):
+    """List contributions default to unit weight unless specified."""
+
+    weights: dict[str, float]
 
 
 class DiscoveryEvidence(TypedDict):
@@ -203,6 +209,7 @@ class EnrichedNodePayload(_EnrichedNodePayloadRequired, total=False):
     discovery_score: float
     discovery_features: DiscoveryFeatures
     discovery_list_ranks: dict[str, int | None]
+    focal_reference_evidence: dict[str, object]
 
 
 class GraphSummary(TypedDict):
@@ -234,6 +241,7 @@ class DashboardMetadata(_DashboardMetadataRequired, total=False):
 
     candidate_source_status: dict[str, str]
     discovery_ranker: DiscoveryRanker
+    discovery_leads: dict[str, list[dict[str, object]]]
     plotly_node_order: list[str]
     plotly_positions: list[list[float]]
     plotly_node_sizes: list[float]
@@ -271,6 +279,7 @@ class PortableGraphMetadata(_PortableGraphMetadataRequired, total=False):
 
     candidate_source_status: dict[str, str]
     discovery_ranker: DiscoveryRanker
+    discovery_leads: dict[str, list[dict[str, object]]]
 
 
 class GraphPayloadDashboard(TypedDict):

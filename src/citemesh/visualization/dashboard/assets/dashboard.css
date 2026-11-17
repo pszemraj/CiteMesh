@@ -205,6 +205,36 @@
       font-weight: 680;
       letter-spacing: 0.01em;
     }
+    .paper-list-actions { display: flex; align-items: center; gap: 8px; }
+    #more-papers-btn { white-space: nowrap; }
+    #more-papers-dialog {
+      width: min(600px, calc(100% - 24px));
+      max-height: min(80dvh, 680px);
+      padding: 0;
+      color: var(--text-primary);
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    #more-papers-dialog[open] { display: flex; flex-direction: column; }
+    #more-papers-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+    .more-papers-content { min-height: 0; padding: 12px 14px 16px; overflow-y: auto; }
+    #more-papers-description { margin: 0 0 14px; font-size: 13px; }
+    .more-papers-content section:not([hidden]) + section { margin-block-start: 16px; }
+    .more-papers-content h3 { margin: 0; font-size: 14px; }
+    .more-papers-content ul { list-style: none; margin: 4px 0 0; padding: 0; }
+    .more-papers-content li {
+      display: grid;
+      gap: 4px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--panel-border);
+      font-size: 14px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .more-papers-content li .muted { font-size: 12px; }
+    .more-papers-content a { color: var(--accent); }
     .muted { color: var(--text-muted); }
     #paper-list {
       margin: 0;
@@ -456,23 +486,31 @@
     }
     .detail-evidence dt { color: var(--text-muted); }
     .detail-evidence dd { margin: 0; font-variant-numeric: tabular-nums; }
-    #detail-ranking:not(:empty) {
+    :is(#detail-ranking, #detail-reference):not(:empty) {
       border-top: 1px solid var(--panel-border);
       margin-block-start: 9px;
       padding-block-start: 5px;
       font-size: 12px;
     }
-    #detail-ranking summary {
+    :is(#detail-ranking, #detail-reference) summary {
       width: fit-content;
       padding: 4px 0;
       color: var(--accent);
       cursor: pointer;
     }
-    #detail-ranking summary:focus-visible {
+    :is(#detail-ranking, #detail-reference) summary:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
     }
-    #detail-ranking p { margin: 5px 0 8px; }
+    :is(#detail-ranking, #detail-reference) p { margin: 5px 0 8px; }
+    #detail-reference blockquote {
+      margin: 5px 0 8px;
+      border-inline-start: 2px solid var(--panel-border);
+      padding-inline-start: 8px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     @media (max-width: 1100px) {
       #pane-nav { display: flex; align-self: center; margin: 8px auto 0; }
       #pane-nav button { min-width: 75px; }

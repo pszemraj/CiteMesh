@@ -675,6 +675,8 @@
       root: document.getElementById("dashboard-root"),
       list: document.getElementById("paper-list"),
       count: document.getElementById("paper-count"),
+      morePapersBtn: document.getElementById("more-papers-btn"),
+      morePapersDialog: document.getElementById("more-papers-dialog"),
       search: document.getElementById("search-input"),
       sort: document.getElementById("sort-select"),
       yearMin: document.getElementById("year-min"),
@@ -695,6 +697,7 @@
       detailLinks: document.getElementById("detail-links"),
       detailWhy: document.getElementById("detail-why-lines"),
       detailRanking: document.getElementById("detail-ranking"),
+      detailReference: document.getElementById("detail-reference"),
       detailActions: document.getElementById("detail-actions"),
       detailAbstract: document.getElementById("detail-abstract"),
       timelineYearMin: document.getElementById("timeline-year-min"),
@@ -1041,6 +1044,63 @@
         .join("");
     }
 
+    function discoveryLeadUrl(lead) {
+      const arxiv = [lead.arxiv_id, lead.paper_id]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim().replace(/^arxiv:/i, ""))
+        .find((value) => /^(?:\d{4}\.\d{4,5}|[a-z.-]+\/\d{7})(?:v\d+)?$/i.test(value));
+      if (arxiv) {
+        return `https://arxiv.org/abs/${arxiv}`;
+      }
+      const doi = [lead.doi, lead.paper_id]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim().replace(/^doi:/i, ""))
+        .find((value) => /^10\.\d{4,9}\/[!-~]+$/.test(value));
+      if (doi) {
+        return `https://doi.org/${doi.split("/").map(encodeURIComponent).join("/")}`;
+      }
+      const s2 = typeof lead.paper_id === "string"
+        ? /^(?:s2:)?([0-9a-f]{40})$/i.exec(lead.paper_id.trim())
+        : null;
+      return s2 ? `https://www.semanticscholar.org/paper/${s2[1]}` : "";
+    }
+
+    function discoveryLeadRowsHtml(entries, kind) {
+      return (Array.isArray(entries) ? entries : [])
+        .filter((entry) => typeof entry?.title === "string" && entry.title.trim())
+        .map((entry) => {
+          const title = escapeHtml(entry.title);
+          const href = discoveryLeadUrl(entry);
+          const link = href
+            ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+            : `<span>${title}</span>`;
+          let detail = "";
+          if (kind === "references" && Number.isInteger(entry.context_count) && entry.context_count > 0) {
+            const count = entry.context_count;
+            detail = `${count} ${count === 1 ? "mention" : "mentions"} in the focal paper`;
+          } else if (kind === "corpus" && Number.isInteger(entry.rank) && entry.rank > 0) {
+            detail = `arXiv index query rank #${entry.rank}`;
+          }
+          return `<li>${link}${detail ? `<span class="muted">${detail}</span>` : ""}</li>`;
+        })
+        .join("");
+    }
+
+    function syncDiscoveryLeads() {
+      if (controls.morePapersDialog.open === true) {
+        controls.morePapersDialog.close();
+      }
+      const leads = payload.meta?.discovery_leads;
+      let hasLeads = false;
+      for (const kind of ["references", "corpus"]) {
+        const rows = discoveryLeadRowsHtml(leads?.[kind], kind);
+        document.getElementById(`more-papers-${kind}-list`).innerHTML = rows;
+        document.getElementById(`more-papers-${kind}`).hidden = !rows;
+        hasLeads ||= !!rows;
+      }
+      controls.morePapersBtn.hidden = !hasLeads;
+    }
+
     function copyText(value) {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         return navigator.clipboard.writeText(value);
@@ -1113,7 +1173,8 @@
             year_range: nextMeta.year_range ?? null,
             candidate_source_status: nextMeta.candidate_source_status || {},
           },
-          nextMeta.discovery_ranker ? { discovery_ranker: nextMeta.discovery_ranker } : {}
+          nextMeta.discovery_ranker ? { discovery_ranker: nextMeta.discovery_ranker } : {},
+          nextMeta.discovery_leads ? { discovery_leads: nextMeta.discovery_leads } : {}
         ),
         summary,
         dashboard: {
@@ -1292,6 +1353,10 @@
         importedDashboardMeta.discovery_ranker || importedMeta.discovery_ranker;
       if (discoveryRanker) {
         baseMeta.discovery_ranker = discoveryRanker;
+      }
+      const discoveryLeads = importedDashboardMeta.discovery_leads || importedMeta.discovery_leads;
+      if (isObjectRecord(discoveryLeads)) {
+        baseMeta.discovery_leads = discoveryLeads;
       }
       if (!hasCompleteDashboardGeometry(baseMeta)) {
         throw new Error(
@@ -1620,6 +1685,7 @@
       populateCollectionSelector();
       updateYearPlaceholders();
       syncDiscoverySortOption();
+      syncDiscoveryLeads();
       renderTimeline();
       return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
         setupGraphInteractions();
@@ -1709,6 +1775,7 @@
         ["reference_context", "Bibliography similarity list"],
         ["direct", "Direct citation list"],
         ["recommended", "Recommendation list"],
+        ["focal_reference", "Focal reference use"],
       ];
       const positions = entries
         .filter(([key]) => Number.isInteger(ranks[key]))
@@ -1717,13 +1784,43 @@
         return `<p>Discovery score ${score}</p>`;
       }
       const ranker = payload.meta?.discovery_ranker;
+      const halfWeight = ranker?.weights?.focal_reference === 0.5
+        ? " The focal reference list contributes half that amount."
+        : "";
       const formula = ranker?.method === "reciprocal_rank_fusion" && Number.isInteger(ranker.k)
-        ? `<p>Each list adds 1 / (${ranker.k} + position) to the score.</p>`
+        ? `<p>Each list adds 1 / (${ranker.k} + position) to the score.${halfWeight}</p>`
         : "";
       return `<details>
         <summary>Discovery score ${score}</summary>
         ${formula}
         <dl class="detail-evidence">${detailEvidenceHtml(positions)}</dl>
+      </details>`;
+    }
+
+    function focalReferenceEvidenceHtml(node) {
+      const evidence = node.focal_reference_evidence;
+      if (!evidence || node.is_seed) {
+        return "";
+      }
+      const count = Number.isInteger(evidence.context_count) ? evidence.context_count : 0;
+      const excerpt = typeof evidence.excerpt === "string" ? evidence.excerpt.trim() : "";
+      const influential = evidence.is_influential === true;
+      if (count <= 0 && !excerpt && !influential) {
+        return "";
+      }
+      const summary = count > 0
+        ? `${count} citation ${count === 1 ? "passage" : "passages"} in the focal paper`
+        : (excerpt ? "Citation passage in the focal paper" : "Influential citation");
+      const source = influential
+        ? "Marked influential by Semantic Scholar"
+        : "From Semantic Scholar";
+      if (!excerpt) {
+        return `<p>${summary} <span class="muted">· ${source}</span></p>`;
+      }
+      return `<details>
+        <summary>${summary}</summary>
+        <blockquote>${escapeHtml(excerpt)}</blockquote>
+        <p class="muted">${source}</p>
       </details>`;
     }
 
@@ -1772,6 +1869,7 @@
       }
       controls.detailWhy.innerHTML = detailEvidenceHtml(evidence);
       controls.detailRanking.innerHTML = ranked ? discoveryBreakdownHtml(node) : "";
+      controls.detailReference.innerHTML = focalReferenceEvidenceHtml(node);
     }
 
     function paperAuthorText(node, limit) {
@@ -1800,6 +1898,7 @@
         controls.detailLinks.innerHTML = "";
         controls.detailWhy.innerHTML = "";
         controls.detailRanking.innerHTML = "";
+        controls.detailReference.innerHTML = "";
         controls.detailActions.innerHTML = "";
         controls.detailAbstract.textContent = "Choose a paper from the graph or list.";
         controls.detailAbstract.classList.add("muted");
@@ -2226,6 +2325,12 @@
           window.open(target, "_blank", "noopener,noreferrer");
         }
       });
+      controls.morePapersBtn.addEventListener("click", () => {
+        if (!controls.morePapersBtn.hidden) {
+          controls.morePapersDialog.showModal();
+        }
+      });
+      syncDiscoveryLeads();
       syncSemanticScholarButton();
 
       function downloadBlob(content, filename, mime) {

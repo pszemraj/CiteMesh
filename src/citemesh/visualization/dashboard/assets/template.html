@@ -83,7 +83,10 @@ __DASHBOARD_CSS__
     <aside id="paper-list-pane" class="pane">
       <div class="pane-header">
         <h2 class="pane-title">Papers</h2>
-        <span id="paper-count" class="muted">0</span>
+        <div class="paper-list-actions">
+          <span id="paper-count" class="muted">0</span>
+          <button id="more-papers-btn" type="button" aria-haspopup="dialog" aria-controls="more-papers-dialog" hidden>More papers</button>
+        </div>
       </div>
       <ul id="paper-list" role="list" tabindex="-1" aria-label="Papers"></ul>
     </aside>
@@ -124,6 +127,7 @@ __DASHBOARD_CSS__
           <h4 id="detail-why-label">Why this paper</h4>
           <dl id="detail-why-lines" class="detail-evidence"></dl>
           <div id="detail-ranking"></div>
+          <div id="detail-reference"></div>
         </section>
         <section id="detail-abstract-card">
           <h4 id="detail-abstract-label">Abstract</h4>
@@ -133,6 +137,24 @@ __DASHBOARD_CSS__
       </div>
     </aside>
   </div>
+
+  <dialog id="more-papers-dialog" aria-labelledby="more-papers-heading" aria-describedby="more-papers-description">
+    <div class="pane-header">
+      <h2 class="pane-title" id="more-papers-heading">More papers</h2>
+      <form method="dialog"><button type="submit" autofocus>Close</button></form>
+    </div>
+    <div class="more-papers-content">
+      <p id="more-papers-description" class="muted">These papers are outside the current graph.</p>
+      <section id="more-papers-references" aria-labelledby="more-papers-references-heading" hidden>
+        <h3 id="more-papers-references-heading">Frequently discussed references</h3>
+        <ul id="more-papers-references-list" role="list"></ul>
+      </section>
+      <section id="more-papers-corpus" aria-labelledby="more-papers-corpus-heading" hidden>
+        <h3 id="more-papers-corpus-heading">Related arXiv papers</h3>
+        <ul id="more-papers-corpus-list" role="list"></ul>
+      </section>
+    </div>
+  </dialog>
 
   <script>__PLOTLY_JS__</script>
   <script id="citemesh-dashboard-data" type="application/json">__PAYLOAD_JSON__</script>

@@ -204,6 +204,9 @@ class DashboardPayloadMixin:
         ranker = _discovery_ranker(self.graph)
         if ranker is not None:
             meta["discovery_ranker"] = ranker
+        leads = self.graph.graph.get("discovery_leads")
+        if isinstance(leads, dict) and leads:
+            meta["discovery_leads"] = leads
         if include_plotly_geometry:
             positions = self._get_layout()
             meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]

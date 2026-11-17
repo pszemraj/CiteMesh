@@ -284,7 +284,18 @@ def _discovery_ranker(graph: PaperGraph) -> DiscoveryRanker | None:
             and isinstance(lists, list)
             and all(isinstance(name, str) for name in lists)
         ):
-            return {"method": method, "k": k, "lists": [str(name) for name in lists]}
+            result: DiscoveryRanker = {"method": method, "k": k, "lists": list(lists)}
+            if "weights" in raw:
+                weights = raw["weights"]
+                if not isinstance(weights, dict) or not all(
+                    name in lists and isinstance(weight, (float, int))
+                    for name, weight in weights.items()
+                ):
+                    raise ValueError(
+                        f"Malformed discovery ranker weights: {weights!r}."
+                    )
+                result["weights"] = dict(weights)
+            return result
     raise ValueError(f"Malformed discovery_ranker graph metadata: {raw!r}.")
 
 
@@ -425,6 +436,9 @@ class NodesMixin:
                 "links": {},
                 "bibtex": "",
             }
+            reference_evidence = attrs.get("focal_reference_evidence")
+            if not is_seed and isinstance(reference_evidence, dict):
+                node_payload["focal_reference_evidence"] = reference_evidence
             evidence = None if is_seed else discovery.get(node_str)
             if evidence is not None:
                 node_payload["discovery_rank"] = evidence["discovery_rank"]
