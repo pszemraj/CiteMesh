@@ -7,22 +7,25 @@
 ### Build a graph
 
 ```bash
+# Hybrid dashboard with local embeddings for Semantic Scholar candidates
+citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard
+citemesh view
+
+# Add a model-free recommendation graph to the same dashboard collection
+citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
+
 # Minimal citation graph (static PNG, the default export)
 citemesh build "arxiv:1706.03762" --strategy citation -p 20
-
-# Dashboard collection in ./out, the default output directory; a second build adds to it
-citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -e csv --theme dark
-citemesh build "arxiv:1810.04805" -s recommendation -e dashboard --theme dark
 
 # Standalone single-file dashboard
 citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -o out/report.dashboard.html
 
-# Embedding graph over a corpus slice, with a debug trace
+# Encode and search a corpus slice, with a debug trace
 citemesh build "arxiv:1810.04805" -s embedding --dataset-split "train[:2%]" \
   -e plotly --verbose --log-file out/run.log
 ```
 
-Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dashboard` exports need the [viz extra](../../README.md#quick-start). Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
+Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dashboard` exports need the `viz` extra, included in the [hybrid quick start](../../README.md#quick-start). Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
 
 ### Accepted identifiers
 
@@ -35,7 +38,7 @@ Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dash
 
 ```bash
 citemesh search "attention mechanism transformers" --limit 5
-citemesh build "<paper-id-from-search>" --strategy recommendation
+citemesh build "<paper-id-from-search>" --strategy hybrid --export dashboard
 # search what an arXiv-corpus build hydrated
 citemesh search "long-context attention" --semantic-source arxiv-corpus
 ```

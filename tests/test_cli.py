@@ -5701,6 +5701,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "S2_API_KEY",
                 "CITEMESH_CACHE_DIR",
                 "--version",
+                'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
             ],
         ),
         (
@@ -5725,6 +5726,9 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "dashboard.html",
                 DASHBOARD_PACKAGE_FILENAME,
                 ".dashboard.html",
+                'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
+                'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
+                'citemesh build "arxiv:1706.03762" -s embedding --cache-namespace NAMESPACE',
             ],
         ),
         (

@@ -453,8 +453,8 @@ def _create_root_parser() -> tuple[
             Group(
                 _help_examples(
                     (
-                        "Build a graph from a known paper",
-                        'citemesh build "arxiv:1706.03762" --strategy hybrid',
+                        "Build a hybrid graph with local embeddings (recommended extra)",
+                        'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
                     ),
                     ("Find a focal paper", 'citemesh search "attention mechanisms"'),
                     ("Open saved results", "citemesh view"),
@@ -636,7 +636,7 @@ def _add_build_citation_arguments(
     citation_group.add_argument(
         "--no-references",
         action="store_true",
-        help="Disable fetching reference lists (faster but no real bibliographic coupling)",
+        help="Skip fetching selected papers’ reference lists for edge scoring. Hybrid still ranks the focal paper’s references.",
     )
     citation_group.add_argument(
         "--refresh-reference-cache",
@@ -973,12 +973,16 @@ def _add_build_arguments(
         epilog=_rich_epilog(
             _help_examples(
                 (
-                    "Create or extend the dashboard collection in out/",
-                    'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
+                    "Build a hybrid dashboard with local embeddings (recommended extra)",
+                    'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
                 ),
                 (
-                    "Search 10,000 recent papers by topic",
-                    'citemesh build "long-context models" -s embedding --corpus-size 10000',
+                    "Build a recommendation dashboard without an embedding model (viz extra)",
+                    'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
+                ),
+                (
+                    "Build from an installed corpus (embeddings extra)",
+                    'citemesh build "arxiv:1706.03762" -s embedding --cache-namespace NAMESPACE',
                 ),
             ),
         ),
