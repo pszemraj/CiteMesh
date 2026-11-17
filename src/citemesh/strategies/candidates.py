@@ -261,12 +261,12 @@ def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
 
     Such records often share no identifier. The preprint is the corpus row when
     exactly one record is one (two corpus rows never match), and otherwise the
-    only record with an arXiv ID; it must carry an arXiv ID and the publication
-    a DOI, and conflicting
-    explicit identifiers remain disqualifying. Titles and full first-author
-    names must match after word normalization, and the publication can be in
-    the preprint's year or the following year. Callers must require a unique
-    match on both sides before reconciling records.
+    only record with an arXiv ID. The publication must carry a DOI, have no
+    conflicting explicit identifiers, and be from the same or following year.
+    Word-normalized titles and full first-author names must match. If the
+    publisher provides only a first initial and surname, also require the
+    same abstract word sequence, at least twenty words long. Callers must
+    require a unique match on both sides before reconciling records.
 
     :param Paper left: One record.
     :param Paper right: The other record.
@@ -300,14 +300,28 @@ def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
         return None
     title = bibliography_text_key(preprint.title)
     author = bibliography_text_key(preprint.authors[0].name)
-    matches = (
-        " " in title
-        and " " in author
-        and len(author.partition(" ")[0]) > 1
-        and title == bibliography_text_key(publication.title)
-        and author == bibliography_text_key(publication.authors[0].name)
+    given_name, _, surname_parts = author.partition(" ")
+    if (
+        " " not in title
+        or not surname_parts
+        or len(given_name) < 2
+        or title != bibliography_text_key(publication.title)
+    ):
+        return None
+    publication_author = bibliography_text_key(publication.authors[0].name)
+    if author == publication_author:
+        return preprint
+    publication_initial, _, publication_surname = publication_author.partition(" ")
+    if (
+        publication_initial != given_name[0]
+        or publication_surname != surname_parts.rsplit(" ", 1)[-1]
+    ):
+        return None
+    abstract = bibliography_text_key(preprint.abstract)
+    same_abstract = len(abstract.split()) >= 20 and abstract == bibliography_text_key(
+        publication.abstract
     )
-    return preprint if matches else None
+    return preprint if same_abstract else None
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:

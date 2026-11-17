@@ -265,6 +265,64 @@ def test_publication_versions_need_matching_metadata(
     assert set(pool.papers) == {paper.paper_id for paper in publication_pair}
 
 
+@pytest.mark.parametrize(
+    ("publication_author", "abstract_case", "folds"),
+    [
+        ("L. Li", "same", 1),
+        ("L. Li", "different", 0),
+        ("L. Li", "placeholder", 0),
+        ("H. Li", "same", 0),
+        ("L. Lu", "same", 0),
+    ],
+)
+def test_abbreviated_publication_author_needs_matching_abstract(
+    publication_author: str, abstract_case: str, folds: int
+) -> None:
+    """Fold an abbreviated publisher's first author with matching content."""
+    abstract = (
+        "We train a vision-and-language model using independently collected images "
+        "and captions, then measure transfer to downstream visual reasoning "
+        "and cross-modal retrieval tasks without parallel pretraining data."
+    )
+    if abstract_case == "placeholder":
+        abstract = "No abstract available"
+    publication_abstract = abstract.replace(
+        "vision-and-language", "vision and language"
+    )
+    if abstract_case == "different":
+        publication_abstract = publication_abstract.replace("independently", "jointly")
+    title = "Unsupervised Vision-and-Language Pre-training Without Parallel Images and Captions"
+    preprint = Paper(
+        paper_id="arxiv:2010.12831",
+        arxiv_id="2010.12831",
+        title=title,
+        year=2020,
+        authors=[Author("Liunian Harold Li")],
+        abstract=abstract,
+        is_local_corpus=True,
+    )
+    publication = Paper(
+        paper_id="fc123daef8ab12025c2e5e6162a0c94370faa4c5",
+        doi="10.18653/v1/2021.naacl-main.420",
+        title=title,
+        year=2021,
+        authors=[Author(publication_author)],
+        abstract=publication_abstract,
+    )
+    pool = DiscoveryPool(_seed())
+    pool.add(preprint, source="semantic", relation="semantic_only")
+    pool.add(publication, source="citation", relation="referenced_by_seed")
+    pool.record_recommendation(publication.paper_id, 4)
+
+    assert pool.reconcile_publication_versions() == folds
+    if folds:
+        assert list(pool.papers) == [preprint.paper_id]
+        assert pool.seed_relations[preprint.paper_id] == "referenced_by_seed"
+        assert pool.recommendation_ranks == {preprint.paper_id: 4}
+    else:
+        assert set(pool.papers) == {preprint.paper_id, publication.paper_id}
+
+
 @pytest.mark.parametrize("competing_publication", [False, True])
 def test_ambiguous_publication_versions_stay_separate(
     publication_pair: tuple[Paper, Paper], competing_publication: bool
