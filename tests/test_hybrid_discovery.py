@@ -25,6 +25,7 @@ from citemesh.services.semantic_scholar.endpoints import (
 )
 from citemesh.strategies import hybrid as hybrid_module
 from citemesh.strategies.candidates import CandidateAcquisitionError
+from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.embedding import corpus_source as corpus_source_module
 from citemesh.strategies.hybrid import HybridGraphBuilder
@@ -87,6 +88,24 @@ def test_corpus_progress_counts_completed_queries_and_closes_on_failure(
     assert queries[1] is seed_document
     assert counts == [1] * (1 if fail_second else 2)
     assert closed == [True]
+
+
+def test_corpus_leads_retain_native_query_positions() -> None:
+    """Seed exclusion and a second retrieval role must not renumber query ranks."""
+    seed = Paper(paper_id="seed", title="Seed", year=2024, is_seed=True)
+    query_hit = Paper(paper_id="query-hit", title="Query hit", year=2023)
+    document_hit = Paper(paper_id="document-hit", title="Document hit", year=2023)
+    pool = DiscoveryPool(seed)
+    search = MagicMock(side_effect=[[seed, query_hit], [query_hit, document_hit]])
+    builder = object.__new__(HybridGraphBuilder)
+    builder.embedding_builder = SimpleNamespace(search_prepared_corpus=search)
+    seed_query = np.asarray([1.0, 0.0], dtype=np.float32)
+    seed_document = np.asarray([0.0, 1.0], dtype=np.float32)
+
+    builder._search_corpus(pool, seed_query, seed_document)
+
+    assert set(pool.papers) == {"query-hit", "document-hit"}
+    assert pool.query_corpus_ranks == {"query-hit": 2}
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +183,7 @@ class FakeSemanticScholar:
 
     papers: dict[str, dict[str, object]] = field(default_factory=dict)
     references: dict[str, list[str]] = field(default_factory=dict)
+    reference_evidence: dict[str, dict[str, object]] = field(default_factory=dict)
     citations: dict[str, list[str]] = field(default_factory=dict)
     recommendations: list[str] = field(default_factory=list)
     aliases: dict[str, str] = field(default_factory=dict)
@@ -231,8 +251,14 @@ class FakeSemanticScholar:
         offset = int(str(params.get("offset", 0)))
         limit = int(str(params.get("limit", 1000)))
         window = ids[offset : offset + limit]
+        data: list[dict[str, object]] = [
+            {key: self.papers[paper_id]} for paper_id in window
+        ]
+        if key == "citedPaper" and "contexts" in str(params.get("fields", "")):
+            for record, paper_id in zip(data, window, strict=True):
+                record.update(self.reference_evidence.get(paper_id, {}))
         return {
-            "data": [{key: self.papers[paper_id]} for paper_id in window],
+            "data": data,
             "next": offset + limit if offset + limit < len(ids) else None,
         }
 
@@ -693,6 +719,62 @@ def test_builds_are_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     assert outcomes[0][0] == _SEED_ID
 
 
+def test_focal_reference_evidence_tracks_canonical_work_and_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both provider aliases annotate the canonical corpus node for this build."""
+    scenario = _scenario(citers=0)
+    scenario.corpus = scenario.corpus[:2]
+    provider_id = scenario.references[0]
+    arxiv = "2301.00000"
+    alias = scenario.world.add("e" * 40, "Alias of the reference", arxiv_id=arxiv)
+    scenario.world.references["f" * 40] = [provider_id, alias]
+    scenario.world.reference_evidence = {
+        provider_id: {"contexts": ["First excerpt"], "isInfluential": False},
+        alias: {"contexts": ["First excerpt", "Second excerpt"], "isInfluential": True},
+    }
+    with fake_client(scenario.world) as client:
+        builder = _builder(
+            client,
+            scenario,
+            "arxiv-corpus",
+            max_papers=2,
+            max_citations=0,
+            fetch_references=False,
+        )
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        graph, seed_id = builder.build_graph(_SEED_ID)
+        related = f"arxiv:{arxiv}"
+        assert set(graph) == {seed_id, related}
+        assert "focal_reference_evidence" not in graph.nodes[seed_id]
+        assert graph.nodes[related]["focal_reference_evidence"] == {
+            "context_count": 2,
+            "excerpt": "First excerpt",
+            "is_influential": True,
+        }
+        assert graph.graph["discovery_ranker"]["weights"] == {"focal_reference": 0.5}
+        active = graph.graph["discovery_ranking"][related]
+        assert active["discovery_list_ranks"]["focal_reference"] == 1
+
+        scenario.world.reference_evidence.clear()
+        rebuilt, _seed_id = builder.build_graph(_SEED_ID)
+        assert "focal_reference_evidence" not in rebuilt.nodes[related]
+        assert set(rebuilt) == set(graph)
+        assert "weights" not in rebuilt.graph["discovery_ranker"]
+        inactive = rebuilt.graph["discovery_ranking"][related]
+        assert "focal_reference" not in inactive["discovery_list_ranks"]
+        assert active["discovery_score"] == pytest.approx(
+            inactive["discovery_score"] + 0.5 / 61
+        )
+        assert scenario.world.requests["references"] == 2
+        assert scenario.world.requests["reference_ids"] == 0
+
+
 @pytest.mark.parametrize(
     ("mode", "cold", "warm"),
     [
@@ -809,7 +891,7 @@ def test_json_export_carries_each_related_papers_discovery_evidence(
     payload = GraphExporter(graph, seed_id).graph_payload()
     json.dumps(payload, allow_nan=False)
 
-    # Corpus-only mode fetches no recommendations, so it fuses three lists.
+    # The fixture supplies no focal evidence. Corpus-only also has no recommendations.
     lists = ["semantic", "reference_context", "direct"]
     if mode == "both":
         lists.append("recommended")

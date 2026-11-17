@@ -13,12 +13,14 @@ pool are fused by reciprocal rank fusion with ``k = 60``:
 - ``direct``: candidates the seed cites or that cite the seed, by ``cos_dd``;
   ties by paper ID.
 - ``recommended``: the provider's recommendations in provider order, each
-  paper at its first appearance; ties by paper ID. Without recommendations the
-  list is empty and the other three decide.
+  paper at its first appearance; ties by paper ID.
+- ``focal_reference``: references cited in at least two distinct focal-paper
+  passages or marked influential by the provider, by passage count, influence,
+  then the semantic list order. This list has weight 0.5.
 
-A candidate scores the sum of ``1 / (k + rank)`` over the lists that contain
-it, with 1-based ranks, and the final order is by score descending, then paper
-ID. Nothing is fitted and no source has a quota. Cosines are computed between
+A candidate scores the sum of ``weight / (k + rank)`` over the lists that
+contain it, with 1-based ranks and weight 1 for the other lists. The final
+order is by score descending, then paper ID. Cosines are computed between
 unit-normalized vectors, so the ranking ignores vector scale, and candidates
 are processed in paper-ID order, so it ignores input order.
 """
@@ -33,6 +35,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 RRF_K = 60
+RRF_WEIGHTS = {"focal_reference": 0.5}
 REFERENCE_CONTEXT_SIZE = 5
 
 _SortKey = tuple[float | str, ...]
@@ -50,6 +53,10 @@ class DiscoveryCandidate:
     :param int | None recommendation_rank: Provider position of the paper's
         first appearance among the recommendations, or ``None`` when it was
         not recommended.
+    :param int | None focal_reference_context_count: Distinct focal passages
+        the provider associated with this citation, if available.
+    :param bool | None focal_reference_is_influential: Provider influence flag
+        for this reference, if available.
     """
 
     paper_id: str
@@ -57,6 +64,8 @@ class DiscoveryCandidate:
     is_reference: bool = False
     cites_seed: bool = False
     recommendation_rank: int | None = None
+    focal_reference_context_count: int | None = None
+    focal_reference_is_influential: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,8 @@ class CandidateFeatures:
     :param bool direct: Whether the seed cites the candidate or the candidate
         cites the seed.
     :param int | None recommendation_rank: Provider recommendation position.
+    :param tuple[int, bool] | None focal_reference_priority: Passage count and
+        influence flag for a focal reference eligible for the extra list.
     """
 
     cos_dd: float
@@ -78,6 +89,7 @@ class CandidateFeatures:
     ctx_ref_top5: float | None
     direct: bool
     recommendation_rank: int | None
+    focal_reference_priority: tuple[int, bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +98,7 @@ class RankedCandidate:
 
     :param str paper_id: Pool ID.
     :param int rank: 1-based position in the fused order.
-    :param float score: Sum of ``1 / (k + rank)`` over the containing lists.
+    :param float score: Sum of ``weight / (k + rank)`` over the containing lists.
     :param CandidateFeatures features: Values the lists were ordered by.
     :param Mapping[str, int] list_ranks: 1-based rank in each containing list.
     """
@@ -147,6 +159,23 @@ def _recommended_key(paper_id: str, features: CandidateFeatures) -> _SortKey | N
     return (float(features.recommendation_rank), paper_id)
 
 
+def _focal_reference_key(paper_id: str, features: CandidateFeatures) -> _SortKey | None:
+    """Order eligible focal references by passages, influence and semantic rank."""
+    if features.focal_reference_priority is None:
+        return None
+    context_count, influential = features.focal_reference_priority
+    return (-context_count, -int(influential), *_semantic_key(paper_id, features))
+
+
+def _focal_reference_priority(candidate: DiscoveryCandidate) -> tuple[int, bool] | None:
+    """Use provider evidence only for a citation made by the focal paper."""
+    context_count = candidate.focal_reference_context_count or 0
+    influential = candidate.focal_reference_is_influential is True
+    if candidate.is_reference and (context_count >= 2 or influential):
+        return context_count, influential
+    return None
+
+
 # The fused lists, in summation order. A key returns ``None`` for a candidate
 # the list does not contain.
 FUSED_LISTS: tuple[
@@ -156,6 +185,7 @@ FUSED_LISTS: tuple[
     ("reference_context", _reference_context_key),
     ("direct", _direct_key),
     ("recommended", _recommended_key),
+    ("focal_reference", _focal_reference_key),
 )
 
 
@@ -221,6 +251,7 @@ def compute_features(
             ctx_ref_top5=context[row],
             direct=candidate.is_reference or candidate.cites_seed,
             recommendation_rank=candidate.recommendation_rank,
+            focal_reference_priority=_focal_reference_priority(candidate),
         )
         for row, candidate in enumerate(ordered)
     }
@@ -246,11 +277,10 @@ def fused_lists(features: Mapping[str, CandidateFeatures]) -> dict[str, list[str
 def reciprocal_rank_fusion(
     lists: Mapping[str, Sequence[str]],
 ) -> list[tuple[str, float]]:
-    """Fuse ranked lists by summing ``1 / (RRF_K + rank)`` per containing list.
+    """Fuse lists by summing ``weight / (RRF_K + rank)`` per containing list.
 
-    Each score is a correctly rounded sum (:func:`math.fsum`), so papers with
-    the same ranks in any lists, in any list order, score identical floats and
-    the tie-break by paper ID decides between them.
+    The correctly rounded sum (:func:`math.fsum`) preserves ties between
+    papers with the same weighted terms regardless of list order.
 
     :param Mapping[str, Sequence[str]] lists: Ranked paper IDs per list, best
         first, each ID at most once per list.
@@ -258,9 +288,10 @@ def reciprocal_rank_fusion(
         then paper ID.
     """
     terms: dict[str, list[float]] = {}
-    for ranked in lists.values():
+    for name, ranked in lists.items():
+        weight = RRF_WEIGHTS.get(name, 1.0)
         for rank, paper_id in enumerate(ranked, start=1):
-            terms.setdefault(paper_id, []).append(1.0 / (RRF_K + rank))
+            terms.setdefault(paper_id, []).append(weight / (RRF_K + rank))
     scores = [(paper_id, math.fsum(values)) for paper_id, values in terms.items()]
     return sorted(scores, key=lambda item: (-item[1], item[0]))
 

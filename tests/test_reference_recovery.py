@@ -610,7 +610,7 @@ def test_hybrid_pools_every_provider_reference_once(
         "arxiv_corpus": "empty",
     }
     client.get_paper_references.assert_called_once_with(
-        seed.paper_id, limit=1000, raise_on_unavailable=True
+        seed.paper_id, limit=1000, raise_on_unavailable=True, reference_evidence={}
     )
     client.get_reference_ids.assert_not_called()
     bibliography.assert_not_called()

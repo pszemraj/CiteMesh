@@ -1652,6 +1652,59 @@ def test_relation_records_bypass_and_never_write_paper_cache() -> None:
     assert s2.disk_cache._load_cached_paper("cold") is None
 
 
+def test_focal_reference_evidence_comes_from_the_same_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An opt-in focal listing captures evidence without extra requests or cached text."""
+    monkeypatch.setattr(s2.endpoints, "GRAPH_RELATION_PAGE_SIZE", 2)
+    pages = [
+        {
+            "data": [
+                {
+                    "citedPaper": _paper_payload("p1"),
+                    "contexts": [" First\nexcerpt ", "First excerpt", "  ", None],
+                    "isInfluential": False,
+                },
+                {"citedPaper": _paper_payload("p2"), "isInfluential": False},
+            ],
+            "next": 2,
+        },
+        {
+            "data": [
+                {
+                    "citedPaper": _paper_payload("p1"),
+                    "contexts": ["First excerpt", "Second excerpt"],
+                    "isInfluential": True,
+                },
+                {"citedPaper": _paper_payload("p3"), "isInfluential": None},
+            ]
+        },
+    ]
+    evidence: dict[str, s2.endpoints.ReferenceEvidence] = {}
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[_MockResponse(200, page) for page in pages]
+        )
+        papers = client.get_paper_references(
+            "seed", limit=4, reference_evidence=evidence
+        )
+        assert [paper.paper_id for paper in papers] == ["p1", "p2", "p3"]
+        assert client.get_cached_reference_ids("seed") == ["p1", "p2", "p3"]
+        calls = client._session.get.call_args_list
+    assert [call.kwargs["params"]["offset"] for call in calls] == [0, 2]
+    assert [call.kwargs["params"]["limit"] for call in calls] == [2, 2]
+    assert all(
+        {"contexts", "isInfluential"} <= set(call.kwargs["params"]["fields"].split(","))
+        for call in calls
+    )
+    assert evidence == {
+        "p1": s2.endpoints.ReferenceEvidence(("First excerpt", "Second excerpt"), True),
+        "p2": s2.endpoints.ReferenceEvidence(is_influential=False),
+    }
+    assert s2.disk_cache._load_cached_paper("p1") is None
+
+
 def test_cache_operation_scope_uses_outer_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Nested endpoint work acquires only the outer cache operation lock.
 

@@ -5,15 +5,116 @@ from __future__ import annotations
 import pytest
 
 from citemesh.core import Author, Paper
+from citemesh.services.semantic_scholar.endpoints import ReferenceEvidence
 from citemesh.strategies import discovery_pool
 from citemesh.strategies.candidates import candidate_records_match
-from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.discovery_pool import DiscoveryPool, build_discovery_leads
+from citemesh.strategies.discovery_ranking import CandidateFeatures, RankedCandidate
 from tests._helpers import build_publication_pair
 
 
 def _seed() -> Paper:
     """Return a seed that shares no identifier with the test records."""
     return Paper(paper_id="seed", title="Seed", year=2024, is_seed=True)
+
+
+def test_discovery_leads_use_evidence_from_the_omitted_pool() -> None:
+    """Cap the two reading lists independently and keep their own rank meanings."""
+    pool = DiscoveryPool(_seed())
+    reference_counts = {
+        "selected-reference": 7,
+        "single-context": 1,
+        "earlier-tie": 2,
+        "later-tie": 2,
+        "most-contexts": 4,
+    }
+    for identifier, count in reference_counts.items():
+        pool.add(
+            Paper(paper_id=identifier, title=identifier, year=2023),
+            source="citation",
+            relation="referenced_by_seed",
+        )
+        pool.record_reference_evidence(
+            identifier,
+            ReferenceEvidence(tuple(f"Passage {i}" for i in range(count)), True),
+        )
+
+    search_positions = {
+        "recommended": 1,
+        "direct-citer": 2,
+        "selected-corpus": 3,
+        "arxiv:2401.00001": 4,
+        "arxiv:2401.00002": 6,
+        "arxiv:2401.00003": 9,
+    }
+    for identifier, position in search_positions.items():
+        pool.add(
+            Paper(
+                paper_id=identifier, title=identifier, year=2024, is_local_corpus=True
+            ),
+            source="semantic",
+            relation="semantic_only",
+        )
+        pool.record_query_corpus_rank(identifier, position)
+    pool.add(pool.papers["direct-citer"], source="citation", relation="cites_seed")
+    pool.record_recommendation("recommended", 1)
+    pool.add(
+        Paper(paper_id="document-role-only", title="Document role only", year=2024),
+        source="semantic",
+        relation="semantic_only",
+    )
+    ranked = [
+        RankedCandidate(
+            identifier,
+            position,
+            0.0,
+            CandidateFeatures(0.0, 0.0, None, False, None),
+            {},
+        )
+        for position, identifier in enumerate(pool.papers, start=1)
+    ]
+    final_graph = {"selected-reference", "selected-corpus"}
+    leads = build_discovery_leads(pool, ranked, final_graph, limit=2)
+
+    assert leads is not None
+    assert [
+        (row["paper_id"], row["rank"], row["context_count"])
+        for row in leads["references"]
+    ] == [("most-contexts", 5, 4), ("earlier-tie", 3, 2)]
+    assert [(row["paper_id"], row["rank"]) for row in leads["corpus"]] == [
+        ("arxiv:2401.00001", 4),
+        ("arxiv:2401.00002", 6),
+    ]
+    assert "context_count" not in leads["corpus"][0]
+    assert build_discovery_leads(pool, ranked, set(pool.papers), limit=2) is None
+    assert build_discovery_leads(pool, ranked, final_graph, limit=0) is None
+
+
+def test_query_position_follows_the_canonical_corpus_record() -> None:
+    """An explicit alias fold preserves the earliest query retrieval position."""
+    pool = DiscoveryPool(_seed())
+    first = Paper(
+        paper_id="10.1000/shared",
+        doi="10.1000/shared",
+        title="Shared work",
+        year=2024,
+        is_local_corpus=True,
+    )
+    second = Paper(
+        paper_id="arxiv:2401.00001",
+        doi="10.1000/shared",
+        title="Shared work",
+        year=2024,
+        is_local_corpus=True,
+    )
+    for rank, paper in ((2, first), (5, second)):
+        member_id = pool.add(paper, source="semantic", relation="semantic_only")
+        assert member_id is not None
+        pool.record_query_corpus_rank(member_id, rank)
+
+    pool.absorb(second.paper_id, first.paper_id)
+
+    assert pool.query_corpus_ranks == {second.paper_id: 2}
 
 
 def test_exact_check_runs_only_on_index_hits(
@@ -70,6 +171,8 @@ def test_corpus_record_takes_over_its_provider_record() -> None:
     )
     pool.add(provider, source="citation", relation="cites_seed")
     pool.record_recommendation(provider.paper_id, 4)
+    evidence = ReferenceEvidence(("A focal reference excerpt",), False)
+    pool.record_reference_evidence(provider.paper_id, evidence)
     corpus = Paper(
         paper_id="arxiv:2301.00001",
         title="Shared work",
@@ -87,6 +190,7 @@ def test_corpus_record_takes_over_its_provider_record() -> None:
     assert pool.sources == {corpus.paper_id: {"citation", "semantic"}}
     assert pool.seed_relations == {corpus.paper_id: "cites_seed"}
     assert pool.recommendation_ranks == {corpus.paper_id: 4}
+    assert pool.focal_reference_evidence == {corpus.paper_id: evidence}
     assert pool.provider_aliases == {provider.paper_id: corpus.paper_id}
     # A later list carrying only the provider ID resolves through the alias.
     bare = Paper(paper_id=provider.paper_id, title="Shared work", year=2023)

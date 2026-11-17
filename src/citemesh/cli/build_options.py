@@ -486,10 +486,11 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
             "Every provider reference and citer of the focal paper, its recommendations "
             "(candidates, both) and its nearest corpus rows (arxiv-corpus, both) "
             "are ranked by reciprocal rank fusion (k=60) of document-embedding "
-            "similarity to the focal paper, similarity to the focal paper's references, direct "
-            "citation links and recommendation order; the best max_papers - 1 "
-            "are kept. Edge scores weight embedding similarity and bibliographic "
-            "coupling by each paper's source."
+            "similarity to the focal paper, similarity to its references, direct "
+            "links and recommendation order. References cited in multiple passages "
+            "or marked influential receive an additional half-weight vote. The "
+            "best max_papers - 1 are kept. Edge scores weight embedding similarity "
+            "and bibliographic coupling by each paper's source."
         )
     return contract
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -44,13 +45,14 @@ def _rrf(*ranks: int) -> float:
     return score
 
 
-def test_fused_lists_are_the_four_evaluated_lists_in_summation_order() -> None:
+def test_fused_lists_are_in_summation_order() -> None:
     """The ranker fuses exactly the evaluated lists, in a fixed order."""
     assert [name for name, _key in FUSED_LISTS] == [
         "semantic",
         "reference_context",
         "direct",
         "recommended",
+        "focal_reference",
     ]
 
 
@@ -197,6 +199,104 @@ def test_rank_candidates_matches_hand_computed_scores() -> None:
     assert by_id["close"].list_ranks == {"semantic": 1}
 
 
+def test_focal_reference_passage_count_influence_and_semantic_order() -> None:
+    """Only qualifying focal references receive the exact half-weight contribution."""
+    candidates = [
+        DiscoveryCandidate(
+            "many", SEED_QUERY, is_reference=True, focal_reference_context_count=4
+        ),
+        DiscoveryCandidate(
+            "influential",
+            SEED_QUERY,
+            is_reference=True,
+            focal_reference_context_count=2,
+            focal_reference_is_influential=True,
+        ),
+        DiscoveryCandidate(
+            "higher-query-cosine",
+            _unit(1.0, 1.0, 0.0),
+            is_reference=True,
+            focal_reference_context_count=2,
+        ),
+        DiscoveryCandidate(
+            "a-lower-query-cosine",
+            _unit(1.0, 0.0, 1.0),
+            is_reference=True,
+            focal_reference_context_count=2,
+        ),
+        DiscoveryCandidate(
+            "influence-only",
+            SEED_DOCUMENT,
+            is_reference=True,
+            focal_reference_is_influential=True,
+        ),
+        DiscoveryCandidate(
+            "single-passage",
+            SEED_DOCUMENT,
+            is_reference=True,
+            focal_reference_context_count=1,
+        ),
+        DiscoveryCandidate(
+            "citer-only",
+            SEED_DOCUMENT,
+            cites_seed=True,
+            focal_reference_context_count=10,
+            focal_reference_is_influential=True,
+        ),
+    ]
+    expected = [
+        "many",
+        "influential",
+        "higher-query-cosine",
+        "a-lower-query-cosine",
+        "influence-only",
+    ]
+    seed_vectors = {"seed_document": SEED_DOCUMENT, "seed_query": SEED_QUERY}
+    lists = fused_lists(compute_features(candidates, **seed_vectors))
+    assert lists["focal_reference"] == expected
+    prior = dict(
+        reciprocal_rank_fusion(
+            {
+                name: papers
+                for name, papers in lists.items()
+                if name != "focal_reference"
+            }
+        )
+    )
+    result = rank_candidates(candidates, **seed_vectors)
+    assert result == rank_candidates(list(reversed(candidates)), **seed_vectors)
+    for item in result:
+        ordinary_terms = [
+            1.0 / (60 + rank)
+            for name, rank in item.list_ranks.items()
+            if name != "focal_reference"
+        ]
+        if item.paper_id in expected:
+            rank = expected.index(item.paper_id) + 1
+            assert item.list_ranks["focal_reference"] == rank
+            assert item.score == math.fsum([*ordinary_terms, 0.5 / (60 + rank)])
+        else:
+            assert "focal_reference" not in item.list_ranks
+            assert item.score == prior[item.paper_id]
+
+
+def test_ineligible_focal_reference_evidence_preserves_the_original_ranking() -> None:
+    """One passage, zero passages and unavailable evidence leave fusion identical."""
+    original = [
+        DiscoveryCandidate(paper_id, SEED_DOCUMENT, is_reference=True)
+        for paper_id in ("one", "zero", "unavailable")
+    ]
+    ineligible = [
+        replace(original[0], focal_reference_context_count=1),
+        replace(original[1], focal_reference_context_count=0),
+        original[2],
+    ]
+    seed_vectors = {"seed_document": SEED_DOCUMENT, "seed_query": SEED_QUERY}
+    assert rank_candidates(original, **seed_vectors) == rank_candidates(
+        ineligible, **seed_vectors
+    )
+
+
 def test_ties_break_by_query_cosine_then_paper_id() -> None:
     """semantic ties use cos_q then ID; direct and fused ties use ID only."""
     candidates = [
@@ -243,7 +343,7 @@ def test_a_recommended_paper_outranks_an_identical_unrecommended_one() -> None:
 
 
 def test_without_recommendations_the_fusion_is_the_three_other_lists() -> None:
-    """arxiv-corpus pools carry no recommendation ranks, so only three lists fuse."""
+    """Three lists fuse when recommendations and focal evidence are unavailable."""
     rng = np.random.default_rng(7)
     candidates = [
         DiscoveryCandidate(

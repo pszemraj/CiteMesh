@@ -13,9 +13,9 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import wraps
+from functools import partial, wraps
 from typing import (
     TYPE_CHECKING,
     Concatenate,
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from citemesh.core.paper_ids import BibliographyKey
     from citemesh.data.embedding_cache.models import PaperMetadata
     from citemesh.services.semantic_scholar import SemanticScholarClient
+    from citemesh.services.semantic_scholar.endpoints import ReferenceEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class CandidateSourceResult:
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
     error: str | None = ""
+    reference_evidence: dict[str, ReferenceEvidence] = field(default_factory=dict)
 
 
 def scope_candidate_collection(
@@ -558,6 +560,7 @@ def fetch_seed_references(
     ]
     | None = None,
     reference_selector: ReferenceSelector | None = None,
+    collect_reference_evidence: bool = False,
 ) -> tuple[CandidateSourceResult, ...]:
     """Collect S2 seed references with an arXiv bibliography fallback.
 
@@ -571,6 +574,8 @@ def fetch_seed_references(
         entries by title, first author, and year after an empty S2 response.
     :param Callable | None reference_selector: Strategy-specific selector applied
         after the complete fallback bibliography is materialized.
+    :param bool collect_reference_evidence: Request edge context and influence
+        from the original Semantic Scholar listing.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
     """
     from citemesh.services import (
@@ -582,10 +587,14 @@ def fetch_seed_references(
     if limit <= 0:
         return ()
     provider_id = provider_lookup_identifier(seed.paper_id, seed)
+    evidence: dict[str, ReferenceEvidence] = {}
+    fetch_references = client.get_paper_references
+    if collect_reference_evidence:
+        fetch_references = partial(fetch_references, reference_evidence=evidence)
     original = (
         fetch_candidate_source(
             "references",
-            lambda: client.get_paper_references(
+            lambda: fetch_references(
                 provider_id, limit=limit, raise_on_unavailable=True
             ),
         )
@@ -593,7 +602,9 @@ def fetch_seed_references(
         else CandidateSourceResult("references", CandidateSourceState.UNAVAILABLE)
     )
     if original.papers:
-        return (original,)
+        return (
+            replace(original, reference_evidence=evidence) if evidence else original,
+        )
     identifier = next(
         (
             value

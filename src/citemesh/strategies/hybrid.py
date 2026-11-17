@@ -57,10 +57,11 @@ from citemesh.strategies.candidates import (
     require_available_candidate_source,
     scope_candidate_collection,
 )
-from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.discovery_pool import DiscoveryPool, build_discovery_leads
 from citemesh.strategies.discovery_ranking import (
     FUSED_LISTS,
     RRF_K,
+    RRF_WEIGHTS,
     DiscoveryCandidate,
     RankedCandidate,
     rank_candidates,
@@ -451,6 +452,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     local_bibliography_lookup=(
                         corpus.cached_bibliography_metadata if corpus else None
                     ),
+                    collect_reference_evidence=True,
                 )
             )
         if self.max_citations > 0 and provider_id is not None:
@@ -594,8 +596,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if row is not None:
                 pool.add(row, source=source, relation=relation)
             member_id = pool.add(paper, source=source, relation=relation)
-            if member_id is not None and result.source == "recommendations":
+            if member_id is None:
+                continue
+            if result.source == "recommendations":
                 pool.record_recommendation(member_id, rank)
+            if evidence := result.reference_evidence.get(paper.paper_id):
+                pool.record_reference_evidence(member_id, evidence)
 
     def _search_corpus(
         self,
@@ -615,19 +621,25 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         with progress_task(
             total=2, description="Searching arXiv corpus", unit="queries"
         ) as progress:
-            for vector in (seed_query, seed_document):
+            for role, vector in (
+                (EmbeddingTask.RETRIEVAL_QUERY, seed_query),
+                (EmbeddingTask.RETRIEVAL_DOCUMENT, seed_document),
+            ):
                 try:
                     neighbours = self.embedding_builder.search_prepared_corpus(
                         vector, HYBRID_CORPUS_NEIGHBOURS
                     )
                 except Exception as exc:
                     raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-                for paper in neighbours:
-                    if (
-                        pool.add(paper, source="semantic", relation="semantic_only")
-                        is not None
-                    ):
-                        added += 1
+                for rank, paper in enumerate(neighbours, start=1):
+                    member_id = pool.add(
+                        paper, source="semantic", relation="semantic_only"
+                    )
+                    if member_id is None:
+                        continue
+                    added += 1
+                    if role is EmbeddingTask.RETRIEVAL_QUERY:
+                        pool.record_query_corpus_rank(member_id, rank)
                 progress.update()
         logger.debug("Corpus neighbours: %d across both focal paper roles.", added)
         return CandidateSourceResult(
@@ -722,6 +734,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         candidates = []
         for paper_id in pool.papers:
             relation = pool.seed_relations.get(paper_id, "")
+            evidence = pool.focal_reference_evidence.get(paper_id)
             candidates.append(
                 DiscoveryCandidate(
                     paper_id=paper_id,
@@ -729,6 +742,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     is_reference=relation in _REFERENCE_RELATIONS,
                     cites_seed=relation in _CITER_RELATIONS,
                     recommendation_rank=pool.recommendation_ranks.get(paper_id),
+                    focal_reference_context_count=evidence.context_count
+                    if evidence is not None
+                    else None,
+                    focal_reference_is_influential=evidence.is_influential
+                    if evidence is not None
+                    else None,
                 )
             )
         ranked = rank_candidates(
@@ -875,19 +894,23 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return min(similarity, 1.0)  # Cap at 1.0
 
     def _record_discovery_evidence(self, graph: PaperGraph) -> None:
-        """Attach the ranker and each graph paper's ranking evidence for export.
+        """Attach ranking evidence, focal citation excerpts and additional reading.
 
         :param PaperGraph graph: Built graph.
-        :return None: Sets ``discovery_ranker`` and ``discovery_ranking``.
+        :return None: Adds the available evidence to the graph and its nodes.
         """
         used = {name for item in self.discovery_ranking for name in item.list_ranks}
         lists = [name for name, _sort_key in FUSED_LISTS if name in used]
-        graph.graph["discovery_ranker"] = {
+        ranker: dict[str, object] = {
             "method": "reciprocal_rank_fusion",
             "k": RRF_K,
             "lists": lists,
         }
-        graph.graph["discovery_ranking"] = {
+        weights = {name: weight for name, weight in RRF_WEIGHTS.items() if name in used}
+        if weights:
+            ranker["weights"] = weights
+        graph.graph["discovery_ranker"] = ranker
+        selected_evidence = {
             item.paper_id: {
                 "discovery_rank": item.rank,
                 "discovery_score": item.score,
@@ -904,6 +927,22 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             for item in self.discovery_ranking
             if item.paper_id in graph
         }
+        graph.graph["discovery_ranking"] = selected_evidence
+        pool = self.discovery_pool
+        if pool is None:
+            return
+        for paper_id, evidence in pool.focal_reference_evidence.items():
+            if paper_id in graph:
+                graph.nodes[paper_id]["focal_reference_evidence"] = {
+                    "context_count": evidence.context_count,
+                    "excerpt": evidence.excerpt,
+                    "is_influential": evidence.is_influential,
+                }
+        leads = build_discovery_leads(
+            pool, self.discovery_ranking, selected_evidence, limit=self.max_papers - 1
+        )
+        if leads is not None:
+            graph.graph["discovery_leads"] = leads
 
     def build_graph(
         self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]

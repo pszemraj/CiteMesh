@@ -28,7 +28,8 @@ rule runs only within a group.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Container, Sequence
+from typing import TYPE_CHECKING, TypedDict
 
 from citemesh.core import Paper
 from citemesh.core.paper_ids import bibliography_text_key
@@ -50,6 +51,8 @@ from citemesh.strategies.candidates import (
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
+    from citemesh.services.semantic_scholar.endpoints import ReferenceEvidence
+    from citemesh.strategies.discovery_ranking import RankedCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,8 @@ class DiscoveryPool:
         self.papers: dict[str, Paper] = {}
         self.sources: dict[str, set[str]] = {}
         self.recommendation_ranks: dict[str, int] = {}
+        self.query_corpus_ranks: dict[str, int] = {}
+        self.focal_reference_evidence: dict[str, ReferenceEvidence] = {}
         self.provider_aliases: dict[str, str] = {}
         self.source_status: dict[str, str] = {}
         self._members_by_key: dict[CandidateIdentityKey, dict[str, None]] = {}
@@ -189,6 +194,21 @@ class DiscoveryPool:
         """
         self.recommendation_ranks.setdefault(member_id, rank)
 
+    def record_query_corpus_rank(self, member_id: str, rank: int) -> None:
+        """Keep the earliest native query retrieval position for this work."""
+        self.query_corpus_ranks[member_id] = min(
+            rank, self.query_corpus_ranks.get(member_id, rank)
+        )
+
+    def record_reference_evidence(
+        self, member_id: str, evidence: ReferenceEvidence
+    ) -> None:
+        """Retain the observed evidence across records of the same work."""
+        previous = self.focal_reference_evidence.get(member_id)
+        self.focal_reference_evidence[member_id] = (
+            previous.combine(evidence) if previous is not None else evidence
+        )
+
     def absorb(self, target_id: str, absorbed_id: str) -> None:
         """Fold one member into another member that records the same work.
 
@@ -215,6 +235,11 @@ class DiscoveryPool:
             self.recommendation_ranks[target_id] = min(
                 self.recommendation_ranks.get(target_id, absorbed_rank), absorbed_rank
             )
+        absorbed_query_rank = self.query_corpus_ranks.pop(absorbed_id, None)
+        if absorbed_query_rank is not None:
+            self.record_query_corpus_rank(target_id, absorbed_query_rank)
+        if evidence := self.focal_reference_evidence.pop(absorbed_id, None):
+            self.record_reference_evidence(target_id, evidence)
         relation = merge_seed_relation(
             self.seed_relations.get(target_id, ""),
             self.seed_relations.pop(absorbed_id, ""),
@@ -289,6 +314,85 @@ class DiscoveryPool:
             del members[member_id]
             if not members:
                 del self._members_by_key[key]
+
+
+class _DiscoveryLeadRequired(TypedDict):
+    """Compact reading-list entry for an omitted candidate."""
+
+    paper_id: str
+    title: str
+    arxiv_id: str
+    doi: str
+    rank: int
+
+
+class DiscoveryLead(_DiscoveryLeadRequired, total=False):
+    """Focal references additionally carry their observed passage count."""
+
+    context_count: int
+
+
+class DiscoveryLeads(TypedDict):
+    """Two capped lists of omitted papers with different evidence."""
+
+    references: list[DiscoveryLead]
+    corpus: list[DiscoveryLead]
+
+
+def _discovery_lead(paper: Paper, rank: int) -> DiscoveryLead:
+    return {
+        "paper_id": paper.paper_id,
+        "title": paper.title,
+        "arxiv_id": paper.arxiv_id,
+        "doi": paper.doi,
+        "rank": rank,
+    }
+
+
+def build_discovery_leads(
+    pool: DiscoveryPool,
+    ranked: Sequence[RankedCandidate],
+    final_graph_ids: Container[str],
+    *,
+    limit: int,
+) -> DiscoveryLeads | None:
+    """Build secondary reading lists from the already ranked candidate pool.
+
+    References require at least two distinct provider contexts and are ordered
+    by context count, then fused rank. Corpus leads keep their original native
+    query-role retrieval rank and exclude papers acquired through a citation
+    or recommendation. Both lists exclude every paper in the final graph.
+    """
+    if limit <= 0:
+        return None
+    omitted = {
+        item.paper_id: item for item in ranked if item.paper_id not in final_graph_ids
+    }
+    cited: list[tuple[int, int, str]] = []
+    for paper_id, evidence in pool.focal_reference_evidence.items():
+        item = omitted.get(paper_id)
+        if item is not None and evidence.context_count >= 2:
+            cited.append((-evidence.context_count, item.rank, paper_id))
+    references: list[DiscoveryLead] = []
+    for count, rank, paper_id in sorted(cited)[:limit]:
+        lead = _discovery_lead(pool.papers[paper_id], rank)
+        lead["context_count"] = -count
+        references.append(lead)
+
+    corpus_positions = sorted(
+        (rank, paper_id)
+        for paper_id, rank in pool.query_corpus_ranks.items()
+        if paper_id in omitted
+        and pool.sources[paper_id] == {"semantic"}
+        and paper_id not in pool.recommendation_ranks
+    )
+    corpus = [
+        _discovery_lead(pool.papers[paper_id], rank)
+        for rank, paper_id in corpus_positions[:limit]
+    ]
+    return (
+        {"references": references, "corpus": corpus} if references or corpus else None
+    )
 
 
 def fetch_candidate_pool(

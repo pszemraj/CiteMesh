@@ -65,18 +65,19 @@ Selection cuts the pool to `--max-papers`, focal paper included.
 
 The embedding strategy encodes the focal paper as a retrieval query and ranks by raw cosine - over the encoded pool in candidates mode, through the cache's top-k search in corpus mode - admitting candidates in order until the budget is full. Ties break on `(-score, paper_id, insertion_index)`, so the same inputs always produce the same graph.
 
-Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each candidate has a document-role vector, and up to four ranked lists are built from it:
+Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each candidate has a document-role vector. The available evidence determines which of five ranked lists contribute.
 
 - **similarity to the focal paper**: every candidate, by the cosine between its vector and the focal paper's document vector, with ties broken on the cosine with the focal paper's query vector, then paper ID
 - **similarity to the focal paper's bibliography**: candidates with at least five references from the focal paper other than themselves, by the mean of their five highest cosines to those references, with ties broken by query cosine, then paper ID
 - **direct links**: candidates the focal paper cites or that cite the focal paper, by document cosine to the focal paper, then paper ID
 - **recommendations**: the provider's recommended candidates in provider order after deduplication, present only in `candidates` and `both` modes
+- **focal reference evidence**: references cited in two or more distinct passages of the focal paper or marked influential by Semantic Scholar. Higher passage counts come first, followed by the influence flag and the focal similarity order. This list has weight `0.5`.
 
 ```text
-score = Σ 1 / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
+score = Σ weight / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
 ```
 
-Candidates sort by score, then paper ID, and the first `max_papers - 1` join the focal paper. Nothing is fitted: there is no year term and no citation-count term, every candidate competes on the same fused score whatever its source, and a candidate absent from a list simply adds nothing for it. Ranking uses only embedding cosines, focal paper links and recommendation order, so it runs before any selected paper's reference list is fetched; those lists come afterwards, for the selected citation-sourced papers only, and feed the bibliographic-coupling term of [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and rank in every list are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson); it is separate from `seed_relevance`, which is computed later over the final graph.
+The other lists have weight `1`. Candidates sort by score, then paper ID, and the first `max_papers - 1` join the focal paper. A list contributes only for candidates it contains. With no qualifying focal reference evidence, hybrid fuses the other available lists. Ranking runs before optional reference hydration for selected citation-sourced papers, which supplies bibliographic coupling during [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and list ranks are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson). The `seed_relevance` value is computed later over the final graph.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 

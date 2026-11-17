@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from functools import wraps
 from typing import (
     TYPE_CHECKING,
@@ -56,6 +57,53 @@ class _RelationListing(NamedTuple):
 
     records: dict[str, object]
     complete: bool
+
+
+@dataclass(frozen=True)
+class ReferenceEvidence:
+    """Context excerpts and influence reported for a focal reference."""
+
+    contexts: tuple[str, ...] = ()
+    is_influential: bool | None = None
+
+    @property
+    def context_count(self) -> int:
+        """Return the number of distinct observed contexts."""
+        return len(self.contexts)
+
+    @property
+    def excerpt(self) -> str | None:
+        """Return one provider excerpt when available."""
+        return self.contexts[0] if self.contexts else None
+
+    def combine(self, other: ReferenceEvidence) -> ReferenceEvidence:
+        """Union distinct excerpts and carry forward observed influence."""
+        flags = self.is_influential, other.is_influential
+        return ReferenceEvidence(
+            contexts=tuple(dict.fromkeys((*self.contexts, *other.contexts))),
+            is_influential=None if flags == (None, None) else any(flags),
+        )
+
+
+def _reference_evidence(row: object) -> ReferenceEvidence | None:
+    """Read evidence carried by a relation row alongside its cited paper."""
+    raw_contexts = payloads._payload_get(row, "contexts")
+    contexts = (
+        tuple(
+            dict.fromkeys(
+                normalized
+                for context in raw_contexts
+                if isinstance(context, str)
+                and (normalized := " ".join(context.split()))
+            )
+        )
+        if isinstance(raw_contexts, list)
+        else ()
+    )
+    influential = payloads._payload_get(row, "isInfluential")
+    if isinstance(influential, bool):
+        return ReferenceEvidence(contexts, influential)
+    return ReferenceEvidence(contexts) if contexts else None
 
 
 def _log_skipped_rows(listing: str, paper_id: str, skipped: int, total: int) -> None:
@@ -392,12 +440,15 @@ class _EndpointsMixin:
         limit: int = 20,
         *,
         raise_on_unavailable: bool = False,
+        reference_evidence: dict[str, ReferenceEvidence] | None = None,
     ) -> list[Paper]:
         """Fetch full metadata for papers referenced by a seed.
 
         :param str paper_id: Seed identifier.
         :param int limit: Maximum unique results.
         :param bool raise_on_unavailable: Raise if a relation page fails.
+        :param dict[str, ReferenceEvidence] | None reference_evidence: Optional
+            destination for relation evidence keyed by returned paper ID.
         :return list[Paper]: Ordered referenced papers.
         """
         return self._get_related_papers(
@@ -406,6 +457,7 @@ class _EndpointsMixin:
             relation="references",
             nested_key="citedPaper",
             raise_on_unavailable=raise_on_unavailable,
+            reference_evidence=reference_evidence,
         )
 
     def _relation_records(
@@ -418,6 +470,7 @@ class _EndpointsMixin:
         limit: int | None,
         raise_on_unavailable: bool,
         progress_description: str | None = None,
+        reference_evidence: dict[str, ReferenceEvidence] | None = None,
     ) -> _RelationListing | None:
         """Fetch ordered unique relation records through explicit REST pages.
 
@@ -429,6 +482,8 @@ class _EndpointsMixin:
         :param bool raise_on_unavailable: Raise on a failed page.
         :param str | None progress_description: Discovery progress label; absent
             for per-paper reference hydration, which owns its progress display.
+        :param dict[str, ReferenceEvidence] | None reference_evidence: Optional
+            operation-local destination for reference context fields.
         :return _RelationListing | None: First record per normalized ID in
             provider order, or ``None`` after a tolerated failed page.
         """
@@ -487,6 +542,15 @@ class _EndpointsMixin:
                             f"Semantic Scholar returned invalid {relation} paper ID."
                         )
                     normalized_id = normalize_paper_id(raw_id)
+                    if reference_evidence is not None and (
+                        evidence := _reference_evidence(row)
+                    ):
+                        previous = reference_evidence.get(normalized_id)
+                        reference_evidence[normalized_id] = (
+                            previous.combine(evidence)
+                            if previous is not None
+                            else evidence
+                        )
                     if normalized_id not in records:
                         records[normalized_id] = paper
                         if limit is not None and len(records) >= limit:
@@ -524,6 +588,7 @@ class _EndpointsMixin:
         relation: str,
         nested_key: str,
         raise_on_unavailable: bool,
+        reference_evidence: dict[str, ReferenceEvidence] | None = None,
     ) -> list[Paper]:
         """Freshly fetch relation pages carrying each related paper's metadata.
 
@@ -536,20 +601,28 @@ class _EndpointsMixin:
         :param str relation: Relation endpoint name.
         :param str nested_key: Nested response paper key.
         :param bool raise_on_unavailable: Raise on a failed page.
+        :param dict[str, ReferenceEvidence] | None reference_evidence: Optional
+            destination for evidence from successfully converted records.
         :return list[Paper]: Ordered related papers.
         """
         parsed_limit = payloads._validate_integer_limit(limit, "limit", allow_zero=True)
         if parsed_limit == 0:
             return []
         normalized_id = normalize_paper_id(paper_id)
+        fields = payloads._default_paper_fields()
+        fetched_evidence: dict[str, ReferenceEvidence] | None = None
+        if reference_evidence is not None:
+            fields.extend(("contexts", "isInfluential"))
+            fetched_evidence = {}
         listing = self._relation_records(
             normalized_id,
             relation=relation,
             nested_key=nested_key,
-            fields=",".join(payloads._default_paper_fields()),
+            fields=",".join(fields),
             limit=parsed_limit,
             raise_on_unavailable=raise_on_unavailable,
             progress_description=f"Collecting focal {relation}",
+            reference_evidence=fetched_evidence,
         )
         if listing is None:
             if raise_on_unavailable:
@@ -573,6 +646,9 @@ class _EndpointsMixin:
                 )
                 continue
             papers.append(paper)
+            if reference_evidence is not None and fetched_evidence is not None:
+                if evidence := fetched_evidence.get(related_id):
+                    reference_evidence[paper.paper_id] = evidence
         _log_skipped_rows(
             f"{relation} discovery",
             normalized_id,
