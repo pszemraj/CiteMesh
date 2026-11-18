@@ -447,7 +447,7 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 "  citemesh cache import \\\n"
                 "    --bucket pszemraj/citemesh-arxiv-indexes \\\n"
                 "    --config embeddinggemma-512-int8\n"
-                "Then rerun with --cache-namespace NAMESPACE printed by import."
+                "After import, rerun your original build command."
             )
 
         dataset_source, revision, dataset = self._resolve_hydration_dataset(

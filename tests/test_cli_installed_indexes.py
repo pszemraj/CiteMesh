@@ -545,8 +545,18 @@ def test_local_import_reports_namespace_and_copyable_use(
     assert run_cache_command(args, cache_parser) == 0
     assert observed == [(tmp_path, None)]
     output = capsys.readouterr().out
-    assert "--cache-namespace 0123456789ab" in " ".join(output.split())
-    assert "query and graph encoding" in " ".join(output.split())
+    normalized = " ".join(output.split())
+    assert "--cache-namespace 0123456789ab" in normalized
+    assert (
+        "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both "
+        "--export dashboard"
+    ) in normalized
+    assert (
+        "citemesh search 'long-context language models' --semantic-source arxiv-corpus"
+    ) in normalized
+    assert "For other imported indexes or custom model settings, append" in normalized
+    assert "citemesh config set defaults.semantic_source both" in normalized
+    assert "query and graph encoding" in normalized
 
 
 def test_hub_import_preflights_before_payload_transfer(

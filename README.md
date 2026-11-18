@@ -66,13 +66,15 @@ The precomputed index enables nearest-neighbor discovery across **3.2 million ar
 citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes --config embeddinggemma-512-int8
 ```
 
-Replace `NAMESPACE` with the namespace printed by import to search or build from the installed corpus.
+After import, run a hybrid build with the corpus enabled, or rerun the corpus command that prompted the import. Default model settings select this index automatically and use its full corpus.
 
 ```bash
-citemesh search "long-context language models and efficient attention" --mode local --cache-namespace NAMESPACE --all-corpus --limit 5
+citemesh search "long-context language models and efficient attention" --semantic-source arxiv-corpus --limit 5
 citemesh build "arxiv:2404.08801" --strategy hybrid --semantic-source both \
-  --cache-namespace NAMESPACE --all-corpus --export dashboard
+  --export dashboard
 ```
+
+Save `both` as the source for future hybrid builds with `citemesh config set defaults.semantic_source both`. If you use non-default model settings, select the imported index with `--cache-namespace NAMESPACE`, using the namespace printed by import.
 
 Import needs no GPU or model weights. Queries and graph similarity use the index's pinned model on your local device, including CPU. On an installed index, `--corpus-size N` searches the newest N indexed papers while keeping the full download and cache on disk. [Portable corpus indexes](docs/guides/caching.md#portable-corpus-indexes)
 

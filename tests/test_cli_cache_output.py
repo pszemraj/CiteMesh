@@ -66,14 +66,24 @@ def test_installed_corpus_hint_keeps_command_copyable(
     cache._print_installed_namespace("0123456789ab")
 
     lines = output.getvalue().splitlines()
-    command = next(line for line in lines if line.startswith("citemesh search "))
-    assert shlex.split(command) == [
-        "citemesh",
-        "search",
-        "long-context language models",
-        "--mode",
-        "local",
-        "--cache-namespace",
-        "0123456789ab",
+    assert [shlex.split(line) for line in lines if line.startswith("citemesh ")] == [
+        [
+            "citemesh",
+            "build",
+            "arxiv:2404.08801",
+            "--strategy",
+            "hybrid",
+            "--semantic-source",
+            "both",
+            "--export",
+            "dashboard",
+        ],
+        [
+            "citemesh",
+            "search",
+            "long-context language models",
+            "--semantic-source",
+            "arxiv-corpus",
+        ],
+        ["citemesh", "config", "set", "defaults.semantic_source", "both"],
     ]
-    assert lines[lines.index(command) - 1].strip() == "Search it with:"

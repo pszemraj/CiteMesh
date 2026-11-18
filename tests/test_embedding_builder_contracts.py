@@ -404,7 +404,9 @@ def test_cold_corpus_reminds_about_public_index_once_before_loading(
     assert "citemesh cache import \\\n" in messages[0].getMessage()
     assert "--bucket pszemraj/citemesh-arxiv-indexes" in messages[0].getMessage()
     assert "--config embeddinggemma-512-int8" in messages[0].getMessage()
-    assert "--cache-namespace NAMESPACE printed by import" in messages[0].getMessage()
+    assert (
+        "After import, rerun your original build command." in messages[0].getMessage()
+    )
     assert load.call_count == 2
 
     # A new builder should still offer the reminder, even in the same process.

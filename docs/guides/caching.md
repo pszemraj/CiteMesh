@@ -69,20 +69,21 @@ Crash safety, the replacement journal, flush ordering, and locking are in [Embed
 
 A portable index installs precomputed retrieval-document embeddings into the native cache. Install the `embeddings` extra first. Import and export copy the stored int8 or float32 values without loading an encoder; query encoding and the selected graph papers' symmetric embeddings still use the recorded model.
 
-Before starting a compatible arXiv corpus from an empty cache, builds show one INFO reminder with the public index import command and `--cache-namespace` selection. Reused caches and resumed hydration skip it. The reminder leaves the build running and requires no network check.
+Before starting a compatible arXiv corpus from an empty cache, builds show one INFO reminder with the public index import command. After import, rerun the same command. Reused caches and resumed hydration skip the reminder. The reminder leaves the build running and requires no network check.
 
 ```bash
 # Import a local export, or one configuration from a Storage Bucket.
 citemesh cache import --path ./arxiv-index
-citemesh cache import --bucket OWNER/INDEX --config embeddinggemma-512-int8 \
-  --snapshot SNAPSHOT_ID
+citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes --config embeddinggemma-512-int8
 citemesh cache scan
 
-# Use the namespace printed by import or scan.
-citemesh search "long-context language models" --mode local \
-  --cache-namespace NAMESPACE --corpus-size 50000
-citemesh build arxiv:2404.08801 --strategy embedding \
-  --cache-namespace NAMESPACE --all-corpus
+# Default model settings select the public index automatically.
+citemesh search "long-context language models" --semantic-source arxiv-corpus
+citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both --export dashboard
+citemesh config set defaults.semantic_source both
+
+# Select a different installed index by the namespace printed by import or scan.
+citemesh search "long-context language models" --cache-namespace NAMESPACE --corpus-size 50000
 
 # Export a completed corpus into a new directory.
 citemesh cache export --namespace NAMESPACE --output ./arxiv-index

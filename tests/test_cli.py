@@ -5739,6 +5739,14 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         (["cache", "--help"], ["clear", "scan", "Examples"]),
         (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
         (
+            ["cache", "import", "--help"],
+            [
+                "--path PATH Local portable snapshot directory",
+                "citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes "
+                "--config embeddinggemma-512-int8",
+            ],
+        ),
+        (
             ["cache", "clear", "--help"],
             ["cache clear", "--yes", "config.toml", "cached papers"],
         ),

@@ -1340,7 +1340,8 @@ def _add_cache_arguments(
                 ("Install a local export", "citemesh cache import --path out/corpus"),
                 (
                     "Install a published corpus",
-                    "citemesh cache import --bucket OWNER/BUCKET",
+                    "citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes "
+                    "--config embeddinggemma-512-int8",
                 ),
             )
         ),
@@ -1559,6 +1560,7 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
         ):
             action.metavar = {
                 "output": "PATH",
+                "path": "PATH",
                 "log_file": "PATH",
                 "model": "MODEL",
                 "model_revision": "REV",

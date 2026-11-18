@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shlex
 import sqlite3
 
 from rich.text import Text
@@ -80,22 +79,36 @@ def _adopt_legacy_namespace(
 
 def _print_installed_namespace(namespace: str) -> None:
     """Show a copyable route from corpus installation to local retrieval."""
-    command = shlex.join(
-        [
-            "citemesh",
-            "search",
-            "long-context language models",
-            "--mode",
-            "local",
-            "--cache-namespace",
-            namespace,
-        ]
-    )
     console.output_console.print(
         Text.assemble(("Installed corpus namespace: ", "bold"), (namespace, "cyan"))
     )
-    console.output_console.print("Search it with:", style="bold")
-    console.output_console.print(Text(command), soft_wrap=True)
+    console.output_console.print(
+        Text(
+            "Default model settings select the public arXiv index automatically. "
+            "For other imported indexes or custom model settings, append "
+            f"--cache-namespace {namespace} to the search or build command below."
+        )
+    )
+    console.output_console.print("Build a hybrid graph", style="bold")
+    console.output_console.print(
+        Text(
+            "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both --export dashboard"
+        ),
+        soft_wrap=True,
+    )
+    console.output_console.print("Search the corpus", style="bold")
+    console.output_console.print(
+        Text(
+            "citemesh search 'long-context language models' --semantic-source arxiv-corpus"
+        ),
+        soft_wrap=True,
+    )
+    console.output_console.print(
+        "Use the corpus for future hybrid builds", style="bold"
+    )
+    console.output_console.print(
+        Text("citemesh config set defaults.semantic_source both"), soft_wrap=True
+    )
     console.output_console.print(
         Text(
             "Corpus embeddings are installed; query and graph encoding still use "
