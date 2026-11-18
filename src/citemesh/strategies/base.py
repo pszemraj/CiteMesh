@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Hashable, Iterable, Mapping
+from dataclasses import replace
 from itertools import zip_longest
 from typing import (
     TYPE_CHECKING,
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
+    from citemesh.services.semantic_scholar import SemanticScholarClient
     from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 import networkx as nx
@@ -316,6 +318,28 @@ class GraphBuilderStrategy(ABC):
     def _set_collection_summary(self, summary: str) -> None:
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
+
+    def _resolve_focal_paper(
+        self,
+        seed_id: str,
+        *,
+        client: SemanticScholarClient,
+        seed_paper: Paper | None = None,
+    ) -> Paper:
+        """Resolve a required paper and bind its seed role to this build."""
+        seed = seed_paper
+        if seed is None:
+            logger.debug("Fetching focal paper: %s", seed_id)
+            seed = client.get_paper(seed_id, raise_on_unavailable=True)
+        if seed is None:
+            raise ValueError(
+                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
+                "know this identifier; check the DOI/arXiv/S2 ID)."
+            )
+        # Seed role belongs to this build, not the supplied metadata record.
+        seed = replace(seed, is_seed=True)
+        self._log_focal_paper(seed)
+        return seed
 
     @staticmethod
     def _log_focal_paper(paper: Paper) -> None:

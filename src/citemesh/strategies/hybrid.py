@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection, Sequence
 from contextlib import nullcontext
-from dataclasses import replace
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -271,7 +270,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         started = perf_counter()
         seed, corpus_seed = self._resolve_seed(seed_id)
-        self._log_focal_paper(seed)
         timings["prepare"] = perf_counter() - started
         self.seed_relations[seed.paper_id] = "seed"
         self.paper_sources[seed.paper_id] = (
@@ -421,14 +419,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 "hybrid build with --semantic-source arxiv-corpus or both and the "
                 "same embedding settings used for local search."
             )
-        seed = cached or self.client.get_paper(seed_id, raise_on_unavailable=True)
-        if seed is None:
-            raise ValueError(
-                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
-                "know this identifier; check the DOI/arXiv/S2 ID)."
-            )
-        # Seed role belongs to this build, not the client-owned metadata record.
-        return replace(seed, is_seed=True), cached is not None
+        seed = self._resolve_focal_paper(seed_id, client=self.client, seed_paper=cached)
+        return seed, cached is not None
 
     def _fetch_provider_sources(
         self, seed: Paper, seed_id: str

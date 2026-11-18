@@ -334,6 +334,39 @@ def test_embedding_seed_resolution_preserves_input_role(provided_seed: bool) -> 
 
 
 @pytest.mark.parametrize(
+    "builder_type",
+    [CitationGraphBuilder, RecommendationGraphBuilder, HybridGraphBuilder],
+)
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_required_seed_resolution_stops_before_candidate_acquisition(
+    builder_type: type[GraphBuilderStrategy],
+    unavailable: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Required seed resolution preserves missing-paper and service errors."""
+    client = MagicMock()
+    client.get_paper.return_value = None
+    if unavailable:
+        client.get_paper.side_effect = s2.SemanticScholarUnavailableError("seed outage")
+    builder = builder_type(client=client)
+    error_type = s2.SemanticScholarUnavailableError if unavailable else ValueError
+    with caplog.at_level(logging.INFO), pytest.raises(error_type) as error:
+        builder.collect_papers("unknown-seed")
+
+    assert str(error.value) == (
+        "seed outage"
+        if unavailable
+        else "Focal paper not found: unknown-seed (Semantic Scholar does not "
+        "know this identifier; check the DOI/arXiv/S2 ID)."
+    )
+    client.get_paper.assert_called_once_with("unknown-seed", raise_on_unavailable=True)
+    client.get_paper_references.assert_not_called()
+    client.get_paper_citations.assert_not_called()
+    client.get_recommended_papers.assert_not_called()
+    assert not any(message.startswith("Focal paper:") for message in caplog.messages)
+
+
+@pytest.mark.parametrize(
     "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
 )
 @pytest.mark.parametrize("references", [[], ["unshared"]])
@@ -1123,7 +1156,9 @@ def test_citation_collect_discovers_all_sources_before_reference_enrichment() ->
     ],
 )
 def test_citation_collect_uses_external_alias_for_pre_resolved_local_seed(
-    external_fields: dict[str, str], provider_id: str
+    external_fields: dict[str, str],
+    provider_id: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A local graph ID must remain local while provider calls use its alias.
 
@@ -1151,10 +1186,14 @@ def test_citation_collect_uses_external_alias_for_pre_resolved_local_seed(
         client=client,
     )
 
-    papers = builder.collect_papers(seed.paper_id, seed_paper=seed)
+    with caplog.at_level(logging.INFO):
+        papers = builder.collect_papers(seed.paper_id, seed_paper=seed)
 
     assert set(papers) == {seed.paper_id, "reference", "citation"}
     assert papers[seed.paper_id].is_seed is True
+    assert papers[seed.paper_id] is not seed
+    assert seed.is_seed is False
+    assert caplog.messages.count("Focal paper: Local seed (2024)") == 1
     assert builder.reference_hydrator.reference_cache[seed.paper_id] == [
         "seed-reference"
     ]
@@ -1705,6 +1744,7 @@ def test_hybrid_discovers_recommendations_before_reference_enrichment(
 
 def test_hybrid_corpus_defers_optional_seed_enrichment(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Corpus seed enrichment must follow citation and corpus acquisition."""
     events: list[str] = []
@@ -1745,9 +1785,12 @@ def test_hybrid_corpus_defers_optional_seed_enrichment(
         side_effect=lambda _papers, _seed: events.append("reference enrichment")
     )
 
-    papers = builder.collect_papers(seed.paper_id)
+    with caplog.at_level(logging.INFO):
+        papers = builder.collect_papers(seed.paper_id)
 
     assert set(papers) == {seed.paper_id, "semantic"}
+    assert papers[seed.paper_id] is not seed
+    assert caplog.messages.count("Focal paper: Local seed (2024)") == 1
     assert events == [
         "reference discovery",
         "citation discovery",

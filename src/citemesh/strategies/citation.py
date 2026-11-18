@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator, Iterable
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -189,29 +188,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         papers = {}
         source_results: list[CandidateSourceResult] = []
 
-        # Step 1: Fetch seed paper
-        seed = seed_paper
-        if seed is None:
-            logger.debug("Fetching focal paper: %s", seed_id)
-            seed = self.client.get_paper(
-                seed_id,
-                raise_on_unavailable=True,
-            )
-
-        if not seed:
-            raise ValueError(
-                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
-                "know this identifier; check the DOI/arXiv/S2 ID)."
-            )
-
-        # Seed role belongs to this build, not the client-owned metadata record.
-        seed = replace(seed, is_seed=True)
+        seed = self._resolve_focal_paper(
+            seed_id, client=self.client, seed_paper=seed_paper
+        )
         provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
         pool = DiscoveryPool(seed)
-
-        self._log_focal_paper(seed)
 
         if self.max_papers > len(papers) and (
             self.max_references > 0 or self.max_citations > 0

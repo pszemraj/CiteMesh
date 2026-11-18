@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -88,22 +87,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {}
         self.reference_hydrator.reset()
 
-        logger.debug("Fetching focal paper: %s", seed_id)
-        seed = self.client.get_paper(
-            seed_id,
-            raise_on_unavailable=True,
-        )
-        if not seed:
-            raise ValueError(
-                f"Focal paper not found: {seed_id} (Semantic Scholar does not "
-                "know this identifier; check the DOI/arXiv/S2 ID)."
-            )
-
-        # Seed role belongs to this build, not the client-owned metadata record.
-        seed = replace(seed, is_seed=True)
+        seed = self._resolve_focal_paper(seed_id, client=self.client)
         papers[seed.paper_id] = seed
 
-        self._log_focal_paper(seed)
         logger.info("Collecting recommendations...")
         logger.debug("Recommendation focal paper: %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
@@ -125,7 +111,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         # Discovery is the primary acquisition path. Do it before optional seed
         # enrichment, whose retries share the collection's S2 recovery budget.
         recommendations = recommendation_result.papers
-        if recommendations and self.reference_hydrator.fetch_references:
+        reference_progress = (
+            bool(recommendations) and self.reference_hydrator.fetch_references
+        )
+        if reference_progress:
             logger.info(
                 "Checking reference lists for the focal paper and its recommendations..."
             )
@@ -138,9 +127,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             recommendations,
             description="Checking recommendations",
             unit="papers",
-            enabled=None
-            if recommendations and self.reference_hydrator.fetch_references
-            else False,
+            enabled=None if reference_progress else False,
         ):
             if not str(paper.paper_id).strip():
                 continue

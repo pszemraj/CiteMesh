@@ -48,6 +48,7 @@ from citemesh.strategies.candidates import (
     publication_version_preprint,
     require_available_candidate_source,
 )
+from citemesh.strategies.discovery_ranking import FOCAL_REFERENCE_MIN_CONTEXTS
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -358,26 +359,26 @@ def build_discovery_leads(
 ) -> DiscoveryLeads | None:
     """Build secondary reading lists from the already ranked candidate pool.
 
-    References require at least two distinct provider contexts and are ordered
-    by fused rank. Corpus leads keep their original native query-role retrieval
-    rank and exclude papers acquired through a citation or recommendation. Both
-    lists exclude every paper in the final graph.
+    References require at least two distinct provider contexts and retain the
+    fused order of ``ranked``. Corpus leads keep their original native query-role
+    retrieval rank and exclude papers acquired through a citation or
+    recommendation. Both lists exclude every paper in the final graph.
     """
     if limit <= 0:
         return None
     omitted = {
         item.paper_id: item for item in ranked if item.paper_id not in final_graph_ids
     }
-    cited: list[tuple[int, str]] = []
-    for paper_id, evidence in pool.focal_reference_evidence.items():
-        item = omitted.get(paper_id)
-        if item is not None and evidence.context_count >= 2:
-            cited.append((item.rank, paper_id))
     references: list[DiscoveryLead] = []
-    for rank, paper_id in sorted(cited)[:limit]:
-        lead = _discovery_lead(pool.papers[paper_id], rank)
-        lead["context_count"] = pool.focal_reference_evidence[paper_id].context_count
+    for paper_id, item in omitted.items():
+        evidence = pool.focal_reference_evidence.get(paper_id)
+        if evidence is None or evidence.context_count < FOCAL_REFERENCE_MIN_CONTEXTS:
+            continue
+        lead = _discovery_lead(pool.papers[paper_id], item.rank)
+        lead["context_count"] = evidence.context_count
         references.append(lead)
+        if len(references) == limit:
+            break
 
     corpus_positions = sorted(
         (rank, paper_id)

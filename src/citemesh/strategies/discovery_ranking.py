@@ -37,6 +37,7 @@ from numpy.typing import NDArray
 RRF_K = 60
 RRF_WEIGHTS = {"focal_reference": 0.5}
 REFERENCE_CONTEXT_SIZE = 5
+FOCAL_REFERENCE_MIN_CONTEXTS = 2
 
 _SortKey = tuple[float | str, ...]
 Vector = NDArray[np.float32] | NDArray[np.float64]
@@ -171,7 +172,9 @@ def _focal_reference_priority(candidate: DiscoveryCandidate) -> tuple[int, bool]
     """Use provider evidence only for a citation made by the focal paper."""
     context_count = candidate.focal_reference_context_count or 0
     influential = candidate.focal_reference_is_influential is True
-    if candidate.is_reference and (context_count >= 2 or influential):
+    if candidate.is_reference and (
+        context_count >= FOCAL_REFERENCE_MIN_CONTEXTS or influential
+    ):
         return context_count, influential
     return None
 
