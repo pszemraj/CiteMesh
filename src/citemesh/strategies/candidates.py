@@ -258,6 +258,26 @@ def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
     return _candidate_match_namespaces(left, right) is None
 
 
+def _matches_abbreviated_author(full: list[str], abbreviated: list[str]) -> bool:
+    """Match leading initials and a surname tail, including particles and suffixes."""
+    if not abbreviated:
+        return False
+    # Reserve a surname even when it is one letter or is followed by a suffix.
+    has_suffix = abbreviated[-1] in {"jr", "sr", "ii", "iii", "iv", "v"}
+    initials = 0
+    for token in abbreviated[: -2 if has_suffix else -1]:
+        if len(token) != 1:
+            break
+        initials += 1
+    surname = abbreviated[initials:]
+    return (
+        initials > 0
+        and len(abbreviated) <= len(full)
+        and abbreviated[:initials] == [name[0] for name in full[:initials]]
+        and surname == full[-len(surname) :]
+    )
+
+
 def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
     """Return the preprint when two records are a preprint and its publication.
 
@@ -266,7 +286,7 @@ def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
     only record with an arXiv ID. The publication must carry a DOI, have no
     conflicting explicit identifiers, and be from the same or following year.
     Word-normalized titles and full first-author names must match. If the
-    publisher provides only a first initial and surname, also require the
+    publisher abbreviates given names to leading initials, also require the
     same abstract word sequence, at least twenty words long. Callers must
     require a unique match on both sides before reconciling records.
 
@@ -301,23 +321,18 @@ def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
     ):
         return None
     title = bibliography_text_key(preprint.title)
-    author = bibliography_text_key(preprint.authors[0].name)
-    given_name, _, surname_parts = author.partition(" ")
+    author = bibliography_text_key(preprint.authors[0].name).split()
     if (
         " " not in title
-        or not surname_parts
-        or len(given_name) < 2
+        or len(author) < 2
+        or len(author[0]) < 2
         or title != bibliography_text_key(publication.title)
     ):
         return None
-    publication_author = bibliography_text_key(publication.authors[0].name)
+    publication_author = bibliography_text_key(publication.authors[0].name).split()
     if author == publication_author:
         return preprint
-    publication_initial, _, publication_surname = publication_author.partition(" ")
-    if (
-        publication_initial != given_name[0]
-        or publication_surname != surname_parts.rsplit(" ", 1)[-1]
-    ):
+    if not _matches_abbreviated_author(author, publication_author):
         return None
     abstract = bibliography_text_key(preprint.abstract)
     same_abstract = len(abstract.split()) >= 20 and abstract == bibliography_text_key(

@@ -370,17 +370,32 @@ def test_publication_versions_need_matching_metadata(
 
 
 @pytest.mark.parametrize(
-    ("publication_author", "abstract_case", "folds"),
+    ("preprint_author", "publication_author", "abstract_case", "folds"),
     [
-        ("L. Li", "same", 1),
-        ("L. Li", "different", 0),
-        ("L. Li", "placeholder", 0),
-        ("H. Li", "same", 0),
-        ("L. Lu", "same", 0),
+        ("Liunian Harold Li", "L. Li", "same", 1),
+        ("Liunian Harold Li", "L. H. Li", "same", 1),
+        ("Ludwig van Beethoven", "L. van Beethoven", "same", 1),
+        ("John Smith Jr.", "J. Smith Jr.", "same", 1),
+        ("Jae O", "J. O", "same", 1),
+        ("Jae O Jr.", "J. O Jr.", "same", 1),
+        ("John Smith III", "J. Smith III", "same", 1),
+        ("Liunian Harold Li", "L. Li", "nineteen", 0),
+        ("Liunian Harold Li", "L. H. Li", "twenty", 1),
+        ("Liunian Harold Li", "Liunian Harold Li", "nineteen", 1),
+        ("Liunian Harold Li", "L. Li", "different", 0),
+        ("Liunian Harold Li", "L. Li", "placeholder", 0),
+        ("Liunian Harold Li", "H. Li", "same", 0),
+        ("Liunian Harold Li", "L. J. Li", "same", 0),
+        ("Liunian Harold Li", "H. L. Li", "same", 0),
+        ("Liunian Harold Li", "L. H. L. Li", "same", 0),
+        ("Liunian Harold Li", "L. Lu", "same", 0),
+        ("Ludwig van Beethoven", "L. de Beethoven", "same", 0),
+        ("John Smith Jr.", "J. Jr.", "same", 0),
+        ("John Smith III", "J. III", "same", 0),
     ],
 )
 def test_abbreviated_publication_author_needs_matching_abstract(
-    publication_author: str, abstract_case: str, folds: int
+    preprint_author: str, publication_author: str, abstract_case: str, folds: int
 ) -> None:
     """Fold an abbreviated publisher's first author with matching content."""
     abstract = (
@@ -390,6 +405,10 @@ def test_abbreviated_publication_author_needs_matching_abstract(
     )
     if abstract_case == "placeholder":
         abstract = "No abstract available"
+    elif abstract_case in {"nineteen", "twenty"}:
+        abstract = " ".join(
+            f"word{index}" for index in range(19 if abstract_case == "nineteen" else 20)
+        )
     publication_abstract = abstract.replace(
         "vision-and-language", "vision and language"
     )
@@ -401,7 +420,7 @@ def test_abbreviated_publication_author_needs_matching_abstract(
         arxiv_id="2010.12831",
         title=title,
         year=2020,
-        authors=[Author("Liunian Harold Li")],
+        authors=[Author(preprint_author)],
         abstract=abstract,
         is_local_corpus=True,
     )
