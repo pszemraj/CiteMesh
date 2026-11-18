@@ -59,8 +59,10 @@ from citemesh.data.embedding_cache.constants import (
     TEXT_FORMATTER_FINGERPRINT_KEY,
 )
 from citemesh.data.embedding_cache.lifecycle import (
+    open_existing_cache,
     probe_embedding_dimension,
     probe_embedding_namespace,
+    select_existing_cache,
 )
 from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
@@ -1901,6 +1903,48 @@ class EmbeddingGraphBuilder(
                 ):
                     return True
         return False
+
+    def selects_installed_corpus(self, namespace_id: str) -> bool:
+        """Check whether these settings bind an installed corpus.
+
+        Without an explicit selection, cache preparation binds the namespace that
+        the loaded checkpoint and its artifact address, then requires the
+        installed source and a corpus view within its coverage. This applies
+        those rules to the requested checkpoint at the corpus's recorded artifact,
+        so it loads no model and uses no network. A fallback checkpoint loads
+        only when the requested one fails, so its address does not count.
+
+        :param str namespace_id: Installed native namespace ID.
+        :return bool: Whether a build or search with these settings uses the
+            corpus, which without a selection means no ``--cache-namespace``.
+        :raises ValueError: If the namespace is not an installed, ready corpus.
+        :raises RuntimeError: If the namespace has no certified contract.
+        """
+        if self._cache_selection is not None:
+            return self._cache_selection.namespace_id == namespace_id
+        if self.semantic_source != "arxiv-corpus":
+            return False
+        selection = select_existing_cache(namespace_id)
+        if (selection.source_repo_id, selection.source_split) != (
+            self.dataset_source,
+            self.dataset_split,
+        ):
+            return False
+        if not self._may_select_namespace(
+            namespace_id,
+            selection.contract.model_artifact_identity,
+            self._model_load_candidates()[:1],
+        ):
+            return False
+        if self.corpus_size is None:
+            return True
+        try:
+            open_existing_cache(selection).require_complete_certified_corpus(
+                corpus_size=self.corpus_size
+            )
+        except ValueError:
+            return False
+        return True
 
     def _matches_recorded_legacy_address(
         self,

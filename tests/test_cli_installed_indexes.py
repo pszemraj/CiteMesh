@@ -28,7 +28,7 @@ from citemesh.cli.commands.build import run_build_command
 from citemesh.cli.commands.cache import run_cache_command
 from citemesh.cli.parser import _create_parser, _pop_tracked_option_dests
 from citemesh.data.embedding_contract import EmbeddingContract, ExistingCacheSelection
-from citemesh.data.user_config import ConfigValue, UserConfig
+from citemesh.data.user_config import ConfigValue, UserConfig, load_user_config
 from tests._helpers import build_seed_graph
 
 
@@ -639,7 +639,7 @@ def test_local_import_reports_namespace_and_copyable_use(
 ) -> None:
     from citemesh.data.embedding_cache import portable
 
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "import", "--path", str(tmp_path)])
     observed = []
 
@@ -649,9 +649,9 @@ def test_local_import_reports_namespace_and_copyable_use(
 
     monkeypatch.setattr(portable, "import_snapshot", install)
     monkeypatch.setattr(
-        "citemesh.cli.commands.cache._default_settings_select", lambda _: automatic
+        "citemesh.cli.commands.cache._settings_select", lambda *_: automatic
     )
-    assert run_cache_command(args, cache_parser) == 0
+    assert run_cache_command(args, cache_parser, build_parser, load_user_config()) == 0
     assert observed == [(tmp_path, None)]
     output = capsys.readouterr().out
     normalized = " ".join(output.split())
@@ -664,9 +664,7 @@ def test_local_import_reports_namespace_and_copyable_use(
         "citemesh search 'long-context language models' "
         f"--semantic-source arxiv-corpus{selector}"
     ) in normalized
-    assert (
-        "Default settings select this index automatically." in normalized
-    ) is automatic
+    assert ("Your settings select this index automatically." in normalized) is automatic
     assert "For other imported indexes or custom model settings" not in normalized
     assert "citemesh config set defaults.semantic_source both" in normalized
     assert "query and graph encoding" in normalized
@@ -683,7 +681,7 @@ def test_bucket_import_preflights_destination_before_transfer(
     from citemesh.data.embedding_cache import portable
     from citemesh.services import embedding_indexes
 
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     flags = ["cache", "import", "--bucket", "owner/index", "--config", "variant"]
     if snapshot:
         flags.extend(["--snapshot", snapshot])
@@ -725,10 +723,8 @@ def test_bucket_import_preflights_destination_before_transfer(
     )
     monkeypatch.setattr(embedding_indexes, "download_publication", download)
     monkeypatch.setattr(portable, "import_snapshot", install)
-    monkeypatch.setattr(
-        "citemesh.cli.commands.cache._default_settings_select", lambda _: True
-    )
-    status = run_cache_command(args, cache_parser)
+    monkeypatch.setattr("citemesh.cli.commands.cache._settings_select", lambda *_: True)
+    status = run_cache_command(args, cache_parser, build_parser, load_user_config())
     if refused:
         assert status == 1
         assert calls == ["resolve", "preflight"]
@@ -739,10 +735,10 @@ def test_bucket_import_preflights_destination_before_transfer(
 
 @pytest.mark.parametrize("flags", [["--config", "variant"], ["--snapshot", "one"]])
 def test_local_import_rejects_bucket_selection_flags(flags: list[str]) -> None:
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "import", "--path", "snapshot", *flags])
     with pytest.raises(SystemExit) as exc:
-        run_cache_command(args, cache_parser)
+        run_cache_command(args, cache_parser, build_parser, load_user_config())
     assert exc.value.code == 2
 
 
@@ -752,7 +748,7 @@ def test_refresh_requires_explicit_legacy_adoption(
     from citemesh.data.embedding_cache import lifecycle
     from citemesh.strategies.embedding import refresh
 
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "refresh", "--namespace", "0123456789ab"])
 
     def uncertified(*args: object, **kwargs: object) -> None:
@@ -763,7 +759,7 @@ def test_refresh_requires_explicit_legacy_adoption(
 
     monkeypatch.setattr(lifecycle, "select_existing_cache", uncertified)
     monkeypatch.setattr(refresh, "adopt_legacy_cache", unexpected_adoption)
-    assert run_cache_command(args, cache_parser) == 1
+    assert run_cache_command(args, cache_parser, build_parser, load_user_config()) == 1
 
 
 def test_legacy_adoption_passes_historical_selectors_for_proof(
@@ -772,7 +768,7 @@ def test_legacy_adoption_passes_historical_selectors_for_proof(
     from citemesh.strategies import embedding
     from citemesh.strategies.embedding import refresh
 
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(
         [
             "cache",
@@ -800,7 +796,7 @@ def test_legacy_adoption_passes_historical_selectors_for_proof(
 
     monkeypatch.setattr(embedding, "EmbeddingGraphBuilder", builder)
     monkeypatch.setattr(refresh, "adopt_legacy_cache", adopt)
-    assert run_cache_command(args, cache_parser) == 0
+    assert run_cache_command(args, cache_parser, build_parser, load_user_config()) == 0
     assert captured["builder"].model_revision == "main"
     assert captured["builder"].truncate_dim == 256
     assert captured["builder"].dataset_source == "owner/source"
@@ -810,7 +806,7 @@ def test_legacy_adoption_passes_historical_selectors_for_proof(
 
 
 def test_legacy_selectors_require_adopt() -> None:
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(
         [
             "cache",
@@ -822,7 +818,7 @@ def test_legacy_selectors_require_adopt() -> None:
         ]
     )
     with pytest.raises(SystemExit) as exc:
-        run_cache_command(args, cache_parser)
+        run_cache_command(args, cache_parser, build_parser, load_user_config())
     assert exc.value.code == 2
 
 
@@ -831,7 +827,7 @@ def test_unknown_published_config_is_a_usage_error(
 ) -> None:
     from citemesh.services import embedding_indexes
 
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(
         [
             "cache",
@@ -850,7 +846,7 @@ def test_unknown_published_config_is_a_usage_error(
 
     monkeypatch.setattr(embedding_indexes, "resolve_publication", unknown)
     with pytest.raises(SystemExit) as exc:
-        run_cache_command(args, cache_parser)
+        run_cache_command(args, cache_parser, build_parser, load_user_config())
     assert exc.value.code == 2
 
 
@@ -863,7 +859,7 @@ def test_hub_http_failures_return_an_operation_error(
     from httpx2 import ConnectError, Request, Response
     from huggingface_hub.errors import BucketBatchError, EntryNotFoundError
 
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "import", "--bucket", "owner/index"])
     response = Response(503, request=Request("GET", "https://huggingface.co"))
     error = {
@@ -880,7 +876,7 @@ def test_hub_http_failures_return_an_operation_error(
         "HfApi",
         lambda: SimpleNamespace(download_bucket_files=unavailable),
     )
-    assert run_cache_command(args, cache_parser) == 1
+    assert run_cache_command(args, cache_parser, build_parser, load_user_config()) == 1
 
 
 @pytest.mark.parametrize("command", ["export", "refresh", "build"])
@@ -934,7 +930,7 @@ def test_namespace_failures_return_operation_errors(
         args = parser.parse_args(
             ["cache", command, "--namespace", "0123456789ab", *flags]
         )
-        result = run_cache_command(args, cache_parser)
+        result = run_cache_command(args, cache_parser, build_parser, load_user_config())
     assert result == 1
     assert not (tmp_path / "out").exists()
     failures = [record for record in caplog.records if record.levelno == logging.ERROR]
@@ -988,9 +984,9 @@ def test_refresh_reports_offline_source_failure(
         lifecycle, "select_existing_cache", lambda *args, **kwargs: None
     )
     monkeypatch.setattr(refresh, "refresh_cache_selection", refresh_source)
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(["cache", "refresh", "--namespace", "0123456789ab"])
-    assert run_cache_command(args, cache_parser) == 1
+    assert run_cache_command(args, cache_parser, build_parser, load_user_config()) == 1
     action = "resolve" if failure_stage == "resolve" else "read"
     assert f"Cannot {action} dataset test/source@main: offline" in caplog.text
     assert not any(record.exc_info for record in caplog.records)
@@ -1013,11 +1009,11 @@ def test_legacy_adoption_rejects_explicit_all_against_recorded_limit(
         pytest.fail("conflicting adoption started")
 
     monkeypatch.setattr(refresh, "adopt_legacy_cache", unexpected)
-    parser, _, cache_parser, _ = _create_parser()
+    parser, build_parser, cache_parser, _ = _create_parser()
     args = parser.parse_args(
         ["cache", "refresh", "--namespace", "0123456789ab", "--adopt", "--all-corpus"]
     )
-    assert run_cache_command(args, cache_parser) == 1
+    assert run_cache_command(args, cache_parser, build_parser, load_user_config()) == 1
 
 
 @pytest.mark.parametrize("namespace", [False, True])

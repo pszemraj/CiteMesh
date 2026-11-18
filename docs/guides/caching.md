@@ -89,6 +89,8 @@ citemesh search "long-context language models" --cache-namespace NAMESPACE --cor
 citemesh cache export --namespace NAMESPACE --output ./arxiv-index
 ```
 
+Import prints the installed namespace and copyable search and build commands. It resolves your settings the way those commands will: built-in defaults overlaid with `config.toml`. When those settings do not select the index, for example because of a different model, dimension, or dataset, the printed commands add `--cache-namespace`.
+
 Where the index comes from:
 
 - `--path` and `--bucket` are alternatives.

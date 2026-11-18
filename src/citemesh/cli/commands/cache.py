@@ -8,6 +8,8 @@ import sqlite3
 
 from rich.text import Text
 
+from citemesh.data.user_config import UserConfig
+
 from .. import console
 from ..cache_ops import _clear_cache_directory, _scan_cache_directory
 from ..console import logger
@@ -45,39 +47,43 @@ def _default_corpus_args() -> argparse.Namespace:
     return defaults
 
 
-def _default_settings_select(namespace: str) -> bool:
-    """Check whether built-in defaults select an installed corpus on their own.
+def _settings_select(
+    namespace: str,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+) -> bool:
+    """Check whether the user's settings select an installed corpus on their own.
 
-    A build or search selects an installed corpus without ``--cache-namespace``
-    when the address its settings derive for the corpus's recorded model
-    artifact is the installed namespace and the corpus has the requested
-    source. This derives that address from a default builder, which loads no
-    model and touches no network or cache file.
+    Resolves the settings of ``citemesh search QUERY --semantic-source
+    arxiv-corpus`` (built-in defaults, then config.toml), which a hybrid build
+    with ``--semantic-source both`` shares for its corpus, and asks a builder
+    with them whether it binds the namespace. That loads no model and uses no
+    network.
 
     :param str namespace: Installed native namespace ID.
-    :return bool: ``True`` when default settings reach the namespace; ``False``
-        also when the embeddings extra that builds the address is not installed.
+    :param argparse.ArgumentParser build_parser: Build subparser supplying the
+        built-in defaults.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return bool: ``True`` when those settings reach the namespace; ``False``
+        also when config.toml makes them invalid for a corpus build or the
+        embeddings extra is not installed.
     """
-    from citemesh.data.embedding_cache.lifecycle import select_existing_cache
-    from citemesh.data.embedding_contract import embedding_namespace_id
     from citemesh.strategies.embedding import EmbeddingGraphBuilder
 
+    from ..build_contract import _resolve_namespace_settings
     from ..build_options import _shared_embedding_builder_kwargs
 
     try:
-        builder = EmbeddingGraphBuilder(
-            **_shared_embedding_builder_kwargs(_default_corpus_args())
+        settings = _resolve_namespace_settings(
+            build_parser, user_config, {"semantic_source": "arxiv-corpus"}
         )
+        builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(settings))
     except ImportError:
         return False
-    selection = select_existing_cache(namespace)
-    address = builder._embedding_cache_namespace(
-        artifact_identity=selection.contract.model_artifact_identity
-    )
-    return embedding_namespace_id(address) == namespace and (
-        builder.dataset_source,
-        builder.dataset_split,
-    ) == (selection.source_repo_id, selection.source_split)
+    except ValueError as exc:
+        logger.debug("Current settings cannot build from a corpus: %s", exc)
+        return False
+    return builder.selects_installed_corpus(namespace)
 
 
 def _adopt_legacy_namespace(
@@ -126,7 +132,7 @@ def _print_installed_namespace(namespace: str, *, automatic: bool) -> None:
     """Show a copyable route from corpus installation to local retrieval.
 
     :param str namespace: Installed native namespace ID.
-    :param bool automatic: Whether default settings select the corpus without
+    :param bool automatic: Whether the user's settings select the corpus without
         ``--cache-namespace``.
     """
     console.output_console.print(
@@ -134,11 +140,11 @@ def _print_installed_namespace(namespace: str, *, automatic: bool) -> None:
     )
     if automatic:
         selector = None
-        note = "Default settings select this index automatically."
+        note = "Your settings select this index automatically."
     else:
         selector = namespace
         note = (
-            "Default settings do not select this index; add "
+            "Your settings do not select this index; add "
             f"--cache-namespace {namespace} to the commands below."
         )
     console.output_console.print(Text(note))
@@ -161,10 +167,17 @@ def _print_installed_namespace(namespace: str, *, automatic: bool) -> None:
     )
 
 
-def _run_portable_command(args: argparse.Namespace) -> int:
+def _run_portable_command(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+) -> int:
     """Export or import a cache snapshot, loading transfer dependencies on demand.
 
     :param argparse.Namespace args: Parsed export or import options.
+    :param argparse.ArgumentParser build_parser: Build subparser whose defaults,
+        with ``user_config``, decide how the import report selects the corpus.
+    :param UserConfig user_config: Loaded user configuration snapshot.
     :return int: Process-style exit code.
     """
     from citemesh.data.embedding_cache.lifecycle import (
@@ -203,18 +216,27 @@ def _run_portable_command(args: argparse.Namespace) -> int:
     cache = import_snapshot(snapshot_path, publication=publication)
     _print_installed_namespace(
         cache.namespace_id,
-        automatic=_default_settings_select(cache.namespace_id),
+        automatic=_settings_select(cache.namespace_id, build_parser, user_config),
     )
     return 0
 
 
 def run_cache_command(
-    args: argparse.Namespace, cache_parser: argparse.ArgumentParser
+    args: argparse.Namespace,
+    cache_parser: argparse.ArgumentParser,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
 ) -> int:
     """Run the ``cache`` subcommand.
 
+    Only the import report reads ``user_config``; refresh and adoption use
+    built-in defaults and the selectors passed to them.
+
     :param argparse.Namespace args: Parsed CLI namespace for ``cache``.
     :param argparse.ArgumentParser cache_parser: Parser used for usage output.
+    :param argparse.ArgumentParser build_parser: Build subparser supplying the
+        settings the import report checks.
+    :param UserConfig user_config: Loaded user configuration snapshot.
     :return int: Process-style exit code.
     """
     if (
@@ -251,7 +273,7 @@ def run_cache_command(
                 refresh_cache_selection(selection, revision=args.dataset_revision)
                 logger.info("Refreshed corpus namespace %s.", args.namespace)
                 return 0
-            return _run_portable_command(args)
+            return _run_portable_command(args, build_parser, user_config)
         except _CacheUsageError as exc:
             cache_parser.error(str(exc))
         except ImportError as exc:

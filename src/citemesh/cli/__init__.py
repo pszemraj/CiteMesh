@@ -131,7 +131,9 @@ def _run(argv: Sequence[str] | None) -> int:
             args, build_parser, user_config
         )
     if args.command == "cache":
-        return _command_module("cache").run_cache_command(args, cache_parser)
+        return _command_module("cache").run_cache_command(
+            args, cache_parser, build_parser, user_config
+        )
 
     return 0
 

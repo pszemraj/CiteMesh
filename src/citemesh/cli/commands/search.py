@@ -24,20 +24,14 @@ from citemesh.strategies.embedding import (
 )
 
 from .. import console
-from ..build_contract import (
-    _BuildContractValueError,
-    _validate_build_cli_contract,
-    _ValueErrorParserErrorSink,
-)
+from ..build_contract import _BuildContractValueError, _resolve_namespace_settings
 from ..build_options import (
-    _apply_user_config_defaults,
     _configured_client_kwargs,
     _resolve_user_config_api_key,
     _shared_embedding_builder_kwargs,
 )
-from ..cache_selection import _apply_cache_selection
 from ..console import logger
-from ..parser import _output_table, _pop_tracked_option_dests
+from ..parser import _output_table
 
 #: Search flags that override a build-equivalent namespace selector. They share
 #: their destinations with the build parser and all default to ``None``, so a
@@ -215,41 +209,17 @@ def _prepare_local_search_builder(
     :raises _LocalSearchOptionError: If the supplied namespace flags do not form
         a build configuration the contract accepts.
     """
-    defaults = build_parser.parse_args(["local-search-placeholder-seed"])
-    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
-    _pop_tracked_option_dests(defaults)
-    # Local search reads an embedding namespace: a configured strategy must not
-    # replace it, and config defaults must be resolved for this strategy.
-    defaults.strategy = "embedding"
-    config_default_dests = _apply_user_config_defaults(
-        defaults, {"strategy"}, user_config
-    )
     overrides = _namespace_overrides(args)
-    for dest, value in overrides.items():
-        setattr(defaults, dest, value)
-        config_default_dests.discard(dest)
-    # Validate the supplied selectors together so source inference, conflicts,
-    # and storage normalization match the build command.
-    provided_dests = set(overrides)
     try:
-        stored_dests = _apply_cache_selection(
-            defaults, provided_dests, _ValueErrorParserErrorSink()
-        )
-        config_default_dests.difference_update(stored_dests)
-        _validate_build_cli_contract(
-            defaults,
-            _ValueErrorParserErrorSink(),
-            provided_dests,
-            config_defaults=config_default_dests,
-            config_path=user_config.path,
-        )
+        defaults = _resolve_namespace_settings(build_parser, user_config, overrides)
     except _BuildContractValueError as exc:
-        if not getattr(
-            args, "cache_namespace", None
-        ) and not provided_dests.intersection(exc.related_dests):
+        if not getattr(args, "cache_namespace", None) and not exc.related_dests & set(
+            overrides
+        ):
             # Config-only failures may fall back to Semantic Scholar in auto mode.
             raise
         raise _LocalSearchOptionError(str(exc)) from exc
+    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
     return builder, defaults
 

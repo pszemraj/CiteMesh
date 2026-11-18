@@ -74,7 +74,7 @@ citemesh build "arxiv:2404.08801" --strategy hybrid --semantic-source both \
   --export dashboard
 ```
 
-Save `both` as the source for future hybrid builds with `citemesh config set defaults.semantic_source both`. If you use non-default model settings, select the imported index with `--cache-namespace NAMESPACE`, using the namespace printed by import.
+Save `both` as the source for future hybrid builds with `citemesh config set defaults.semantic_source both`. Import checks your settings, including saved config defaults; when they do not select the index, as with non-default model settings, the commands it prints add `--cache-namespace NAMESPACE`.
 
 Import needs no GPU or model weights. Queries and graph similarity use the index's pinned model on your local device, including CPU. On an installed index, `--corpus-size N` searches the newest N indexed papers while keeping the full download and cache on disk. [Portable corpus indexes](docs/guides/caching.md#portable-corpus-indexes)
 

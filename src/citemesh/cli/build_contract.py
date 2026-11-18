@@ -7,13 +7,14 @@ config-sourced defaults), side-effect logging, and dispatch of validated argumen
 from __future__ import annotations
 
 import argparse
-from collections.abc import Set
+from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import get_cache_dir, validate_compression_filter
+from citemesh.data.user_config import UserConfig
 from citemesh.strategies.embedding import resolve_embedding_device
 
 from .build_options import (
@@ -24,13 +25,16 @@ from .build_options import (
     _CORPUS_SEMANTIC_SOURCES,
     _STRATEGY_DISPATCH,
     _apply_hybrid_default_overrides,
+    _apply_user_config_defaults,
     _build_option_label,
     _candidate_pool_size_applies,
     _embedding_branch_enabled,
     _normalized_cache_reason,
 )
 from .cache_ops import _embedding_cache_directory_stats
+from .cache_selection import _apply_cache_selection
 from .console import logger
+from .parser import _pop_tracked_option_dests
 
 if TYPE_CHECKING:
     from citemesh.core.models import PaperGraph
@@ -509,6 +513,56 @@ def _validate_build_cli_contract(
         _validate_embedding_device(context)
         _normalize_cache_compression(context)
         _validate_storage_precision_options(context)
+
+
+def _resolve_namespace_settings(
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+    flags: Mapping[str, object],
+) -> argparse.Namespace:
+    """Resolve the embedding build settings that select a cache namespace.
+
+    Built-in build defaults are overlaid with config.toml defaults and then with
+    ``flags``, which count as options passed on the command line. A
+    ``cache_namespace`` flag binds that installed corpus's stored selectors, and
+    the build contract validates and normalizes the result. Local search and the
+    import report both use this, so they agree with a build on the namespace.
+
+    :param argparse.ArgumentParser build_parser: Build subparser supplying the
+        built-in defaults.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :param Mapping[str, object] flags: Namespace selectors supplied as flags.
+    :return argparse.Namespace: Effective build-equivalent settings for
+        ``--strategy embedding``.
+    :raises _BuildContractValueError: If the flags and config.toml defaults do
+        not form a valid embedding build.
+    """
+    settings = build_parser.parse_args(["placeholder-focal-paper"])
+    _pop_tracked_option_dests(settings)
+    # Reading an embedding namespace: a configured strategy must not replace it,
+    # and config defaults must be resolved for this strategy.
+    settings.strategy = "embedding"
+    config_default_dests = _apply_user_config_defaults(
+        settings, {"strategy"}, user_config
+    )
+    for dest, value in flags.items():
+        setattr(settings, dest, value)
+        config_default_dests.discard(dest)
+    # Validate the supplied selectors together so source inference, conflicts,
+    # and storage normalization match the build command.
+    provided_dests = set(flags)
+    stored_dests = _apply_cache_selection(
+        settings, provided_dests, _ValueErrorParserErrorSink()
+    )
+    config_default_dests.difference_update(stored_dests)
+    _validate_build_cli_contract(
+        settings,
+        _ValueErrorParserErrorSink(),
+        provided_dests,
+        config_defaults=config_default_dests,
+        config_path=user_config.path,
+    )
+    return settings
 
 
 def _log_build_side_effect_contract(args: argparse.Namespace) -> None:

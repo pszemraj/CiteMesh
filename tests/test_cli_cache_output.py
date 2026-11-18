@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import io
+import logging
 import shlex
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
+import citemesh.strategies.embedding.builder as builder_module
 from citemesh.cli import cache_ops, console
 from citemesh.cli.commands import cache
+from citemesh.cli.parser import _create_parser
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data.user_config import load_user_config, user_config_path
+from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.embedding.config import DEFAULT_DATASET_SOURCE
 
 
 @pytest.mark.parametrize("width", [60, 80, 120])
@@ -92,29 +99,55 @@ def test_installed_corpus_hint_keeps_command_copyable(
         ["citemesh", "config", "set", "defaults.semantic_source", "both"],
     ]
     text = " ".join(output.getvalue().split())
-    assert ("Default settings select this index automatically." in text) is automatic
+    assert ("Your settings select this index automatically." in text) is automatic
     assert (
-        "Default settings do not select this index; add --cache-namespace "
+        "Your settings do not select this index; add --cache-namespace "
         "0123456789ab to the commands below." in text
     ) is not automatic
     assert ("--cache-namespace" in text) is not automatic
 
 
+class _InstalledView:
+    """Corpus view check of an installed corpus that covers ``limit`` papers."""
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = limit
+
+    def require_complete_certified_corpus(self, *, corpus_size: int | None) -> None:
+        if self.limit is not None and corpus_size is not None:
+            if corpus_size > self.limit:
+                raise ValueError("Requested corpus view exceeds installed coverage")
+
+
 def _installed_corpus(
-    monkeypatch: pytest.MonkeyPatch, namespace_id: str, source_repo_id: str
-) -> None:
-    """Serve one installed corpus whose model artifact is ``artifact``."""
-    from citemesh.data.embedding_cache import lifecycle
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
+    truncate_dim: int | None = None,
+    source_repo_id: str = DEFAULT_DATASET_SOURCE,
+    limit: int | None = None,
+) -> str:
+    """Serve one installed corpus that these builder settings encoded.
+
+    :return str: Native namespace ID of the corpus, recorded at artifact ``artifact``.
+    """
     from citemesh.data.embedding_contract import (
         EmbeddingContract,
         ExistingCacheSelection,
+        embedding_namespace_id,
     )
 
+    producer = EmbeddingGraphBuilder(
+        model_name=model_name, truncate_dim=truncate_dim, semantic_source="arxiv-corpus"
+    )
+    namespace_id = embedding_namespace_id(
+        producer._embedding_cache_namespace(artifact_identity="artifact")
+    )
     selection = ExistingCacheSelection(
         namespace_id=namespace_id,
         namespace_serialization="address",
         contract=EmbeddingContract(
-            model_id="unsloth/embeddinggemma-300m",
+            model_id=model_name,
             model_revision="revision",
             model_artifact_identity="artifact",
             profile_key="embeddinggemma",
@@ -122,7 +155,7 @@ def _installed_corpus(
             representation="retrieval-document-v1",
             formatter_identity="formatter",
             normalization="l2-v1",
-            dimension=512,
+            dimension=producer.truncate_dim,
             stored_dtype="int8",
             quantization="affine-int8-v1",
             calibration_sample_size=2000,
@@ -131,32 +164,109 @@ def _installed_corpus(
         source_config_name=None,
         source_split="train",
     )
-    monkeypatch.setattr(lifecycle, "select_existing_cache", lambda _: selection)
+
+    def select(requested: str) -> ExistingCacheSelection:
+        assert requested == namespace_id
+        return selection
+
+    monkeypatch.setattr(builder_module, "select_existing_cache", select)
+    monkeypatch.setattr(
+        builder_module, "open_existing_cache", lambda _: _InstalledView(limit)
+    )
+    return namespace_id
 
 
-def test_default_settings_select_a_corpus_by_address_and_source(
+def _settings_select(namespace_id: str, config_toml: str) -> bool:
+    """Decide the import report from a config.toml in the isolated cache root."""
+    config_path = user_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(config_toml, encoding="utf-8")
+    _, build_parser, _, _ = _create_parser()
+    return cache._settings_select(namespace_id, build_parser, load_user_config())
+
+
+@pytest.mark.parametrize(
+    ("corpus", "config_toml", "selected"),
+    [
+        pytest.param({}, "", True, id="defaults"),
+        pytest.param(
+            {}, '[defaults]\nsemantic_source = "both"\n', True, id="saved-source"
+        ),
+        pytest.param({}, "[defaults]\ntruncate_dim = 256\n", False, id="config-dim"),
+        pytest.param(
+            {},
+            '[defaults]\nmodel = "google/embeddinggemma-300m"\n',
+            False,
+            id="config-model",
+        ),
+        pytest.param({"truncate_dim": 256}, "", False, id="corpus-dim"),
+        pytest.param(
+            {"truncate_dim": 256},
+            "[defaults]\ntruncate_dim = 256\n",
+            True,
+            id="corpus-dim-configured",
+        ),
+        pytest.param({"source_repo_id": "publisher/source"}, "", False, id="source"),
+        pytest.param(
+            {"source_repo_id": "publisher/source"},
+            '[defaults]\ndataset_source = "publisher/source"\n',
+            True,
+            id="source-configured",
+        ),
+        pytest.param(
+            {"model_name": "google/embeddinggemma-300m"},
+            "",
+            False,
+            id="fallback-model",
+        ),
+        pytest.param(
+            {"limit": 5}, "[defaults]\ncorpus_size = 5\n", True, id="view-within"
+        ),
+        pytest.param(
+            {"limit": 5}, "[defaults]\ncorpus_size = 10\n", False, id="view-beyond"
+        ),
+    ],
+)
+def test_saved_settings_decide_whether_import_selects_the_corpus(
     monkeypatch: pytest.MonkeyPatch,
+    corpus: dict[str, str | int],
+    config_toml: str,
+    selected: bool,
 ) -> None:
-    """Only an installed corpus the default builder would address is selected."""
-    from citemesh.data.embedding_contract import embedding_namespace_id
-    from citemesh.strategies.embedding import EmbeddingGraphBuilder
-    from citemesh.strategies.embedding.config import DEFAULT_DATASET_SOURCE
+    """Config defaults that address a namespace flip the import report either way.
 
-    default = EmbeddingGraphBuilder(semantic_source="arxiv-corpus")
-    address = default._embedding_cache_namespace(artifact_identity="artifact")
-    namespace = embedding_namespace_id(address)
+    The requested checkpoint addresses the corpus; the fallback checkpoint that
+    loads only when it fails does not, and a configured view must fit coverage.
+    """
+    namespace_id = _installed_corpus(monkeypatch, **corpus)
 
-    _installed_corpus(monkeypatch, namespace, DEFAULT_DATASET_SOURCE)
-    assert cache._default_settings_select(namespace)
-
-    _installed_corpus(monkeypatch, namespace, "publisher/source")
-    assert not cache._default_settings_select(namespace)
-
-    _installed_corpus(monkeypatch, "0123456789ab", DEFAULT_DATASET_SOURCE)
-    assert not cache._default_settings_select("0123456789ab")
+    assert _settings_select(namespace_id, config_toml) is selected
 
 
-def test_default_settings_need_the_embeddings_extra_to_select_a_corpus(
+@pytest.mark.parametrize(
+    "config_toml",
+    [
+        pytest.param("[defaults]\ntruncate_dim = 100\n", id="builder-option"),
+        pytest.param(
+            '[defaults]\nstreaming = true\ndataset_split = "train[:5%]"\n',
+            id="build-contract",
+        ),
+    ],
+)
+def test_invalid_saved_settings_report_the_explicit_route(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    config_toml: str,
+) -> None:
+    """A config.toml no corpus build accepts yields the namespace route, not an error."""
+    namespace_id = _installed_corpus(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="citemesh")
+
+    assert not _settings_select(namespace_id, config_toml)
+    assert "Current settings cannot build from a corpus" in caplog.text
+
+
+def test_saved_settings_need_the_embeddings_extra_to_select_a_corpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without the extra the address cannot be derived, so the explicit route is shown."""
@@ -167,4 +277,4 @@ def test_default_settings_need_the_embeddings_extra_to_select_a_corpus(
 
     monkeypatch.setattr(deps, "_check_embedding_deps", missing)
 
-    assert not cache._default_settings_select("0123456789ab")
+    assert not _settings_select("0123456789ab", "")
