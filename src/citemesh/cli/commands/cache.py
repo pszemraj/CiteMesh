@@ -11,7 +11,7 @@ from rich.text import Text
 from .. import console
 from ..cache_ops import _clear_cache_directory, _scan_cache_directory
 from ..console import logger
-from ..parser import _missing_command
+from ..parser import CORPUS_BUILD_EXAMPLE, CORPUS_SEARCH_EXAMPLE, _missing_command
 
 _ADOPTION_SELECTORS = (
     "model",
@@ -89,26 +89,16 @@ def _print_installed_namespace(namespace: str) -> None:
             f"--cache-namespace {namespace} to the search or build command below."
         )
     )
-    console.output_console.print("Build a hybrid graph", style="bold")
-    console.output_console.print(
-        Text(
-            "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both --export dashboard"
+    for label, command in (
+        ("Build a hybrid graph", CORPUS_BUILD_EXAMPLE),
+        ("Search the corpus", CORPUS_SEARCH_EXAMPLE),
+        (
+            "Use the corpus for future hybrid builds",
+            "citemesh config set defaults.semantic_source both",
         ),
-        soft_wrap=True,
-    )
-    console.output_console.print("Search the corpus", style="bold")
-    console.output_console.print(
-        Text(
-            "citemesh search 'long-context language models' --semantic-source arxiv-corpus"
-        ),
-        soft_wrap=True,
-    )
-    console.output_console.print(
-        "Use the corpus for future hybrid builds", style="bold"
-    )
-    console.output_console.print(
-        Text("citemesh config set defaults.semantic_source both"), soft_wrap=True
-    )
+    ):
+        console.output_console.print(label, style="bold")
+        console.output_console.print(Text(command), soft_wrap=True)
     console.output_console.print(
         Text(
             "Corpus embeddings are installed; query and graph encoding still use "
@@ -158,8 +148,7 @@ def _run_portable_command(args: argparse.Namespace) -> int:
         snapshot_path = download_publication(resolved)
         publication = resolved.origin
     cache = import_snapshot(snapshot_path, publication=publication)
-    namespace = cache.db_path.stem.removeprefix("metadata_")
-    _print_installed_namespace(namespace)
+    _print_installed_namespace(cache.namespace_id)
     return 0
 
 

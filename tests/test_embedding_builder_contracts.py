@@ -329,17 +329,21 @@ def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> No
 
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid-corpus", "hybrid-both"])
 @pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.parametrize("model_profile", ["auto", "embeddinggemma"])
 def test_cold_corpus_reminds_about_public_index_once_before_loading(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     strategy: str,
     use_streaming: bool,
+    model_profile: str,
 ) -> None:
     """Offer the public index once, before either corpus mode loads its dataset."""
     caplog.set_level(logging.INFO, logger=hydration_module.__name__)
     if strategy == "embedding":
         builder = EmbeddingGraphBuilder(
-            semantic_source="arxiv-corpus", client=MagicMock()
+            semantic_source="arxiv-corpus",
+            client=MagicMock(),
+            model_profile=model_profile,
         )
     else:
         monkeypatch.setattr(
@@ -348,6 +352,7 @@ def test_cold_corpus_reminds_about_public_index_once_before_loading(
         builder = HybridGraphBuilder(
             semantic_source="both" if strategy == "hybrid-both" else "arxiv-corpus",
             client=MagicMock(),
+            model_profile=model_profile,
         ).embedding_builder
     _pin_model_fingerprint(monkeypatch, builder)
 
@@ -398,6 +403,7 @@ def test_cold_corpus_reminds_about_public_index_once_before_loading(
     [
         {"semantic_source": "candidates"},
         {"model_name": "custom-checkpoint"},
+        {"model_name": "google/embeddinggemma-300m"},
         {"model_revision": "custom-revision"},
         {"model_profile": "default"},
         {"dataset_source": "example/custom-corpus"},
@@ -416,6 +422,15 @@ def test_public_index_reminder_skips_other_corpus_contracts(
     caplog.set_level(logging.INFO, logger=hydration_module.__name__)
     options = {"semantic_source": "arxiv-corpus", "client": MagicMock(), **overrides}
     builder = EmbeddingGraphBuilder(**options)
+    if "calibration_sample_size" in overrides:
+        # A local default does not change the published index's calibration.
+        from citemesh.core import EMBEDDING_STORAGE_CONFIG
+
+        monkeypatch.setattr(
+            EMBEDDING_STORAGE_CONFIG,
+            "calibration_sample_size",
+            overrides["calibration_sample_size"],
+        )
     _pin_model_fingerprint(monkeypatch, builder)
     monkeypatch.setattr(
         builder,

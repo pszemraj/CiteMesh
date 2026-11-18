@@ -53,6 +53,7 @@ from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
 )
+from citemesh.strategies.embedding.config import PUBLIC_ARXIV_INDEX_IMPORT
 from citemesh.strategies.hybrid import (
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
@@ -66,6 +67,18 @@ from .console import DEFAULT_LOG_WIDTH, LOG_LEVEL_CHOICES
 
 _TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
 _TRACKED_ACTION_CACHE: dict[type[argparse.Action], type[argparse.Action]] = {}
+
+
+_HYBRID_DASHBOARD_EXAMPLE = (
+    'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard'
+)
+CORPUS_BUILD_EXAMPLE = (
+    "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both "
+    "--export dashboard"
+)
+CORPUS_SEARCH_EXAMPLE = (
+    "citemesh search 'long-context language models' --semantic-source arxiv-corpus"
+)
 
 
 class _HelpFormatter(RichHelpFormatter):
@@ -454,7 +467,7 @@ def _create_root_parser() -> tuple[
                 _help_examples(
                     (
                         "Build a hybrid graph with local embeddings (recommended extra)",
-                        'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
+                        _HYBRID_DASHBOARD_EXAMPLE,
                     ),
                     ("Find a focal paper", 'citemesh search "attention mechanisms"'),
                     ("Open saved results", "citemesh view"),
@@ -974,15 +987,15 @@ def _add_build_arguments(
             _help_examples(
                 (
                     "Build a hybrid dashboard with local embeddings (recommended extra)",
-                    'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
+                    _HYBRID_DASHBOARD_EXAMPLE,
                 ),
                 (
                     "Build a recommendation dashboard without an embedding model (viz extra)",
                     'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
                 ),
                 (
-                    "Build from an installed corpus (embeddings extra)",
-                    'citemesh build "arxiv:1706.03762" -s embedding --cache-namespace NAMESPACE',
+                    "Build with the installed arXiv corpus (recommended extra)",
+                    CORPUS_BUILD_EXAMPLE,
                 ),
             ),
         ),
@@ -1099,8 +1112,7 @@ def _add_search_arguments(
                 ),
                 (
                     "Search an arXiv-corpus build",
-                    'citemesh search "long-context attention" '
-                    "--semantic-source arxiv-corpus",
+                    CORPUS_SEARCH_EXAMPLE,
                 ),
                 (
                     "Search Semantic Scholar by keyword",
@@ -1340,8 +1352,7 @@ def _add_cache_arguments(
                 ("Install a local export", "citemesh cache import --path out/corpus"),
                 (
                     "Install a published corpus",
-                    "citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes "
-                    "--config embeddinggemma-512-int8",
+                    " ".join(PUBLIC_ARXIV_INDEX_IMPORT),
                 ),
             )
         ),
@@ -1557,23 +1568,26 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
             action.option_strings
             and action.type in (str, _non_empty_str, Path)
             and action.choices is None
+            and action.metavar is None
         ):
-            action.metavar = {
-                "output": "PATH",
-                "path": "PATH",
-                "log_file": "PATH",
-                "model": "MODEL",
-                "model_revision": "REV",
-                "dataset_source": "DATASET",
-                "dataset_split": "SPLIT",
-                "namespace": "NAMESPACE",
-                "cache_namespace": "NAMESPACE",
-                "dataset_revision": "REV",
-                "snapshot": "ID",
-                "bucket": "BUCKET",
-                "config": "NAME",
-                "browser": "NAME",
-            }.get(action.dest, "TEXT")
+            if action.type is Path:
+                action.metavar = "PATH"
+            else:
+                action.metavar = {
+                    "output": "PATH",
+                    "log_file": "PATH",
+                    "model": "MODEL",
+                    "model_revision": "REV",
+                    "dataset_source": "DATASET",
+                    "dataset_split": "SPLIT",
+                    "namespace": "NAMESPACE",
+                    "cache_namespace": "NAMESPACE",
+                    "dataset_revision": "REV",
+                    "snapshot": "ID",
+                    "bucket": "BUCKET",
+                    "config": "NAME",
+                    "browser": "NAME",
+                }.get(action.dest, "TEXT")
 
 
 def _finalize_command_parser(

@@ -539,7 +539,7 @@ def test_local_import_reports_namespace_and_copyable_use(
 
     def install(path: Path, *, publication: dict | None) -> SimpleNamespace:
         observed.append((path, publication))
-        return SimpleNamespace(db_path=tmp_path / "metadata_0123456789ab.db")
+        return SimpleNamespace(namespace_id="0123456789ab")
 
     monkeypatch.setattr(portable, "import_snapshot", install)
     assert run_cache_command(args, cache_parser) == 0
@@ -559,90 +559,41 @@ def test_local_import_reports_namespace_and_copyable_use(
     assert "query and graph encoding" in normalized
 
 
-def test_hub_import_preflights_before_payload_transfer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("snapshot", "refused"),
+    [(None, True), ("snapshot-one", False)],
+    ids=["refused-before-download", "pinned-snapshot"],
+)
+def test_bucket_import_preflights_destination_before_transfer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, snapshot: str | None, refused: bool
 ) -> None:
     from citemesh.data.embedding_cache import portable
     from citemesh.services import embedding_indexes
 
     parser, _, cache_parser, _ = _create_parser()
-    args = parser.parse_args(
-        [
-            "cache",
-            "import",
-            "--bucket",
-            "owner/index",
-            "--config",
-            "variant",
-        ]
-    )
-    calls = []
-    publication = SimpleNamespace(
-        origin={
-            "bucket_id": "owner/index",
-            "config_name": "variant",
-            "snapshot_id": "snapshot-pin",
-        }
-    )
-
-    def resolve(*args: object, **kwargs: object) -> SimpleNamespace:
-        calls.append("resolve")
-        return publication
-
-    def preflight(value: object) -> None:
-        assert value is publication
-        calls.append("preflight")
-        raise ValueError("resume pinned pending import")
-
-    def transfer(*args: object, **kwargs: object) -> None:
-        pytest.fail("payload downloaded after destination refusal")
-
-    monkeypatch.setattr(embedding_indexes, "resolve_publication", resolve)
-    monkeypatch.setattr(
-        embedding_indexes, "preflight_publication_destination", preflight
-    )
-    monkeypatch.setattr(embedding_indexes, "download_publication", transfer)
-    monkeypatch.setattr(portable, "import_snapshot", transfer)
-    assert run_cache_command(args, cache_parser) == 1
-    assert calls == ["resolve", "preflight"]
-
-
-def test_bucket_import_passes_snapshot_selection_and_records_origin(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from citemesh.data.embedding_cache import portable
-    from citemesh.services import embedding_indexes
-
-    parser, _, cache_parser, _ = _create_parser()
-    args = parser.parse_args(
-        [
-            "cache",
-            "import",
-            "--bucket",
-            "owner/index",
-            "--config",
-            "variant",
-            "--snapshot",
-            "snapshot-one",
-        ]
-    )
+    flags = ["cache", "import", "--bucket", "owner/index", "--config", "variant"]
+    if snapshot:
+        flags.extend(["--snapshot", snapshot])
+    args = parser.parse_args(flags)
     origin = {
         "bucket_id": "owner/index",
         "config_name": "variant",
-        "snapshot_id": "snapshot-one",
+        "snapshot_id": snapshot or "snapshot-pin",
     }
     publication = SimpleNamespace(origin=origin)
     calls = []
 
     def resolve(bucket_id: str, **kwargs: object) -> SimpleNamespace:
         assert bucket_id == "owner/index"
-        assert kwargs == {"config_name": "variant", "snapshot_id": "snapshot-one"}
+        assert kwargs == {"config_name": "variant", "snapshot_id": snapshot}
         calls.append("resolve")
         return publication
 
     def preflight(value: object) -> None:
         assert value is publication
         calls.append("preflight")
+        if refused:
+            raise ValueError("resume pinned pending import")
 
     def download(value: object) -> Path:
         assert value is publication
@@ -653,7 +604,7 @@ def test_bucket_import_passes_snapshot_selection_and_records_origin(
         assert path == tmp_path
         assert publication == origin
         calls.append("install")
-        return SimpleNamespace(db_path=tmp_path / "metadata_0123456789ab.db")
+        return SimpleNamespace(namespace_id="0123456789ab")
 
     monkeypatch.setattr(embedding_indexes, "resolve_publication", resolve)
     monkeypatch.setattr(
@@ -661,8 +612,13 @@ def test_bucket_import_passes_snapshot_selection_and_records_origin(
     )
     monkeypatch.setattr(embedding_indexes, "download_publication", download)
     monkeypatch.setattr(portable, "import_snapshot", install)
-    assert run_cache_command(args, cache_parser) == 0
-    assert calls == ["resolve", "preflight", "download", "install"]
+    status = run_cache_command(args, cache_parser)
+    if refused:
+        assert status == 1
+        assert calls == ["resolve", "preflight"]
+    else:
+        assert status == 0
+        assert calls == ["resolve", "preflight", "download", "install"]
 
 
 @pytest.mark.parametrize("flags", [["--config", "variant"], ["--snapshot", "one"]])

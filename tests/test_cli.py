@@ -1866,113 +1866,58 @@ def test_search_local_build_footer_uses_active_fallback_model(
     assert generated.calibration_sample_size == searched["calibration_sample_size"]
 
 
-def test_search_semantic_source_flag_selects_corpus_namespace(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        pytest.param(
+            ["--mode", "local", "--semantic-source", "arxiv-corpus"],
+            {"dataset_source": DEFAULT_DATASET_SOURCE},
+            id="explicit-corpus",
+        ),
+        pytest.param(
+            ["--mode", "local", "--dataset-source", "research/arxiv-snapshot"],
+            {"dataset_source": "research/arxiv-snapshot"},
+            id="dataset-implies-corpus",
+        ),
+        pytest.param(
+            [
+                "--model-revision",
+                "frozen-release",
+                "--semantic-source",
+                "arxiv-corpus",
+                "--truncate-dim",
+                "256",
+                "--storage-precision",
+                "int8",
+                "--calibration-sample-size",
+                "4000",
+            ],
+            {
+                "model_revision": "frozen-release",
+                "truncate_dim": 256,
+                "calibration_sample_size": 4000,
+            },
+            id="one-off-model-settings",
+        ),
+    ],
+)
+def test_search_flags_select_corpus_namespace(
+    monkeypatch: pytest.MonkeyPatch, flags: list[str], expected: dict[str, object]
 ) -> None:
-    """--semantic-source arxiv-corpus must reach the corpus cache namespace.
-
-    Storage precision is part of the namespace and the build contract coerces
-    ``int8`` to ``float32`` outside corpus mode, so the override has to land
-    before validation or the search targets a namespace no corpus build wrote.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
-    :return None: Assertions pin the corpus namespace the builder receives.
-    """
+    """Resolve the corpus source before validation chooses its storage precision."""
     fake_builder = _fake_local_search_builder(
-        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+        cached_count=1, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
     monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
 
-    result = run_cli_command(
-        [
-            "search",
-            "cached topic",
-            "--mode",
-            "local",
-            "--semantic-source",
-            "arxiv-corpus",
-        ]
-    )
+    result = run_cli_command(["search", "cached topic", *flags])
 
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert result.returncode == 0, result.stderr
     builder_kwargs = builder_factory.call_args.kwargs
     assert builder_kwargs["semantic_source"] == "arxiv-corpus"
     assert builder_kwargs["storage_precision"] == "int8"
-    assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
-
-
-def test_search_identity_flags_select_one_off_build_namespace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Local search should accept every user-selectable cache identity field.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
-    :return None: Assertions verify one-off build selectors reach the builder.
-    """
-    fake_builder = _fake_local_search_builder(
-        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
-    )
-    builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
-
-    result = run_cli_command(
-        [
-            "search",
-            "cached topic",
-            "--model-revision",
-            "frozen-release",
-            "--semantic-source",
-            "arxiv-corpus",
-            "--truncate-dim",
-            "256",
-            "--storage-precision",
-            "int8",
-            "--calibration-sample-size",
-            "4000",
-        ]
-    )
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    builder_kwargs = builder_factory.call_args.kwargs
-    assert builder_kwargs["model_revision"] == "frozen-release"
-    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
-    assert builder_kwargs["truncate_dim"] == 256
-    assert builder_kwargs["storage_precision"] == "int8"
-    assert builder_kwargs["calibration_sample_size"] == 4000
-
-
-def test_search_dataset_source_flag_implies_corpus_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--dataset-source alone implies arxiv-corpus, mirroring the build contract.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
-    :return None: Assertions verify the implied corpus namespace.
-    """
-    fake_builder = _fake_local_search_builder(
-        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
-    )
-    builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
-    dataset_source = "research/arxiv-snapshot"
-
-    result = run_cli_command(
-        [
-            "search",
-            "cached topic",
-            "--mode",
-            "local",
-            "--dataset-source",
-            dataset_source,
-        ]
-    )
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    builder_kwargs = builder_factory.call_args.kwargs
-    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
-    assert builder_kwargs["dataset_source"] == dataset_source
-    assert builder_kwargs["storage_precision"] == "int8"
+    assert {key: builder_kwargs[key] for key in expected} == expected
 
 
 def test_configured_local_corpus_hybrid_build_uses_full_split(
@@ -5724,14 +5669,21 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 ".dashboard.html",
                 'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
                 'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
-                'citemesh build "arxiv:1706.03762" -s embedding --cache-namespace NAMESPACE',
+                "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both --export dashboard",
             ],
         ),
         (
             ["view", "--help"],
             ["view [PATH]", "out/dashboard.html", "--browser NAME", "system browser"],
         ),
-        (["search", "--help"], ["search", "--limit"]),
+        (
+            ["search", "--help"],
+            [
+                "search",
+                "--limit",
+                "citemesh search 'long-context language models' --semantic-source arxiv-corpus",
+            ],
+        ),
         (["cache", "--help"], ["clear", "scan", "Examples"]),
         (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
         (
@@ -5783,6 +5735,29 @@ def test_cli_help_survives_unusable_terminal_width(
     assert "usage: citemesh COMMAND [options]" in help_text
     assert "CiteMesh" in help_text
     assert "Options:" in help_text
+
+
+@pytest.mark.parametrize(
+    ("option", "option_type", "metavar", "expected"),
+    [
+        ("archive", Path, None, "PATH"),
+        ("model", Path, None, "PATH"),
+        ("path", Path, "DIRECTORY", "DIRECTORY"),
+        ("model", str, None, "MODEL"),
+        ("model", str, "CHECKPOINT", "CHECKPOINT"),
+    ],
+)
+def test_help_metavars_follow_types_and_preserve_explicit_labels(
+    option: str,
+    option_type: type[Path] | type[str],
+    metavar: str | None,
+    expected: str,
+) -> None:
+    """Use a common path placeholder while honoring option-specific labels."""
+    parser = argparse.ArgumentParser()
+    action = parser.add_argument(f"--{option}", type=option_type, metavar=metavar)
+    parser_module._normalize_action_metavars(parser)
+    assert action.metavar == expected
 
 
 def test_cli_options_with_defaults_document_them_in_help() -> None:

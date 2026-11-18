@@ -29,9 +29,7 @@ from typing import (
 import numpy as np
 from numpy.typing import NDArray
 
-from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
-from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_cache import (
     EMBEDDING_DATASET_CHUNK_ROWS,
     CacheNamespacePayloadStats,
@@ -51,7 +49,8 @@ from . import corpus_source, deps
 from .config import (
     CALIBRATION_RESERVOIR_SEED,
     CANDIDATE_MULTIPLIER,
-    DEFAULT_DATASET_SOURCE,
+    PUBLIC_ARXIV_INDEX_IMPORT,
+    matches_public_arxiv_index,
 )
 from .records import (
     _DATASET_PAPER_ID_FIELDS,
@@ -428,25 +427,16 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return
 
         if (
-            self.storage_precision == "int8"
-            and not self._public_index_reminder_shown
-            and self.dataset_source == DEFAULT_DATASET_SOURCE
-            and self.dataset_split == "train"
-            and self.model_name == DEFAULT_EMBEDDING_MODEL_NAME
-            and self.model_revision is None
-            and self.requested_model_profile in {"auto", "embeddinggemma"}
-            and self.truncate_dim == 512
-            and self.calibration_sample_size
-            == EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+            not self._public_index_reminder_shown
+            and matches_public_arxiv_index(self)
             and self._cached_payload_row_count() == 0
         ):
             self._public_index_reminder_shown = True
+            import_command = " \\\n    ".join(PUBLIC_ARXIV_INDEX_IMPORT)
             logger.info(
                 "Starting a new arXiv corpus cache.\n"
                 "Skip corpus encoding with the public precomputed index:\n"
-                "  citemesh cache import \\\n"
-                "    --bucket pszemraj/citemesh-arxiv-indexes \\\n"
-                "    --config embeddinggemma-512-int8\n"
+                f"  {import_command}\n"
                 "After import, rerun your original build command."
             )
 
