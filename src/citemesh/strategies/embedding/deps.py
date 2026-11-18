@@ -7,7 +7,6 @@ import importlib.util
 from types import ModuleType
 from typing import TYPE_CHECKING
 
-from citemesh._runtime import stderr_isatty
 from citemesh.progress import progress_enabled
 
 from . import runtime
@@ -108,7 +107,7 @@ def _import_datasets_module() -> ModuleType:
     """
     datasets_module = _import_optional("datasets")
     progress_bars = getattr(datasets_module, "utils", None)
-    if not (stderr_isatty() and progress_enabled()):
+    if not progress_enabled(require_tty=True):
         disable_progress_bars = getattr(progress_bars, "disable_progress_bars", None)
         if callable(disable_progress_bars):
             disable_progress_bars()

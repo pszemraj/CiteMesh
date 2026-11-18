@@ -20,6 +20,7 @@ import h5py
 import numpy as np
 import pytest
 
+from citemesh import progress as progress_module
 from citemesh.core import Author, Paper
 from citemesh.core import paper_ids as paper_ids_module
 from citemesh.core.text_batching import estimate_text_length_bucket
@@ -169,10 +170,15 @@ def test_model_load_enforces_profile_transformers_floor(
     assert init_log["attempts"] == [model_name]
 
 
+@pytest.mark.parametrize(
+    ("distribution_version", "should_reject"), [("5.14.1", False), ("unknown", True)]
+)
 def test_transformers_version_falls_back_to_distribution_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    distribution_version: str,
+    should_reject: bool,
 ) -> None:
-    """Nonstandard module versions should use valid installed package metadata."""
+    """Nonstandard module versions require verifiable distribution metadata."""
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _install_fake_torch(
         monkeypatch,
@@ -183,41 +189,22 @@ def test_transformers_version_falls_back_to_distribution_metadata(
     monkeypatch.setattr(
         runtime_module.importlib_metadata,
         "version",
-        lambda _distribution: "5.14.1",
+        lambda _distribution: distribution_version,
     )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    builder._load_model()
+    if should_reject:
+        with pytest.raises(
+            embedding_module.EmbeddingBackendCompatibilityError,
+            match="Could not determine the installed Transformers version",
+        ):
+            builder._load_model()
+        assert "attempts" not in init_log
+        return
 
+    builder._load_model()
     assert init_log["attempts"] == [DEFAULT_EMBEDDING_MODEL_NAME]
     assert "dtype" in init_log["kwargs"]["model_kwargs"]
-
-
-def test_transformers_unknown_version_fails_with_verification_guidance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unverifiable backend version should fail closed without claiming 0.0."""
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _install_fake_torch(
-        monkeypatch,
-        cuda_available=False,
-        bf16_supported=False,
-    )
-    monkeypatch.setattr(sys.modules["transformers"], "__version__", "development-build")
-    monkeypatch.setattr(
-        runtime_module.importlib_metadata,
-        "version",
-        lambda _distribution: "unknown",
-    )
-
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    with pytest.raises(
-        embedding_module.EmbeddingBackendCompatibilityError,
-        match="Could not determine the installed Transformers version",
-    ):
-        builder._load_model()
-
-    assert "attempts" not in init_log
 
 
 def _install_fake_sentence_transformers(
@@ -895,8 +882,8 @@ def test_datasets_progress_policy_preserves_enabled_process_defaults(
         )
     )
     monkeypatch.setattr(deps_module, "_import_optional", lambda *_args: datasets_module)
-    monkeypatch.setattr(deps_module, "stderr_isatty", lambda: interactive)
-    monkeypatch.setattr(deps_module, "progress_enabled", lambda: progress_visible)
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(progress_module, "_progress_enabled", progress_visible)
 
     assert deps_module._import_datasets_module() is datasets_module
     enable_progress_bars.assert_not_called()
@@ -1761,8 +1748,8 @@ def test_model_load_suppresses_transformers_progress_temporarily(
         hub_progress_module, "HF_HUB_DISABLE_PROGRESS_BARS", hub_environment
     )
     monkeypatch.setattr(hub_progress_module, "progress_bar_states", hub_states.copy())
-    monkeypatch.setattr(runtime_module, "stderr_isatty", lambda: interactive)
-    monkeypatch.setattr(runtime_module, "progress_enabled", lambda: progress_visible)
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(progress_module, "_progress_enabled", progress_visible)
     original_cls = deps_module._import_sentence_transformer_class()
 
     def load(model_name: str, **kwargs: Any) -> Any:

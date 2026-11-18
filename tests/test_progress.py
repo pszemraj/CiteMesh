@@ -252,41 +252,46 @@ def test_progress_eta_retains_slow_work_after_a_fast_update_burst(
     assert display.tasks[0].completed == 7003
 
 
-def test_progress_iterator_disabled_yields_items_without_rendering(
+@pytest.mark.parametrize(
+    ("interactive", "allowed", "enabled", "expected"),
+    [
+        (False, True, True, True),
+        (True, True, False, False),
+        (True, True, None, True),
+        (False, True, None, False),
+        (True, False, True, False),
+        (True, False, None, False),
+    ],
+)
+def test_progress_display_policy_preserves_items_and_counts(
+    monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
     recorded_displays: list[Progress],
+    interactive: bool,
+    allowed: bool,
+    enabled: bool | None,
+    expected: bool,
 ) -> None:
-    """A disabled bar should emit nothing while still yielding every item."""
+    """Verbosity gates every display while automatic display also requires a TTY."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: interactive)
+    progress_module.set_progress_enabled(allowed)
+
+    assert progress_module.progress_enabled() is allowed
+    assert progress_module.progress_enabled(require_tty=True) is (
+        allowed and interactive
+    )
+
     items = list(
         progress_module.progress_iterator(
-            [1, 2, 3],
-            description="scan",
-            enabled=False,
+            [1, 2, 3], description="scan", enabled=enabled
         )
     )
 
     display = recorded_displays[0]
     assert items == [1, 2, 3]
-    assert progress_console.export_text() == ""
+    assert bool(progress_console.export_text()) is expected
     assert display.live.is_started is False
     assert display.tasks[0].completed == 3
-
-
-def test_progress_severity_policy_suppresses_explicitly_enabled_bars(
-    progress_console: Console,
-    recorded_displays: list[Progress],
-) -> None:
-    """Warning and error output must not leave dependency-style bars live."""
-    progress_module.set_progress_enabled(False)
-
-    items = list(
-        progress_module.progress_iterator([1, 2, 3], description="scan", enabled=True)
-    )
-
-    display = recorded_displays[0]
-    assert items == [1, 2, 3]
-    assert progress_console.export_text() == ""
-    assert display.live.is_started is False
 
 
 def test_progress_iterator_close_after_break_stops_display(

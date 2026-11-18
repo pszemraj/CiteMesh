@@ -811,8 +811,8 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
             st_kwargs["truncate_dim"] = self.truncate_dim
         if self.model_revision is not None:
             st_kwargs["revision"] = self.model_revision
-        try:
-            with _suppress_transformers_progress():
+        with _suppress_transformers_progress():
+            try:
                 with _suppress_expected_fa2_load_dtype_warning(
                     enabled=(
                         self._attention_implementation_hint == "flash_attention_2"
@@ -823,19 +823,18 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
                     loaded_model = sentence_transformer_cls(
                         candidate_model, **st_kwargs
                     )
-        except (ImportError, ValueError) as exc:
-            if not self._is_flash_attention_load_error(exc):
-                raise
-            logger.warning(
-                "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
-                candidate_model,
-                exc,
-            )
-            # ``model_kwargs`` is the same object st_kwargs carries, so the
-            # downgrade reaches the retry without rebuilding the kwargs.
-            self._attention_implementation_hint = "sdpa"
-            model_kwargs["attn_implementation"] = "sdpa"
-            with _suppress_transformers_progress():
+            except (ImportError, ValueError) as exc:
+                if not self._is_flash_attention_load_error(exc):
+                    raise
+                logger.warning(
+                    "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
+                    candidate_model,
+                    exc,
+                )
+                # ``model_kwargs`` is the same object st_kwargs carries, so the
+                # downgrade reaches the retry without rebuilding the kwargs.
+                self._attention_implementation_hint = "sdpa"
+                model_kwargs["attn_implementation"] = "sdpa"
                 loaded_model = sentence_transformer_cls(candidate_model, **st_kwargs)
         self._validate_loaded_model_precision(loaded_model, candidate_model)
         self._validate_loaded_model_contract(loaded_model, candidate_model)

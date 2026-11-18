@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import (
     closing,
@@ -31,8 +31,10 @@ from unittest.mock import MagicMock
 
 import networkx as nx
 import pytest
+from rich.console import Console
 
 from citemesh import cli as cli_module
+from citemesh import progress as progress_module
 from citemesh.cli import (
     DASHBOARD_COLLECTION_KIND,
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
@@ -310,33 +312,28 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def _reset_cli_logging_state() -> tuple[list[logging.Handler], int, bool]:
-    """Reset root/CLI logging state for direct logging configuration tests."""
-    root_logger = logging.getLogger()
-    saved_handlers = list(root_logger.handlers)
-    saved_level = int(root_logger.level)
-    saved_configured = bool(console_module._LOGGING_CONFIGURED)
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
-    console_module._LOGGING_CONFIGURED = False
-    return saved_handlers, saved_level, saved_configured
-
-
-def _restore_cli_logging_state(
-    saved_handlers: list[logging.Handler], saved_level: int, saved_configured: bool
-) -> None:
-    """Restore root/CLI logging state after direct logging configuration tests."""
-    root_logger = logging.getLogger()
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
+@contextmanager
+def _isolated_cli_logging(console: Console | None = None) -> Iterator[None]:
+    """Isolate each real CLI logging configuration from pytest and other tests."""
+    root = logging.getLogger()
+    levels = {root: root.level}
+    for name in console_module._THIRD_PARTY_LOGGERS:
+        logger = logging.getLogger(name)
+        levels[logger] = logger.level
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(root, "handlers", [])
+        patch.setattr(console_module, "_LOGGING_CONFIGURED", False)
+        patch.setattr(console_module, "log_console", console or Console(stderr=True))
+        patch.setattr(console_module, "output_console", Console())
+        patch.setattr(progress_module, "_progress_console", None)
+        patch.setattr(progress_module, "_progress_enabled", True)
         try:
-            handler.close()
-        except Exception:
-            pass
-    for handler in saved_handlers:
-        root_logger.addHandler(handler)
-    root_logger.setLevel(saved_level)
-    console_module._LOGGING_CONFIGURED = saved_configured
+            yield
+        finally:
+            for handler in root.handlers:
+                handler.close()
+            for logger, level in levels.items():
+                logger.setLevel(level)
 
 
 def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -977,25 +974,14 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
     [("debug", True), ("info", True), ("warning", False), ("error", False)],
 )
 def test_configure_logging_sets_progress_policy_from_severity(
-    monkeypatch: pytest.MonkeyPatch,
     log_level: str,
     expected_progress: bool,
 ) -> None:
     """Progress bars should appear only for normal and verbose CLI output."""
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
-    progress_policy: list[bool] = []
-    monkeypatch.setattr(
-        console_module,
-        "set_progress_enabled",
-        lambda enabled: progress_policy.append(enabled),
-    )
-
-    try:
+    with _isolated_cli_logging():
+        progress_module.set_progress_enabled(not expected_progress)
         console_module._configure_logging(log_level=log_level)
-    finally:
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
-
-    assert progress_policy == [expected_progress]
+        assert progress_module.progress_enabled() is expected_progress
 
 
 @pytest.mark.parametrize("log_level", ["info", "debug", "warning", "error"])
@@ -1047,26 +1033,18 @@ def test_redirected_logs_preserve_long_lines_without_terminal_padding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Piped diagnostics retain literal paths without display wrapping or spaces."""
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     stderr = io.StringIO()
     later_stderr = io.StringIO()
     message = "Saved output to /" + "long-directory-name/" * 12 + "[draft].html"
     monkeypatch.setattr(console_module, "stderr_isatty", lambda: False)
     monkeypatch.delenv("FORCE_COLOR", raising=False)
-    monkeypatch.setattr(
-        console_module,
-        "log_console",
-        cli_module.Console(stderr=True, force_terminal=False),
-    )
-    try:
+    with _isolated_cli_logging(Console(stderr=True, force_terminal=False)):
         with redirect_stderr(stderr):
             console_module._configure_logging()
             cli_module.logger.info(message)
             cli_module.logger.warning("Results are incomplete.")
         with redirect_stderr(later_stderr):
             cli_module.logger.info("A later invocation.")
-    finally:
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     timestamp = r"\d{2}:\d{2}:\d{2}"
     assert re.fullmatch(
@@ -1079,19 +1057,10 @@ def test_redirected_logs_preserve_long_lines_without_terminal_padding(
     )
 
 
-def test_console_logs_repeat_compact_timestamps_for_each_record(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_console_logs_repeat_compact_timestamps_for_each_record() -> None:
     """Two phases in the same second both retain their clock timestamp."""
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     stderr = io.StringIO()
-    monkeypatch.setattr(
-        console_module,
-        "log_console",
-        cli_module.Console(file=stderr, color_system=None),
-    )
-    monkeypatch.setattr(console_module, "set_progress_console", lambda _console: None)
-    try:
+    with _isolated_cli_logging(Console(file=stderr, color_system=None)):
         console_module._configure_logging(log_width=80)
         for message in ("First phase", "Second phase"):
             record = logging.LogRecord(
@@ -1099,8 +1068,6 @@ def test_console_logs_repeat_compact_timestamps_for_each_record(
             )
             record.created = 0.0
             cli_module.logger.handle(record)
-    finally:
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     output = stderr.getvalue()
     timestamps = re.findall(r"^(\d{2}:\d{2}:\d{2})", output, re.MULTILINE)
@@ -1121,15 +1088,10 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     :param bool preconfigured: Whether a library already installed a root handler.
     :return None: Assertions verify both logging sinks honor the requested level.
     """
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
     stderr = io.StringIO()
-    noisy_logger_names = ("filelock", "matplotlib", "urllib3")
-    saved_logger_levels = {
-        name: logging.getLogger(name).level for name in noisy_logger_names
-    }
 
-    try:
+    with _isolated_cli_logging():
         if preconfigured:
             logging.getLogger().addHandler(logging.NullHandler())
         with redirect_stderr(stderr):
@@ -1146,10 +1108,6 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
             assert logging.getLogger("filelock").level == logging.WARNING
             assert logging.getLogger("matplotlib").level == logging.WARNING
             assert logging.getLogger("urllib3").level == logging.WARNING
-    finally:
-        for name, level in saved_logger_levels.items():
-            logging.getLogger(name).setLevel(level)
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     assert log_path.exists()
     content = log_path.read_text(encoding="utf-8")
@@ -1168,19 +1126,16 @@ def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> Non
     :param Path tmp_path: Pytest temporary directory.
     :return None: Assertions verify Rich markup does not consume the table name.
     """
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     config_path = tmp_path / "config.toml"
     config_path.write_text("[plugin_settings]\nenabled = true\n", encoding="utf-8")
     stderr = io.StringIO()
 
-    try:
+    with _isolated_cli_logging():
         with redirect_stderr(stderr):
             console_module._configure_logging(log_level="info", log_width=0)
             cli_module.load_user_config(config_path)
             for handler in logging.getLogger().handlers:
                 handler.flush()
-    finally:
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     warning = stderr.getvalue()
     assert "Ignoring unknown config table" in warning
@@ -4914,26 +4869,18 @@ def test_dashboard_collection_mode_logs_side_effects(
 )
 def test_build_run_summary_reports_requested_outputs_once(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     elapsed_seconds: float,
     runtime: str,
 ) -> None:
     """At 80 columns each output stays copyable, including in the log file."""
     stderr = io.StringIO()
-    saved = _reset_cli_logging_state()
-    monkeypatch.setattr(
-        console_module,
-        "log_console",
-        cli_module.Console(file=stderr, color_system=None),
-    )
-    monkeypatch.setattr(console_module, "set_progress_console", lambda _console: None)
     graph = build_seed_graph("seed")
     output_paths = {
         "dashboard": Path("out/dashboard.html"),
         "json": tmp_path / ("long-directory-" * 8) / "[draft] result.json",
     }
     log_file = tmp_path / "build.log"
-    try:
+    with _isolated_cli_logging(Console(file=stderr, color_system=None)):
         console_module._configure_logging(log_width=80, log_file=str(log_file))
         build_module._log_run_summary(
             graph,
@@ -4942,8 +4889,6 @@ def test_build_run_summary_reports_requested_outputs_once(
             dashboard_package_path=tmp_path / "dashboard.citemesh.json",
             elapsed_seconds=elapsed_seconds,
         )
-    finally:
-        _restore_cli_logging_state(*saved)
 
     for output in (stderr.getvalue(), log_file.read_text(encoding="utf-8")):
         assert f"Build complete: 1 paper, 0 edges in {runtime}." in output

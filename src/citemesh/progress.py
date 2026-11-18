@@ -56,12 +56,9 @@ def set_progress_enabled(enabled: bool) -> None:
     _progress_enabled = bool(enabled)
 
 
-def progress_enabled() -> bool:
-    """Return whether the CLI currently permits progress displays.
-
-    :return bool: ``True`` when the active verbosity allows progress output.
-    """
-    return _progress_enabled
+def progress_enabled(*, require_tty: bool = False) -> bool:
+    """Check whether verbosity allows progress, optionally requiring a terminal."""
+    return _progress_enabled and (not require_tty or stderr_isatty())
 
 
 def _resolve_console() -> Console:
@@ -172,7 +169,7 @@ def progress_task(
         bar only when stderr is interactive.
     :return Iterator[ProgressTask]: Handle used to advance the task.
     """
-    show = _progress_enabled and (stderr_isatty() if enabled is None else bool(enabled))
+    show = enabled is not False and progress_enabled(require_tty=enabled is None)
     console = _resolve_console()
     progress = Progress(
         *_columns(console.width, total),

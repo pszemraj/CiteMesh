@@ -1293,8 +1293,8 @@ def test_transient_transport_errors_retry(
 
 
 @pytest.mark.parametrize(
-    ("delay", "failed_attempts"),
-    [(30.0, 2), (15.0, 4)],
+    ("delay", "failed_attempts", "announced_attempts"),
+    [(30.0, 2, [2, 3]), (15.0, 4, [3, 5])],
     ids=["single-wait", "cumulative-waits"],
 )
 @pytest.mark.parametrize(
@@ -1306,6 +1306,7 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
     caplog: pytest.LogCaptureFixture,
     delay: float,
     failed_attempts: int,
+    announced_attempts: list[int],
     status_code: int,
     status: str,
 ) -> None:
@@ -1326,13 +1327,10 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
         for record in caplog.records
         if record.levelno >= logging.INFO
     ]
-    attempts_per_notice = int(30.0 / delay)
     assert visible == [
         f"Semantic Scholar is {status} while fetching p1. "
-        f"Attempt {failed + 1}/{API_CONFIG.max_retries} in {delay:.0f}s."
-        for failed in range(
-            attempts_per_notice, failed_attempts + 1, attempts_per_notice
-        )
+        f"Attempt {attempt}/{API_CONFIG.max_retries} in {delay:.0f}s."
+        for attempt in announced_attempts
     ]
     diagnostics = [
         record.getMessage()

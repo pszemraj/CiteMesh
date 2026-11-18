@@ -19,7 +19,6 @@ from importlib import metadata as importlib_metadata
 from types import ModuleType
 from typing import Literal
 
-from citemesh._runtime import stderr_isatty
 from citemesh.core.choices import DEVICE_CHOICES as EMBEDDING_DEVICE_CHOICES
 from citemesh.data.model_profiles import EmbeddingModelProfile
 from citemesh.progress import progress_enabled
@@ -134,7 +133,7 @@ def _suppress_transformers_progress() -> Iterator[None]:
 
     hub_progress = importlib.import_module("huggingface_hub.utils.tqdm")
     hide_downloads = (
-        not (stderr_isatty() and progress_enabled())
+        not progress_enabled(require_tty=True)
         and hub_progress.HF_HUB_DISABLE_PROGRESS_BARS is None
     )
     hub_states = hub_progress.progress_bar_states.copy()

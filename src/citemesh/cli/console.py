@@ -27,6 +27,23 @@ REDIRECTED_LOG_WIDTH = 140
 
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
 
+_THIRD_PARTY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "httpx2",
+    "httpcore2",
+    "urllib3",
+    "filelock",
+    "matplotlib",
+    "PIL",
+    "h5py",
+    "fsspec",
+    "asyncio",
+    "sentence_transformers",
+    "transformers",
+    "datasets",
+)
+
 
 def _resolve_console_width(log_width: int, *, interactive: bool) -> int | None:
     """Resolve the configured Rich console width for a target stream.
@@ -169,19 +186,6 @@ def _configure_logging(
         handlers=handlers,
         force=True,
     )
-    # Keep third-party HTTP logs concise without import-time side effects.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("httpx2").setLevel(logging.WARNING)
-    logging.getLogger("httpcore2").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("filelock").setLevel(logging.WARNING)
-    logging.getLogger("matplotlib").setLevel(logging.WARNING)
-    logging.getLogger("PIL").setLevel(logging.WARNING)
-    logging.getLogger("h5py").setLevel(logging.WARNING)
-    logging.getLogger("fsspec").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-    logging.getLogger("transformers").setLevel(logging.WARNING)
-    logging.getLogger("datasets").setLevel(logging.WARNING)
+    for name in _THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     _LOGGING_CONFIGURED = True

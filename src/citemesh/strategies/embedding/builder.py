@@ -27,7 +27,6 @@ from typing import (
 import numpy as np
 from numpy.typing import NDArray
 
-from citemesh._runtime import stderr_isatty
 from citemesh.core import (
     DEFAULT_MAX_PAPERS,
     EMBEDDING_CONFIG,
@@ -218,7 +217,6 @@ def _cache_scan_progress(values: Sequence[_T], description: str) -> Iterable[_T]
         values,
         description=description,
         unit="papers",
-        enabled=stderr_isatty(),
     )
 
 

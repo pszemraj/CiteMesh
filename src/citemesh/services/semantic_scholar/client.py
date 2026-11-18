@@ -384,7 +384,6 @@ class SemanticScholarClient(_EndpointsMixin):
             self._handle_unavailable(exhausted, raise_on_unavailable)
             return None
 
-        last_error: Exception | None = None
         retry_wait_seconds = 0.0
         for attempt in range(1, API_CONFIG.max_retries + 1):
             recovery_started_at = monotonic() if attempt > 1 else None
@@ -502,11 +501,11 @@ class SemanticScholarClient(_EndpointsMixin):
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
+            rate_limited = retry._is_rate_limit_error(last_error)
             delay = retry._jittered_backoff(
                 attempt,
                 retry_after=getattr(last_error, "retry_after", None),
-                rate_limited=last_error is not None
-                and retry._is_rate_limit_error(last_error),
+                rate_limited=rate_limited,
             )
             if remaining is not None and delay > remaining:
                 exhausted = self._retry_exhausted(
@@ -519,12 +518,8 @@ class SemanticScholarClient(_EndpointsMixin):
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
             retry_wait_seconds += delay
-            if retry_wait_seconds >= retry._LONG_RETRY_WARNING_SECONDS:
-                status = (
-                    "rate-limited"
-                    if last_error is not None and retry._is_rate_limit_error(last_error)
-                    else "temporarily unavailable"
-                )
+            if retry_wait_seconds >= retry._RETRY_NOTICE_INTERVAL_SECONDS:
+                status = "rate-limited" if rate_limited else "temporarily unavailable"
                 logger.info(
                     "Semantic Scholar is %s while %s. Attempt %d/%d in %.0fs.",
                     status,
