@@ -231,7 +231,7 @@ Hydration compatibility uses dataset source, split, and cap, not the recorded co
 
 ### Quantization
 
-Corpus storage uses per-dimension affine int8 values. The optional Hamming prefilter keeps `top_k * binary_rescore_multiplier` rows for exact vector rescoring. Calibration ranges come from a reservoir sample and are persisted before the first int8 write.
+Corpus storage uses per-dimension affine int8 values. The optional Hamming prefilter keeps `top_k * binary_rescore_multiplier` rows, and at least 512, for exact vector rescoring, so a search with a small `--limit` still rescores 512 rows. Calibration ranges come from a reservoir sample and are persisted before the first int8 write.
 
 An int8 write outside those ranges warns once per run. Existing rows need the original ranges for decoding, so recalibration requires a forced rebuild. Candidates use float32 without calibration. Run `citemesh build --help` for the current storage flags and defaults.
 

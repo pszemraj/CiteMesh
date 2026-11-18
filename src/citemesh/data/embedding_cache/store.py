@@ -22,6 +22,7 @@ import numpy as np
 from filelock import FileLock
 from numpy.typing import NDArray
 
+from citemesh.core.config import EMBEDDING_STORAGE_CONFIG
 from citemesh.core.paper_ids import (
     BibliographyKey,
     arxiv_id_chronology_key,
@@ -295,7 +296,9 @@ class EmbeddingCache(
         :param NDArray[np.float32] query_embedding: Query embedding in float32.
         :param int top_k: Number of top documents to return.
         :param bool binary_prefilter: Whether to use binary Hamming prefiltering.
-        :param int binary_rescore_multiplier: Candidate oversampling factor for rescoring.
+        :param int binary_rescore_multiplier: Candidate oversampling factor for rescoring;
+            the pool is ``top_k * binary_rescore_multiplier`` rows, but never fewer than
+            ``EMBEDDING_STORAGE_CONFIG.binary_rescore_min_candidates`` (capped by eligible rows).
         :param corpus_size: Newest-N view of certified members or ordinary cached rows; ``None`` uses all.
         :return List[CacheSearchResult]: Ranked search results.
         """
@@ -352,7 +355,11 @@ class EmbeddingCache(
                     )
 
                 effective_multiplier = max(int(binary_rescore_multiplier), 1)
-                candidate_count = max(top_k * effective_multiplier, top_k)
+                candidate_count = max(
+                    top_k * effective_multiplier,
+                    EMBEDDING_STORAGE_CONFIG.binary_rescore_min_candidates,
+                    top_k,
+                )
 
                 use_binary_prefilter = bool(
                     binary_prefilter

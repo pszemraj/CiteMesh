@@ -8,7 +8,7 @@ import huggingface_hub.constants
 import numpy as np
 import pytest
 
-from citemesh.core import EMBEDDING_CONFIG, Paper
+from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Paper
 from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
@@ -406,6 +406,9 @@ def test_real_model_persistent_retrieval_recall(
                 actual = {result.paper_id for result in results}
                 assert actual == expected, (precision, binary, topic, actual)
                 assert cache.last_search_used_binary_prefilter is binary
+                pool = max(
+                    2 * 8, EMBEDDING_STORAGE_CONFIG.binary_rescore_min_candidates
+                )
                 assert cache.last_search_rescored_embeddings == (
-                    16 if binary else len(papers)
+                    min(pool, len(papers)) if binary else len(papers)
                 )

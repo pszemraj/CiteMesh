@@ -19,6 +19,7 @@ import pytest
 from filelock import FileLock
 
 from citemesh.cli import cache_ops
+from citemesh.core.config import EMBEDDING_STORAGE_CONFIG
 from citemesh.core.paper_ids import BibliographyKey
 from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import EmbeddingCache, constants, lifecycle
@@ -246,6 +247,8 @@ def test_ordinary_cache_newest_view_filters_before_scoring(
         assert cache.last_search_total_embeddings == (size or len(records))
         assert cache.last_search_physical_embeddings == len(records)
         assert cache.last_search_rescored_embeddings == (size or len(records))
+    # Drop the pool floor so the prefilter's own cut to ``top_k`` is observable.
+    monkeypatch.setattr(EMBEDDING_STORAGE_CONFIG, "binary_rescore_min_candidates", 1)
     results = cache.search(query, 1, corpus_size=3, **kwargs)
     assert [result.paper_id for result in results] == ["2601.00001v1"]
     assert cache.last_search_total_embeddings == 3

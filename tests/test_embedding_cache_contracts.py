@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 import citemesh.data.embedding_cache as embedding_cache_module
+from citemesh.core.config import EMBEDDING_STORAGE_CONFIG
 from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import (
     BINARY_INDEX_DATASET_NAME,
@@ -2683,6 +2684,48 @@ def test_embedding_cache_search_handles_unsorted_prefilter_candidates() -> None:
         )
 
     assert [result.paper_id for result in results] == ["p5"]
+
+
+@pytest.mark.parametrize(
+    ("floor", "rescored"),
+    [(1, 1), (4, 4), (100, 6)],
+    ids=["no-floor", "floor-above-pool", "floor-capped-by-rows"],
+)
+def test_embedding_cache_binary_prefilter_pool_has_a_floor(
+    monkeypatch: pytest.MonkeyPatch, floor: int, rescored: int
+) -> None:
+    """A small ``top_k`` still rescores the configured floor, capped by cached rows."""
+    monkeypatch.setattr(
+        EMBEDDING_STORAGE_CONFIG, "binary_rescore_min_candidates", floor
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="prefilter-pool-floor")
+        _set_test_int8_calibration(cache)
+        papers = {
+            f"p{idx}": {"title": f"Title {idx}", "abstract": "Abstract"}
+            for idx in range(6)
+        }
+        lookup = LookupEncodeModel(
+            {
+                **{
+                    f"Title {idx}. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)
+                    for idx in range(5)
+                },
+                "Title 5. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            }
+        )
+        cache.get_embeddings(papers, lookup, show_progress=False)
+
+        results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=1,
+        )
+
+    assert [result.paper_id for result in results] == ["p5"]
+    assert cache.last_search_used_binary_prefilter is True
+    assert cache.last_search_rescored_embeddings == rescored
 
 
 def test_embedding_cache_binary_prefilter_rows_are_monotonic_subset() -> None:
