@@ -48,7 +48,7 @@ from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
     EmbeddingTask,
     _extract_dataset_paper_metadata,
-    _query_seed_id,
+    _query_focal_id,
     format_paper_for_embedding,
     resolve_embedding_device,
 )
@@ -544,11 +544,11 @@ def _concurrent_hydration_worker(
 
         original_search = builder._search_cache_candidates
 
-        def search(seed_embedding: np.ndarray) -> list[tuple[str, dict, np.ndarray]]:
+        def search(focal_embedding: np.ndarray) -> list[tuple[str, dict, np.ndarray]]:
             """Expose a post-hydration clear unless the operation lock spans search."""
             if is_first:
                 second_worker_done.wait(0.75)
-            return original_search(seed_embedding)
+            return original_search(focal_embedding)
 
         builder._ensure_cache_model_fingerprint = ensure_fingerprint
         builder._resolve_dataset_split_row_count = lambda _source, *, revision: (
@@ -931,7 +931,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
 
         builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
         builder._load_model()
-        embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
+        embeddings = builder._encode_texts(["focal"], show_progress_bar=False)
 
         assert init_log["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
         assert init_log["kwargs"]["truncate_dim"] == 512
@@ -4351,13 +4351,13 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     assert result.metadata["doi"] == "10.1039/c3sm27410a"
     assert result.metadata["venue"] == "Soft Matter 2013"
     assert result.metadata["abstract"] == "Original text"
-    seed = Paper("a" * 40, "Confined polymers", 2013, doi="10.1039/c3sm27410a")
+    focal = Paper("a" * 40, "Confined polymers", 2013, doi="10.1039/c3sm27410a")
     corpus_paper = Paper(
         paper_id=result.paper_id,
         is_local_corpus=True,
         **result.metadata,
     )
-    assert corpus_matches_s2(corpus_paper, seed)
+    assert corpus_matches_s2(corpus_paper, focal)
     load_dataset.reset_mock()
     builder._ensure_cache_hydrated(use_streaming=False)
     load_dataset.assert_not_called()
@@ -4518,7 +4518,7 @@ def test_select_newest_corpus_rows_uses_alternate_identifier_fields(
     assert [record["title"] for record in selected] == ["Newer"]
 
 
-def test_collect_papers_query_seed_and_warm_cache_contracts(
+def test_collect_papers_query_focal_and_warm_cache_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Query-mode IDs and warm-cache candidate retrieval should be deterministic."""
@@ -4538,15 +4538,15 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming: [],
+        lambda _focal_embedding, *, use_streaming: [],
     )
     monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _: None)
 
     query = "attention mechanism test query"
     papers = builder.collect_papers(query)
-    expected_seed_id = _query_seed_id(query)
-    assert list(papers.keys()) == [expected_seed_id]
-    assert papers[expected_seed_id].is_seed is True
+    expected_focal_id = _query_focal_id(query)
+    assert list(papers.keys()) == [expected_focal_id]
+    assert papers[expected_focal_id].is_focal is True
 
     builder = EmbeddingGraphBuilder(
         max_papers=2, use_streaming=False, client=MagicMock()
@@ -4604,17 +4604,17 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
-def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
+def test_collect_papers_excludes_corpus_alias_of_resolved_focal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A corpus arXiv row must not duplicate its S2-resolved seed paper."""
-    seed = Paper(
+    """A corpus arXiv row must not duplicate its S2-resolved focal paper."""
+    focal = Paper(
         paper_id="a" * 40,
-        title="Recent Seed",
+        title="Recent Focal",
         year=2026,
-        abstract="Seed abstract",
+        abstract="Focal abstract",
         arxiv_id="2608.15411",
-        doi="10.1000/seed",
+        doi="10.1000/focal",
     )
     builder = EmbeddingGraphBuilder(
         max_papers=3,
@@ -4627,7 +4627,7 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
         "_prepare_corpus_for_build",
         MagicMock(),
     )
-    builder.client.get_paper.return_value = seed
+    builder.client.get_paper.return_value = focal
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
         builder,
@@ -4639,13 +4639,13 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
+        lambda _focal_embedding, *, use_streaming, corpus_prepared=False: [
             (
                 "arxiv:2608.15411",
                 {
-                    "title": "Recent Seed",
+                    "title": "Recent Focal",
                     "year": 2026,
-                    "abstract": "Seed abstract",
+                    "abstract": "Focal abstract",
                     "arxiv_id": "2608.15411",
                     "authors": [],
                 },
@@ -4681,7 +4681,7 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
     papers = builder.collect_papers("arxiv:2608.15411")
 
     assert list(papers) == [
-        seed.paper_id,
+        focal.paper_id,
         "arxiv:2608.15413",
         "arxiv:2608.15412",
     ]
@@ -4707,7 +4707,7 @@ def test_collect_papers_keeps_corpus_primary_ids_stable(
     :param str identifier_value: Strong identifier shared by distinct source rows.
     :return None: Checks source-primary IDs and bounded ranking retention.
     """
-    seed = Paper(paper_id="seed", title="Seed", year=2025)
+    focal = Paper(paper_id="focal", title="Focal", year=2025)
     builder = EmbeddingGraphBuilder(
         max_papers=3,
         semantic_source="arxiv-corpus",
@@ -4719,7 +4719,7 @@ def test_collect_papers_keeps_corpus_primary_ids_stable(
         "_prepare_corpus_for_build",
         MagicMock(),
     )
-    builder.client.get_paper.return_value = seed
+    builder.client.get_paper.return_value = focal
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
         builder,
@@ -4740,7 +4740,7 @@ def test_collect_papers_keeps_corpus_primary_ids_stable(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
+        lambda _focal_embedding, *, use_streaming, corpus_prepared=False: [
             ("source-a", {**shared_metadata, "abstract": ""}, first_vector),
             (
                 "source-b",
@@ -4760,9 +4760,9 @@ def test_collect_papers_keeps_corpus_primary_ids_stable(
     )
     monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
-    assert list(papers) == [seed.paper_id, "source-a", "source-b"]
+    assert list(papers) == [focal.paper_id, "source-a", "source-b"]
     assert papers["source-a"].abstract == ""
     assert papers["source-b"].abstract == "Supplemental abstract"
     np.testing.assert_array_equal(
@@ -4781,7 +4781,7 @@ def test_collect_papers_does_not_bridge_corpus_rows(
     :param pytest.MonkeyPatch monkeypatch: Replaces model and cache-search behavior.
     :return None: Checks source-primary IDs remain separate under the graph cap.
     """
-    seed = Paper(paper_id="seed", title="Seed", year=2025)
+    focal = Paper(paper_id="focal", title="Focal", year=2025)
     builder = EmbeddingGraphBuilder(
         max_papers=3,
         semantic_source="arxiv-corpus",
@@ -4793,7 +4793,7 @@ def test_collect_papers_does_not_bridge_corpus_rows(
         "_prepare_corpus_for_build",
         MagicMock(),
     )
-    builder.client.get_paper.return_value = seed
+    builder.client.get_paper.return_value = focal
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
         builder,
@@ -4809,7 +4809,7 @@ def test_collect_papers_does_not_bridge_corpus_rows(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
+        lambda _focal_embedding, *, use_streaming, corpus_prepared=False: [
             (
                 "arxiv:2608.15412",
                 {"title": "Bridge work", "year": 2024, "arxiv_id": "2608.15412"},
@@ -4844,9 +4844,9 @@ def test_collect_papers_does_not_bridge_corpus_rows(
     )
     monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
-    assert list(papers) == [seed.paper_id, "arxiv:2608.15412", "10.1000/bridge"]
+    assert list(papers) == [focal.paper_id, "arxiv:2608.15412", "10.1000/bridge"]
     assert "10.1000/bridge" in builder.retrieval_embeddings
     assert "bridge-source" not in builder.retrieval_embeddings
     assert "later-unique" not in builder.retrieval_embeddings
@@ -4866,12 +4866,12 @@ def test_corpus_collection_preserves_all_candidate_authors(
     :param pytest.MonkeyPatch monkeypatch: Replaces model and corpus acquisition.
     :return None: Checks the corpus metadata conversion preserves all authors.
     """
-    seed = Paper(
-        paper_id="seed",
-        title="Seed",
+    focal = Paper(
+        paper_id="focal",
+        title="Focal",
         year=2024,
-        abstract="Seed abstract",
-        is_seed=True,
+        abstract="Focal abstract",
+        is_focal=True,
     )
     author_names = ["Alice", "Bob", "Carol", "Dana"]
     builder = EmbeddingGraphBuilder(
@@ -4883,7 +4883,7 @@ def test_corpus_collection_preserves_all_candidate_authors(
         "_prepare_corpus_for_build",
         MagicMock(),
     )
-    builder.client.get_paper.return_value = seed
+    builder.client.get_paper.return_value = focal
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
         builder,
@@ -4895,7 +4895,7 @@ def test_corpus_collection_preserves_all_candidate_authors(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
+        lambda _focal_embedding, *, use_streaming, corpus_prepared=False: [
             (
                 "arxiv:2501.00001",
                 {
@@ -4910,17 +4910,17 @@ def test_corpus_collection_preserves_all_candidate_authors(
     )
     monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
     assert papers["arxiv:2501.00001"].authors == [
         Author(name=name) for name in author_names
     ]
 
 
-def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
+def test_collect_papers_formats_all_focal_papers_in_retrieval_query_space(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Free-text and resolved-paper seeds should both use retrieval-query prompts."""
+    """Focal papers from free text and resolved records use retrieval-query prompts."""
 
     def _build_builder() -> tuple[
         EmbeddingGraphBuilder, list[str], list[dict[str, str]]
@@ -4943,7 +4943,7 @@ def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
         monkeypatch.setattr(
             builder,
             "_select_candidates",
-            lambda _seed_embedding, *, use_streaming: [],
+            lambda _focal_embedding, *, use_streaming: [],
         )
         monkeypatch.setattr(builder, "_enrich_corpus_papers", lambda _papers: None)
         return builder, query_calls, document_calls
@@ -4982,10 +4982,10 @@ def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
     paper_builder.client.get_paper = MagicMock(
         return_value=Paper(
             paper_id="paper-1",
-            title="Seed Title",
-            abstract="Seed Abstract",
+            title="Focal Title",
+            abstract="Focal Abstract",
             year=2024,
-            is_seed=True,
+            is_focal=True,
         )
     )
 
@@ -4994,9 +4994,9 @@ def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
     paper_builder.client.get_paper.assert_called_once_with(
         "paper-1", raise_on_unavailable=True
     )
-    assert paper_queries == ["Seed Title. Seed Abstract"]
+    assert paper_queries == ["Focal Title. Focal Abstract"]
     assert paper_documents == []
-    assert paper_texts == ["Q::Seed Title. Seed Abstract"]
+    assert paper_texts == ["Q::Focal Title. Focal Abstract"]
 
     outage_builder, outage_queries, outage_documents = _build_builder()
     outage_builder.client.get_paper = MagicMock(
@@ -5022,23 +5022,23 @@ def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
         )[1],
     )
     prefetched_builder.client.get_paper = MagicMock(
-        side_effect=AssertionError("seed should be reused from caller")
+        side_effect=AssertionError("focal should be reused from caller")
     )
 
     prefetched_builder.collect_papers(
         "paper-1",
-        seed_paper=Paper(
+        focal_paper=Paper(
             paper_id="paper-1",
-            title="Seed Title",
-            abstract="Seed Abstract",
+            title="Focal Title",
+            abstract="Focal Abstract",
             year=2024,
-            is_seed=True,
+            is_focal=True,
         ),
     )
 
-    assert prefetched_queries == ["Seed Title. Seed Abstract"]
+    assert prefetched_queries == ["Focal Title. Focal Abstract"]
     assert prefetched_documents == []
-    assert prefetched_texts == ["Q::Seed Title. Seed Abstract"]
+    assert prefetched_texts == ["Q::Focal Title. Focal Abstract"]
 
 
 def test_graph_similarity_materialization_uses_sts_cache_and_warm_hits(
@@ -5057,12 +5057,12 @@ def test_graph_similarity_materialization_uses_sts_cache_and_warm_hits(
 
     monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _CaptureModel())
     papers = {
-        "seed": Paper(
-            paper_id="seed",
+        "focal": Paper(
+            paper_id="focal",
             title="Attention Models",
             year=None,
             abstract="Transformer attention for language.",
-            is_seed=True,
+            is_focal=True,
         ),
         "peer": Paper(
             paper_id="peer",
@@ -5107,11 +5107,11 @@ def test_graph_similarity_materialization_fails_closed_on_missing_vectors(
     )
     builder.graph_embedding_cache = MagicMock()
     builder.graph_embedding_cache.get_embeddings.return_value = {
-        "seed": np.asarray([1.0, 0.0], dtype=np.float32)
+        "focal": np.asarray([1.0, 0.0], dtype=np.float32)
     }
     monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
     papers = {
-        "seed": Paper(paper_id="seed", title="Seed", year=None, is_seed=True),
+        "focal": Paper(paper_id="focal", title="Focal", year=None, is_focal=True),
         "peer": Paper(paper_id="peer", title="Peer", year=None),
     }
 
@@ -5125,10 +5125,10 @@ def test_embedding_build_prepares_graph_vectors_before_edge_scoring(
     """The base build lifecycle should invoke STS preparation before similarities."""
     builder = EmbeddingGraphBuilder(max_papers=2, top_k=1, client=MagicMock())
     papers = {
-        "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True),
+        "focal": Paper(paper_id="focal", title="Focal", year=2024, is_focal=True),
         "peer": Paper(paper_id="peer", title="Peer", year=2024),
     }
-    monkeypatch.setattr(builder, "collect_papers", lambda _seed_id, **_kwargs: papers)
+    monkeypatch.setattr(builder, "collect_papers", lambda _focal_id, **_kwargs: papers)
     prepare = MagicMock(
         side_effect=lambda selected: builder.embeddings.update(
             {
@@ -5139,11 +5139,11 @@ def test_embedding_build_prepares_graph_vectors_before_edge_scoring(
     )
     monkeypatch.setattr(builder, "materialize_graph_embeddings", prepare)
 
-    graph, seed_id = builder.build_graph("seed")
+    graph, focal_id = builder.build_graph("focal")
 
-    assert seed_id == "seed"
+    assert focal_id == "focal"
     prepare.assert_called_once_with(papers)
-    assert graph.has_edge("seed", "peer")
+    assert graph.has_edge("focal", "peer")
 
 
 @pytest.mark.parametrize(
@@ -9174,7 +9174,7 @@ def test_embedding_citation_enrichment_logs_target_count(
         abstract="paper one abstract",
         authors=[Author(name="Corpus Author")],
         is_local_corpus=True,
-        is_seed=False,
+        is_focal=False,
     )
     enriched = Paper(
         paper_id="s2-paper-1",
@@ -9186,17 +9186,17 @@ def test_embedding_citation_enrichment_logs_target_count(
         doi="10.5555/paper-one",
         venue="ICML",
         citation_count=77,
-        is_seed=False,
+        is_focal=False,
     )
     client.get_papers = MagicMock(return_value={"arxiv:2401.00001": enriched})
     client.get_paper = MagicMock()
     papers = {
-        "seed": Paper(
-            paper_id="seed",
-            title="Seed",
+        "focal": Paper(
+            paper_id="focal",
+            title="Focal",
             year=2024,
-            abstract="seed abstract",
-            is_seed=True,
+            abstract="focal abstract",
+            is_focal=True,
         ),
         "arxiv:2401.00001": target,
     }
@@ -9283,19 +9283,19 @@ def test_embedding_citation_enrichment_skips_invalid_batch_rows(
     )
 
 
-@pytest.mark.parametrize("seed_id", ["content:abc123", "arxiv_7", "local-source-42"])
-def test_generated_corpus_seed_reopens_cached_paper(seed_id: str) -> None:
+@pytest.mark.parametrize("focal_id", ["content:abc123", "arxiv_7", "local-source-42"])
+def test_generated_corpus_focal_reopens_cached_paper(focal_id: str) -> None:
     """A local-search result should reopen its cached bibliographic metadata.
 
-    :param str seed_id: Current or legacy generated corpus identifier.
+    :param str focal_id: Current or legacy generated corpus identifier.
     :return None: Checks cache-first resolution without an external API request.
     """
     client = MagicMock()
     cache = MagicMock()
     cache.hydration_operation_lock.return_value = nullcontext()
     cache.get_paper_metadata_batch.return_value = {
-        seed_id: {
-            "title": "Cached seed",
+        focal_id: {
+            "title": "Cached focal paper",
             "abstract": "Cached abstract",
             "authors": ["Ada Example"],
             "year": 2024,
@@ -9309,22 +9309,22 @@ def test_generated_corpus_seed_reopens_cached_paper(seed_id: str) -> None:
     cache.get_hydrated_dataset_source.return_value = builder.dataset_source
     builder.embedding_cache = cache
 
-    resolved = builder._resolve_seed_paper(seed_id, None)
+    resolved = builder._resolve_focal_input(focal_id, None)
 
-    cache.get_paper_metadata_batch.assert_called_once_with([seed_id])
+    cache.get_paper_metadata_batch.assert_called_once_with([focal_id])
     client.get_paper.assert_not_called()
-    assert resolved.paper_id == seed_id
-    assert resolved.title == "Cached seed"
+    assert resolved.paper_id == focal_id
+    assert resolved.title == "Cached focal paper"
     assert resolved.abstract == "Cached abstract"
     assert [author.name for author in resolved.authors] == ["Ada Example"]
     assert resolved.year == 2024
     assert resolved.doi == "10.1234/cached"
-    assert resolved.is_seed is True
+    assert resolved.is_focal is True
     assert resolved.is_local_corpus is True
 
 
 @pytest.mark.parametrize(
-    "seed_id", ["content:local-paper", "arxiv_7", "local-source-42"]
+    "focal_id", ["content:local-paper", "arxiv_7", "local-source-42"]
 )
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
 @pytest.mark.parametrize(
@@ -9334,7 +9334,7 @@ def test_generated_corpus_seed_reopens_cached_paper(seed_id: str) -> None:
 def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    seed_id: str,
+    focal_id: str,
     strategy: str,
     force_rebuild_cache: bool,
     prepare_before_build: bool,
@@ -9343,19 +9343,19 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
 
     :param pytest.MonkeyPatch monkeypatch: Cache and runtime isolation fixture.
     :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
-    :param str seed_id: Cached current, legacy, or opaque source identifier.
+    :param str focal_id: Cached current, legacy, or opaque source identifier.
     :param str strategy: Direct embedding or hybrid public build path.
     :param bool force_rebuild_cache: Whether the build clears and rehydrates first.
     :param bool prepare_before_build: Whether a public preflight consumes the clear.
     :return None: Verifies search-to-build identity across fresh builder instances.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-    fingerprint = "artifact-local-seed-lifecycle"
-    dataset_source = "fixture/local-seed-corpus"
+    fingerprint = "artifact-local-focal-lifecycle"
+    dataset_source = "fixture/local-focal-corpus"
     source_row = {
-        "id": seed_id,
-        "title": "Cached seed title",
-        "abstract": "Cached seed abstract",
+        "id": focal_id,
+        "title": "Cached focal paper title",
+        "abstract": "Cached focal paper abstract",
         "authors": ["Ada Example"],
         "year": 2024,
         "categories": ["cs.IR"],
@@ -9369,7 +9369,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
         """
         client = MagicMock()
         client.get_paper.side_effect = AssertionError(
-            "cached local seed must not be sent to Semantic Scholar"
+            "cached local focal paper must not be sent to Semantic Scholar"
         )
         builder = EmbeddingGraphBuilder(
             max_papers=1,
@@ -9399,8 +9399,8 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     hydration_builder._ensure_cache_hydrated(use_streaming=False)
 
     search_builder = make_builder()
-    search_result = search_builder.search_local("cached seed", top_k=1)[0]
-    assert search_result.paper_id == seed_id
+    search_result = search_builder.search_local("cached focal paper", top_k=1)[0]
+    assert search_result.paper_id == focal_id
 
     if strategy == "embedding":
         build_builder: EmbeddingGraphBuilder | HybridGraphBuilder = make_builder(
@@ -9416,7 +9416,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
             "get_paper_citations",
         ):
             getattr(hybrid_client, provider_method).side_effect = AssertionError(
-                "cached local seed without an external alias must stay local"
+                "cached local focal paper without an external alias must stay local"
             )
         build_builder = HybridGraphBuilder(
             max_papers=2,
@@ -9451,20 +9451,20 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
         assert not active_embedding_builder.embedding_cache.is_hydrated(
             "train[:1]", 1, dataset_source=dataset_source
         )
-    graph, actual_seed_id = build_builder.build_graph(search_result.paper_id)
+    graph, actual_focal_id = build_builder.build_graph(search_result.paper_id)
 
-    assert actual_seed_id == seed_id
-    assert set(graph) == {seed_id}
-    assert graph.nodes[seed_id]["title"] == "Cached seed title"
-    assert graph.nodes[seed_id]["paper"].abstract == "Cached seed abstract"
-    assert graph.nodes[seed_id]["is_local_corpus"] is True
+    assert actual_focal_id == focal_id
+    assert set(graph) == {focal_id}
+    assert graph.nodes[focal_id]["title"] == "Cached focal paper title"
+    assert graph.nodes[focal_id]["paper"].abstract == "Cached focal paper abstract"
+    assert graph.nodes[focal_id]["is_local_corpus"] is True
     assert (
         active_embedding_builder.embedding_cache.db_path
         == search_builder.embedding_cache.db_path
     )
     active_embedding_builder.client.get_paper.assert_not_called()
     if strategy == "hybrid":
-        assert build_builder.paper_sources == {seed_id: "semantic"}
+        assert build_builder.paper_sources == {focal_id: "semantic"}
         build_builder.client.get_reference_ids.assert_not_called()
         build_builder.client.get_paper_references.assert_not_called()
         build_builder.client.get_paper_citations.assert_not_called()
@@ -9474,13 +9474,13 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     ("strategy", "fetch_references"),
     [("embedding", False), ("hybrid", False), ("hybrid", True)],
 )
-def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
+def test_reopened_corpus_focal_preserves_provider_evidence_and_graph_score(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     strategy: str,
     fetch_references: bool,
 ) -> None:
-    """Cold and warm corpus builds must score the same provider-backed seed.
+    """Cold and warm corpus builds must score the same provider-backed focal.
 
     :param pytest.MonkeyPatch monkeypatch: Cache and runtime isolation fixture.
     :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
@@ -9489,15 +9489,15 @@ def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
     :return None: Verifies citation count, provenance, identity, and edge-score parity.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-    fingerprint = "artifact-seed-evidence-lifecycle"
-    dataset_source = "fixture/seed-evidence-corpus"
-    seed_id = "arxiv:2508.12345"
+    fingerprint = "artifact-focal-evidence-lifecycle"
+    dataset_source = "fixture/focal-evidence-corpus"
+    focal_id = "arxiv:2508.12345"
     related_id = "arxiv:2508.12346"
     source_rows = [
         {
-            "id": seed_id,
-            "title": "Seed title",
-            "abstract": "Seed abstract",
+            "id": focal_id,
+            "title": "Focal title",
+            "abstract": "Focal abstract",
             "year": 2024,
         },
         {
@@ -9511,16 +9511,16 @@ def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
     def provider_paper(paper_id: str) -> Paper:
         """Return stable provider evidence for one fixture paper.
 
-        :param str paper_id: Seed or related canonical arXiv identifier.
+        :param str paper_id: Focal or related canonical arXiv identifier.
         :return Paper: Fresh provider record with its controlled citation count.
         """
-        is_seed = paper_id == seed_id
+        is_focal = paper_id == focal_id
         return Paper(
             paper_id=paper_id,
-            title="Seed title" if is_seed else "Related title",
-            abstract="Seed abstract" if is_seed else "Related abstract",
+            title="Focal title" if is_focal else "Related title",
+            abstract="Focal abstract" if is_focal else "Related abstract",
             year=2024,
-            citation_count=1000 if is_seed else 500,
+            citation_count=1000 if is_focal else 500,
         )
 
     client = MagicMock()
@@ -9580,25 +9580,25 @@ def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
         return builder
 
     cold_builder = make_builder()
-    cold_graph, cold_seed_id = cold_builder.build_graph(seed_id)
+    cold_graph, cold_focal_id = cold_builder.build_graph(focal_id)
     client.get_paper.reset_mock()
 
     warm_builder = make_builder()
-    warm_graph, warm_seed_id = warm_builder.build_graph(seed_id)
+    warm_graph, warm_focal_id = warm_builder.build_graph(focal_id)
 
-    assert cold_seed_id == warm_seed_id == seed_id
-    assert cold_graph.nodes[seed_id]["citation_count"] == 1000
-    assert warm_graph.nodes[seed_id]["citation_count"] == 1000
-    assert cold_graph[seed_id][related_id]["weight"] == pytest.approx(
-        warm_graph[seed_id][related_id]["weight"]
+    assert cold_focal_id == warm_focal_id == focal_id
+    assert cold_graph.nodes[focal_id]["citation_count"] == 1000
+    assert warm_graph.nodes[focal_id]["citation_count"] == 1000
+    assert cold_graph[focal_id][related_id]["weight"] == pytest.approx(
+        warm_graph[focal_id][related_id]["weight"]
     )
     client.get_paper.assert_not_called()
     if strategy == "hybrid":
-        assert cold_builder.paper_sources[seed_id] == "citation"
-        assert warm_builder.paper_sources[seed_id] == "citation"
+        assert cold_builder.paper_sources[focal_id] == "citation"
+        assert warm_builder.paper_sources[focal_id] == "citation"
 
 
-def test_cached_corpus_seed_enrichment_preserves_local_primary_id() -> None:
+def test_cached_corpus_focal_enrichment_preserves_local_primary_id() -> None:
     """Provider evidence must supplement rather than replace corpus identity."""
     client = MagicMock()
     client.get_papers.return_value = {
@@ -9610,50 +9610,50 @@ def test_cached_corpus_seed_enrichment_preserves_local_primary_id() -> None:
         )
     }
     builder = EmbeddingGraphBuilder(client=client)
-    seed = Paper(
-        paper_id="content:local-seed",
+    focal = Paper(
+        paper_id="content:local-focal",
         title="Cached title",
         abstract="Cached abstract",
         year=2024,
         arxiv_id="2508.12345",
-        is_seed=True,
+        is_focal=True,
         is_local_corpus=True,
     )
 
-    builder.enrich_cached_corpus_seed(seed)
+    builder.enrich_cached_corpus_focal(focal)
 
-    assert seed.paper_id == "content:local-seed"
-    assert seed.title == "Cached title"
-    assert seed.citation_count == 1000
-    assert seed.is_seed is True
-    assert seed.is_local_corpus is True
+    assert focal.paper_id == "content:local-focal"
+    assert focal.title == "Cached title"
+    assert focal.citation_count == 1000
+    assert focal.is_focal is True
+    assert focal.is_local_corpus is True
     client.get_papers.assert_called_once_with(["arxiv:2508.12345"])
 
 
-def test_cached_corpus_seed_rejected_enrichment_keeps_local_metadata(
+def test_cached_corpus_focal_rejected_enrichment_keeps_local_metadata(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A rejected optional provider lookup must leave the cached seed usable."""
+    """A rejected optional provider lookup must leave the cached focal paper usable."""
     client = MagicMock()
     client.get_papers.side_effect = SemanticScholarRequestError("invalid upstream ID")
     builder = EmbeddingGraphBuilder(client=client)
-    seed = Paper(
-        paper_id="content:local-seed",
+    focal = Paper(
+        paper_id="content:local-focal",
         title="Cached title",
         abstract="Cached abstract",
         year=2024,
         arxiv_id="2508.12345",
-        is_seed=True,
+        is_focal=True,
         is_local_corpus=True,
     )
 
     with caplog.at_level(logging.WARNING):
-        builder.enrich_cached_corpus_seed(seed)
+        builder.enrich_cached_corpus_focal(focal)
 
-    assert seed.paper_id == "content:local-seed"
-    assert seed.title == "Cached title"
-    assert seed.citation_count == 0
-    assert seed.is_local_corpus is True
+    assert focal.paper_id == "content:local-focal"
+    assert focal.title == "Cached title"
+    assert focal.citation_count == 0
+    assert focal.is_local_corpus is True
     assert "keeping corpus metadata" in caplog.text
 
 
@@ -9689,16 +9689,16 @@ class _OperationLockProbe:
 
 
 @pytest.mark.parametrize(
-    "resolver", ["resolve_seed_paper", "resolve_cached_corpus_seed"]
+    "resolver", ["resolve_focal_paper", "resolve_cached_corpus_focal"]
 )
-def test_public_corpus_seed_resolvers_hold_preparation_and_lookup_under_one_lock(
+def test_public_corpus_focal_resolvers_hold_preparation_and_lookup_under_one_lock(
     monkeypatch: pytest.MonkeyPatch,
     resolver: str,
 ) -> None:
-    """Standalone seed resolution must consume the corpus it prepared.
+    """Standalone focal resolution must consume the corpus it prepared.
 
     :param pytest.MonkeyPatch monkeypatch: Runtime and cache isolation fixture.
-    :param str resolver: Public corpus seed resolver under test.
+    :param str resolver: Public corpus focal resolver under test.
     :return None: Verifies preparation and lookup share one operation boundary.
     """
     builder = EmbeddingGraphBuilder(
@@ -9715,41 +9715,41 @@ def test_public_corpus_seed_resolvers_hold_preparation_and_lookup_under_one_lock
         "_prepare_corpus_for_build",
         lambda: probe.record(events, "prepare"),
     )
-    seed = Paper(
-        paper_id="content:seed",
-        title="Prepared seed",
+    focal = Paper(
+        paper_id="content:focal",
+        title="Prepared focal",
         year=2026,
-        is_seed=True,
+        is_focal=True,
         is_local_corpus=True,
     )
-    if resolver == "resolve_seed_paper":
+    if resolver == "resolve_focal_paper":
         monkeypatch.setattr(
             builder,
-            "_resolve_seed_paper",
-            lambda _seed_id, _seed_paper: probe.record(events, "lookup") or seed,
+            "_resolve_focal_input",
+            lambda _focal_id, _focal_paper: probe.record(events, "lookup") or focal,
         )
-        resolved = builder.resolve_seed_paper(seed.paper_id)
+        resolved = builder.resolve_focal_paper(focal.paper_id)
     else:
         monkeypatch.setattr(
             builder,
-            "_resolve_cached_corpus_seed",
-            lambda _seed_id: probe.record(events, "lookup") or seed,
+            "_resolve_cached_corpus_focal",
+            lambda _focal_id: probe.record(events, "lookup") or focal,
         )
-        resolved = builder.resolve_cached_corpus_seed(seed.paper_id)
+        resolved = builder.resolve_cached_corpus_focal(focal.paper_id)
 
-    assert resolved is seed
+    assert resolved is focal
     assert events == ["prepare", "lookup"]
     assert probe.depth == 0
 
 
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
-def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
+def test_corpus_collection_holds_one_lock_through_focal_and_neighbor_consumption(
     monkeypatch: pytest.MonkeyPatch,
     storage_precision: str,
     strategy: str,
 ) -> None:
-    """Preparation, seed use, and semantic retrieval must be one operation.
+    """Preparation, focal use, and semantic retrieval must be one operation.
 
     :param pytest.MonkeyPatch monkeypatch: Runtime and cache isolation fixture.
     :param str storage_precision: Persistent float32 or int8 representation.
@@ -9784,11 +9784,11 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
     events: list[str] = []
     cache.hydration_operation_lock.side_effect = probe.acquire
     monkeypatch.setattr(embedding_builder, "prepare_embedding_cache", lambda: cache)
-    seed = Paper(
-        paper_id="content:seed",
-        title="Prepared seed",
+    focal = Paper(
+        paper_id="content:focal",
+        title="Prepared focal",
         year=2026,
-        is_seed=True,
+        is_focal=True,
         is_local_corpus=True,
     )
     neighbor = Paper(
@@ -9806,13 +9806,13 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
     if strategy == "embedding":
         monkeypatch.setattr(
             embedding_builder,
-            "resolve_seed_paper",
-            lambda *_args, **_kwargs: probe.record(events, "seed") or seed,
+            "resolve_focal_paper",
+            lambda *_args, **_kwargs: probe.record(events, "focal") or focal,
         )
         monkeypatch.setattr(
             embedding_builder,
-            "_encode_seed_embedding",
-            lambda _seed: (
+            "_encode_focal_embedding",
+            lambda _focal: (
                 probe.record(events, "encode")
                 or np.asarray([1.0, 0.0], dtype=np.float32)
             ),
@@ -9832,19 +9832,19 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
         assert isinstance(hybrid_builder, HybridGraphBuilder)
         monkeypatch.setattr(
             embedding_builder,
-            "resolve_cached_corpus_seed",
-            lambda *_args, **_kwargs: probe.record(events, "seed") or seed,
+            "resolve_cached_corpus_focal",
+            lambda *_args, **_kwargs: probe.record(events, "focal") or focal,
         )
         monkeypatch.setattr(
             embedding_builder,
-            "enrich_cached_corpus_seed",
-            lambda _seed: probe.record(events, "enrich"),
+            "enrich_cached_corpus_focal",
+            lambda _focal: probe.record(events, "enrich"),
         )
         offline_hybrid_encoder(monkeypatch, hybrid_builder)
         monkeypatch.setattr(
             embedding_builder,
             "search_prepared_corpus",
-            lambda *_args: probe.record(events, "neighbors") or [seed, neighbor],
+            lambda *_args: probe.record(events, "neighbors") or [focal, neighbor],
         )
         monkeypatch.setattr(
             embedding_builder,
@@ -9857,16 +9857,16 @@ def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
             lambda _papers: probe.record(events, "enrich neighbors"),
         )
 
-    papers = public_builder.collect_papers(seed.paper_id)
+    papers = public_builder.collect_papers(focal.paper_id)
 
-    assert seed.paper_id in papers
+    assert focal.paper_id in papers
     assert events[0] == "prepare"
-    assert "seed" in events
+    assert "focal" in events
     assert "neighbors" in events
     assert probe.depth == 0
 
 
-@pytest.mark.parametrize("failure_stage", ["prepare", "seed", "encode", "neighbors"])
+@pytest.mark.parametrize("failure_stage", ["prepare", "focal", "encode", "neighbors"])
 def test_corpus_collection_releases_operation_lock_after_stage_failure(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str,
@@ -9886,11 +9886,11 @@ def test_corpus_collection_releases_operation_lock_after_stage_failure(
     probe = _OperationLockProbe()
     cache.hydration_operation_lock.side_effect = probe.acquire
     monkeypatch.setattr(builder, "prepare_embedding_cache", lambda: cache)
-    seed = Paper(
-        paper_id="content:seed",
-        title="Prepared seed",
+    focal = Paper(
+        paper_id="content:focal",
+        title="Prepared focal",
         year=2026,
-        is_seed=True,
+        is_focal=True,
         is_local_corpus=True,
     )
 
@@ -9903,13 +9903,13 @@ def test_corpus_collection_releases_operation_lock_after_stage_failure(
     monkeypatch.setattr(builder, "_prepare_corpus_for_build", lambda: stage("prepare"))
     monkeypatch.setattr(
         builder,
-        "resolve_seed_paper",
-        lambda *_args, **_kwargs: stage("seed", seed),
+        "resolve_focal_paper",
+        lambda *_args, **_kwargs: stage("focal", focal),
     )
     monkeypatch.setattr(
         builder,
-        "_encode_seed_embedding",
-        lambda _seed: stage("encode", np.asarray([1.0, 0.0], dtype=np.float32)),
+        "_encode_focal_embedding",
+        lambda _focal: stage("encode", np.asarray([1.0, 0.0], dtype=np.float32)),
     )
     monkeypatch.setattr(
         builder,
@@ -9918,7 +9918,7 @@ def test_corpus_collection_releases_operation_lock_after_stage_failure(
     )
 
     with pytest.raises(RuntimeError, match=f"failed during {failure_stage}"):
-        builder.collect_papers(seed.paper_id)
+        builder.collect_papers(focal.paper_id)
 
     assert probe.depth == 0
     with probe.acquire():
@@ -9926,40 +9926,40 @@ def test_corpus_collection_releases_operation_lock_after_stage_failure(
 
 
 @pytest.mark.parametrize(
-    "seed_id", ["arxiv:2508.12345", "arxiv_7"], ids=["stable", "legacy"]
+    "focal_id", ["arxiv:2508.12345", "arxiv_7"], ids=["stable", "legacy"]
 )
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
-def test_corpus_migration_precedes_seed_encoding_and_first_selection(
+def test_corpus_migration_precedes_focal_encoding_and_first_selection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    seed_id: str,
+    focal_id: str,
     storage_precision: str,
     strategy: str,
 ) -> None:
-    """The first post-migration build must encode the restored seed metadata.
+    """The first post-migration build must encode the restored focal paper metadata.
 
     :param pytest.MonkeyPatch monkeypatch: Cache, source, and runtime isolation.
     :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
-    :param str seed_id: Stable source ID or preserved legacy anonymous primary ID.
+    :param str focal_id: Stable source ID or preserved legacy anonymous primary ID.
     :param str storage_precision: Persistent float32 or calibrated int8 vectors.
     :param str strategy: Direct embedding or hybrid public build path.
-    :return None: Checks first-build selection and seed-identity preservation.
+    :return None: Checks first-build selection and focal-identity preservation.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-    dataset_source = "fixture/pre-seed-migration"
-    fingerprint = "artifact-pre-seed-migration"
+    dataset_source = "fixture/pre-focal-migration"
+    fingerprint = "artifact-pre-focal-migration"
     restored_term = "RESTORED_SEMANTIC_AXIS"
-    source_seed: dict[str, Any] = {
-        "title": "Migration seed",
+    source_focal: dict[str, Any] = {
+        "title": "Migration focal",
         "abstract": None,
-        "summary": f"{restored_term} seed abstract",
+        "summary": f"{restored_term} focal abstract",
         "year": 2024,
     }
-    if seed_id != "arxiv_7":
-        source_seed["id"] = "2508.12345"
+    if focal_id != "arxiv_7":
+        source_focal["id"] = "2508.12345"
     source_rows = [
-        source_seed,
+        source_focal,
         {
             "id": "2508.12346",
             "title": "Restored-text neighbor",
@@ -9991,7 +9991,7 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
 
     client = MagicMock()
     client.get_paper.side_effect = AssertionError(
-        "the persisted corpus seed must resolve before provider fallback"
+        "the persisted corpus focal must resolve before provider fallback"
     )
     client.get_papers.return_value = {}
     client.get_paper_references.return_value = []
@@ -10038,7 +10038,7 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
         _extract_dataset_paper_metadata(record, index)
         for index, record in enumerate(source_rows)
     ]
-    cached_metadata[0]["paper_id"] = seed_id
+    cached_metadata[0]["paper_id"] = focal_id
     cached_metadata[0]["abstract"] = ""
     embedding_builder._cache_metadata_batch(cached_metadata)
     cache.mark_hydrated(
@@ -10050,7 +10050,7 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
     cache._write_cache_metadata(
         {
             "corpus_metadata_version": "2",
-            "corpus_identity_version": "" if seed_id == "arxiv_7" else "1",
+            "corpus_identity_version": "" if focal_id == "arxiv_7" else "1",
         }
     )
     monkeypatch.setattr(
@@ -10080,11 +10080,11 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
     monkeypatch.setattr(embedding_builder, "_ensure_cache_hydrated", ensure_hydrated)
     monkeypatch.setattr(embedding_builder, "_prepare_corpus_for_build", prepare)
 
-    graph, actual_seed_id = public_builder.build_graph(seed_id)
+    graph, actual_focal_id = public_builder.build_graph(focal_id)
 
-    assert actual_seed_id == seed_id
-    assert set(graph) == {seed_id, "arxiv:2508.12346"}
-    assert graph.nodes[seed_id]["paper"].abstract == f"{restored_term} seed abstract"
+    assert actual_focal_id == focal_id
+    assert set(graph) == {focal_id, "arxiv:2508.12346"}
+    assert graph.nodes[focal_id]["paper"].abstract == f"{restored_term} focal abstract"
     prepare.assert_called_once_with()
     ensure_hydrated.assert_called_once_with(use_streaming=False)
     client.get_paper.assert_not_called()
@@ -10093,14 +10093,14 @@ def test_corpus_migration_precedes_seed_encoding_and_first_selection(
 @pytest.mark.parametrize("starting_cache", ["empty", "growth"])
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
-def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
+def test_corpus_preparation_stabilizes_focal_identity_on_first_build(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     starting_cache: str,
     storage_precision: str,
     strategy: str,
 ) -> None:
-    """Initial hydration and normal growth must precede final seed identity.
+    """Initial hydration and normal growth must precede final focal identity.
 
     :param pytest.MonkeyPatch monkeypatch: Cache, source, and runtime isolation.
     :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
@@ -10110,14 +10110,14 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
     :return None: Checks cold/warm corpus-primary ID parity and one preparation pass.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-    dataset_source = "fixture/pre-seed-identity"
-    fingerprint = "artifact-pre-seed-identity"
-    requested_seed_id = "arxiv:2508.12345"
-    provider_seed_id = "a" * 40
-    corpus_seed = {
+    dataset_source = "fixture/pre-focal-identity"
+    fingerprint = "artifact-pre-focal-identity"
+    requested_focal_id = "arxiv:2508.12345"
+    provider_focal_id = "a" * 40
+    corpus_focal = {
         "id": "2508.12345",
-        "title": "Corpus-primary seed",
-        "abstract": "Seed abstract",
+        "title": "Corpus-primary focal",
+        "abstract": "Focal abstract",
         "year": 2024,
     }
     source_rows = [
@@ -10135,17 +10135,17 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
         },
     ]
     if starting_cache == "empty":
-        source_rows.append(corpus_seed)
+        source_rows.append(corpus_focal)
 
-    def provider_seed() -> Paper:
+    def provider_focal() -> Paper:
         """Return provider metadata with a different primary identifier.
 
         :return Paper: Provider-primary record carrying the corpus arXiv alias.
         """
         return Paper(
-            paper_id=provider_seed_id,
-            title="Provider seed",
-            abstract="Seed abstract",
+            paper_id=provider_focal_id,
+            title="Provider focal",
+            abstract="Focal abstract",
             year=2024,
             arxiv_id="2508.12345",
             citation_count=100,
@@ -10161,18 +10161,18 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
         :return tuple: Public builder, embedding child, and provider mock.
         """
         client = MagicMock()
-        client.get_paper.return_value = provider_seed()
+        client.get_paper.return_value = provider_focal()
 
         def get_papers(paper_ids: list[str]) -> dict[str, Paper]:
-            """Return provider evidence only for the requested seed alias.
+            """Return provider evidence only for the requested focal alias.
 
             :param list[str] paper_ids: Normalized provider lookup identifiers.
-            :return Dict[str, Paper]: Matching seed evidence when requested.
+            :return Dict[str, Paper]: Matching focal evidence when requested.
             """
             return {
-                paper_id: provider_seed()
+                paper_id: provider_focal()
                 for paper_id in paper_ids
-                if paper_id == requested_seed_id
+                if paper_id == requested_focal_id
             }
 
         client.get_papers.side_effect = get_papers
@@ -10227,31 +10227,31 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
         _initial_builder, initial_embedding, _initial_client = make_builder()
         initial_embedding._prepare_corpus_for_build()
         assert (
-            requested_seed_id
+            requested_focal_id
             not in initial_embedding.embedding_cache.get_cached_paper_ids()
         )
         # Model a cache hydrated before source revisions were recorded: only
         # those still follow upstream growth during a build.
         initial_embedding.embedding_cache.set_hydration_source_revision(None)
-        source_rows.append(corpus_seed)
+        source_rows.append(corpus_focal)
 
     cold_builder, cold_embedding, cold_client = make_builder()
     cold_prepare = MagicMock(wraps=cold_embedding._prepare_corpus_for_build)
     cold_ensure_hydrated = MagicMock(wraps=cold_embedding._ensure_cache_hydrated)
     monkeypatch.setattr(cold_embedding, "_ensure_cache_hydrated", cold_ensure_hydrated)
     monkeypatch.setattr(cold_embedding, "_prepare_corpus_for_build", cold_prepare)
-    cold_graph, cold_seed_id = cold_builder.build_graph(requested_seed_id)
+    cold_graph, cold_focal_id = cold_builder.build_graph(requested_focal_id)
 
     warm_builder, warm_embedding, warm_client = make_builder()
     warm_prepare = MagicMock(wraps=warm_embedding._prepare_corpus_for_build)
     warm_ensure_hydrated = MagicMock(wraps=warm_embedding._ensure_cache_hydrated)
     monkeypatch.setattr(warm_embedding, "_ensure_cache_hydrated", warm_ensure_hydrated)
     monkeypatch.setattr(warm_embedding, "_prepare_corpus_for_build", warm_prepare)
-    warm_graph, warm_seed_id = warm_builder.build_graph(requested_seed_id)
+    warm_graph, warm_focal_id = warm_builder.build_graph(requested_focal_id)
 
-    assert cold_seed_id == warm_seed_id == requested_seed_id
-    assert requested_seed_id in cold_graph
-    assert requested_seed_id in warm_graph
+    assert cold_focal_id == warm_focal_id == requested_focal_id
+    assert requested_focal_id in cold_graph
+    assert requested_focal_id in warm_graph
     cold_prepare.assert_called_once_with()
     warm_prepare.assert_called_once_with()
     cold_ensure_hydrated.assert_called_once_with(use_streaming=False)
@@ -10259,33 +10259,33 @@ def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
     cold_client.get_paper.assert_not_called()
     warm_client.get_paper.assert_not_called()
     if strategy == "hybrid":
-        assert cold_builder.paper_sources[requested_seed_id] == "citation"
-        assert warm_builder.paper_sources[requested_seed_id] == "citation"
+        assert cold_builder.paper_sources[requested_focal_id] == "citation"
+        assert warm_builder.paper_sources[requested_focal_id] == "citation"
 
 
 @pytest.mark.parametrize(
-    "seed_id", ["content:resume-seed", "arxiv_7", "local-source-42"]
+    "focal_id", ["content:resume-focal", "arxiv_7", "local-source-42"]
 )
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
 @pytest.mark.parametrize("fresh_retry", [False, True], ids=["same", "fresh"])
-def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
+def test_interrupted_force_rebuild_resumes_before_local_focal_lookup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    seed_id: str,
+    focal_id: str,
     storage_precision: str,
     strategy: str,
     fresh_retry: bool,
 ) -> None:
-    """A restarted build must resume persisted hydration before seed resolution.
+    """A restarted build must resume persisted hydration before focal resolution.
 
     :param pytest.MonkeyPatch monkeypatch: Cache, batching, and runtime isolation.
     :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
-    :param str seed_id: Current, legacy, or opaque source-primary seed identifier.
+    :param str focal_id: Current, legacy, or opaque source-primary focal paper identifier.
     :param str storage_precision: Persistent float32 or calibrated int8 vectors.
     :param str strategy: Direct embedding or hybrid public build path.
     :param bool fresh_retry: Whether retry discards the interrupted builder object.
-    :return None: Verifies prefix retention, missing-row resume, and seed identity.
+    :return None: Verifies prefix retention, missing-row resume, and focal identity.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
     monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 1)
@@ -10298,7 +10298,7 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
             "title": "Second",
             "abstract": "Second abstract",
         },
-        {"id": seed_id, "title": "Resume seed", "abstract": "Seed abstract"},
+        {"id": focal_id, "title": "Resume focal", "abstract": "Focal abstract"},
     ]
 
     def make_builder(
@@ -10366,8 +10366,8 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
     initial_embedding._ensure_cache_hydrated(use_streaming=False)
     search_result = next(
         result
-        for result in initial_embedding.search_local("resume seed", top_k=3)
-        if result.paper_id == seed_id
+        for result in initial_embedding.search_local("resume focal", top_k=3)
+        if result.paper_id == focal_id
     )
 
     interrupted_builder, interrupted_embedding, interrupted_client = make_builder(
@@ -10431,15 +10431,15 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
         return resume_write(batch, texts)
 
     monkeypatch.setattr(retry_embedding, "_cache_metadata_batch", capture_resume_batch)
-    graph, actual_seed_id = retry_builder.build_graph(search_result.paper_id)
+    graph, actual_focal_id = retry_builder.build_graph(search_result.paper_id)
 
-    assert actual_seed_id == seed_id
-    assert seed_id in graph
-    assert resumed_ids == ["second-record", seed_id]
+    assert actual_focal_id == focal_id
+    assert focal_id in graph
+    assert resumed_ids == ["second-record", focal_id]
     assert retry_embedding.embedding_cache.get_cached_paper_ids() == {
         "first-record",
         "second-record",
-        seed_id,
+        focal_id,
     }
     assert retry_embedding.embedding_cache.is_hydrated(
         "train", None, dataset_source=dataset_source
@@ -10447,12 +10447,12 @@ def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
     retry_client.get_paper.assert_not_called()
 
 
-def test_missing_local_corpus_seed_reports_cache_namespace_mismatch() -> None:
+def test_missing_local_corpus_focal_reports_cache_namespace_mismatch() -> None:
     """A local-only ID must not be sent to S2 or treated as query text.
 
     :return None: Checks an actionable selected-cache mismatch error.
     """
-    seed_id = "arxiv_7"
+    focal_id = "arxiv_7"
     client = MagicMock()
     cache = MagicMock()
     cache.hydration_operation_lock.return_value = nullcontext()
@@ -10462,14 +10462,14 @@ def test_missing_local_corpus_seed_reports_cache_namespace_mismatch() -> None:
     builder.embedding_cache = cache
 
     with pytest.raises(ValueError, match="not found in the selected embedding cache"):
-        builder._resolve_seed_paper(seed_id, None)
+        builder._resolve_focal_input(focal_id, None)
 
-    cache.get_paper_metadata_batch.assert_called_once_with([seed_id])
+    cache.get_paper_metadata_batch.assert_called_once_with([focal_id])
     client.get_paper.assert_not_called()
 
 
-def test_local_corpus_seed_rejects_cached_dataset_source_mismatch() -> None:
-    """Seed metadata must come from the requested corpus dataset source.
+def test_local_corpus_focal_rejects_cached_dataset_source_mismatch() -> None:
+    """Focal metadata must come from the requested corpus dataset source.
 
     :return None: Checks provenance before cache lookup or external resolution.
     """
@@ -10485,21 +10485,21 @@ def test_local_corpus_seed_rejects_cached_dataset_source_mismatch() -> None:
     builder.embedding_cache = cache
 
     with pytest.raises(RuntimeError, match="--dataset-source 'source/b'"):
-        builder._resolve_seed_paper("content:abc123", None)
+        builder._resolve_focal_input("content:abc123", None)
 
     cache.get_paper_metadata_batch.assert_not_called()
     client.get_paper.assert_not_called()
 
 
-def test_external_seed_skips_mismatched_corpus_cache_before_s2_resolution() -> None:
-    """A changed corpus source must not block an externally resolvable seed.
+def test_external_focal_skips_mismatched_corpus_cache_before_s2_resolution() -> None:
+    """A changed corpus source must not block an externally resolvable focal.
 
     :return None: Checks stale cache metadata is neither reused nor treated as fatal.
     """
-    seed_id = "arxiv:2401.00001"
+    focal_id = "arxiv:2401.00001"
     client = MagicMock()
     client.get_paper.return_value = Paper(
-        paper_id=seed_id, title="External seed", year=2024
+        paper_id=focal_id, title="External focal", year=2024
     )
     cache = MagicMock()
     cache.hydration_operation_lock.return_value = nullcontext()
@@ -10511,15 +10511,15 @@ def test_external_seed_skips_mismatched_corpus_cache_before_s2_resolution() -> N
     )
     builder.embedding_cache = cache
 
-    resolved = builder._resolve_seed_paper(seed_id, None)
+    resolved = builder._resolve_focal_input(focal_id, None)
 
     cache.get_paper_metadata_batch.assert_not_called()
-    client.get_paper.assert_called_once_with(seed_id, raise_on_unavailable=True)
-    assert resolved.paper_id == seed_id
-    assert resolved.is_seed is True
+    client.get_paper.assert_called_once_with(focal_id, raise_on_unavailable=True)
+    assert resolved.paper_id == focal_id
+    assert resolved.is_focal is True
 
 
-def test_local_corpus_seed_requires_corpus_semantic_source() -> None:
+def test_local_corpus_focal_requires_corpus_semantic_source() -> None:
     """Candidate mode should reject a local ID without opening its own cache.
 
     :return None: Checks source guidance and avoids creating an irrelevant namespace.
@@ -10528,21 +10528,21 @@ def test_local_corpus_seed_requires_corpus_semantic_source() -> None:
     builder = EmbeddingGraphBuilder(semantic_source="candidates", client=client)
 
     with pytest.raises(ValueError, match="requires semantic_source='arxiv-corpus'"):
-        builder._resolve_seed_paper("content:abc123", None)
+        builder._resolve_focal_input("content:abc123", None)
 
     assert builder._embedding_cache is None
     client.get_paper.assert_not_called()
 
 
-def test_uncached_raw_source_seed_keeps_external_resolution_path() -> None:
+def test_uncached_raw_source_focal_keeps_external_resolution_path() -> None:
     """Raw source IDs absent from the corpus cache remain externally resolvable.
 
     :return None: Checks an ``arxiv_`` prefix alone is not treated as local-only.
     """
-    seed_id = "arxiv_dataset-key"
+    focal_id = "arxiv_dataset-key"
     client = MagicMock()
     client.get_paper.return_value = Paper(
-        paper_id=seed_id, title="Raw source paper", year=2024
+        paper_id=focal_id, title="Raw source paper", year=2024
     )
     builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=client)
     cache = MagicMock()
@@ -10551,13 +10551,13 @@ def test_uncached_raw_source_seed_keeps_external_resolution_path() -> None:
     cache.get_paper_metadata_batch.return_value = {}
     builder.embedding_cache = cache
 
-    resolved = builder._resolve_seed_paper(seed_id, None)
+    resolved = builder._resolve_focal_input(focal_id, None)
 
-    cache.get_paper_metadata_batch.assert_called_once_with([seed_id])
-    client.get_paper.assert_called_once_with(seed_id, raise_on_unavailable=True)
-    assert resolved.paper_id == seed_id
+    cache.get_paper_metadata_batch.assert_called_once_with([focal_id])
+    client.get_paper.assert_called_once_with(focal_id, raise_on_unavailable=True)
+    assert resolved.paper_id == focal_id
     assert resolved.title == "Raw source paper"
-    assert resolved.is_seed is True
+    assert resolved.is_focal is True
 
 
 def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_counts() -> (
@@ -10570,7 +10570,7 @@ def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_count
     client = MagicMock()
     builder = EmbeddingGraphBuilder(client=client)
     papers = {
-        "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True),
+        "focal": Paper(paper_id="focal", title="Focal", year=2024, is_focal=True),
         "arxiv_0": Paper(paper_id="arxiv_0", title="Unresolved", year=2024),
         "content:abc": Paper(
             paper_id="content:abc", title="Anonymous corpus row", year=2024
@@ -10630,7 +10630,7 @@ def test_citation_enrichment_covers_all_candidates_and_keeps_partial_batch_count
         ("10.1000/corpus", "", "10.1000/other", "", "10.1000/other", "10.1000/other"),
     ],
 )
-@pytest.mark.parametrize("enrichment_path", ["candidate", "seed", "reference"])
+@pytest.mark.parametrize("enrichment_path", ["candidate", "focal", "reference"])
 def test_corpus_enrichment_rejects_conflicting_identifiers(
     primary_id: str,
     corpus_arxiv: str,
@@ -10672,9 +10672,9 @@ def test_corpus_enrichment_rejects_conflicting_identifiers(
         client.get_cached_papers.assert_called_once_with([lookup_id])
         client.get_papers.assert_not_called()
     else:
-        if enrichment_path == "seed":
-            target.is_seed = True
-            builder.enrich_cached_corpus_seed(target)
+        if enrichment_path == "focal":
+            target.is_focal = True
+            builder.enrich_cached_corpus_focal(target)
         else:
             builder._enrich_corpus_papers({primary_id: target})
         client.get_papers.assert_called_once_with([lookup_id])
@@ -10745,7 +10745,7 @@ def test_citation_enrichment_uses_external_aliases_for_local_corpus_rows() -> No
     client = MagicMock()
     builder = EmbeddingGraphBuilder(client=client)
     papers = {
-        "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True),
+        "focal": Paper(paper_id="focal", title="Focal", year=2024, is_focal=True),
         "local-only": Paper(
             paper_id="local-only",
             title="Local only",
@@ -10804,15 +10804,15 @@ def test_embedding_build_graph_persists_runtime_metadata(
     monkeypatch.setattr(
         builder,
         "collect_papers",
-        lambda seed_id, **kwargs: {
-            "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True)
+        lambda focal_id, **kwargs: {
+            "focal": Paper(paper_id="focal", title="Focal", year=2024, is_focal=True)
         },
     )
     monkeypatch.setattr(builder, "compute_similarity", lambda _p1, _p2: 0.0)
     monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
 
-    graph, seed_id = builder.build_graph("seed")
-    assert seed_id == "seed"
+    graph, focal_id = builder.build_graph("focal")
+    assert focal_id == "focal"
     assert graph.graph["embedding_runtime"] == {
         "binary_prefilter_used": True,
         "active_model": DEFAULT_EMBEDDING_MODEL_NAME,
@@ -10970,7 +10970,7 @@ def test_embedding_mps_precision_policy(
     assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
     assert builder._autocast_enabled is True
     assert builder._get_model_for_encoding() is not builder.model
-    builder._encode_texts(["seed"])
+    builder._encode_texts(["focal"])
     assert ("call", "mps", bf16_token) in autocast_log
     assert ("enter",) in autocast_log and ("exit",) in autocast_log
 
@@ -11179,9 +11179,9 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
     assert builder._inner_model_compiled is True
     assert isinstance(model.block.model, tuple)
     with caplog.at_level(logging.WARNING):
-        papers = {"seed": Paper(paper_id="seed", title="Seed", year=2024)}
+        papers = {"focal": Paper(paper_id="focal", title="Focal", year=2024)}
         if encode_path == "direct":
-            embeddings = builder._encode_texts(["seed"])
+            embeddings = builder._encode_texts(["focal"])
         elif encode_path == "retrieval":
             embeddings = np.asarray(list(builder.embed_papers(papers).values()))
         elif encode_path == "graph":
@@ -11191,7 +11191,7 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
         else:
             builder._ensure_cache_model_fingerprint()
             assert (
-                builder._cache_metadata_batch([{"paper_id": "seed", "title": "Seed"}])
+                builder._cache_metadata_batch([{"paper_id": "focal", "title": "Focal"}])
                 == 1
             )
             embeddings = np.asarray(list(builder.embed_papers(papers).values()))
@@ -11234,7 +11234,7 @@ def test_embedding_tf32_skipped_for_non_cuda_device(
     )
     builder = EmbeddingGraphBuilder(max_papers=1, device=device, client=MagicMock())
     builder._load_model()
-    builder._encode_texts(["seed"])
+    builder._encode_texts(["focal"])
 
     assert builder.device == device
     assert builder._tf32_mode == "off"
@@ -11503,7 +11503,7 @@ def test_embedding_real_mps_task_space_quality_smoke() -> None:
     retrieval_cases = [
         (
             Paper(
-                paper_id="transformer-seed",
+                paper_id="transformer-focal",
                 title="Transformer language models",
                 year=2017,
                 abstract=(
@@ -11547,7 +11547,7 @@ def test_embedding_real_mps_task_space_quality_smoke() -> None:
         ),
         (
             Paper(
-                paper_id="rag-seed",
+                paper_id="rag-focal",
                 title="Retrieval-augmented language generation",
                 year=2020,
                 abstract=(
@@ -11593,10 +11593,10 @@ def test_embedding_real_mps_task_space_quality_smoke() -> None:
 
     recalls: list[float] = []
     ndcgs: list[float] = []
-    for seed, candidates, relevant_ids in retrieval_cases:
+    for focal, candidates, relevant_ids in retrieval_cases:
         query_text = format_paper_for_embedding(
             profile=builder.model_profile,
-            paper=seed,
+            paper=focal,
             task=EmbeddingTask.RETRIEVAL_QUERY,
         )
         document_texts = [

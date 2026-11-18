@@ -232,10 +232,10 @@ def test_atomic_writes_without_fchmod(
     json_path = tmp_path / "paper.json"
 
     cache_module.atomic_write_text(text_path, 'theme = "dark"\n', mode=0o600)
-    cache_module.atomic_write_json(json_path, {"paper_id": "seed"})
+    cache_module.atomic_write_json(json_path, {"paper_id": "focal"})
 
     assert text_path.read_text(encoding="utf-8") == 'theme = "dark"\n'
-    assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "seed"}
+    assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "focal"}
 
 
 def test_atomic_output_path_replaces_existing_writable_file(tmp_path: Path) -> None:

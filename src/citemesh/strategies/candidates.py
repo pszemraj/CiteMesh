@@ -1,7 +1,7 @@
 """
 Candidate acquisition and paper-identity helpers.
 
-Fetches the seed's Semantic Scholar neighbors (references, with an arXiv
+Fetches the focal paper's Semantic Scholar neighbors (references, with an arXiv
 bibliography fallback, citations, and recommendations) as per-source results.
 The identity rule and merge helpers here back the indexed pool in
 :mod:`citemesh.strategies.discovery_pool`, which hybrid and the embedding
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_CANDIDATE_POOL_SIZE = 400
-QUERY_SEED_SEARCH_LIMIT = 20
+QUERY_FOCAL_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
 ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
@@ -508,17 +508,17 @@ def select_recovered_references_by_score(
 
 
 def _select_recovered_references_by_text(
-    seed: Paper,
+    focal: Paper,
     recovered: Sequence[Paper],
     limit: int,
 ) -> list[Paper]:
     """Select fallback references by relevance instead of bibliography order.
 
-    Title/abstract similarity to the seed is the primary signal. Citation count
+    Title/abstract similarity to the focal paper is the primary signal. Citation count
     breaks topical ties, and original bibliography order is the stable fallback
     when metadata cannot distinguish records.
 
-    :param Paper seed: Seed paper used as the relevance query.
+    :param Paper focal: Focal paper used as the relevance query.
     :param Sequence[Paper] recovered: Materialized bibliography records.
     :param int limit: Maximum references to retain.
     :return list[Paper]: Ranked, capped reference records.
@@ -527,31 +527,33 @@ def _select_recovered_references_by_text(
         return list(recovered)
 
     index = AbstractSimilarityIndex()
-    index.build({seed.paper_id: seed, **{paper.paper_id: paper for paper in recovered}})
+    index.build(
+        {focal.paper_id: focal, **{paper.paper_id: paper for paper in recovered}}
+    )
     return select_recovered_references_by_score(
         recovered,
         limit,
-        lambda paper: index.similarity(seed.paper_id, paper.paper_id),
+        lambda paper: index.similarity(focal.paper_id, paper.paper_id),
     )
 
 
 def _add_verified_reference(
-    seed: Paper, references: list[Paper], paper: Paper | None
+    focal: Paper, references: list[Paper], paper: Paper | None
 ) -> None:
-    """Keep the canonical reference while excluding matches to the seed.
+    """Keep the canonical reference while excluding matches to the focal paper.
 
     A paper that duplicates an already collected reference is merged into it
     instead of being appended.
 
-    :param Paper seed: Seed paper whose own records are never kept as references.
+    :param Paper focal: Focal paper whose own records are never kept as references.
     :param list[Paper] references: Collected references, extended in place.
     :param Paper | None paper: Resolved reference record, or ``None`` if unresolved.
     :return None: Appends or merges ``paper`` into ``references``.
     """
     if (
         paper is None
-        or paper.paper_id == seed.paper_id
-        or candidate_records_match(seed, paper)
+        or paper.paper_id == focal.paper_id
+        or candidate_records_match(focal, paper)
     ):
         return
     for existing in references:
@@ -563,12 +565,12 @@ def _add_verified_reference(
     references.append(paper)
 
 
-def fetch_seed_references(
+def fetch_focal_references(
     client: SemanticScholarClient,
-    seed: Paper,
+    focal: Paper,
     limit: int,
     *,
-    seed_identifier: str | None = None,
+    focal_identifier: str | None = None,
     local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
     local_bibliography_lookup: Callable[
         [Sequence[BibliographyKey]], dict[BibliographyKey, Paper]
@@ -577,12 +579,12 @@ def fetch_seed_references(
     reference_selector: ReferenceSelector | None = None,
     collect_reference_evidence: bool = False,
 ) -> tuple[CandidateSourceResult, ...]:
-    """Collect S2 seed references with an arXiv bibliography fallback.
+    """Collect S2 focal paper references with an arXiv bibliography fallback.
 
     :param SemanticScholarClient client: Existing metadata and discovery client.
-    :param Paper seed: Resolved seed, supplying external identifiers.
+    :param Paper focal: Resolved focal paper, supplying external identifiers.
     :param int limit: Maximum usable references; zero disables discovery.
-    :param str | None seed_identifier: Original input, retaining arXiv version.
+    :param str | None focal_identifier: Original input, retaining arXiv version.
     :param Callable | None local_lookup: Read unambiguous requested aliases from an
         already prepared corpus, keyed by normalized request identifier.
     :param Callable | None local_bibliography_lookup: Resolve identifier-free
@@ -601,7 +603,7 @@ def fetch_seed_references(
 
     if limit <= 0:
         return ()
-    provider_id = provider_lookup_identifier(seed.paper_id, seed)
+    provider_id = provider_lookup_identifier(focal.paper_id, focal)
     evidence: dict[str, ReferenceEvidence] = {}
     fetch_references = client.get_paper_references
     if collect_reference_evidence:
@@ -623,7 +625,7 @@ def fetch_seed_references(
     identifier = next(
         (
             value
-            for raw in (seed_identifier or "", seed.arxiv_id, seed.paper_id)
+            for raw in (focal_identifier or "", focal.arxiv_id, focal.paper_id)
             if (value := arxiv_identifier(raw))
         ),
         None,
@@ -656,7 +658,7 @@ def fetch_seed_references(
     identified = [entry.identifiers for entry in entries if entry.identifiers]
     with progress_task(
         total=len(identified),
-        description="Recovering focal references",
+        description="Recovering focal paper references",
         unit="references",
         enabled=False if not identified else None,
     ) as progress:
@@ -717,7 +719,7 @@ def fetch_seed_references(
                 resolver.bind_entries(batch)
             attempted.update(ids)
             for entry in batch:
-                _add_verified_reference(seed, recovered, resolver.resolve(entry))
+                _add_verified_reference(focal, recovered, resolver.resolve(entry))
             progress.update(len(batch))
     _enrich_local_reference_records(client, recovered)
     resolved_with_identifiers = len(recovered)
@@ -736,11 +738,11 @@ def fetch_seed_references(
         if keys:
             records_by_key = local_bibliography_lookup(keys)
             for key in keys:
-                _add_verified_reference(seed, recovered, records_by_key.get(key))
+                _add_verified_reference(focal, recovered, records_by_key.get(key))
 
     materialized_count = len(recovered)
     selector = reference_selector or _select_recovered_references_by_text
-    recovered = selector(seed, recovered, limit)
+    recovered = selector(focal, recovered, limit)
     logger.debug(
         "arXiv bibliography extraction: entries=%d, resolved_with_identifiers=%d, "
         "resolved_by_title=%d, materialized=%d, selected=%d, reference_limit=%d.",
@@ -842,8 +844,8 @@ def require_available_candidate_source(
         )
 
 
-def merge_seed_relation(existing: str, incoming: str) -> str:
-    """Merge two seed-relation labels conservatively.
+def merge_focal_relation(existing: str, incoming: str) -> str:
+    """Merge two labels describing relations to the focal paper conservatively.
 
     :param str existing: Existing relation label.
     :param str incoming: Incoming relation label.
@@ -856,7 +858,7 @@ def merge_seed_relation(existing: str, incoming: str) -> str:
     if (
         not normalized_incoming
         or normalized_existing == normalized_incoming
-        or normalized_existing == "seed"
+        or normalized_existing == "focal"
     ):
         return normalized_existing
     if normalized_existing == "overlap" or normalized_incoming == "overlap":
@@ -864,7 +866,7 @@ def merge_seed_relation(existing: str, incoming: str) -> str:
     if {
         normalized_existing,
         normalized_incoming,
-    } == {"referenced_by_seed", "cites_seed"}:
+    } == {"referenced_by_focal", "cites_focal"}:
         return "overlap"
     if normalized_existing == "semantic_only":
         return normalized_incoming
@@ -955,7 +957,7 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
             seen_references.add(normalized_reference_id)
             reference_ids.append(normalized_reference_id)
     preferred.references = reference_ids
-    preferred.is_seed = bool(preferred.is_seed or incoming.is_seed)
+    preferred.is_focal = bool(preferred.is_focal or incoming.is_focal)
     return preferred
 
 

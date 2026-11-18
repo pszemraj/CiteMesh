@@ -56,29 +56,29 @@ class ReferenceHydrator:
         self.reference_cache.clear()
         self._source_unavailable = False
 
-    def withhold_seed_references(self, seed: Paper) -> None:
-        """Record that the provider has no reference list for the seed.
+    def withhold_focal_references(self, focal: Paper) -> None:
+        """Record that the provider has no reference list for the focal paper.
 
         A bibliography recovered elsewhere must not stand in for the provider's
         list in coupling scores, and the empty provider answer is not repeated.
 
-        :param Paper seed: Build seed.
-        :return None: Empties the seed's reference list for this build.
+        :param Paper focal: Focal paper for this build.
+        :return None: Empties the focal paper's reference list for this build.
         """
-        self.reference_cache[seed.paper_id] = []
-        seed.references = []
+        self.reference_cache[focal.paper_id] = []
+        focal.references = []
 
-    def hydrate(self, papers: dict[str, Paper], seed: Paper) -> None:
-        """Fill the seed's and the collected papers' reference lists.
+    def hydrate(self, papers: dict[str, Paper], focal: Paper) -> None:
+        """Fill the focal paper's and the collected papers' reference lists.
 
-        :param Dict[str, Paper] papers: Collected papers, possibly with the seed.
-        :param Paper seed: Build seed.
+        :param Dict[str, Paper] papers: Collected papers, possibly with the focal paper.
+        :param Paper focal: Focal paper for this build.
         :return None: Updates paper records and the in-memory cache.
         """
         if self.fetch_references:
             logger.debug("Hydrating reference lists for %d papers...", len(papers))
 
-        self.ensure(seed)
+        self.ensure(focal)
 
         progress_bar: Generator[tuple[str, Paper], None, None] | None = None
         paper_items: Iterable[tuple[str, Paper]] = papers.items()
@@ -92,7 +92,7 @@ class ReferenceHydrator:
 
         try:
             for paper_id, paper in paper_items:
-                if paper_id != seed.paper_id:
+                if paper_id != focal.paper_id:
                     self.ensure(paper)
         finally:
             if progress_bar is not None:

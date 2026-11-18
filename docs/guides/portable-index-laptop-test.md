@@ -120,10 +120,10 @@ class CorpusOnlyClient(SemanticScholarClient):
         return {}
 
 
-seed = Paper(**json.loads(Path("out/unseen-paper.json").read_text(encoding="utf-8")))
+focal = Paper(**json.loads(Path("out/unseen-paper.json").read_text(encoding="utf-8")))
 selection = select_existing_cache(NAMESPACE)
 cache = open_existing_cache(selection)
-assert not cache.get_paper_metadata_batch([seed.paper_id]), (
+assert not cache.get_paper_metadata_batch([focal.paper_id]), (
     "Choose an unseen focal paper"
 )
 state, count = cache.corpus_state(), cache.embedding_count()
@@ -140,23 +140,23 @@ for cap in (None, 8):
         max_papers=6,
         min_semantic_similarity=0,
     )
-    graph, seed_id = builder.build_graph(seed.paper_id, seed_paper=seed)
-    assert seed_id == seed.paper_id
+    graph, focal_id = builder.build_graph(focal.paper_id, focal_paper=focal)
+    assert focal_id == focal.paper_id
     assert graph.number_of_nodes() == 6 and graph.number_of_edges() > 0
     assert all(
-        node == seed_id or attributes["paper"].is_local_corpus
+        node == focal_id or attributes["paper"].is_local_corpus
         for node, attributes in graph.nodes(data=True)
     )
     assert cache.embedding_count() == count
     assert cache.corpus_state() == state
-    assert not cache.get_paper_metadata_batch([seed.paper_id])
+    assert not cache.get_paper_metadata_batch([focal.paper_id])
     assert builder.graph_embedding_cache.db_path != cache.db_path
     assert builder.graph_embedding_cache.storage_precision == "float32"
     runtime = graph.graph["embedding_runtime"]
     assert runtime["device"] == DEVICE
     assert runtime["resolved_model_revision"] == selection.contract.model_revision
     label = "full" if cap is None else "newest8"
-    exporter = GraphExporter(graph, seed_id, theme_name="dark")
+    exporter = GraphExporter(graph, focal_id, theme_name="dark")
     exporter.to_json(Path(f"out/unseen-{label}.json"))
     exporter.to_dashboard_html(Path(f"out/unseen-{label}.dashboard.html"))
     print(label, "PASS", runtime)

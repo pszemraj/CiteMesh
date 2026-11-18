@@ -150,10 +150,10 @@ class _H5LayoutMixin(_EmbeddingCacheHost):
             conn.execute(CORPUS_MEMBERSHIP_TABLE_CREATE_SQL)
             conn.execute(CORPUS_MEMBERSHIP_ORDINAL_INDEX_SQL)
 
-            # Contract values are seeded, never re-stamped, here: overwriting them
+            # Initialize contract values without re-stamping them. Overwriting them
             # would make _assert_runtime_cache_consistency compare the runtime
-            # against itself. Absent keys seed as a fresh namespace would; stored
-            # ones survive to be compared, and are restamped once validated or
+            # against itself. Absent keys receive fresh namespace defaults. Stored
+            # values survive to be compared, and are restamped once validated or
             # repaired. Physical compression and hydration state likewise survive
             # process restarts.
             self._set_cache_metadata(

@@ -93,11 +93,11 @@ def _canonicalize_embedding_paper_id(raw_id: object) -> str:
     return recognize_arxiv_identifier(text, allow_bare=True) or text
 
 
-def _query_seed_id(query_text: str) -> str:
-    """Build deterministic query-mode seed node identifier.
+def _query_focal_id(query_text: str) -> str:
+    """Build deterministic query-mode focal paper node identifier.
 
     :param str query_text: Raw user query text.
-    :return str: Stable hashed query seed identifier.
+    :return str: Stable hashed query focal paper identifier.
     """
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"

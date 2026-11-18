@@ -136,9 +136,9 @@ def theme_label_text_alpha(theme_obj: Theme) -> float:
 
 # as fallback. The tooltip's job is answering "why is this paper here".
 _HOVER_RELATION_LABELS: dict[str, str] = {
-    "seed": "focal paper",
-    "referenced_by_seed": "referenced by focal paper",
-    "cites_seed": "cites focal paper",
+    "focal": "focal paper",
+    "referenced_by_focal": "referenced by focal paper",
+    "cites_focal": "cites focal paper",
     "overlap": "prior + derivative work",
     "semantic_only": "semantic match",
     "citation": "citation graph",
@@ -199,7 +199,7 @@ def _select_dashboard_label_nodes(
     """
 
     def _rank(node_id: Hashable) -> tuple[int, int, int, str]:
-        """Build a stable seed/citation/year priority tuple.
+        """Build a stable focal/citation/year priority tuple.
 
         :param Hashable node_id: Candidate node identifier.
         :return tuple[int, int, int, str]: Sort key for label priority.
@@ -208,7 +208,7 @@ def _select_dashboard_label_nodes(
         citations = coerce_citation_count(attrs.get("citation_count", 0))
         year = max(coerce_publication_year(attrs.get("year", 0)), 0)
         return (
-            0 if bool(attrs.get("is_seed", False)) else 1,
+            0 if bool(attrs.get("is_focal", False)) else 1,
             -citations,
             -year,
             str(node_id),
@@ -217,7 +217,7 @@ def _select_dashboard_label_nodes(
     selected: list[Hashable] = []
     for node_id in sorted(node_ids, key=_rank):
         coords = tuple(float(value) for value in pos[node_id])
-        if not bool(graph.nodes[node_id].get("is_seed", False)) and any(
+        if not bool(graph.nodes[node_id].get("is_focal", False)) and any(
             math.dist(coords, tuple(float(value) for value in pos[other]))
             < DASHBOARD_LABEL_MIN_DISTANCE
             for other in selected

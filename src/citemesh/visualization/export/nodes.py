@@ -189,11 +189,11 @@ def _strategy(graph: PaperGraph, metadata: Mapping[str, object]) -> str:
 
 
 _PROVENANCE_CLASSES = frozenset({"citation", "semantic", "both"})
-_SEED_RELATION_CLASSES = frozenset(
+_FOCAL_RELATION_CLASSES = frozenset(
     {
-        "seed",
-        "referenced_by_seed",
-        "cites_seed",
+        "focal",
+        "referenced_by_focal",
+        "cites_focal",
         "overlap",
         "semantic_only",
         "citation",
@@ -232,13 +232,13 @@ def _provenance_map(graph: PaperGraph) -> dict[str, str]:
     return _graph_class_map(graph, "paper_sources", _PROVENANCE_CLASSES)
 
 
-def _seed_relation_map(graph: PaperGraph) -> dict[str, str]:
-    """Resolve normalized relation-to-seed mapping when available.
+def _focal_relation_map(graph: PaperGraph) -> dict[str, str]:
+    """Resolve normalized relation-to-focal mapping when available.
 
-    :param PaperGraph graph: Graph carrying a ``seed_relations`` mapping.
+    :param PaperGraph graph: Graph carrying a ``focal_relations`` mapping.
     :return Dict[str, str]: Node-ID to relation class mapping.
     """
-    return _graph_class_map(graph, "seed_relations", _SEED_RELATION_CLASSES)
+    return _graph_class_map(graph, "focal_relations", _FOCAL_RELATION_CLASSES)
 
 
 def _int_or_none(value: object) -> int | None:
@@ -314,7 +314,7 @@ def _discovery_evidence(raw: object) -> DiscoveryEvidence:
         if isinstance(features, dict) and isinstance(list_ranks, dict):
             rank = _int_or_none(raw.get("discovery_rank"))
             score = _float_or_none(raw.get("discovery_score"))
-            similarity = _float_or_none(features.get("seed_similarity"))
+            similarity = _float_or_none(features.get("focal_similarity"))
             direct = features.get("direct_citation")
             if (
                 rank is not None
@@ -326,7 +326,7 @@ def _discovery_evidence(raw: object) -> DiscoveryEvidence:
                     "discovery_rank": rank,
                     "discovery_score": score,
                     "discovery_features": {
-                        "seed_similarity": similarity,
+                        "focal_similarity": similarity,
                         "bibliography_similarity": _float_or_none(
                             features.get("bibliography_similarity")
                         ),
@@ -385,9 +385,9 @@ class NodesMixin:
         :return list[EnrichedNodePayload]: Enriched node payloads.
         """
         provenance = _provenance_map(self.graph)
-        seed_relations = _seed_relation_map(self.graph)
+        focal_relations = _focal_relation_map(self.graph)
         discovery = _discovery_evidence_map(self.graph)
-        relevance = self._seed_relevance_scores()
+        relevance = self._focal_relevance_scores()
         sorted_nodes = _sorted_nodes(self.graph)
         strategy = _strategy(self.graph, self.metadata)
 
@@ -404,18 +404,18 @@ class NodesMixin:
             doi = str(serialized.get("doi") or "").strip()
             categories = _normalized_text_values(serialized.get("categories", []))
             abstract = str(serialized.get("abstract") or "").strip()
-            is_seed = bool(serialized.get("is_seed", False))
+            is_focal = bool(serialized.get("is_focal", False))
             is_local_corpus = bool(serialized.get("is_local_corpus", False))
 
             provenance_base = provenance.get(
                 node_str, _default_provenance(strategy=strategy)
             )
-            node_provenance = "seed" if is_seed else provenance_base
-            seed_relation = seed_relations.get(node_str, "")
-            if is_seed:
-                seed_relation = "seed"
-            if not seed_relation and node_provenance == "semantic":
-                seed_relation = "semantic_only"
+            node_provenance = "focal" if is_focal else provenance_base
+            focal_relation = focal_relations.get(node_str, "")
+            if is_focal:
+                focal_relation = "focal"
+            if not focal_relation and node_provenance == "semantic":
+                focal_relation = "semantic_only"
             node_payload: EnrichedNodePayload = {
                 "id": node_str,
                 "title": title,
@@ -427,19 +427,19 @@ class NodesMixin:
                 "arxiv_id": arxiv_id,
                 "doi": doi,
                 "categories": categories,
-                "is_seed": is_seed,
+                "is_focal": is_focal,
                 "is_local_corpus": is_local_corpus,
                 "provenance": node_provenance,
                 "provenance_base": provenance_base,
-                "seed_relation": seed_relation,
-                "seed_relevance": float(relevance.get(node_str, 0.0)),
+                "focal_relation": focal_relation,
+                "focal_relevance": float(relevance.get(node_str, 0.0)),
                 "links": {},
                 "bibtex": "",
             }
             reference_evidence = attrs.get("focal_reference_evidence")
-            if not is_seed and isinstance(reference_evidence, dict):
+            if not is_focal and isinstance(reference_evidence, dict):
                 node_payload["focal_reference_evidence"] = reference_evidence
-            evidence = None if is_seed else discovery.get(node_str)
+            evidence = None if is_focal else discovery.get(node_str)
             if evidence is not None:
                 node_payload["discovery_rank"] = evidence["discovery_rank"]
                 node_payload["discovery_score"] = evidence["discovery_score"]
@@ -451,8 +451,8 @@ class NodesMixin:
             node_payloads.append(node_payload)
         return node_payloads
 
-    def _seed_relevance_scores(self: _ExporterHost) -> dict[str, float]:
-        """Compute seed-centric personalized PageRank scores.
+    def _focal_relevance_scores(self: _ExporterHost) -> dict[str, float]:
+        """Compute focal-centric personalized PageRank scores.
 
         :return Dict[str, float]: Node-ID keyed relevance scores.
         """
@@ -475,12 +475,12 @@ class NodesMixin:
         personalization: dict[str, float] = {
             str(node_id): 0.0 for node_id in relevance_graph.nodes
         }
-        seed_id = str(self.seed_id)
-        if seed_id in personalization:
-            personalization[seed_id] = 1.0
+        focal_id = str(self.focal_id)
+        if focal_id in personalization:
+            personalization[focal_id] = 1.0
         else:
-            seed_id = next(iter(personalization))
-            personalization[seed_id] = 1.0
+            focal_id = next(iter(personalization))
+            personalization[focal_id] = 1.0
 
         try:
             scores = nx.pagerank(
@@ -538,7 +538,7 @@ class NodesMixin:
         cache_key = theme.name
         if cache_key not in self._color_map_cache:
             colors, _, _ = compute_node_colors(
-                self._serialized_graph(), self.seed_id, theme
+                self._serialized_graph(), self.focal_id, theme
             )
             ordered_nodes = [node_id for node_id, _ in _sorted_nodes(self.graph)]
             self._color_map_cache[cache_key] = {

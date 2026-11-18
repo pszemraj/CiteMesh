@@ -4,7 +4,9 @@ File names, path resolution, and the schema of every format CiteMesh writes. Das
 
 ## Terminology
 
-The **focal paper** is the paper a graph is built around. Existing Python parameters and saved fields such as `seed_id`, `is_seed`, `seed_relation`, and `seed_relevance` retain `seed` for this concept. The `--seed` flag instead sets the random layout seed.
+The **focal paper** is the paper a graph is built around. The graph stores its ID in `focal_id` and marks its node with `is_focal`. The CLI option `--seed` sets the random layout seed.
+
+Graph JSON, dashboard collections, and build sidecars now use schema version 2. Version 1 used `seed_id`, `is_seed`, and `seed_*` field names. To use a version 1 graph, collection, or earlier `dashboard.manifest.json` with the current viewer, rerun the original builds in a new output directory. Existing self-contained HTML dashboards still open on their own. Scripts that read CSV headers or GraphML node attributes must also use the new field names.
 
 ## Artifact set
 
@@ -38,7 +40,7 @@ _Pyvis settles under browser physics and labels every node; Plotly keeps the Pyt
 
 ## Output location
 
-Omit `--output` to use `out/` under the current working directory; a source checkout tracks `out/.gitkeep` and ignores generated contents. `<title-slug>` is a filesystem-safe paper title, falling back to the canonical focal paper ID, and `<hash>` is the first 8 characters of `sha256(seed_id)`. Later builds reuse a directory with the same hash suffix, so correcting a title keeps the directory name and lets a refresh replace its exports in place.
+Omit `--output` to use `out/` under the current working directory; a source checkout tracks `out/.gitkeep` and ignores generated contents. `<title-slug>` is a filesystem-safe paper title, falling back to the canonical focal paper ID, and `<hash>` is the first 8 characters of `sha256(focal_id)`. Later builds reuse a directory with the same hash suffix, so correcting a title keeps the directory name and lets a refresh replace its exports in place.
 
 - `--output` omitted: non-dashboard artifacts go to `out/<title-slug>-<hash>/<strategy>.<ext>`; a dashboard export writes `out/dashboard.html`, `out/dashboard.citemesh.json`, and `out/<title-slug>-<hash>/<strategy>.json` plus its sidecar.
 - An existing `--output` directory wins over suffix rules, even when its name ends in `.json` or `.dashboard.html`: non-dashboard exports go inside it, dashboard exports use it as the collection root.
@@ -49,19 +51,17 @@ The sidecar follows the resolved output: `<strategy>.config.json` beside strateg
 
 ## Collection package (`dashboard.citemesh.json`)
 
-UTF-8 JSON with `kind: "citemesh-dashboard-collection"`, `schema_version: 1`, `current_result_id`, and `results` ordered most-recently-updated first. Each result holds its stable identity, a summary of the focal paper, title, and strategy, an `updated_at` timestamp, the graph payload, and portable `build` settings. Machine-local output paths are excluded, so the package moves between machines as one file.
+UTF-8 JSON with `kind: "citemesh-dashboard-collection"`, `schema_version: 2`, `current_result_id`, and `results` ordered most-recently-updated first. Each result holds its stable identity, a summary of the focal paper, title, and strategy, an `updated_at` timestamp, the graph payload, and portable `build` settings. Machine-local output paths are excluded, so the package moves between machines as one file.
 
-Results are keyed by `(strategy, seed_id)`: a new focal paper adds a result, the same focal paper under a different strategy adds a separate one, and the same focal paper and strategy replaces that slot even when model or build settings changed - collections keep no history of reruns. A refresh also drops optional formats for that strategy that an earlier run produced and this one did not select; other strategies' and unrelated user files are untouched.
-
-Collections in the former `dashboard.manifest.json` layout are migrated on the next build: valid legacy entries are merged in, and the legacy manifest and its artifacts are left in place.
+Results are keyed by `(strategy, focal_id)`: a new focal paper adds a result, the same focal paper under a different strategy adds a separate one, and the same focal paper and strategy replaces that slot even when model or build settings changed - collections keep no history of reruns. A refresh also drops optional formats for that strategy that an earlier run produced and this one did not select; other strategies' and unrelated user files are untouched.
 
 A malformed, unsupported, or inaccessible existing package stops the build before any API call or model work and leaves the file untouched; failed filesystem inspection never counts as a missing package. Per-result files are staged before the collection lock is taken and the package is written last, so an export, rendering, or filesystem failure leaves the previous collection intact and reports the saved package path - short of power-loss atomicity across the bundle.
 
 ## Graph JSON (`<strategy>.json`)
 
-The graph payload requires its `seed_id` to identify a node present in the graph. It contains:
+The graph payload requires its `focal_id` to identify a node present in the graph. It contains:
 
-- `kind` (`"citemesh-graph"`), `schema_version` (`1`), `seed_id`
+- `kind` (`"citemesh-graph"`), `schema_version` (`2`), `focal_id`
 - `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources. Hybrid builds also include `discovery_ranker`, which describes how the papers were ranked: `{"method": "reciprocal_rank_fusion", "k": 60, "lists": [...]}`, where `lists` names the active lists. Optional `weights` records contributions that differ from one. For example, `{"focal_reference": 0.5}` gives focal citation use half weight. [Ranking formula](../guides/how-it-works.md#5-ranking-and-selection)
 - `summary` - `nodes`, `edges`
 - `nodes` - enriched per-paper objects
@@ -70,21 +70,21 @@ The graph payload requires its `seed_id` to identify a node present in the graph
 
 Each node carries:
 
-- core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
-- analysis fields `provenance` (`seed`/`citation`/`semantic`/`both`), `provenance_base`, `seed_relation` (`cites_seed`/`referenced_by_seed`/`semantic_only`/`overlap`/`seed`), and [`seed_relevance`](../guides/how-it-works.md#8-exports-and-the-dashboard-collection)
+- core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_focal`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
+- analysis fields `provenance` (`focal`/`citation`/`semantic`/`both`), `provenance_base`, `focal_relation` (`cites_focal`/`referenced_by_focal`/`semantic_only`/`overlap`/`focal`), and [`focal_relevance`](../guides/how-it-works.md#8-exports-and-the-dashboard-collection)
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
 - discovery evidence on every related paper of a hybrid build (never on the focal paper or on other strategies' papers): `discovery_rank` (one-based position in the fused order of the whole candidate pool), `discovery_score` (the fused score), `discovery_features`, and `discovery_list_ranks`
 
-`discovery_features` holds `seed_similarity` (the document-role cosine with the focal paper), `bibliography_similarity` (`null` when fewer than five other references from the focal paper exist), `direct_citation` (the focal paper cites the paper or it cites the focal paper), and `recommendation_rank` (its position among the provider's returned recommendations, or `null`). `discovery_list_ranks` gives the paper's one-based position in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The fused score uses these positions. The recommendation list position can differ from the provider position after candidates are deduplicated. The values below are illustrative:
+`discovery_features` holds `focal_similarity` (the document-role cosine with the focal paper), `bibliography_similarity` (`null` when fewer than five other references from the focal paper exist), `direct_citation` (the focal paper cites the paper or it cites the focal paper), and `recommendation_rank` (its position among the provider's returned recommendations, or `null`). `discovery_list_ranks` gives the paper's one-based position in each list named by `meta.discovery_ranker.lists`, or `null` for a list that does not contain it. The fused score uses these positions. The recommendation list position can differ from the provider position after candidates are deduplicated. The values below are illustrative:
 
 ```json
 "discovery_rank": 3,
 "discovery_score": 0.0479,
-"discovery_features": {"seed_similarity": 0.71, "bibliography_similarity": 0.66, "direct_citation": true, "recommendation_rank": null},
+"discovery_features": {"focal_similarity": 0.71, "bibliography_similarity": 0.66, "direct_citation": true, "recommendation_rank": null},
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`seed_relevance` is personalized PageRank over the final similarity graph. The dashboard labels it **Graph relevance**. The dashboard defaults to **Discovery rank** when every related paper has a rank, and **Graph relevance** otherwise. When ranks exist for only some papers, sorting by discovery rank puts unranked papers last. **Why this paper** shows the paper's place in the candidate pool, its discovery signals, and the separate graph evidence. Expand **Discovery score** to see the positions used in fusion. **Add Results** resets the sort, search, year, and scope controls for the loaded graph.
+`focal_relevance` is personalized PageRank over the final similarity graph. The dashboard labels it **Graph relevance**. The dashboard defaults to **Discovery rank** when every related paper has a rank, and **Graph relevance** otherwise. When ranks exist for only some papers, sorting by discovery rank puts unranked papers last. **Why this paper** shows the paper's place in the candidate pool, its discovery signals, and the separate graph evidence. Expand **Discovery score** to see the positions used in fusion. **Add Results** resets the sort, search, year, and scope controls for the loaded graph.
 
 A selected focal reference can carry `focal_reference_evidence`. Its `context_count` counts distinct nonempty passages supplied by Semantic Scholar, `excerpt` holds a sample passage when available, and `is_influential` records the provider flag when supplied. These fields refer to the relationship with this particular focal paper.
 
@@ -94,7 +94,7 @@ JSON and dashboard share this node schema, and every JSON export carries the lay
 
 ## CSV (`<strategy>.csv`)
 
-Columns, one row per paper: `id`, `title`, `year`, `authors` (semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`, `categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`, `seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
+Columns, one row per paper: `id`, `title`, `year`, `authors` (semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`, `categories` (semicolon-separated), `is_focal`, `provenance`, `focal_relation`, `focal_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
 
 An empty graph still writes the header. Both the CLI and dashboard writers quote fields containing commas, quotes, or line breaks, and prefix an apostrophe to text cells beginning with `=`, `+`, `-`, `@`, tab, or carriage return (spreadsheet formula-injection guard), so consumers may see a leading `'`.
 
@@ -104,7 +104,7 @@ One `@article` per paper, with `title`, `author`, `year`, `doi`, `url`, and `abs
 
 ## GraphML (`<strategy>.graphml`)
 
-A reduced node schema: `provenance`, `provenance_base`, `seed_relation`, `seed_relevance`, the four `discovery_*` fields (`discovery_rank`, `discovery_score`, `discovery_features`, `discovery_list_ranks`), `links`, and `bibtex` are omitted, `authors` and `categories` are flattened to comma-separated strings, `is_seed` is written as `0`/`1`, and nullable text fields become empty values. Graph-level attributes are `citemesh_graphml_determinism`, `citemesh_graphml_writer_version`, and one `citemesh_meta_<key>` per run-metadata key.
+A reduced node schema: `provenance`, `provenance_base`, `focal_relation`, `focal_relevance`, the four `discovery_*` fields (`discovery_rank`, `discovery_score`, `discovery_features`, `discovery_list_ranks`), `links`, and `bibtex` are omitted, `authors` and `categories` are flattened to comma-separated strings, `is_focal` is written as `0`/`1`, and nullable text fields become empty values. Graph-level attributes are `citemesh_graphml_determinism`, `citemesh_graphml_writer_version`, and one `citemesh_meta_<key>` per run-metadata key.
 
 ## Dashboard HTML
 
@@ -125,19 +125,19 @@ The paper list shows discovery rank where available. Select a title to read its 
 
 ![Search narrowing the Megalodon paper list and similarity graph](../../assets/ui-dashboard-search-filter.png)
 
-Downloads are named from the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
+Downloads are named from the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, focal_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
 Node color is a publication-year gradient shown in the year legend, node size tracks citation count, the focal paper wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
 
 ## Sidecar (`<strategy>.config.json`)
 
-The sidecar records `schema_version`, `build`, `outputs` (resolved artifact paths), and `metadata`.
+The sidecar records `schema_version: 2`, `build`, `outputs` (resolved artifact paths), and `metadata`.
 
 `build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record `max_citations` and `max_references`, which for hybrid are provider fetch limits), `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus-only runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. Hybrid runs never record a candidate-pool budget, since no such budget sizes their pool; `arxiv-corpus` and `both` runs record the corpus settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` disables the elapsed cap (see the [API request policy](../guides/cli.md#troubleshooting)).
 
 `metadata` carries:
 
-- run metadata `paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`
+- run metadata `paper_id`, `focal_id`, `nodes`, `edges`, `theme`, `strategy`
 - `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence describing the rank fusion
 - `candidate_source_status` - per requested candidate source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure); hybrid runs that search the corpus (`arxiv-corpus` and `both`) also record `arxiv_corpus`. See [source-failure handling](../guides/cli.md#troubleshooting).
 - embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
@@ -145,7 +145,7 @@ The sidecar records `schema_version`, `build`, `outputs` (resolved artifact path
 
 ## Graph input
 
-When a node carries a `Paper` under its `paper` attribute, exports, PNG rendering, and artifact filenames use that record for bibliographic metadata, including empty values that clear stale mirrored fields. A node-level `is_seed` overrides `Paper.is_seed`; nodes without a `Paper` use their scalar attributes.
+When a node carries a `Paper` under its `paper` attribute, exports, PNG rendering, and artifact filenames use that record for bibliographic metadata, including empty values that clear stale mirrored fields. A node-level `is_focal` overrides `Paper.is_focal`; nodes without a `Paper` use their scalar attributes.
 
 Node IDs must be non-empty, have no surrounding whitespace, and remain unique after conversion to strings. Enriched citation counts use the shared non-negative integer normalizer: booleans, nulls, nonnumeric text, and NaN become zero. Integral numeric years (including `2017.0`) are accepted; fractional or non-finite years are missing. Null or non-finite edge weights raise before exports replace existing files.
 

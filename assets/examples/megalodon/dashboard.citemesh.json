@@ -39,6 +39,7 @@
           "dashboard",
           "json"
         ],
+        "focal_id": "arxiv:2404.08801",
         "layout": {
           "dpi": 150,
           "spring_iterations": 100,
@@ -49,10 +50,10 @@
         "paper_id_input": "arxiv:2404.08801",
         "refresh_paper_cache": false,
         "s2_retry_budget": 0.0,
-        "seed_id": "arxiv:2404.08801",
         "strategy": "hybrid",
         "timestamp_included": false
       },
+      "focal_id": "arxiv:2404.08801",
       "payload": {
         "dashboard": {
           "meta": {
@@ -478,6 +479,7 @@
                 "focal_reference": 0.5
               }
             },
+            "focal_id": "arxiv:2404.08801",
             "plotly_node_order": [
               "469c27e51ade2adce206ad051f912fedc0dce3fb",
               "4b1da83fae2ee16c51ed7c7094e30419ea721840",
@@ -754,7 +756,6 @@
                 -0.39195189685234544
               ]
             ],
-            "seed_id": "arxiv:2404.08801",
             "strategy": "hybrid",
             "summary": {
               "edges": 110,
@@ -1759,6 +1760,7 @@
             "weight": 0.7565939831733703
           }
         ],
+        "focal_id": "arxiv:2404.08801",
         "kind": "citemesh-graph",
         "meta": {
           "candidate_source_status": {
@@ -2204,8 +2206,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7164494675360101,
               "direct_citation": false,
-              "recommendation_rank": 6,
-              "seed_similarity": 0.6228382497070106
+              "focal_similarity": 0.6228382497070106,
+              "recommendation_rank": 6
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -2217,9 +2219,11 @@
             "discovery_rank": 12,
             "discovery_score": 0.033535353535353536,
             "doi": "10.1109/IRASET68627.2026.11538727",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.002229418183571611,
             "id": "469c27e51ade2adce206ad051f912fedc0dce3fb",
+            "is_focal": false,
             "is_local_corpus": false,
-            "is_seed": false,
             "links": {
               "arxiv_abs": null,
               "arxiv_pdf": null,
@@ -2228,8 +2232,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.002229418183571611,
             "title": "Beyond Attention Complexity: A Survey of Efficient and Frugal Transformers for Long-Context Deployment",
             "venue": "2026 6th International Conference on Innovative Research in Applied Science, Engineering and Technology (IRASET)",
             "year": 2026
@@ -2246,8 +2248,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7351004660798853,
               "direct_citation": false,
-              "recommendation_rank": 144,
-              "seed_similarity": 0.6147992598649732
+              "focal_similarity": 0.6147992598649732,
+              "recommendation_rank": 144
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -2259,9 +2261,11 @@
             "discovery_rank": 42,
             "discovery_score": 0.024848999323009224,
             "doi": "10.63090/eijdsml/3139.7344.0002",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.001845007432786339,
             "id": "4b1da83fae2ee16c51ed7c7094e30419ea721840",
+            "is_focal": false,
             "is_local_corpus": false,
-            "is_seed": false,
             "links": {
               "arxiv_abs": null,
               "arxiv_pdf": null,
@@ -2270,8 +2274,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.001845007432786339,
             "title": "Attention-Free Transformers: State Space Models as Scalable Alternatives",
             "venue": "Eduschool International Journal of Data Science and Machine learning (EIJDSML)",
             "year": 2026
@@ -2293,8 +2295,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7098378113553588,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.4713694992643252
+              "focal_similarity": 0.4713694992643252,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 79,
@@ -2311,9 +2313,11 @@
               "excerpt": "Group Normalization (Wu and He, 2018) normalizes hidden representations both along the timestep dimension and a subset of the feature dimension, which has obtained improvements over Layer Normalization on a range of computer vision tasks.",
               "is_influential": true
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.0012347304916595033,
             "id": "arxiv:1607.06450",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/1607.06450",
               "arxiv_pdf": "https://arxiv.org/pdf/1607.06450.pdf",
@@ -2322,8 +2326,6 @@
             },
             "provenance": "citation",
             "provenance_base": "citation",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.0012347304916595033,
             "title": "Layer Normalization",
             "venue": "arXiv.org",
             "year": 2016
@@ -2349,8 +2351,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6820002093194869,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6335232664184682
+              "focal_similarity": 0.6335232664184682,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 10,
@@ -2367,9 +2369,11 @@
               "excerpt": "Table 8 illustrate the word-level perplexity (PPL) of M EGALODON on WikiText-103, together with previous state-of-the-art models, including Transformer (Baevski and Auli, 2018), Transformer-XL (Dai et al., 2019), S4 (Gu et al., 2022a) and M EGA (Ma et al., 2023).",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.0046119144701817875,
             "id": "arxiv:1901.02860",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/1901.02860",
               "arxiv_pdf": "https://arxiv.org/pdf/1901.02860.pdf",
@@ -2378,8 +2382,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.0046119144701817875,
             "title": "Transformer-XL: Attentive Language Models Beyond a Fixed-Length Context",
             "venue": "Annual Meeting of the Association for Computational Linguistics",
             "year": 2019
@@ -2403,8 +2405,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6503094761490121,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.702832123279638
+              "focal_similarity": 0.702832123279638,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 2,
@@ -2421,9 +2423,11 @@
               "excerpt": "The three most commonly used parallelism strategies are data, tensor (Shoeybi et al., 2019) and pipeline parallelism (Huang et al., 2019).",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.00443267492213866,
             "id": "arxiv:1909.08053",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/1909.08053",
               "arxiv_pdf": "https://arxiv.org/pdf/1909.08053.pdf",
@@ -2432,8 +2436,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.00443267492213866,
             "title": "Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism",
             "venue": "arXiv.org",
             "year": 2019
@@ -2466,8 +2468,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6641187223865697,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.5872019470107336
+              "focal_similarity": 0.5872019470107336,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 26,
@@ -2484,9 +2486,11 @@
               "excerpt": "In the original M EGA architecture, the update gate \u03c6 (19) is used for a gated residual connection (21) to mitigate this problem (Parisotto et al., 2020; Xu et al., 2020).",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.0027614658443487526,
             "id": "arxiv:1910.06764",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/1910.06764",
               "arxiv_pdf": "https://arxiv.org/pdf/1910.06764.pdf",
@@ -2495,8 +2499,6 @@
             },
             "provenance": "citation",
             "provenance_base": "citation",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.0027614658443487526,
             "title": "Stabilizing Transformers for Reinforcement Learning",
             "venue": "International Conference on Machine Learning",
             "year": 2019
@@ -2528,8 +2530,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6637359812975051,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6096120823575516
+              "focal_similarity": 0.6096120823575516,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 14,
@@ -2546,9 +2548,11 @@
               "excerpt": "We also conduct experiments on small/medium-scale sequence modeling benchmarks, including Long Range Arena (LRA) (Tay et al., 2021), raw speech classification on Speech Commands (Warden, 2018), image classification on ImageNet-1K (Deng et al., 2009), and language-modeling on WikiText-103 (Merity et\u2026",
               "is_influential": true
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.006344619527816866,
             "id": "arxiv:2011.04006",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2011.04006",
               "arxiv_pdf": "https://arxiv.org/pdf/2011.04006.pdf",
@@ -2557,8 +2561,6 @@
             },
             "provenance": "citation",
             "provenance_base": "citation",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.006344619527816866,
             "title": "Long Range Arena: A Benchmark for Efficient Transformers",
             "venue": "International Conference on Learning Representations",
             "year": 2020
@@ -2584,8 +2586,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6441422241115291,
               "direct_citation": true,
-              "recommendation_rank": 14,
-              "seed_similarity": 0.5435520418597795
+              "focal_similarity": 0.5435520418597795,
+              "recommendation_rank": 14
             },
             "discovery_list_ranks": {
               "direct": 50,
@@ -2602,9 +2604,11 @@
               "excerpt": "Techniques like efficient attention mechanisms (Tay et al., 2020; Ma et al., 2021) and structured state space models (Gu et al., 2022a; Poli et al., 2023; Gu and Dao, 2023) have been introduced to overcome these limitations, aiming to enhance scalability and performance.",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.011733097350513857,
             "id": "arxiv:2106.01540",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2106.01540",
               "arxiv_pdf": "https://arxiv.org/pdf/2106.01540.pdf",
@@ -2613,8 +2617,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.011733097350513857,
             "title": "Luna: Linear Unified Nested Attention",
             "venue": "Neural Information Processing Systems",
             "year": 2021
@@ -2635,8 +2637,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7000368047015344,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.5621814156812337
+              "focal_similarity": 0.5621814156812337,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 40,
@@ -2653,9 +2655,11 @@
               "excerpt": "Techniques like efficient attention mechanisms (Tay et al., 2020; Ma et al., 2021) and structured state space models (Gu et al., 2022a; Poli et al., 2023; Gu and Dao, 2023) have been introduced to overcome these limitations, aiming to enhance scalability and performance.",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.006754337483568133,
             "id": "arxiv:2111.00396",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2111.00396",
               "arxiv_pdf": "https://arxiv.org/pdf/2111.00396.pdf",
@@ -2664,8 +2668,6 @@
             },
             "provenance": "citation",
             "provenance_base": "citation",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.006754337483568133,
             "title": "Efficiently Modeling Long Sequences with Structured State Spaces",
             "venue": "International Conference on Learning Representations",
             "year": 2021
@@ -2690,8 +2692,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6946377831627493,
               "direct_citation": true,
-              "recommendation_rank": 30,
-              "seed_similarity": 0.5983819889689281
+              "focal_similarity": 0.5983819889689281,
+              "recommendation_rank": 30
             },
             "discovery_list_ranks": {
               "direct": 20,
@@ -2708,9 +2710,11 @@
               "excerpt": "However, extensive studies have investigated the instability issue of pre-normalization when scaling up model size (Davis et al., 2021; Liu et al., 2022).",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.020944907070275975,
             "id": "arxiv:2202.10447",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2202.10447",
               "arxiv_pdf": "https://arxiv.org/pdf/2202.10447.pdf",
@@ -2719,8 +2723,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.020944907070275975,
             "title": "Transformer Quality in Linear Time",
             "venue": "International Conference on Machine Learning",
             "year": 2022
@@ -2743,8 +2745,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7629233631357193,
               "direct_citation": false,
-              "recommendation_rank": 122,
-              "seed_similarity": 0.5895283352412171
+              "focal_similarity": 0.5895283352412171,
+              "recommendation_rank": 122
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -2756,9 +2758,11 @@
             "discovery_rank": 44,
             "discovery_score": 0.02471908128099945,
             "doi": "10.52202/068431-1189",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.010904302240830084,
             "id": "arxiv:2205.14135",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2205.14135",
               "arxiv_pdf": "https://arxiv.org/pdf/2205.14135.pdf",
@@ -2767,8 +2771,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.010904302240830084,
             "title": "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
             "venue": "Neural Information Processing Systems",
             "year": 2022
@@ -2794,8 +2796,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6778725500064527,
               "direct_citation": true,
-              "recommendation_rank": 37,
-              "seed_similarity": 0.7016864500604196
+              "focal_similarity": 0.7016864500604196,
+              "recommendation_rank": 37
             },
             "discovery_list_ranks": {
               "direct": 3,
@@ -2812,9 +2814,11 @@
               "excerpt": "Following Ma et al. (2023), we perform speech classification on the SC10 subset of the Speech Commands dataset (Warden, 2018), and set attention chunk size c = 1000 .",
               "is_influential": true
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.024440508694337663,
             "id": "arxiv:2209.10655",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2209.10655",
               "arxiv_pdf": "https://arxiv.org/pdf/2209.10655.pdf",
@@ -2823,8 +2827,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.024440508694337663,
             "title": "Mega: Moving Average Equipped Gated Attention",
             "venue": "International Conference on Learning Representations",
             "year": 2022
@@ -2849,8 +2851,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6796416204524541,
               "direct_citation": true,
-              "recommendation_rank": 153,
-              "seed_similarity": 0.5957960816418535
+              "focal_similarity": 0.5957960816418535,
+              "recommendation_rank": 153
             },
             "discovery_list_ranks": {
               "direct": 22,
@@ -2867,9 +2869,11 @@
               "excerpt": null,
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.017921683149659542,
             "id": "arxiv:2212.14052",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2212.14052",
               "arxiv_pdf": "https://arxiv.org/pdf/2212.14052.pdf",
@@ -2878,8 +2882,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.017921683149659542,
             "title": "Hungry Hungry Hippos: Towards Language Modeling with State Space Models",
             "venue": "International Conference on Learning Representations",
             "year": 2022
@@ -2900,8 +2902,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7341101036495814,
               "direct_citation": false,
-              "recommendation_rank": 72,
-              "seed_similarity": 0.6425534232352339
+              "focal_similarity": 0.6425534232352339,
+              "recommendation_rank": 72
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -2913,9 +2915,11 @@
             "discovery_rank": 18,
             "discovery_score": 0.031082719299907184,
             "doi": "10.48550/arXiv.2302.06218",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.008947739237596017,
             "id": "arxiv:2302.06218",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2302.06218",
               "arxiv_pdf": "https://arxiv.org/pdf/2302.06218.pdf",
@@ -2924,8 +2928,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.008947739237596017,
             "title": "A Unified View of Long-Sequence Models towards Modeling Million-Scale Dependencies",
             "venue": "arXiv.org",
             "year": 2023
@@ -2949,8 +2951,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6664225252637018,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6723383687223792
+              "focal_similarity": 0.6723383687223792,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 4,
@@ -2967,9 +2969,11 @@
               "excerpt": "(Hutchins et al., 2022) and M EGA B YTE (Yu et al., 2024).",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.05287271336683457,
             "id": "arxiv:2305.07185",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2305.07185",
               "arxiv_pdf": "https://arxiv.org/pdf/2305.07185.pdf",
@@ -2978,8 +2982,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.05287271336683457,
             "title": "MEGABYTE: Predicting Million-byte Sequences with Multiscale Transformers",
             "venue": "Neural Information Processing Systems",
             "year": 2023
@@ -3018,8 +3020,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6818299262648623,
               "direct_citation": true,
-              "recommendation_rank": 80,
-              "seed_similarity": 0.6427407171009714
+              "focal_similarity": 0.6427407171009714,
+              "recommendation_rank": 80
             },
             "discovery_list_ranks": {
               "direct": 7,
@@ -3036,9 +3038,11 @@
               "excerpt": "Following Xiong et al. (2023), we use a simple prompt { CONTEXT } Q: { QUESTION } A: for all the tasks, and evaluate 0-shot F1-score on NarrativeQA, 2-shot F1-score on Qasper and 1-shot geometric-ROUGE 3 on QMSum.",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.035938053030662186,
             "id": "arxiv:2309.16039",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2309.16039",
               "arxiv_pdf": "https://arxiv.org/pdf/2309.16039.pdf",
@@ -3047,8 +3051,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.035938053030662186,
             "title": "Effective Long-Context Scaling of Foundation Models",
             "venue": "North American Chapter of the Association for Computational Linguistics",
             "year": 2023
@@ -3069,8 +3071,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7054534599228386,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6296306474847038
+              "focal_similarity": 0.6296306474847038,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 11,
@@ -3087,9 +3089,11 @@
               "excerpt": "Even with recently proposed distributed attention solutions (Li et al., 2023b; Liu et al., 2024), computing a single training step of a 7B parameter model over a 1M-token sequence is more than 100 times slower than performing the equivalent computation using 256 separate sequences of 4K tokens each.",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.04283438024388285,
             "id": "arxiv:2310.01889",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2310.01889",
               "arxiv_pdf": "https://arxiv.org/pdf/2310.01889.pdf",
@@ -3098,8 +3102,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.04283438024388285,
             "title": "Ring Attention with Blockwise Transformers for Near-Infinite Context",
             "venue": "International Conference on Learning Representations",
             "year": 2023
@@ -3127,8 +3129,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7068676320134838,
               "direct_citation": true,
-              "recommendation_rank": 63,
-              "seed_similarity": 0.6499342856818959
+              "focal_similarity": 0.6499342856818959,
+              "recommendation_rank": 63
             },
             "discovery_list_ranks": {
               "direct": 5,
@@ -3145,9 +3147,11 @@
               "excerpt": "In many real-world applications, such as multi-turn conversation, long-document comprehension, and video generation, large language models (LLMs) must efficiently process long sequential data, understand internal long-range dynamics, and generate coherent output.",
               "is_influential": false
             },
+            "focal_relation": "referenced_by_focal",
+            "focal_relevance": 0.06530923713559189,
             "id": "arxiv:2310.03294",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2310.03294",
               "arxiv_pdf": "https://arxiv.org/pdf/2310.03294.pdf",
@@ -3156,8 +3160,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "referenced_by_seed",
-            "seed_relevance": 0.06530923713559189,
             "title": "DISTFLASHATTN: Distributed Memory-efficient Attention for Long-context LLMs Training",
             "venue": "arXiv.org",
             "year": 2023
@@ -3178,8 +3180,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6760838008599919,
               "direct_citation": false,
-              "recommendation_rank": 4,
-              "seed_similarity": 0.6471428388225247
+              "focal_similarity": 0.6471428388225247,
+              "recommendation_rank": 4
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3191,9 +3193,11 @@
             "discovery_rank": 21,
             "discovery_score": 0.02996906301662939,
             "doi": "",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.014439757668347887,
             "id": "arxiv:2312.00752",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2312.00752",
               "arxiv_pdf": "https://arxiv.org/pdf/2312.00752.pdf",
@@ -3202,8 +3206,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.014439757668347887,
             "title": "Mamba: Linear-Time Sequence Modeling with Selective State Spaces",
             "venue": "arXiv.org",
             "year": 2023
@@ -3227,8 +3229,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7301258199885261,
               "direct_citation": false,
-              "recommendation_rank": 25,
-              "seed_similarity": 0.6142148887546904
+              "focal_similarity": 0.6142148887546904,
+              "recommendation_rank": 25
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3240,9 +3242,11 @@
             "discovery_rank": 19,
             "discovery_score": 0.031065598627229088,
             "doi": "10.48550/arXiv.2312.06635",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.034038126583115516,
             "id": "arxiv:2312.06635",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2312.06635",
               "arxiv_pdf": "https://arxiv.org/pdf/2312.06635.pdf",
@@ -3251,8 +3255,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.034038126583115516,
             "title": "Gated Linear Attention Transformers with Hardware-Efficient Training",
             "venue": "International Conference on Machine Learning",
             "year": 2023
@@ -3277,8 +3279,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6994842486885379,
               "direct_citation": false,
-              "recommendation_rank": 8,
-              "seed_similarity": 0.6074543414328317
+              "focal_similarity": 0.6074543414328317,
+              "recommendation_rank": 8
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3290,9 +3292,11 @@
             "discovery_rank": 29,
             "discovery_score": 0.027738463806575263,
             "doi": "10.48550/arXiv.2401.04658",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.047106876221996434,
             "id": "arxiv:2401.04658",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2401.04658",
               "arxiv_pdf": "https://arxiv.org/pdf/2401.04658.pdf",
@@ -3301,8 +3305,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.047106876221996434,
             "title": "Lightning Attention-2: A Free Lunch for Handling Unlimited Sequence Lengths in Large Language Models",
             "venue": "arXiv.org",
             "year": 2024
@@ -3330,8 +3332,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7155591736511813,
               "direct_citation": false,
-              "recommendation_rank": 18,
-              "seed_similarity": 0.6504568122739302
+              "focal_similarity": 0.6504568122739302,
+              "recommendation_rank": 18
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3343,9 +3345,11 @@
             "discovery_rank": 9,
             "discovery_score": 0.03578232912598238,
             "doi": "10.52202/079017-3801",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.024888664499948792,
             "id": "arxiv:2402.04617",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2402.04617",
               "arxiv_pdf": "https://arxiv.org/pdf/2402.04617.pdf",
@@ -3354,8 +3358,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.024888664499948792,
             "title": "InfLLM: Training-Free Long-Context Extrapolation for LLMs with an Efficient Context Memory",
             "venue": "Neural Information Processing Systems",
             "year": 2024
@@ -3380,8 +3382,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7065160396605041,
               "direct_citation": false,
-              "recommendation_rank": 32,
-              "seed_similarity": 0.6484970148029268
+              "focal_similarity": 0.6484970148029268,
+              "recommendation_rank": 32
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3393,9 +3395,11 @@
             "discovery_rank": 17,
             "discovery_score": 0.03166716384517861,
             "doi": "10.48550/arXiv.2402.17463",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.06810786920103451,
             "id": "arxiv:2402.17463",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2402.17463",
               "arxiv_pdf": "https://arxiv.org/pdf/2402.17463.pdf",
@@ -3404,8 +3408,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.06810786920103451,
             "title": "Training-Free Long-Context Scaling of Large Language Models",
             "venue": "International Conference on Machine Learning",
             "year": 2024
@@ -3432,19 +3434,19 @@
             ],
             "citation_count": 63,
             "doi": "10.48550/arXiv.2404.08801",
+            "focal_relation": "focal",
+            "focal_relevance": 0.2020956149452703,
             "id": "arxiv:2404.08801",
+            "is_focal": true,
             "is_local_corpus": true,
-            "is_seed": true,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2404.08801",
               "arxiv_pdf": "https://arxiv.org/pdf/2404.08801.pdf",
               "doi": "https://doi.org/10.48550/arXiv.2404.08801",
               "semantic_scholar": "https://www.semanticscholar.org/paper/arxiv%3A2404.08801"
             },
-            "provenance": "seed",
+            "provenance": "focal",
             "provenance_base": "citation",
-            "seed_relation": "seed",
-            "seed_relevance": 0.2020956149452703,
             "title": "Megalodon: Efficient LLM Pretraining and Inference with Unlimited Context Length",
             "venue": "Neural Information Processing Systems",
             "year": 2024
@@ -3465,8 +3467,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.66843023418791,
               "direct_citation": false,
-              "recommendation_rank": 10,
-              "seed_similarity": 0.663819851276445
+              "focal_similarity": 0.663819851276445,
+              "recommendation_rank": 10
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3478,9 +3480,11 @@
             "discovery_rank": 15,
             "discovery_score": 0.03185988323603003,
             "doi": "10.48550/arXiv.2405.02842",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.012505754166889612,
             "id": "arxiv:2405.02842",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2405.02842",
               "arxiv_pdf": "https://arxiv.org/pdf/2405.02842.pdf",
@@ -3489,8 +3493,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.012505754166889612,
             "title": "IceFormer: Accelerated Inference with Long-Sequence Transformers on CPUs",
             "venue": "International Conference on Learning Representations",
             "year": 2024
@@ -3514,8 +3516,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6803461114774088,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6359759981604688
+              "focal_similarity": 0.6359759981604688,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 9,
@@ -3527,9 +3529,11 @@
             "discovery_rank": 30,
             "discovery_score": 0.027719921529902065,
             "doi": "10.48550/arXiv.2406.06484",
+            "focal_relation": "cites_focal",
+            "focal_relevance": 0.05679679781245516,
             "id": "arxiv:2406.06484",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2406.06484",
               "arxiv_pdf": "https://arxiv.org/pdf/2406.06484.pdf",
@@ -3538,8 +3542,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "cites_seed",
-            "seed_relevance": 0.05679679781245516,
             "title": "Parallelizing Linear Transformers with the Delta Rule over Sequence Length",
             "venue": "Neural Information Processing Systems",
             "year": 2024
@@ -3574,8 +3576,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6473891272006231,
               "direct_citation": false,
-              "recommendation_rank": 33,
-              "seed_similarity": 0.6766337414754111
+              "focal_similarity": 0.6766337414754111,
+              "recommendation_rank": 33
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3587,9 +3589,11 @@
             "discovery_rank": 28,
             "discovery_score": 0.028526055187560875,
             "doi": "",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.016911515165051134,
             "id": "arxiv:2406.07887",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2406.07887",
               "arxiv_pdf": "https://arxiv.org/pdf/2406.07887.pdf",
@@ -3598,8 +3602,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.016911515165051134,
             "title": "An Empirical Study of Mamba-based Language Models",
             "venue": "arXiv.org",
             "year": 2024
@@ -3631,8 +3633,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7106390195097634,
               "direct_citation": false,
-              "recommendation_rank": null,
-              "seed_similarity": 0.7025213336349195
+              "focal_similarity": 0.7025213336349195,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3644,9 +3646,11 @@
             "discovery_rank": 31,
             "discovery_score": 0.027673192771084338,
             "doi": "10.48550/arXiv.2406.18485",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.07238802707455297,
             "id": "arxiv:2406.18485",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2406.18485",
               "arxiv_pdf": "https://arxiv.org/pdf/2406.18485.pdf",
@@ -3655,8 +3659,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.07238802707455297,
             "title": "LoongTrain: Efficient Training of Long-Sequence LLMs with Head-Context Parallelism",
             "venue": "arXiv.org",
             "year": 2024
@@ -3687,8 +3689,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7177966530905617,
               "direct_citation": false,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6712649286783025
+              "focal_similarity": 0.6712649286783025,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3700,9 +3702,11 @@
             "discovery_rank": 32,
             "discovery_score": 0.02758751902587519,
             "doi": "10.1145/3709703",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.009922880385748756,
             "id": "arxiv:2407.12117",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2407.12117",
               "arxiv_pdf": "https://arxiv.org/pdf/2407.12117.pdf",
@@ -3711,8 +3715,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.009922880385748756,
             "title": "MEMO: Fine-grained Tensor Management For Ultra-long Context LLM Training",
             "venue": "Proc. ACM Manag. Data",
             "year": 2024
@@ -3735,8 +3737,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6665918618753284,
               "direct_citation": false,
-              "recommendation_rank": 31,
-              "seed_similarity": 0.6677215348317715
+              "focal_similarity": 0.6677215348317715,
+              "recommendation_rank": 31
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3748,9 +3750,11 @@
             "discovery_rank": 24,
             "discovery_score": 0.028869336729598738,
             "doi": "10.48550/arXiv.2407.15892",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.009461891551727,
             "id": "arxiv:2407.15892",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2407.15892",
               "arxiv_pdf": "https://arxiv.org/pdf/2407.15892.pdf",
@@ -3759,8 +3763,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.009461891551727,
             "title": "Mini-Sequence Transformer: Optimizing Intermediate Memory for Long Sequences Training",
             "venue": "arXiv.org",
             "year": 2024
@@ -3783,8 +3785,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7060344910829672,
               "direct_citation": false,
-              "recommendation_rank": 42,
-              "seed_similarity": 0.6573495779303427
+              "focal_similarity": 0.6573495779303427,
+              "recommendation_rank": 42
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3796,9 +3798,11 @@
             "discovery_rank": 14,
             "discovery_score": 0.03281979458450047,
             "doi": "10.48550/arXiv.2410.01485",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.021887973671111522,
             "id": "arxiv:2410.01485",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2410.01485",
               "arxiv_pdf": "https://arxiv.org/pdf/2410.01485.pdf",
@@ -3807,8 +3811,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.021887973671111522,
             "title": "A Little Goes a Long Way: Efficient Long Context Training and Inference with Partial Contexts",
             "venue": "International Conference on Learning Representations",
             "year": 2024
@@ -3831,8 +3833,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7136412191330372,
               "direct_citation": false,
-              "recommendation_rank": 17,
-              "seed_similarity": 0.6309844978548709
+              "focal_similarity": 0.6309844978548709,
+              "recommendation_rank": 17
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3844,9 +3846,11 @@
             "discovery_rank": 16,
             "discovery_score": 0.03174280181072401,
             "doi": "10.48550/arXiv.2410.04211",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.008589788063068985,
             "id": "arxiv:2410.04211",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2410.04211",
               "arxiv_pdf": "https://arxiv.org/pdf/2410.04211.pdf",
@@ -3855,8 +3859,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.008589788063068985,
             "title": "Correlation-Aware Select and Merge Attention for Efficient Fine-Tuning and Context Length Extension",
             "venue": "arXiv.org",
             "year": 2024
@@ -3887,8 +3889,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7014836037148466,
               "direct_citation": false,
-              "recommendation_rank": null,
-              "seed_similarity": 0.7064309574079382
+              "focal_similarity": 0.7064309574079382,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3900,9 +3902,11 @@
             "discovery_rank": 36,
             "discovery_score": 0.02603002235707442,
             "doi": "10.48550/arXiv.2503.02356",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.00653187246870026,
             "id": "arxiv:2503.02356",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2503.02356",
               "arxiv_pdf": "https://arxiv.org/pdf/2503.02356.pdf",
@@ -3911,8 +3915,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.00653187246870026,
             "title": "Efficient Long Context Fine-tuning with Chunk Flow",
             "venue": "International Conference on Machine Learning",
             "year": 2025
@@ -3935,8 +3937,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7006661623132582,
               "direct_citation": false,
-              "recommendation_rank": 20,
-              "seed_similarity": 0.6008775762515717
+              "focal_similarity": 0.6008775762515717,
+              "recommendation_rank": 20
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3948,9 +3950,11 @@
             "discovery_rank": 40,
             "discovery_score": 0.025403626042991408,
             "doi": "10.48550/arXiv.2503.14376",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.008343177619574907,
             "id": "arxiv:2503.14376",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2503.14376",
               "arxiv_pdf": "https://arxiv.org/pdf/2503.14376.pdf",
@@ -3959,8 +3963,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.008343177619574907,
             "title": "Tiled Flash Linear Attention: More Efficient Linear RNN and xLSTM Kernels",
             "venue": "Neural Information Processing Systems",
             "year": 2025
@@ -3986,8 +3988,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7054146020068259,
               "direct_citation": false,
-              "recommendation_rank": 123,
-              "seed_similarity": 0.6468819225225707
+              "focal_similarity": 0.6468819225225707,
+              "recommendation_rank": 123
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -3999,9 +4001,11 @@
             "discovery_rank": 41,
             "discovery_score": 0.025049479875057453,
             "doi": "10.48550/arXiv.2505.07793",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.005406021996546673,
             "id": "arxiv:2505.07793",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2505.07793",
               "arxiv_pdf": "https://arxiv.org/pdf/2505.07793.pdf",
@@ -4010,8 +4014,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.005406021996546673,
             "title": "Overflow Prevention Enhances Long-Context Recurrent LLMs",
             "venue": "arXiv.org",
             "year": 2025
@@ -4033,8 +4035,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7079739302680812,
               "direct_citation": false,
-              "recommendation_rank": 21,
-              "seed_similarity": 0.6611322099722996
+              "focal_similarity": 0.6611322099722996,
+              "recommendation_rank": 21
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4046,9 +4048,11 @@
             "discovery_rank": 7,
             "discovery_score": 0.03679409880960269,
             "doi": "10.48550/arXiv.2506.01963",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.0026945780092920693,
             "id": "arxiv:2506.01963",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2506.01963",
               "arxiv_pdf": "https://arxiv.org/pdf/2506.01963.pdf",
@@ -4057,8 +4061,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.0026945780092920693,
             "title": "Breaking Quadratic Barriers: A Non-Attention LLM for Ultra-Long Context Horizons",
             "venue": "arXiv.org",
             "year": 2025
@@ -4082,8 +4084,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7047782265180461,
               "direct_citation": false,
-              "recommendation_rank": 2,
-              "seed_similarity": 0.6336399912117157
+              "focal_similarity": 0.6336399912117157,
+              "recommendation_rank": 2
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4095,9 +4097,11 @@
             "discovery_rank": 13,
             "discovery_score": 0.033346277498825995,
             "doi": "10.48550/arXiv.2506.04761",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.013934240673337666,
             "id": "arxiv:2506.04761",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2506.04761",
               "arxiv_pdf": "https://arxiv.org/pdf/2506.04761.pdf",
@@ -4106,8 +4110,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.013934240673337666,
             "title": "Log-Linear Attention",
             "venue": "International Conference on Learning Representations",
             "year": 2025
@@ -4144,8 +4146,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6516779405353403,
               "direct_citation": false,
-              "recommendation_rank": 29,
-              "seed_similarity": 0.6573209155078104
+              "focal_similarity": 0.6573209155078104,
+              "recommendation_rank": 29
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4157,9 +4159,11 @@
             "discovery_rank": 35,
             "discovery_score": 0.026197195366257295,
             "doi": "10.48550/arXiv.2506.05233",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.009324288407167248,
             "id": "arxiv:2506.05233",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2506.05233",
               "arxiv_pdf": "https://arxiv.org/pdf/2506.05233.pdf",
@@ -4168,8 +4172,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.009324288407167248,
             "title": "MesaNet: Sequence Modeling by Locally Optimal Test-Time Training",
             "venue": "arXiv.org",
             "year": 2025
@@ -4194,8 +4196,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6666896516958253,
               "direct_citation": true,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6474390056605065
+              "focal_similarity": 0.6474390056605065,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": 6,
@@ -4207,9 +4209,11 @@
             "discovery_rank": 27,
             "discovery_score": 0.028565810504136497,
             "doi": "10.48550/arXiv.2510.03279",
+            "focal_relation": "cites_focal",
+            "focal_relevance": 0.005279288660020667,
             "id": "arxiv:2510.03279",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2510.03279",
               "arxiv_pdf": "https://arxiv.org/pdf/2510.03279.pdf",
@@ -4218,8 +4222,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "cites_seed",
-            "seed_relevance": 0.005279288660020667,
             "title": "MemMamba: Rethinking Memory Patterns in State Space Model",
             "venue": "arXiv.org",
             "year": 2025
@@ -4245,8 +4247,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6750213778027659,
               "direct_citation": false,
-              "recommendation_rank": 85,
-              "seed_similarity": 0.6709651353858002
+              "focal_similarity": 0.6709651353858002,
+              "recommendation_rank": 85
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4258,9 +4260,11 @@
             "discovery_rank": 37,
             "discovery_score": 0.025962223517600958,
             "doi": "10.48550/arXiv.2510.07318",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.00726078003193183,
             "id": "arxiv:2510.07318",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2510.07318",
               "arxiv_pdf": "https://arxiv.org/pdf/2510.07318.pdf",
@@ -4269,8 +4273,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.00726078003193183,
             "title": "Artificial Hippocampus Networks for Efficient Long-Context Modeling",
             "venue": "arXiv.org",
             "year": 2025
@@ -4302,8 +4304,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6689346107095929,
               "direct_citation": false,
-              "recommendation_rank": 13,
-              "seed_similarity": 0.6539510088510707
+              "focal_similarity": 0.6539510088510707,
+              "recommendation_rank": 13
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4315,9 +4317,11 @@
             "discovery_rank": 22,
             "discovery_score": 0.028988090800024402,
             "doi": "10.48550/arXiv.2512.23675",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.009087090434289943,
             "id": "arxiv:2512.23675",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2512.23675",
               "arxiv_pdf": "https://arxiv.org/pdf/2512.23675.pdf",
@@ -4326,8 +4330,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.009087090434289943,
             "title": "End-to-End Test-Time Training for Long Context",
             "venue": "arXiv.org",
             "year": 2025
@@ -4360,8 +4362,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.630774686414249,
               "direct_citation": true,
-              "recommendation_rank": 1,
-              "seed_similarity": 0.7928365522722662
+              "focal_similarity": 0.7928365522722662,
+              "recommendation_rank": 1
             },
             "discovery_list_ranks": {
               "direct": 1,
@@ -4373,9 +4375,11 @@
             "discovery_rank": 3,
             "discovery_score": 0.05166171744701623,
             "doi": "10.48550/arXiv.2601.06463",
+            "focal_relation": "cites_focal",
+            "focal_relevance": 0.004989291421743026,
             "id": "arxiv:2601.06463",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2601.06463",
               "arxiv_pdf": "https://arxiv.org/pdf/2601.06463.pdf",
@@ -4384,8 +4388,6 @@
             },
             "provenance": "both",
             "provenance_base": "both",
-            "seed_relation": "cites_seed",
-            "seed_relevance": 0.004989291421743026,
             "title": "Gecko: An Efficient Neural Architecture Inherently Processing Sequences with Arbitrary Lengths",
             "venue": "arXiv.org",
             "year": 2026
@@ -4414,8 +4416,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.6943038065652922,
               "direct_citation": false,
-              "recommendation_rank": 3,
-              "seed_similarity": 0.6588980767430925
+              "focal_similarity": 0.6588980767430925,
+              "recommendation_rank": 3
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4427,9 +4429,11 @@
             "discovery_rank": 6,
             "discovery_score": 0.03700581999230358,
             "doi": "10.48550/arXiv.2604.24715",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.002190915293561875,
             "id": "arxiv:2604.24715",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2604.24715",
               "arxiv_pdf": "https://arxiv.org/pdf/2604.24715.pdf",
@@ -4438,8 +4442,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.002190915293561875,
             "title": "Long-Context Aware Upcycling: A New Frontier for Hybrid LLM Scaling",
             "venue": "arXiv.org",
             "year": 2026
@@ -4463,8 +4465,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7272482936992865,
               "direct_citation": false,
-              "recommendation_rank": null,
-              "seed_similarity": 0.6517471581099459
+              "focal_similarity": 0.6517471581099459,
+              "recommendation_rank": null
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4476,9 +4478,11 @@
             "discovery_rank": 43,
             "discovery_score": 0.02482636323333826,
             "doi": "10.48550/arXiv.2605.11744",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.0018828817574408395,
             "id": "arxiv:2605.11744",
+            "is_focal": false,
             "is_local_corpus": true,
-            "is_seed": false,
             "links": {
               "arxiv_abs": "https://arxiv.org/abs/2605.11744",
               "arxiv_pdf": "https://arxiv.org/pdf/2605.11744.pdf",
@@ -4487,8 +4491,6 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.0018828817574408395,
             "title": "Training-Inference Consistent Segmented Execution for Long-Context LLMs",
             "venue": "arXiv.org",
             "year": 2026
@@ -4507,8 +4509,8 @@
             "discovery_features": {
               "bibliography_similarity": 0.7230628930290093,
               "direct_citation": false,
-              "recommendation_rank": 93,
-              "seed_similarity": 0.6478141841903692
+              "focal_similarity": 0.6478141841903692,
+              "recommendation_rank": 93
             },
             "discovery_list_ranks": {
               "direct": null,
@@ -4520,9 +4522,11 @@
             "discovery_rank": 20,
             "discovery_score": 0.03037573881227132,
             "doi": "10.54097/drkv6s13",
+            "focal_relation": "semantic_only",
+            "focal_relevance": 0.0018732463398180173,
             "id": "e98871f127d5ea9cb7a6c891bb0988b807ca22a3",
+            "is_focal": false,
             "is_local_corpus": false,
-            "is_seed": false,
             "links": {
               "arxiv_abs": null,
               "arxiv_pdf": null,
@@ -4531,22 +4535,18 @@
             },
             "provenance": "semantic",
             "provenance_base": "semantic",
-            "seed_relation": "semantic_only",
-            "seed_relevance": 0.0018732463398180173,
             "title": "Achieving Constant Memory Complexity in Long Context Transformers Through Linear Attention",
             "venue": "Academic Journal of Applied Sciences",
             "year": 2026
           }
         ],
-        "schema_version": 1,
-        "seed_id": "arxiv:2404.08801",
+        "schema_version": 2,
         "summary": {
           "edges": 110,
           "nodes": 45
         }
       },
       "result_id": "hybrid:arxiv:2404.08801",
-      "seed_id": "arxiv:2404.08801",
       "strategy": "hybrid",
       "summary": {
         "edges": 110,
@@ -4556,5 +4556,5 @@
       "updated_at": "2026-11-18T00:52:11"
     }
   ],
-  "schema_version": 1
+  "schema_version": 2
 }

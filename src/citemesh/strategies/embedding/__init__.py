@@ -33,7 +33,7 @@ from .deps import _check_embedding_deps
 from .fingerprint import EmbeddingCacheFingerprintMismatchError
 from .hydration import HYDRATION_FLUSH_SIZE
 from .precision import _PrecisionEncodeProxy
-from .records import _extract_dataset_paper_metadata, _query_seed_id
+from .records import _extract_dataset_paper_metadata, _query_focal_id
 from .runtime import (
     EMBEDDING_DEVICE_CHOICES,
     EmbeddingBackendCompatibilityError,
@@ -57,7 +57,7 @@ __all__ = [
     "_PrecisionEncodeProxy",
     "_check_embedding_deps",
     "_extract_dataset_paper_metadata",
-    "_query_seed_id",
+    "_query_focal_id",
     "format_embedding_metadata",
     "format_paper_for_embedding",
     "resolve_embedding_device",

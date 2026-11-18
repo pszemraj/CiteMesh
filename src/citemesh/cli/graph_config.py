@@ -79,7 +79,7 @@ def _build_citation_config_payload(
 
 def _build_graph_config_payload(
     cli_args: argparse.Namespace,
-    seed_id: str,
+    focal_id: str,
     metadata: ExportMetadata,
     selected_formats: list[str],
     output_paths: dict[str, Path],
@@ -88,7 +88,7 @@ def _build_graph_config_payload(
     """Build the effective configuration sidecar for one graph export.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :param str seed_id: Resolved seed paper identifier.
+    :param str focal_id: Resolved focal paper identifier.
     :param ExportMetadata metadata: Run metadata payload used by exporters.
     :param List[str] selected_formats: Formats requested for export.
     :param Dict[str, Path] output_paths: Resolved export artifact paths.
@@ -167,11 +167,11 @@ def _build_graph_config_payload(
             embedding_config.pop("calibration_sample_size")
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "build": {
             "paper_id_input": cli_args.paper_id,
             "paper_id_canonical": canonicalize_paper_id_for_metadata(cli_args.paper_id),
-            "seed_id": seed_id,
+            "focal_id": focal_id,
             "strategy": strategy,
             "max_papers": int(cli_args.max_papers),
             "refresh_paper_cache": bool(

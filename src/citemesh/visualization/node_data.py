@@ -55,7 +55,7 @@ def effective_node_metadata(
     """Return the metadata every renderer and exporter should expose for a node.
 
     An attached :class:`~citemesh.core.models.Paper` owns bibliographic metadata.
-    The graph's explicit ``is_seed`` attribute remains authoritative because seed
+    The graph's explicit ``is_focal`` attribute remains authoritative because focal
     role belongs to one graph build rather than to the reusable paper record.
     Titles and abstracts are normalized here exactly as embedding inputs are.
 
@@ -76,7 +76,7 @@ def effective_node_metadata(
             "arxiv_id": paper.arxiv_id,
             "doi": paper.doi,
             "categories": paper.categories,
-            "is_seed": bool(attrs.get("is_seed", paper.is_seed)),
+            "is_focal": bool(attrs.get("is_focal", paper.is_focal)),
             "is_local_corpus": bool(paper.is_local_corpus),
         }
 
@@ -91,6 +91,6 @@ def effective_node_metadata(
         "arxiv_id": attrs.get("arxiv_id", ""),
         "doi": attrs.get("doi", ""),
         "categories": attrs.get("categories") or [],
-        "is_seed": bool(attrs.get("is_seed", False)),
+        "is_focal": bool(attrs.get("is_focal", False)),
         "is_local_corpus": bool(attrs.get("is_local_corpus", False)),
     }

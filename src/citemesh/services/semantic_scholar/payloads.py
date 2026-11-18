@@ -397,7 +397,7 @@ def _convert_payload_paper(
             *(_payload_get(payload, key) for key in category_keys)
         ),
         references=references or [],
-        is_seed=False,
+        is_focal=False,
     )
 
 

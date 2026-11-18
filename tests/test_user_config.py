@@ -974,7 +974,7 @@ def test_configured_corpus_cap_and_full_split_override(
     ] == (expected_corpus_size)
     payload = graph_config_module._build_graph_config_payload(
         args,
-        "seed",
+        "focal",
         {},
         ["json"],
         {"json": Path("graph.json")},
@@ -1249,7 +1249,7 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     ) in messages
     payload = graph_config_module._build_graph_config_payload(
         args,
-        "seed",
+        "focal",
         {},
         ["json"],
         {"json": Path("graph.json")},
@@ -1329,7 +1329,7 @@ def test_single_accepted_config_default_never_breaks_a_plain_build(
     raw_value: object,
     strategy: str,
 ) -> None:
-    """A default the loader accepts must not fail ``build --strategy S <seed>``.
+    """A default the loader accepts must not fail ``build --strategy S <focal>``.
 
     Device availability is a property of the host, not of the config: the probe
     is patched to resolve every device, so ``cuda`` and ``mps`` are checked like

@@ -32,7 +32,7 @@ from citemesh.strategies.candidates import (
     CandidateSourceState,
     candidate_identifiers_conflict,
     candidate_records_match,
-    merge_seed_relation,
+    merge_focal_relation,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.discovery_pool import DiscoveryPool, fetch_candidate_pool
@@ -84,14 +84,14 @@ def _paper(paper_id: str, year: int = 2020, refs: list[str] | None = None) -> Pa
     )
 
 
-def _seed_paper(paper_id: str = "seed") -> Paper:
-    """Build deterministic seed paper fixture."""
+def _focal_paper(paper_id: str = "focal") -> Paper:
+    """Build deterministic focal paper fixture."""
     return Paper(
         paper_id=paper_id,
         title=f"Paper {paper_id}",
         year=2024,
-        abstract="seed abstract",
-        is_seed=True,
+        abstract="focal abstract",
+        is_focal=True,
     )
 
 
@@ -184,16 +184,16 @@ def _make_constant_similarity_builder(
         cap = 3
 
     papers = {
-        "seed": Paper(paper_id="seed", title="Seed", year=2024, abstract="seed"),
+        "focal": Paper(paper_id="focal", title="Focal", year=2024, abstract="focal"),
         "a": Paper(paper_id="a", title="A", year=2024, abstract="alpha"),
         "b": Paper(paper_id="b", title="B", year=2024, abstract="beta"),
         "c": Paper(paper_id="c", title="C", year=2024, abstract="gamma"),
         "d": Paper(paper_id="d", title="D", year=2024, abstract="delta"),
     }
-    papers["seed"].is_seed = True
+    papers["focal"].is_focal = True
 
-    def fake_collect_papers(self, seed_id: str, **kwargs: object) -> dict[str, Paper]:
-        del seed_id
+    def fake_collect_papers(self, focal_id: str, **kwargs: object) -> dict[str, Paper]:
+        del focal_id
         del kwargs
         return papers
 
@@ -215,22 +215,22 @@ def _make_constant_similarity_builder(
 
 def test_citation_and_recommendation_should_create_edge_thresholds() -> None:
     """Citation/recommendation strategies should use configured threshold only."""
-    seed = Paper(paper_id="seed", title="Seed", year=2020, abstract="seed")
-    seed.is_seed = True
+    focal = Paper(paper_id="focal", title="Focal", year=2020, abstract="focal")
+    focal.is_focal = True
     related = Paper(paper_id="related", title="Related", year=2021, abstract="related")
     other = Paper(paper_id="other", title="Other", year=2019, abstract="other")
 
     citation = CitationGraphBuilder(similarity_threshold=0.4, client=MagicMock())
-    assert not citation.should_create_edge(seed, related, 0.39)
-    assert citation.should_create_edge(seed, related, 0.4)
+    assert not citation.should_create_edge(focal, related, 0.39)
+    assert citation.should_create_edge(focal, related, 0.4)
     assert not citation.should_create_edge(other, related, 0.39)
     assert citation.should_create_edge(other, related, 0.4)
 
     recommendation = RecommendationGraphBuilder(
         similarity_threshold=0.2, client=MagicMock()
     )
-    assert recommendation.should_create_edge(seed, related, 0.2)
-    assert not recommendation.should_create_edge(seed, related, 0.19)
+    assert recommendation.should_create_edge(focal, related, 0.2)
+    assert not recommendation.should_create_edge(focal, related, 0.19)
 
 
 @pytest.mark.parametrize(
@@ -242,31 +242,31 @@ def test_citation_and_recommendation_should_create_edge_thresholds() -> None:
         HybridGraphBuilder,
     ],
 )
-@pytest.mark.parametrize("seed_year", [None, 2020])
-def test_repeated_collection_preserves_client_owned_seed_role(
+@pytest.mark.parametrize("focal_year", [None, 2020])
+def test_repeated_collection_preserves_client_owned_focal_role(
     builder_type: type[GraphBuilderStrategy],
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    seed_year: int | None,
+    focal_year: int | None,
 ) -> None:
-    """Reusing a seed's metadata as a later candidate must retain that candidate.
+    """Reusing a focal paper's metadata as a later candidate must retain that candidate.
 
     :param type[GraphBuilderStrategy] builder_type: Public builder constructor.
     :param pytest.MonkeyPatch monkeypatch: Offline semantic inference stubs.
-    :param pytest.LogCaptureFixture caplog: Captures focal-paper notices.
-    :param int | None seed_year: Known or unavailable publication year.
-    :return None: Both collections have exactly one seed and preserve input roles.
+    :param pytest.LogCaptureFixture caplog: Captures focal paper notices.
+    :param int | None focal_year: Known or unavailable publication year.
+    :return None: Both collections have exactly one focal paper and preserve input roles.
     """
-    first = replace(_paper("first"), title="Paper\n  first", year=seed_year)
-    second = replace(_paper("second"), year=seed_year)
+    first = replace(_paper("first"), title="Paper\n  first", year=focal_year)
+    second = replace(_paper("second"), year=focal_year)
     caplog.set_level(logging.DEBUG)
     client = MagicMock()
     client.get_paper.side_effect = [first, second]
 
     def candidates(*_args: object, **_kwargs: object) -> list[Paper]:
-        current_seed = first if client.get_paper.call_count == 1 else second
-        suffix = f" ({seed_year})" if seed_year is not None else ""
-        assert f"Focal paper: Paper {current_seed.paper_id}{suffix}" in caplog.messages
+        current_focal = first if client.get_paper.call_count == 1 else second
+        suffix = f" ({focal_year})" if focal_year is not None else ""
+        assert f"Focal paper: Paper {current_focal.paper_id}{suffix}" in caplog.messages
         return [first]
 
     client.get_paper_references.side_effect = candidates
@@ -298,13 +298,13 @@ def test_repeated_collection_preserves_client_owned_seed_role(
     builder.build_graph("second")
     second_collection = builder.papers
 
-    assert first.is_seed is False
-    assert second.is_seed is False
+    assert first.is_focal is False
+    assert second.is_focal is False
     assert first_collection["first"] is not first
-    assert first_collection["first"].is_seed is True
+    assert first_collection["first"].is_focal is True
     assert set(second_collection) == {"first", "second"}
-    assert [p.paper_id for p in second_collection.values() if p.is_seed] == ["second"]
-    suffix = f" ({seed_year})" if seed_year is not None else ""
+    assert [p.paper_id for p in second_collection.values() if p.is_focal] == ["second"]
+    suffix = f" ({focal_year})" if focal_year is not None else ""
     assert [
         record.getMessage()
         for record in caplog.records
@@ -312,24 +312,24 @@ def test_repeated_collection_preserves_client_owned_seed_role(
     ] == [f"Focal paper: Paper first{suffix}", f"Focal paper: Paper second{suffix}"]
 
 
-@pytest.mark.parametrize("provided_seed", [False, True])
-def test_embedding_seed_resolution_preserves_input_role(provided_seed: bool) -> None:
-    """Prefetched and client-returned seeds are bound to the build by copying.
+@pytest.mark.parametrize("provided_focal", [False, True])
+def test_embedding_focal_resolution_preserves_input_role(provided_focal: bool) -> None:
+    """Prefetched and client-returned focal papers are copied for the build.
 
-    :param bool provided_seed: Whether the caller supplies the metadata directly.
-    :return None: Seed resolution leaves the supplied metadata reusable.
+    :param bool provided_focal: Whether the caller supplies the metadata directly.
+    :return None: Focal resolution leaves the supplied metadata reusable.
     """
-    paper = _paper("seed")
+    paper = _paper("focal")
     client = MagicMock()
     client.get_paper.return_value = paper
     builder = EmbeddingGraphBuilder(client=client)
 
-    resolved = builder._resolve_seed_paper("seed", paper if provided_seed else None)
+    resolved = builder._resolve_focal_input("focal", paper if provided_focal else None)
 
     assert resolved is not paper
-    assert resolved.is_seed is True
-    assert paper.is_seed is False
-    if provided_seed:
+    assert resolved.is_focal is True
+    assert paper.is_focal is False
+    if provided_focal:
         client.get_paper.assert_not_called()
 
 
@@ -338,28 +338,30 @@ def test_embedding_seed_resolution_preserves_input_role(provided_seed: bool) -> 
     [CitationGraphBuilder, RecommendationGraphBuilder, HybridGraphBuilder],
 )
 @pytest.mark.parametrize("unavailable", [False, True])
-def test_required_seed_resolution_stops_before_candidate_acquisition(
+def test_required_focal_resolution_stops_before_candidate_acquisition(
     builder_type: type[GraphBuilderStrategy],
     unavailable: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Required seed resolution preserves missing-paper and service errors."""
+    """Required focal resolution preserves missing-paper and service errors."""
     client = MagicMock()
     client.get_paper.return_value = None
     if unavailable:
-        client.get_paper.side_effect = s2.SemanticScholarUnavailableError("seed outage")
+        client.get_paper.side_effect = s2.SemanticScholarUnavailableError(
+            "focal outage"
+        )
     builder = builder_type(client=client)
     error_type = s2.SemanticScholarUnavailableError if unavailable else ValueError
     with caplog.at_level(logging.INFO), pytest.raises(error_type) as error:
-        builder.collect_papers("unknown-seed")
+        builder.collect_papers("unknown-focal")
 
     assert str(error.value) == (
-        "seed outage"
+        "focal outage"
         if unavailable
-        else "Focal paper not found: unknown-seed (Semantic Scholar does not "
+        else "Focal paper not found: unknown-focal (Semantic Scholar does not "
         "know this identifier; check the DOI/arXiv/S2 ID)."
     )
-    client.get_paper.assert_called_once_with("unknown-seed", raise_on_unavailable=True)
+    client.get_paper.assert_called_once_with("unknown-focal", raise_on_unavailable=True)
     client.get_paper_references.assert_not_called()
     client.get_paper_citations.assert_not_called()
     client.get_recommended_papers.assert_not_called()
@@ -382,8 +384,8 @@ def test_indexed_graphs_require_topical_or_shared_reference_evidence(
     :param pytest.LogCaptureFixture caplog: Captured graph warnings.
     :return None: Assertions verify irrelevant edges are absent and supported ones remain.
     """
-    seed = Paper(
-        paper_id="seed",
+    focal = Paper(
+        paper_id="focal",
         title="Algebra",
         abstract="Polynomial rings theorem",
         year=2024,
@@ -399,23 +401,23 @@ def test_indexed_graphs_require_topical_or_shared_reference_evidence(
         references=references,
     )
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [other]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = [other]
     client.get_reference_ids.return_value = []
     builder = builder_type(client=client, similarity_threshold=0.0)
 
-    graph, _ = builder.build_graph("seed")
+    graph, _ = builder.build_graph("focal")
 
-    assert set(graph) == {"seed", "other"}
+    assert set(graph) == {"focal", "other"}
     assert graph.number_of_edges() == 0
     assert "Graph contains no edges" in caplog.text
-    assert builder.compute_similarity(seed, other) == 0.0
+    assert builder.compute_similarity(focal, other) == 0.0
     other.references = ["shared"]
     caplog.clear()
-    graph, _ = builder.build_graph("seed")
-    assert graph.has_edge("seed", "other")
+    graph, _ = builder.build_graph("focal")
+    assert graph.has_edge("focal", "other")
     assert "Graph contains no edges" not in caplog.text
 
 
@@ -434,7 +436,7 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     from citemesh.services import SemanticScholarUnavailableError
 
     client = MagicMock()
-    client.get_paper.return_value = _paper("seed", refs=["seed-ref"])
+    client.get_paper.return_value = _paper("focal", refs=["focal-ref"])
     related = [_paper("first"), _paper("second")]
     client.get_recommended_papers.return_value = related
     client.get_paper_references.return_value = related
@@ -444,9 +446,9 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     builder = builder_type(client=client)
 
     with caplog.at_level(logging.WARNING):
-        papers = builder.collect_papers("seed")
+        papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "first", "second"}
+    assert set(papers) == {"focal", "first", "second"}
     client.get_reference_ids.assert_called_once_with("first", force_refresh=False)
     assert len(caplog.records) == 1
     assert (
@@ -456,7 +458,7 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     client.get_reference_ids.reset_mock(side_effect=True)
     client.get_reference_ids.return_value = ["restored"]
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
     assert client.get_reference_ids.call_count == 2
     assert papers["first"].references == ["restored"]
@@ -465,7 +467,7 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
         paper.references = []
     client.get_reference_ids.side_effect = ValueError("malformed references")
     with pytest.raises(ValueError, match="malformed references"):
-        builder.collect_papers("seed")
+        builder.collect_papers("focal")
 
 
 @pytest.mark.parametrize(
@@ -487,13 +489,13 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
     :param list[str] expected_references: Expected warm-paper reference IDs.
     :return None: Verifies cache-only recovery after one exhausted request.
     """
-    seed = _paper("seed", refs=["seed-reference"])
+    focal = _paper("focal", refs=["focal-reference"])
     cold = _paper("cold")
     warm = _paper("warm")
 
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        client.get_paper = MagicMock(return_value=seed)
+        client.get_paper = MagicMock(return_value=focal)
         client._session.get = MagicMock(side_effect=requests.ConnectionError("offline"))
         client._persist_reference_cache_entry(
             s2.disk_cache._reference_cache_path("warm"), "warm", ["shared"]
@@ -517,9 +519,9 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
             )
 
         with patch("time.sleep"):
-            papers = builder.collect_papers("seed")
+            papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "cold", "warm"}
+    assert set(papers) == {"focal", "cold", "warm"}
     assert papers["warm"].references == expected_references
     assert client._session.get.call_count == API_CONFIG.max_retries
 
@@ -540,10 +542,10 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
     :return None: Checks healthy discovery and warm-cache reuse after an outage.
     """
     monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
-    seed = _paper("scope-seed")
+    focal = _paper("scope-focal")
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        client.get_paper = MagicMock(return_value=seed)
+        client.get_paper = MagicMock(return_value=focal)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
         client._session.get = MagicMock(side_effect=_reference_outage_transport)
@@ -563,16 +565,16 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
         with patch("time.sleep") as sleep_mock:
             for _ in range(2):
                 with client.candidate_operation_scope():
-                    papers = builder.collect_papers("scope-seed")
+                    papers = builder.collect_papers("scope-focal")
                     if builder_type is CitationGraphBuilder:
-                        assert set(papers) == {"scope-seed", "healthy-citation"}
+                        assert set(papers) == {"scope-focal", "healthy-citation"}
                         assert builder.candidate_source_status == {
                             "references": "unavailable",
                             "citations": "complete",
                         }
                     else:
                         assert set(papers) == {
-                            "scope-seed",
+                            "scope-focal",
                             "healthy-recommendation",
                         }
                         assert builder.candidate_source_status == {
@@ -636,10 +638,10 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
     :return None: Verifies reference retry sharing and healthy parent enrichment.
     """
     monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
-    seed = _paper("hybrid-scope-seed")
+    focal = _paper("hybrid-scope-focal")
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        client.get_paper = MagicMock(return_value=seed)
+        client.get_paper = MagicMock(return_value=focal)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
         client._session.get = MagicMock(side_effect=_reference_outage_transport)
@@ -653,7 +655,7 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
         offline_hybrid_encoder(monkeypatch, builder)
 
         with patch("time.sleep"):
-            papers = builder.collect_papers("hybrid-scope-seed")
+            papers = builder.collect_papers("hybrid-scope-focal")
 
         assert (
             len(
@@ -666,7 +668,7 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
             == 2 * API_CONFIG.max_retries
         )
         assert set(papers) == {
-            "hybrid-scope-seed",
+            "hybrid-scope-focal",
             "healthy-citation",
             "healthy-recommendation",
         }
@@ -708,10 +710,10 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
     :return None: Verifies healthy source candidates and accurate status survive.
     """
     monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
-    seed = _paper("embedding-scope-seed")
+    focal = _paper("embedding-scope-focal")
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        client.get_paper = MagicMock(return_value=seed)
+        client.get_paper = MagicMock(return_value=focal)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
         client._session.get = MagicMock(side_effect=_reference_outage_transport)
@@ -736,7 +738,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
         )
 
         with patch("time.sleep"):
-            papers = builder.collect_papers("embedding-scope-seed")
+            papers = builder.collect_papers("embedding-scope-focal")
 
         assert (
             len(
@@ -749,7 +751,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
             == API_CONFIG.max_retries
         )
         assert set(papers) == {
-            "embedding-scope-seed",
+            "embedding-scope-focal",
             "healthy-citation",
             "healthy-recommendation",
         }
@@ -825,7 +827,7 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
         with patch("time.sleep"):
             pool = fetch_candidate_pool(
                 client,
-                _seed_paper("partial-scope-seed"),
+                _focal_paper("partial-scope-focal"),
                 max_references=1,
                 max_citations=1,
                 max_recommendations=1,
@@ -870,7 +872,7 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
     with patch("citemesh.strategies.recommendation.get_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.get_paper.return_value = Paper(
-            paper_id="seed", title="Seed", year=2020, abstract="seed abstract"
+            paper_id="focal", title="Focal", year=2020, abstract="focal abstract"
         )
         mock_client.get_recommended_papers.return_value = [
             Paper(
@@ -891,12 +893,12 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
         mock_client.get_reference_ids.return_value = []
 
         builder = RecommendationGraphBuilder(max_papers=3, fetch_references=True)
-        papers = builder.collect_papers("seed")
+        papers = builder.collect_papers("focal")
 
     assert "valid" in papers
     assert "missing" not in papers
     assert papers["valid"].references == ["r1", "r2"]
-    mock_client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
+    mock_client.get_reference_ids.assert_called_once_with("focal", force_refresh=False)
 
 
 def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() -> None:
@@ -906,7 +908,7 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
 
     :return None: Verifies live ID order, inline metadata, and reference reuse.
     """
-    seed = _seed_paper()
+    focal = _focal_paper()
     first = _paper("first")
     second = _paper("second")
     calls: list[tuple[str, dict[str, object] | str, dict[str, object] | None]] = []
@@ -914,8 +916,8 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
 
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        _cache_full_papers(seed, first, second)
-        for paper_id in ("seed", "first", "second", "third"):
+        _cache_full_papers(focal, first, second)
+        for paper_id in ("focal", "first", "second", "third"):
             client._persist_reference_cache_entry(
                 s2.disk_cache._reference_cache_path(paper_id), paper_id, []
             )
@@ -956,24 +958,24 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
         )
         builder = RecommendationGraphBuilder(max_papers=3, client=client)
 
-        first_run = builder.collect_papers("seed")
-        second_run = builder.collect_papers("seed")
+        first_run = builder.collect_papers("focal")
+        second_run = builder.collect_papers("focal")
 
-    assert list(first_run) == ["seed", "first", "second"]
-    assert list(second_run) == ["seed", "second", "third"]
+    assert list(first_run) == ["focal", "first", "second"]
+    assert list(second_run) == ["focal", "second", "third"]
     assert len(calls) == 2
 
 
-def test_recommendation_fetches_primary_discovery_before_seed_references(
+def test_recommendation_fetches_primary_discovery_before_focal_references(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Recommendation acquisition must precede optional seed reference hydration.
+    """Recommendation acquisition must precede optional focal reference hydration.
 
     :return None: Verifies the primary candidate fetch wins the shared budget.
     """
     client = MagicMock()
     events: list[str] = []
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
 
     def fetch_recommendations(*_args: object, **_kwargs: object) -> list[Paper]:
         """Record primary discovery before returning one candidate.
@@ -1007,9 +1009,9 @@ def test_recommendation_fetches_primary_discovery_before_seed_references(
             wraps=progress_iterator,
         ) as progress,
     ):
-        RecommendationGraphBuilder(max_papers=2, client=client).collect_papers("seed")
+        RecommendationGraphBuilder(max_papers=2, client=client).collect_papers("focal")
 
-    assert events == ["recommendations", "references:seed", "references:candidate"]
+    assert events == ["recommendations", "references:focal", "references:candidate"]
     assert [paper.paper_id for paper in progress.call_args.args[0]] == ["candidate"]
     assert progress.call_args.kwargs == dict(
         description="Checking recommendations", unit="papers", enabled=None
@@ -1022,17 +1024,17 @@ def test_recommendation_collect_clamps_endpoint_request_limit() -> None:
     :return None: Checks the oversampled request is capped at 500 results.
     """
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
     client.get_recommended_papers.return_value = []
 
     RecommendationGraphBuilder(
         max_papers=300,
         fetch_references=False,
         client=client,
-    ).collect_papers("seed")
+    ).collect_papers("focal")
 
     client.get_recommended_papers.assert_called_once_with(
-        "seed",
+        "focal",
         limit=500,
         raise_on_unavailable=True,
     )
@@ -1042,12 +1044,12 @@ def test_citation_collect_populates_reference_cache_and_summary(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Citation collection should hydrate references and expose summary."""
-    seed = _paper("seed", refs=["seed-ref"])
+    focal = _paper("focal", refs=["focal-ref"])
     ref = _paper("ref1")
     cit = _paper("cit1")
 
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [ref]
     client.get_paper_citations.return_value = [cit]
     client.get_reference_ids.side_effect = lambda pid, force_refresh=False: [
@@ -1062,9 +1064,9 @@ def test_citation_collect_populates_reference_cache_and_summary(
         client=client,
     )
     with caplog.at_level(logging.INFO):
-        papers = builder.collect_papers("seed")
+        papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "ref1", "cit1"}
+    assert set(papers) == {"focal", "ref1", "cit1"}
     assert papers["ref1"].references == ["ref1-ref"]
     assert papers["cit1"].references == ["cit1-ref"]
     assert builder.get_collection_summary() == "Collected 3 papers"
@@ -1084,8 +1086,8 @@ def test_citation_reference_hydration_reports_interactive_progress(
 
     :return None: Checks the hydration loop uses the shared progress iterator.
     """
-    seed = _paper("seed", refs=["seed-ref"])
-    papers = {seed.paper_id: seed}
+    focal = _paper("focal", refs=["focal-ref"])
+    papers = {focal.paper_id: focal}
     papers.update(
         {_paper_id: _paper(_paper_id) for _paper_id in map(str, range(paper_count))}
     )
@@ -1103,7 +1105,7 @@ def test_citation_reference_hydration_reports_interactive_progress(
         ),
         patch("citemesh.strategies.reference_hydration.progress_iterator", progress),
     ):
-        builder.reference_hydrator.hydrate(papers, seed)
+        builder.reference_hydrator.hydrate(papers, focal)
 
     progress.assert_called_once_with(
         papers.items(),
@@ -1117,7 +1119,7 @@ def test_citation_collect_discovers_all_sources_before_reference_enrichment() ->
     """Optional reference hydration must not preempt requested candidate sources."""
     events: list[str] = []
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
 
     def references(*_args: object, **_kwargs: object) -> list[Paper]:
         events.append("discover references")
@@ -1141,41 +1143,41 @@ def test_citation_collect_discovers_all_sources_before_reference_enrichment() ->
         max_citations=1,
         fetch_references=True,
         client=client,
-    ).collect_papers("seed")
+    ).collect_papers("focal")
 
-    assert set(papers) == {"seed", "ref1", "cit1"}
+    assert set(papers) == {"focal", "ref1", "cit1"}
     assert events[:2] == ["discover references", "discover citations"]
-    assert events[2:] == ["enrich seed", "enrich ref1", "enrich cit1"]
+    assert events[2:] == ["enrich focal", "enrich ref1", "enrich cit1"]
 
 
 @pytest.mark.parametrize(
     ("external_fields", "provider_id"),
     [
         ({"arxiv_id": "2508.12345"}, "arxiv:2508.12345"),
-        ({"doi": "10.1000/LOCAL.SEED"}, "10.1000/local.seed"),
+        ({"doi": "10.1000/LOCAL.FOCAL"}, "10.1000/local.focal"),
     ],
 )
-def test_citation_collect_uses_external_alias_for_pre_resolved_local_seed(
+def test_citation_collect_uses_external_alias_for_pre_resolved_local_focal(
     external_fields: dict[str, str],
     provider_id: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A local graph ID must remain local while provider calls use its alias.
 
-    :param dict[str, str] external_fields: External identifier field on the seed.
+    :param dict[str, str] external_fields: External identifier field on the focal paper.
     :param str provider_id: Canonical identifier expected by provider methods.
     :return None: Verifies every upstream call and the local reference-cache key.
     """
-    seed = Paper(
+    focal = Paper(
         paper_id="local-source-key",
-        title="Local seed",
+        title="Local focal",
         year=2024,
         abstract="Local abstract",
         is_local_corpus=True,
         **external_fields,
     )
     client = MagicMock()
-    client.get_reference_ids.return_value = ["seed-reference"]
+    client.get_reference_ids.return_value = ["focal-reference"]
     client.get_paper_references.return_value = [_paper("reference")]
     client.get_paper_citations.return_value = [_paper("citation")]
     builder = CitationGraphBuilder(
@@ -1186,16 +1188,20 @@ def test_citation_collect_uses_external_alias_for_pre_resolved_local_seed(
         client=client,
     )
 
-    with caplog.at_level(logging.INFO):
-        papers = builder.collect_papers(seed.paper_id, seed_paper=seed)
+    with pytest.raises(TypeError, match="seed_paper"):
+        builder.collect_papers(focal.paper_id, **{"seed_paper": focal})
+    client.get_paper.assert_not_called()
 
-    assert set(papers) == {seed.paper_id, "reference", "citation"}
-    assert papers[seed.paper_id].is_seed is True
-    assert papers[seed.paper_id] is not seed
-    assert seed.is_seed is False
-    assert caplog.messages.count("Focal paper: Local seed (2024)") == 1
-    assert builder.reference_hydrator.reference_cache[seed.paper_id] == [
-        "seed-reference"
+    with caplog.at_level(logging.INFO):
+        papers = builder.collect_papers(focal.paper_id, focal_paper=focal)
+
+    assert set(papers) == {focal.paper_id, "reference", "citation"}
+    assert papers[focal.paper_id].is_focal is True
+    assert papers[focal.paper_id] is not focal
+    assert focal.is_focal is False
+    assert caplog.messages.count("Focal paper: Local focal (2024)") == 1
+    assert builder.reference_hydrator.reference_cache[focal.paper_id] == [
+        "focal-reference"
     ]
     client.get_paper.assert_not_called()
     client.get_reference_ids.assert_any_call(provider_id, force_refresh=False)
@@ -1207,11 +1213,11 @@ def test_citation_collect_uses_external_alias_for_pre_resolved_local_seed(
     )
 
 
-def test_citation_collect_keeps_opaque_pre_resolved_local_seed_off_provider() -> None:
-    """An opaque corpus seed without an alias must produce a seed-only branch."""
-    seed = Paper(
+def test_citation_collect_keeps_opaque_pre_resolved_local_focal_off_provider() -> None:
+    """An opaque corpus focal without an alias must produce a focal paper-only branch."""
+    focal = Paper(
         paper_id="local-source-key",
-        title="Local seed",
+        title="Local focal",
         year=2024,
         abstract="Local abstract",
         is_local_corpus=True,
@@ -1224,7 +1230,7 @@ def test_citation_collect_keeps_opaque_pre_resolved_local_seed_off_provider() ->
         "get_paper_citations",
     ):
         getattr(client, provider_method).side_effect = AssertionError(
-            "opaque local seed must not be sent to Semantic Scholar"
+            "opaque local focal paper must not be sent to Semantic Scholar"
         )
     builder = CitationGraphBuilder(
         max_papers=3,
@@ -1234,10 +1240,10 @@ def test_citation_collect_keeps_opaque_pre_resolved_local_seed_off_provider() ->
         client=client,
     )
 
-    papers = builder.collect_papers(seed.paper_id, seed_paper=seed)
+    papers = builder.collect_papers(focal.paper_id, focal_paper=focal)
 
-    assert set(papers) == {seed.paper_id}
-    assert papers[seed.paper_id].is_seed is True
+    assert set(papers) == {focal.paper_id}
+    assert papers[focal.paper_id].is_focal is True
     assert builder.reference_hydrator.reference_cache == {}
     assert builder.candidate_source_status == {}
 
@@ -1245,13 +1251,13 @@ def test_citation_collect_keeps_opaque_pre_resolved_local_seed_off_provider() ->
 def test_citation_collect_sizes_relation_requests_to_open_graph_slots() -> None:
     """Relation requests should honor capacity and let citations fill duplicate gaps.
 
-    :return None: Checks remaining-slot limits and a full graph after a seed alias.
+    :return None: Checks remaining-slot limits and a full graph after a focal paper alias.
     """
-    seed = _seed_paper("seed")
+    focal = _focal_paper("focal")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [
-        _paper("seed"),
+        _paper("focal"),
         _paper("ref1"),
     ]
     client.get_paper_citations.return_value = [_paper("cit1")]
@@ -1262,40 +1268,40 @@ def test_citation_collect_sizes_relation_requests_to_open_graph_slots() -> None:
         max_citations=25,
         fetch_references=False,
         client=client,
-    ).collect_papers("seed")
+    ).collect_papers("focal")
 
-    assert set(papers) == {"seed", "ref1", "cit1"}
+    assert set(papers) == {"focal", "ref1", "cit1"}
     client.get_paper_references.assert_called_once_with(
-        "seed",
+        "focal",
         limit=2,
         raise_on_unavailable=True,
     )
     client.get_paper_citations.assert_called_once_with(
-        "seed",
+        "focal",
         limit=1,
         raise_on_unavailable=True,
     )
 
-    seed_only_client = MagicMock()
-    seed_only_client.get_paper.return_value = _seed_paper("seed-only")
-    seed_only_papers = CitationGraphBuilder(
+    focal_only_client = MagicMock()
+    focal_only_client.get_paper.return_value = _focal_paper("focal-only")
+    focal_only_papers = CitationGraphBuilder(
         max_papers=1,
         max_references=25,
         max_citations=25,
         fetch_references=False,
-        client=seed_only_client,
-    ).collect_papers("seed-only")
+        client=focal_only_client,
+    ).collect_papers("focal-only")
 
-    assert set(seed_only_papers) == {"seed-only"}
-    seed_only_client.get_paper_references.assert_not_called()
-    seed_only_client.get_paper_citations.assert_not_called()
+    assert set(focal_only_papers) == {"focal-only"}
+    focal_only_client.get_paper_references.assert_not_called()
+    focal_only_client.get_paper_citations.assert_not_called()
 
 
 def test_citation_record_reaching_a_member_by_alias_merges_into_a_full_graph() -> None:
     """A row the pool resolves through an alias merges even with no free slot."""
-    seed = _seed_paper("seed")
+    focal = _focal_paper("focal")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     # "b" shares a DOI with "a", so it merges into "a" and becomes an alias.
     client.get_paper_references.return_value = [
         replace(_paper("a"), doi="10.1000/d"),
@@ -1311,47 +1317,47 @@ def test_citation_record_reaching_a_member_by_alias_merges_into_a_full_graph() -
         client=client,
     )
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "a", "x"}
-    assert builder.seed_relations["a"] == merge_seed_relation(
-        "referenced_by_seed", "cites_seed"
+    assert set(papers) == {"focal", "a", "x"}
+    assert builder.focal_relations["a"] == merge_focal_relation(
+        "referenced_by_focal", "cites_focal"
     )
 
 
-def test_recommendation_record_of_the_seed_merges_before_member_lookup() -> None:
-    """A seed record that also matches a member enriches the seed, unfetched."""
-    seed = replace(_seed_paper("seed"), arxiv_id="2001.00001")
+def test_recommendation_record_of_the_focal_merges_before_member_lookup() -> None:
+    """A focal paper record that also matches a member enriches the focal paper, unfetched."""
+    focal = replace(_focal_paper("focal"), arxiv_id="2001.00001")
     member = replace(_paper("m"), doi="10.1000/d")
-    # Same arXiv ID as the seed and same DOI as the member.
+    # Same arXiv ID as the focal paper and same DOI as the member.
     bridge = replace(_paper("r"), arxiv_id="2001.00001", doi="10.1000/d")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [member, bridge]
     client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
         [] if paper_id == "m" else [f"ref-of-{paper_id}"]
     )
 
     papers = RecommendationGraphBuilder(max_papers=10, client=client).collect_papers(
-        "seed"
+        "focal"
     )
 
-    assert set(papers) == {"seed", "m"}
+    assert set(papers) == {"focal", "m"}
     assert [call.args[0] for call in client.get_reference_ids.call_args_list] == [
-        "seed",
+        "focal",
         "m",
     ]
-    assert papers["seed"].references == ["ref-of-seed"]
+    assert papers["focal"].references == ["ref-of-focal"]
 
 
-def test_citation_collect_preserves_seed_when_relation_reuses_seed_id() -> None:
-    """Duplicate relation payloads should not unset the canonical seed marker."""
-    seed = _paper("seed", refs=["seed-ref"])
-    duplicate_seed_record = _paper("seed", year=2021)
+def test_citation_collect_preserves_focal_when_relation_reuses_focal_id() -> None:
+    """Duplicate relation payloads should not unset the canonical focal paper marker."""
+    focal = _paper("focal", refs=["focal-ref"])
+    duplicate_focal_record = _paper("focal", year=2021)
 
     client = MagicMock()
-    client.get_paper.return_value = seed
-    client.get_paper_references.return_value = [duplicate_seed_record]
+    client.get_paper.return_value = focal
+    client.get_paper_references.return_value = [duplicate_focal_record]
     client.get_paper_citations.return_value = []
 
     builder = CitationGraphBuilder(
@@ -1363,24 +1369,24 @@ def test_citation_collect_preserves_seed_when_relation_reuses_seed_id() -> None:
         client=client,
     )
 
-    papers = builder.collect_papers("seed")
-    assert papers["seed"].is_seed is True
+    papers = builder.collect_papers("focal")
+    assert papers["focal"].is_focal is True
 
-    graph, seed_id = builder.build_graph("seed")
-    assert seed_id == "seed"
-    assert graph.nodes["seed"]["is_seed"] is True
+    graph, focal_id = builder.build_graph("focal")
+    assert focal_id == "focal"
+    assert graph.nodes["focal"]["is_focal"] is True
 
 
 def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates() -> (
     None
 ):
     """Overlap duplicates should retain hydrated references on the canonical object."""
-    seed = _paper("seed", refs=["seed-ref"])
+    focal = _paper("focal", refs=["focal-ref"])
     overlap_from_references = _paper("overlap")
     overlap_from_citations = _paper("overlap")
 
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [overlap_from_references]
     client.get_paper_citations.return_value = [overlap_from_citations]
     client.get_reference_ids.return_value = ["overlap-ref"]
@@ -1392,25 +1398,25 @@ def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates()
         fetch_references=True,
         client=client,
     )
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
     assert papers["overlap"].references == ["overlap-ref"]
-    assert builder.seed_relations["overlap"] == "overlap"
+    assert builder.focal_relations["overlap"] == "overlap"
     client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
 
 
 def test_citation_collect_merges_external_primary_aliases() -> None:
     """Citation ingestion collapses external primary aliases into S2 records."""
-    seed = _paper("s2-seed")
-    seed.arxiv_id = "2508.12345"
+    focal = _paper("s2-focal")
+    focal.arxiv_id = "2508.12345"
     reference = _paper("s2-candidate")
     reference.arxiv_id = "2508.12346"
     citation_alias = _paper("arxiv:2508.12346")
-    seed_alias = _paper("arxiv:2508.12345")
+    focal_alias = _paper("arxiv:2508.12345")
 
     client = MagicMock()
-    client.get_paper.return_value = seed
-    client.get_paper_references.return_value = [seed_alias, reference]
+    client.get_paper.return_value = focal
+    client.get_paper_references.return_value = [focal_alias, reference]
     client.get_paper_citations.return_value = [citation_alias]
 
     builder = CitationGraphBuilder(
@@ -1420,26 +1426,26 @@ def test_citation_collect_merges_external_primary_aliases() -> None:
         fetch_references=False,
         client=client,
     )
-    papers = builder.collect_papers("s2-seed")
+    papers = builder.collect_papers("s2-focal")
 
-    assert set(papers) == {"s2-seed", "s2-candidate"}
-    assert papers["s2-seed"].is_seed is True
-    assert builder.seed_relations == {
-        "s2-seed": "seed",
+    assert set(papers) == {"s2-focal", "s2-candidate"}
+    assert papers["s2-focal"].is_focal is True
+    assert builder.focal_relations == {
+        "s2-focal": "focal",
         "s2-candidate": "overlap",
     }
 
 
 def test_citation_collect_merges_s2_duplicates_with_shared_external_id() -> None:
     """Citation ingestion collapses S2 records with one agreed external ID."""
-    seed = _paper("seed")
+    focal = _paper("focal")
     first = _paper("1" * 40)
     first.doi = "10.1000/shared"
     second = _paper("2" * 40)
     second.doi = "10.1000/shared"
 
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [first]
     client.get_paper_citations.return_value = [second]
 
@@ -1450,22 +1456,22 @@ def test_citation_collect_merges_s2_duplicates_with_shared_external_id() -> None
         fetch_references=False,
         client=client,
     )
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", first.paper_id}
-    assert builder.seed_relations == {
-        "seed": "seed",
+    assert set(papers) == {"focal", first.paper_id}
+    assert builder.focal_relations == {
+        "focal": "focal",
         first.paper_id: "overlap",
     }
 
 
 def test_citation_collect_keeps_bridge_records_distinct() -> None:
     """A bridge payload cannot merge separate primary IDs."""
-    seed = _paper("seed")
+    focal = _paper("focal")
     arxiv_record, doi_record, bridge = _identity_bridge_records()
 
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [arxiv_record, doi_record, bridge]
     client.get_paper_citations.return_value = []
 
@@ -1476,24 +1482,24 @@ def test_citation_collect_keeps_bridge_records_distinct() -> None:
         fetch_references=False,
         client=client,
     )
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", arxiv_record.paper_id, doi_record.paper_id}
-    assert builder.seed_relations == {
-        "seed": "seed",
-        arxiv_record.paper_id: "referenced_by_seed",
-        doi_record.paper_id: "referenced_by_seed",
+    assert set(papers) == {"focal", arxiv_record.paper_id, doi_record.paper_id}
+    assert builder.focal_relations == {
+        "focal": "focal",
+        arxiv_record.paper_id: "referenced_by_focal",
+        doi_record.paper_id: "referenced_by_focal",
     }
 
 
-def test_citation_build_graph_persists_seed_relation_metadata() -> None:
-    """Citation graph export metadata should preserve seed relation classes."""
-    seed = _paper("seed", refs=["seed-ref"])
+def test_citation_build_graph_persists_focal_relation_metadata() -> None:
+    """Citation graph export metadata should preserve focal relation classes."""
+    focal = _paper("focal", refs=["focal-ref"])
     ref = _paper("ref1")
     cit = _paper("cit1")
 
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [ref]
     client.get_paper_citations.return_value = [cit]
 
@@ -1505,14 +1511,14 @@ def test_citation_build_graph_persists_seed_relation_metadata() -> None:
         similarity_threshold=0.0,
         client=client,
     )
-    graph, seed_id = builder.build_graph("seed")
+    graph, focal_id = builder.build_graph("focal")
 
-    assert seed_id == "seed"
+    assert focal_id == "focal"
     assert graph.graph["strategy"] == "citation"
-    assert graph.graph["seed_relations"] == {
-        "cit1": "cites_seed",
-        "ref1": "referenced_by_seed",
-        "seed": "seed",
+    assert graph.graph["focal_relations"] == {
+        "cit1": "cites_focal",
+        "ref1": "referenced_by_focal",
+        "focal": "focal",
     }
     assert graph.graph["candidate_source_status"] == {
         "citations": "complete",
@@ -1523,7 +1529,7 @@ def test_citation_build_graph_persists_seed_relation_metadata() -> None:
 def test_recommendation_build_graph_persists_strategy_metadata() -> None:
     """Recommendation graphs should persist strategy metadata for downstream exports."""
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
     client.get_recommended_papers.return_value = [
         _paper("rec1", year=2023),
         _paper("rec2", year=2022),
@@ -1535,9 +1541,9 @@ def test_recommendation_build_graph_persists_strategy_metadata() -> None:
         similarity_threshold=0.0,
         client=client,
     )
-    graph, seed_id = builder.build_graph("seed")
+    graph, focal_id = builder.build_graph("focal")
 
-    assert seed_id == "seed"
+    assert focal_id == "focal"
     assert graph.graph["strategy"] == "recommendation"
     assert graph.graph["candidate_source_status"] == {"recommendations": "complete"}
 
@@ -1552,7 +1558,7 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
     """
     from citemesh.services import SemanticScholarUnavailableError
 
-    seed = _seed_paper()
+    focal = _focal_paper()
     partial_client = MagicMock()
     partial_client.get_paper_references.side_effect = SemanticScholarUnavailableError(
         "references down"
@@ -1562,7 +1568,7 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
 
     partial_pool = fetch_candidate_pool(
         partial_client,
-        seed,
+        focal,
         max_references=1,
         max_citations=1,
         max_recommendations=1,
@@ -1579,7 +1585,7 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
     empty_client.get_paper_citations.return_value = []
     empty_pool = fetch_candidate_pool(
         empty_client,
-        seed,
+        focal,
         max_references=1,
         max_citations=1,
     )
@@ -1599,7 +1605,7 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
     with pytest.raises(CandidateAcquisitionError, match="references, citations"):
         fetch_candidate_pool(
             unavailable_client,
-            seed,
+            focal,
             max_references=1,
             max_citations=1,
         )
@@ -1615,14 +1621,14 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
                 paper_id="query:topic",
                 title="topic",
                 year=None,
-                is_seed=True,
+                is_focal=True,
             ),
             max_recommendations=1,
         )
     query_client.get_recommended_papers.assert_not_called()
 
     recommendation_client = MagicMock()
-    recommendation_client.get_paper.return_value = seed
+    recommendation_client.get_paper.return_value = focal
     recommendation_client.get_recommended_papers.side_effect = (
         SemanticScholarUnavailableError("recommendations down")
     )
@@ -1631,10 +1637,10 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
             max_papers=3,
             fetch_references=False,
             client=recommendation_client,
-        ).collect_papers("seed")
+        ).collect_papers("focal")
 
     citation_client = MagicMock()
-    citation_client.get_paper.return_value = seed
+    citation_client.get_paper.return_value = focal
     citation_client.get_paper_references.side_effect = SemanticScholarUnavailableError(
         "references down"
     )
@@ -1648,10 +1654,10 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
             max_citations=1,
             fetch_references=False,
             client=citation_client,
-        ).collect_papers("seed")
+        ).collect_papers("focal")
 
     hybrid_client = MagicMock()
-    hybrid_client.get_paper.return_value = seed
+    hybrid_client.get_paper.return_value = focal
     hybrid_client.get_paper_references.side_effect = SemanticScholarUnavailableError(
         "references down"
     )
@@ -1668,9 +1674,9 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
     )
     offline_hybrid_encoder(monkeypatch, hybrid_builder)
 
-    hybrid_papers = hybrid_builder.collect_papers("seed")
+    hybrid_papers = hybrid_builder.collect_papers("focal")
 
-    assert set(hybrid_papers) == {"seed", "rec1"}
+    assert set(hybrid_papers) == {"focal", "rec1"}
     assert hybrid_builder.candidate_source_status == {
         "references": "unavailable",
         "citations": "unavailable",
@@ -1684,7 +1690,7 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
         CandidateAcquisitionError,
         match="references, citations, recommendations",
     ):
-        hybrid_builder.collect_papers("seed")
+        hybrid_builder.collect_papers("focal")
     assert hybrid_client.get_recommended_papers.call_count == 2
     assert hybrid_builder.candidate_source_status == {
         "references": "unavailable",
@@ -1699,7 +1705,7 @@ def test_hybrid_discovers_recommendations_before_reference_enrichment(
     """Citation enrichment must not preempt hybrid recommendation discovery."""
     events: list[str] = []
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
 
     def unavailable_references(*_args: object, **_kwargs: object) -> list[Paper]:
         events.append("discover references")
@@ -1730,32 +1736,32 @@ def test_hybrid_discovers_recommendations_before_reference_enrichment(
     )
     offline_hybrid_encoder(monkeypatch, builder)
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "rec1"}
+    assert set(papers) == {"focal", "rec1"}
     # A semantic-only recommendation gets no reference list for coupling.
     assert events == [
         "discover references",
         "discover citations",
         "discover recommendations",
-        "enrich seed",
+        "enrich focal",
     ]
 
 
-def test_hybrid_corpus_defers_optional_seed_enrichment(
+def test_hybrid_corpus_defers_optional_focal_enrichment(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Corpus seed enrichment must follow citation and corpus acquisition."""
+    """Corpus focal paper enrichment must follow citation and corpus acquisition."""
     events: list[str] = []
-    seed = Paper(
-        paper_id="local-seed",
-        title="Local seed",
+    focal = Paper(
+        paper_id="local-focal",
+        title="Local focal",
         year=2024,
         abstract="Local abstract",
         arxiv_id="2501.00001",
         is_local_corpus=True,
-        is_seed=True,
+        is_focal=True,
     )
     client = MagicMock()
     client.get_paper_references.side_effect = lambda *_args, **_kwargs: (
@@ -1773,30 +1779,30 @@ def test_hybrid_corpus_defers_optional_seed_enrichment(
         fetch_references=True,
         client=client,
     )
-    search = stub_hybrid_corpus(builder, seed=seed)
+    search = stub_hybrid_corpus(builder, focal=focal)
     search.side_effect = lambda *_args: (
         events.append("corpus discovery") or [_paper("semantic")]
     )
     offline_hybrid_encoder(monkeypatch, builder)
-    builder.embedding_builder.enrich_cached_corpus_seed = MagicMock(
-        side_effect=lambda _seed: events.append("provider seed enrichment")
+    builder.embedding_builder.enrich_cached_corpus_focal = MagicMock(
+        side_effect=lambda _focal: events.append("provider focal paper enrichment")
     )
     builder.reference_hydrator.hydrate = MagicMock(
-        side_effect=lambda _papers, _seed: events.append("reference enrichment")
+        side_effect=lambda _papers, _focal: events.append("reference enrichment")
     )
 
     with caplog.at_level(logging.INFO):
-        papers = builder.collect_papers(seed.paper_id)
+        papers = builder.collect_papers(focal.paper_id)
 
-    assert set(papers) == {seed.paper_id, "semantic"}
-    assert papers[seed.paper_id] is not seed
-    assert caplog.messages.count("Focal paper: Local seed (2024)") == 1
+    assert set(papers) == {focal.paper_id, "semantic"}
+    assert papers[focal.paper_id] is not focal
+    assert caplog.messages.count("Focal paper: Local focal (2024)") == 1
     assert events == [
         "reference discovery",
         "citation discovery",
         "corpus discovery",
         "corpus discovery",
-        "provider seed enrichment",
+        "provider focal paper enrichment",
         "reference enrichment",
     ]
     client.get_paper.assert_not_called()
@@ -1808,11 +1814,11 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
     """Reference hydration outages must not discard already discovered papers."""
     from citemesh.services import SemanticScholarUnavailableError
 
-    seed = _seed_paper()
+    focal = _focal_paper()
     citation_candidate = _paper("citation")
     semantic_candidate = _paper("semantic")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [citation_candidate]
     client.get_paper_citations.return_value = []
     client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
@@ -1826,14 +1832,14 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
     offline_hybrid_encoder(monkeypatch, builder)
 
     with caplog.at_level(logging.WARNING):
-        papers = builder.collect_papers(seed.paper_id)
+        papers = builder.collect_papers(focal.paper_id)
 
     assert set(papers) == {
-        seed.paper_id,
+        focal.paper_id,
         citation_candidate.paper_id,
         semantic_candidate.paper_id,
     }
-    client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
+    client.get_reference_ids.assert_called_once_with("focal", force_refresh=False)
     assert (
         "Reference hydration unavailable; continuing with available reference data."
         in caplog.text
@@ -1856,7 +1862,7 @@ def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
     ) -> list[Paper]:
         """Return as many fake search papers as the request permits.
 
-        :param str query: Search text expected from the synthetic seed.
+        :param str query: Search text expected from the synthetic focal paper.
         :param int limit: Requested provider result limit.
         :param bool raise_on_unavailable: Strict availability flag.
         :return list[Paper]: Prefix of the fake search result set.
@@ -1872,7 +1878,7 @@ def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
             paper_id="query:topic",
             title="topic",
             year=None,
-            is_seed=True,
+            is_focal=True,
         ),
         max_recommendations=1,
     )
@@ -1939,9 +1945,9 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     """
     from citemesh.services import SemanticScholarUnavailableError
 
-    seed = _seed_paper()
+    focal = _focal_paper()
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
     client.get_paper_citations.side_effect = SemanticScholarUnavailableError("offline")
     client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
@@ -1955,21 +1961,21 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     )
     assert builder.embedding_builder.dataset_source == "example/arxiv"
     assert builder.embedding_builder.corpus_size is None
-    search = stub_hybrid_corpus(builder, neighbours=[seed, _paper("semantic")])
+    search = stub_hybrid_corpus(builder, neighbours=[focal, _paper("semantic")])
     offline_hybrid_encoder(monkeypatch, builder)
 
     with caplog.at_level(logging.WARNING):
-        papers = builder.collect_papers("seed")
+        papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "semantic"}
+    assert set(papers) == {"focal", "semantic"}
     assert builder.candidate_source_status == {
         "references": "unavailable",
         "citations": "unavailable",
         "arxiv_corpus": "complete",
     }
     assert search.call_count == 2
-    client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
-    client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
+    client.get_paper.assert_called_once_with("focal", raise_on_unavailable=True)
+    client.get_reference_ids.assert_called_once_with("focal", force_refresh=False)
     client.get_recommended_papers.assert_not_called()
     assert (
         "Continuing with unavailable candidate sources: references, citations."
@@ -2005,9 +2011,9 @@ def test_citation_related_paper_reference_failure_remains_uncached() -> None:
 
 def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:
     """Citation collection should scope in-memory reference cache to one request."""
-    seed = _paper("seed", refs=["seed-ref"])
+    focal = _paper("focal", refs=["focal-ref"])
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = []
     client.get_paper_citations.return_value = []
 
@@ -2018,7 +2024,7 @@ def test_citation_collect_clears_in_memory_reference_cache_between_requests() ->
     )
     builder.reference_hydrator.reference_cache["stale"] = ["stale-ref"]
 
-    builder.collect_papers("seed")
+    builder.collect_papers("focal")
 
     assert builder.reference_hydrator.reference_cache == {}
 
@@ -2058,9 +2064,9 @@ def test_hybrid_collection_merges_and_tracks_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should merge citation+semantic papers and source labels."""
-    seed = _paper("seed")
+    focal = _paper("focal")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [_paper("c1")]
     client.get_paper_citations.return_value = []
     builder = HybridGraphBuilder(
@@ -2069,32 +2075,32 @@ def test_hybrid_collection_merges_and_tracks_sources(
     stub_hybrid_corpus(builder, neighbours=[_paper("c1"), _paper("s1"), _paper("s2")])
     offline_hybrid_encoder(monkeypatch, builder)
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "c1", "s1", "s2"}
+    assert set(papers) == {"focal", "c1", "s1", "s2"}
     assert builder.paper_sources == {
-        "seed": "citation",
+        "focal": "citation",
         "c1": "both",
         "s1": "semantic",
         "s2": "semantic",
     }
-    assert builder.seed_relations["seed"] == "seed"
-    assert builder.seed_relations["c1"] == "referenced_by_seed"
-    assert builder.seed_relations["s1"] == "semantic_only"
+    assert builder.focal_relations["focal"] == "focal"
+    assert builder.focal_relations["c1"] == "referenced_by_focal"
+    assert builder.focal_relations["s1"] == "semantic_only"
 
 
-@pytest.mark.parametrize("seed_id", ["content:local-paper", "arxiv_7"])
-def test_hybrid_candidates_mode_rejects_local_only_seed(seed_id: str) -> None:
+@pytest.mark.parametrize("focal_id", ["content:local-paper", "arxiv_7"])
+def test_hybrid_candidates_mode_rejects_local_only_focal(focal_id: str) -> None:
     """A corpus-free hybrid build must not send local IDs to the provider.
 
-    :param str seed_id: Current or legacy local-only corpus identifier.
+    :param str focal_id: Current or legacy local-only corpus identifier.
     :return None: Verifies actionable guidance before any provider request.
     """
     client = MagicMock()
     builder = HybridGraphBuilder(max_papers=2, client=client)
 
     with pytest.raises(ValueError, match="requires a corpus"):
-        builder.collect_papers(seed_id)
+        builder.collect_papers(focal_id)
 
     client.get_paper.assert_not_called()
 
@@ -2195,21 +2201,21 @@ def test_graph_nodes_mirror_all_paper_authors(
     """
     author_names = ["Alice", "Bob", "Carol", "Dana"]
     papers = {
-        "seed": Paper(
-            paper_id="seed",
-            title="Seed",
+        "focal": Paper(
+            paper_id="focal",
+            title="Focal",
             year=2024,
             authors=[Author(name=name) for name in author_names],
-            is_seed=True,
+            is_focal=True,
         )
     }
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    monkeypatch.setattr(builder, "collect_papers", lambda _seed_id, **_kwargs: papers)
+    monkeypatch.setattr(builder, "collect_papers", lambda _focal_id, **_kwargs: papers)
     monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
 
-    graph, _ = builder.build_graph("seed")
+    graph, _ = builder.build_graph("focal")
 
-    assert graph.nodes["seed"]["authors"] == author_names
+    assert graph.nodes["focal"]["authors"] == author_names
 
 
 @pytest.mark.parametrize(("query_scale", "candidate_scale"), [(1, 1), (10, 1), (1, 10)])
@@ -2219,7 +2225,7 @@ def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
     candidate_scale: int,
 ) -> None:
     """Candidate order must follow cosine direction rather than vector magnitude."""
-    seed = _seed_paper("seed")
+    focal = _focal_paper("focal")
     candidates = {
         "a-less-aligned": _paper("a-less-aligned"),
         "b-more-aligned": _paper("b-more-aligned"),
@@ -2230,7 +2236,7 @@ def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
         "b-more-aligned": np.asarray([0.8, 0.6], dtype=np.float32),
     }
     builder = EmbeddingGraphBuilder(semantic_source="candidates", client=MagicMock())
-    pool = DiscoveryPool(seed)
+    pool = DiscoveryPool(focal)
     for paper in candidates.values():
         pool.add(paper, source="recommendation", relation="semantic_only")
     monkeypatch.setattr(
@@ -2239,7 +2245,8 @@ def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
     )
     monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
     ranked = [
-        paper_id for paper_id, _, _ in builder._select_candidates_from_pool(query, seed)
+        paper_id
+        for paper_id, _, _ in builder._select_candidates_from_pool(query, focal)
     ]
 
     assert ranked == ["b-more-aligned", "a-less-aligned"]
@@ -2248,19 +2255,19 @@ def test_semantic_candidate_ranking_is_invariant_to_vector_scale(
 def test_hybrid_edges_use_graph_vectors_not_retrieval_vectors() -> None:
     """Hybrid pairwise topology must not read the retrieval space."""
     builder = HybridGraphBuilder(max_papers=2, client=MagicMock())
-    seed = _seed_paper("seed")
-    candidate = _paper("candidate", year=seed.year)
-    builder.paper_sources = {"seed": "semantic", "candidate": "semantic"}
+    focal = _focal_paper("focal")
+    candidate = _paper("candidate", year=focal.year)
+    builder.paper_sources = {"focal": "semantic", "candidate": "semantic"}
     builder.embedding_builder.retrieval_embeddings = {
-        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "focal": np.asarray([1.0, 0.0], dtype=np.float32),
         "candidate": np.asarray([1.0, 0.0], dtype=np.float32),
     }
     builder.embedding_builder.embeddings = {
-        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "focal": np.asarray([1.0, 0.0], dtype=np.float32),
         "candidate": np.asarray([0.0, 1.0], dtype=np.float32),
     }
 
-    assert builder.compute_similarity(seed, candidate) == 0.0
+    assert builder.compute_similarity(focal, candidate) == 0.0
 
 
 def test_embedding_strategy_ranks_recovered_references_by_retrieval_cosine(
@@ -2271,7 +2278,7 @@ def test_embedding_strategy_ranks_recovered_references_by_retrieval_cosine(
     :param pytest.MonkeyPatch monkeypatch: Replaces inference with fixed vectors.
     :return None: Checks retrieval cosine wins over order and citation count.
     """
-    seed = _seed_paper("seed")
+    focal = _focal_paper("focal")
     early = _paper("early")
     early.citation_count = 100
     relevant = _paper("relevant")
@@ -2287,10 +2294,10 @@ def test_embedding_strategy_ranks_recovered_references_by_retrieval_cosine(
         semantic_source="candidates",
         client=MagicMock(),
     )
-    builder.retrieval_embeddings[seed.paper_id] = query
+    builder.retrieval_embeddings[focal.paper_id] = query
     monkeypatch.setattr(builder, "embed_papers", MagicMock(return_value=embeddings))
     selected = builder._select_recovered_references_by_embedding(
-        seed, [early, relevant], 1
+        focal, [early, relevant], 1
     )
 
     assert selected == [relevant]
@@ -2305,10 +2312,10 @@ def test_embedding_candidate_pool_passes_retrieval_reference_selector(
         semantic_source="candidates",
         client=MagicMock(),
     )
-    seed = _seed_paper("seed")
+    focal = _focal_paper("focal")
     candidate = _paper("candidate")
-    pool = DiscoveryPool(seed)
-    pool.add(candidate, source="reference", relation="referenced_by_seed")
+    pool = DiscoveryPool(focal)
+    pool.add(candidate, source="reference", relation="referenced_by_focal")
     fetch = MagicMock(return_value=pool)
     monkeypatch.setattr(
         "citemesh.strategies.embedding.builder.fetch_candidate_pool", fetch
@@ -2321,7 +2328,9 @@ def test_embedding_candidate_pool_passes_retrieval_reference_selector(
         ),
     )
 
-    builder._select_candidates_from_pool(np.asarray([1.0, 0.0], dtype=np.float32), seed)
+    builder._select_candidates_from_pool(
+        np.asarray([1.0, 0.0], dtype=np.float32), focal
+    )
 
     assert (
         fetch.call_args.kwargs["reference_selector"]
@@ -2341,7 +2350,7 @@ def test_hybrid_graph_preparation_fails_closed_on_sts_inference() -> None:
         match="Hybrid graph-similarity embedding failed.*simulated MPS STS failure",
     ):
         builder.prepare_graph_scoring(
-            {"seed": _seed_paper("seed"), "peer": _paper("peer")}
+            {"focal": _focal_paper("focal"), "peer": _paper("peer")}
         )
 
 
@@ -2351,7 +2360,7 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
 ) -> None:
     """Hybrid collection should fail when semantic enrichment cannot complete."""
     client = MagicMock()
-    client.get_paper.return_value = _paper("seed")
+    client.get_paper.return_value = _paper("focal")
     client.get_paper_references.return_value = [_paper("c1")]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = [_paper("rec")]
@@ -2367,7 +2376,7 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
     with pytest.raises(
         RuntimeError, match="Semantic enrichment failed: semantic backend unavailable"
     ):
-        builder.collect_papers("seed")
+        builder.collect_papers("focal")
 
 
 def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
@@ -2375,7 +2384,7 @@ def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
     from citemesh.services import SemanticScholarUnavailableError
 
     client = MagicMock()
-    client.get_paper.side_effect = SemanticScholarUnavailableError("seed outage")
+    client.get_paper.side_effect = SemanticScholarUnavailableError("focal outage")
     builder = HybridGraphBuilder(
         max_papers=5,
         semantic_source="arxiv-corpus",
@@ -2383,14 +2392,14 @@ def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
     )
     stub_hybrid_corpus(builder)
 
-    with pytest.raises(SemanticScholarUnavailableError, match="seed outage"):
-        builder.collect_papers("seed")
+    with pytest.raises(SemanticScholarUnavailableError, match="focal outage"):
+        builder.collect_papers("focal")
 
 
 def _single_reference_client() -> MagicMock:
-    """Return a client whose seed cites one paper and has no other relations."""
+    """Return a client whose focal cites one paper and has no other relations."""
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper("seed")
+    client.get_paper.return_value = _focal_paper("focal")
     client.get_paper_references.return_value = [_paper("c1")]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = []
@@ -2398,21 +2407,21 @@ def _single_reference_client() -> MagicMock:
     return client
 
 
-def test_hybrid_collection_fails_when_seed_embedding_unavailable(
+def test_hybrid_collection_fails_when_focal_embedding_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hybrid ranking should surface a seed embedding failure."""
+    """Hybrid ranking should surface a focal paper embedding failure."""
     builder = HybridGraphBuilder(max_papers=4, client=_single_reference_client())
     monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
     builder.embedding_builder._encode_texts = MagicMock(
-        side_effect=RuntimeError("temporary seed encode failure")
+        side_effect=RuntimeError("temporary focal encode failure")
     )
 
     with pytest.raises(
         EmbeddingInferenceError,
-        match="Hybrid focal embedding failed: RuntimeError: temporary seed encode",
+        match="Hybrid focal paper embedding failed: RuntimeError: temporary focal encode",
     ):
-        builder.collect_papers("seed")
+        builder.collect_papers("focal")
 
 
 @pytest.mark.parametrize(
@@ -2431,17 +2440,17 @@ def test_hybrid_ranking_rejects_invalid_candidate_embeddings(
     """Hybrid ranking should reject unusable vectors instead of substituting zero."""
     builder = HybridGraphBuilder(max_papers=4, client=_single_reference_client())
     monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
-    seed_vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    focal_vector = np.asarray([1.0, 0.0], dtype=np.float32)
     builder.embedding_builder._encode_texts = MagicMock(
-        return_value=seed_vector[np.newaxis, :]
+        return_value=focal_vector[np.newaxis, :]
     )
-    # The seed document, then the one candidate.
+    # The focal paper document, then the one candidate.
     builder.embedding_builder.document_vectors = MagicMock(
-        side_effect=[{"seed": seed_vector}, {"c1": candidate_vector}]
+        side_effect=[{"focal": focal_vector}, {"c1": candidate_vector}]
     )
 
     with pytest.raises(EmbeddingInferenceError, match=message):
-        builder.collect_papers("seed")
+        builder.collect_papers("focal")
 
 
 def test_hybrid_candidates_mode_rebuild_encodes_no_candidate_again(
@@ -2456,17 +2465,17 @@ def test_hybrid_candidates_mode_rebuild_encodes_no_candidate_again(
             max_papers=4, semantic_source="candidates", client=client
         )
         texts = offline_hybrid_encoder(monkeypatch, builder)
-        papers = builder.collect_papers("seed")
+        papers = builder.collect_papers("focal")
         encoded.append(list(texts))
 
     assert {"c1", "rec"} <= set(papers)
-    # Seed query, seed document and both candidates; then the seed query only.
+    # Focal query, focal paper document and both candidates; then the focal paper query only.
     assert [len(texts) for texts in encoded] == [4, 1]
     assert encoded[1] == encoded[0][:1]
-    # Cached document vectors leave the seed's query-role slot alone.
+    # Cached document vectors leave the focal paper's query-role slot alone.
     retrieval = builder.embedding_builder.retrieval_embeddings
-    assert list(retrieval) == ["seed"]
-    assert np.allclose(retrieval["seed"], word_hash_vectors(encoded[1])[0])
+    assert list(retrieval) == ["focal"]
+    assert np.allclose(retrieval["focal"], word_hash_vectors(encoded[1])[0])
 
 
 @pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
@@ -2485,24 +2494,24 @@ def test_hybrid_corpus_modes_encode_provider_rows_in_memory(
         side_effect=AssertionError("provider rows must not enter the corpus cache")
     )
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
     assert "c1" in papers
     builder.embedding_builder.document_vectors.assert_not_called()
-    # Seed query and seed document, then every candidate once.
+    # Focal query and focal paper document, then every candidate once.
     assert len(texts) == 2 + len(builder.discovery_ranking)
 
 
 def test_hybrid_thresholds_and_fetch_limits() -> None:
-    """Hybrid should enforce seed/non-seed thresholds and default provider limits."""
+    """Hybrid enforces thresholds for focal paper edges and other edges, plus limits."""
     builder = HybridGraphBuilder(max_papers=3, client=MagicMock())
-    seed = _paper("seed")
-    seed.is_seed = True
+    focal = _paper("focal")
+    focal.is_focal = True
     other = _paper("other")
     peer = _paper("peer")
 
-    assert not builder.should_create_edge(seed, other, 0.2)
-    assert builder.should_create_edge(seed, other, 0.41)
+    assert not builder.should_create_edge(focal, other, 0.2)
+    assert builder.should_create_edge(focal, other, 0.41)
     assert not builder.should_create_edge(other, peer, 0.5)
     assert builder.should_create_edge(other, peer, 0.51)
 
@@ -2527,16 +2536,16 @@ def test_hybrid_propagates_refresh_reference_cache_to_reference_hydration() -> N
     assert builder.reference_hydrator.refresh_reference_cache is True
 
 
-def test_hybrid_collection_dedupes_semantic_seed_aliases(
+def test_hybrid_collection_dedupes_semantic_focal_aliases(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Hybrid should collapse and report a corpus alias of the citation seed.
+    """Hybrid should collapse and report a corpus alias of the citation focal.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture replacing collection internals.
     :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
     """
-    seed = Paper(
+    focal = Paper(
         paper_id="ca997f1a733e53ad0fa29041246ff655243e8c1b",
         title="Polynomial Composition Activations: Unleashing the Dynamics of Large Language Models",
         year=2024,
@@ -2546,38 +2555,38 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
         ),
         authors=[Author(name="Zhijian Zhou"), Author(name="Ya Wang")],
         arxiv_id="2411.03884",
-        is_seed=True,
+        is_focal=True,
     )
-    semantic_seed_alias = Paper(
+    semantic_focal_alias = Paper(
         paper_id="arXiv:2411.03884v2",
         title=(
             "Polynomial Composition Activations: Unleashing the Dynamics of Large\n"
             "  Language Models"
         ),
         year=2025,
-        abstract=seed.abstract,
+        abstract=focal.abstract,
         authors=[Author(name="Zhijian Zhou"), Author(name="Yitao Zeng")],
         is_local_corpus=True,
     )
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [_paper("c1")]
     client.get_paper_citations.return_value = []
     builder = HybridGraphBuilder(
         max_papers=5, semantic_source="arxiv-corpus", client=client
     )
-    stub_hybrid_corpus(builder, neighbours=[semantic_seed_alias, _paper("s1")])
+    stub_hybrid_corpus(builder, neighbours=[semantic_focal_alias, _paper("s1")])
     offline_hybrid_encoder(monkeypatch, builder)
 
     with caplog.at_level(logging.DEBUG, logger="citemesh.strategies.candidates"):
         papers = builder.collect_papers("arXiv:2411.03884")
 
-    assert set(papers) == {seed.paper_id, "c1", "s1"}
+    assert set(papers) == {focal.paper_id, "c1", "s1"}
     assert "arXiv:2411.03884v2" not in papers
-    assert papers[seed.paper_id].year == 2024
-    assert builder.paper_sources[seed.paper_id] == "citation"
+    assert papers[focal.paper_id].year == 2024
+    assert builder.paper_sources[focal.paper_id] == "citation"
     assert (
-        f"Merged record {semantic_seed_alias.paper_id} into {seed.paper_id} "
+        f"Merged record {semantic_focal_alias.paper_id} into {focal.paper_id} "
         "via shared arxiv identifier"
     ) in caplog.messages
 
@@ -2589,27 +2598,30 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 0)
 
     builder = HybridGraphBuilder(max_papers=3, client=MagicMock())
-    builder.paper_sources = {"seed": "citation", "a": "semantic"}
-    builder.seed_relations = {
-        "seed": "seed",
+    builder.paper_sources = {"focal": "citation", "a": "semantic"}
+    builder.focal_relations = {
+        "focal": "focal",
         "a": "semantic_only",
         "pruned": "citation",
     }
     graph = nx.Graph()
-    graph.add_node("seed", is_seed=True)
-    graph.add_node("a", is_seed=False)
+    graph.add_node("focal", is_focal=True)
+    graph.add_node("a", is_focal=False)
     monkeypatch.setattr(
         hybrid_strategy.GraphBuilderStrategy,
         "build_graph",
-        lambda self, seed_id, **kwargs: (graph, "seed"),
+        lambda self, focal_id, **kwargs: (graph, "focal"),
     )
 
-    out_graph, out_seed = builder.build_graph("seed")
+    out_graph, out_focal = builder.build_graph("focal")
     assert out_graph is graph
-    assert out_seed == "seed"
+    assert out_focal == "focal"
     assert out_graph.graph["strategy"] == "hybrid"
-    assert out_graph.graph["paper_sources"] == {"a": "semantic", "seed": "citation"}
-    assert out_graph.graph["seed_relations"] == {"a": "semantic_only", "seed": "seed"}
+    assert out_graph.graph["paper_sources"] == {"a": "semantic", "focal": "citation"}
+    assert out_graph.graph["focal_relations"] == {
+        "a": "semantic_only",
+        "focal": "focal",
+    }
 
 
 def test_hybrid_build_graph_logs_post_cap_edge_count(
@@ -2620,24 +2632,24 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
 
     builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
     graph = nx.Graph()
-    graph.add_node("seed", is_seed=True)
+    graph.add_node("focal", is_focal=True)
     graph.add_nodes_from(["a", "b", "c"])
-    graph.add_edge("seed", "a", weight=0.9)
-    graph.add_edge("seed", "b", weight=0.8)
-    graph.add_edge("seed", "c", weight=0.7)
+    graph.add_edge("focal", "a", weight=0.9)
+    graph.add_edge("focal", "b", weight=0.8)
+    graph.add_edge("focal", "c", weight=0.7)
     graph.add_edge("a", "b", weight=0.95)
     graph.add_edge("a", "c", weight=0.85)
     graph.add_edge("b", "c", weight=0.75)
     monkeypatch.setattr(
         hybrid_strategy.GraphBuilderStrategy,
         "build_graph",
-        lambda self, seed_id, **kwargs: (graph, "seed"),
+        lambda self, focal_id, **kwargs: (graph, "focal"),
     )
 
     with caplog.at_level(logging.DEBUG):
-        out_graph, out_seed = builder.build_graph("seed")
+        out_graph, out_focal = builder.build_graph("focal")
 
-    assert out_seed == "seed"
+    assert out_focal == "focal"
     assert out_graph.number_of_edges() < graph.number_of_edges()
     assert any(
         f"Hybrid edge cap applied: {graph.number_of_edges()} -> {out_graph.number_of_edges()} edges"
@@ -2650,27 +2662,27 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
     "strategy",
     ["recommendation", "citation", "embedding", "hybrid"],
 )
-def test_max_papers_is_total_node_cap_including_seed(
+def test_max_papers_is_total_node_cap_including_focal(
     monkeypatch: pytest.MonkeyPatch,
     strategy: str,
 ) -> None:
-    """All strategies should include seed within ``max_papers`` total cap."""
+    """All strategies should include focal within ``max_papers`` total cap."""
     if strategy == "recommendation":
         client = MagicMock()
-        client.get_paper.return_value = _seed_paper()
+        client.get_paper.return_value = _focal_paper()
         client.get_recommended_papers.return_value = [
             _paper(f"r{i}") for i in range(1, 6)
         ]
         papers = RecommendationGraphBuilder(max_papers=3, client=client).collect_papers(
-            "seed"
+            "focal"
         )
         assert len(papers) == 3
-        assert "seed" in papers
+        assert "focal" in papers
         return
 
     if strategy == "citation":
         client = MagicMock()
-        client.get_paper.return_value = _seed_paper()
+        client.get_paper.return_value = _focal_paper()
         client.get_paper_references.return_value = [
             _paper(f"r{i}") for i in range(1, 6)
         ]
@@ -2680,9 +2692,9 @@ def test_max_papers_is_total_node_cap_including_seed(
             max_citations=10,
             max_references=10,
             client=client,
-        ).collect_papers("seed")
+        ).collect_papers("focal")
         assert len(papers) == 4
-        assert "seed" in papers
+        assert "focal" in papers
         return
 
     if strategy == "embedding":
@@ -2694,13 +2706,13 @@ def test_max_papers_is_total_node_cap_including_seed(
             semantic_source="arxiv-corpus",
             client=MagicMock(),
         )
-        builder.client.get_paper.return_value = _seed_paper()
+        builder.client.get_paper.return_value = _focal_paper()
         builder._load_model = lambda: None
         builder._resolve_model_fingerprint = lambda: "test-fingerprint"
         builder._prepare_corpus_for_build = lambda: None
         builder._enrich_corpus_papers = lambda _: None
         builder._select_candidates = (
-            lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
+            lambda _focal_embedding, *, use_streaming, corpus_prepared=False: [
                 (
                     "c1",
                     {
@@ -2736,13 +2748,13 @@ def test_max_papers_is_total_node_cap_including_seed(
         builder._encode_texts = lambda texts, **kwargs: np.array(
             [[1.0, 0.0] for _ in texts], dtype=np.float32
         )
-        papers = builder.collect_papers("seed")
+        papers = builder.collect_papers("focal")
         assert len(papers) == 3
-        assert "seed" in papers
+        assert "focal" in papers
         return
 
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
     client.get_paper_references.return_value = [_paper("c1"), _paper("c2")]
     client.get_paper_citations.return_value = [_paper("c3")]
     hybrid = HybridGraphBuilder(
@@ -2750,9 +2762,9 @@ def test_max_papers_is_total_node_cap_including_seed(
     )
     stub_hybrid_corpus(hybrid, neighbours=[_paper("s1"), _paper("s2")])
     offline_hybrid_encoder(monkeypatch, hybrid)
-    papers = hybrid.collect_papers("seed")
+    papers = hybrid.collect_papers("focal")
     assert len(papers) == 4
-    assert "seed" in papers
+    assert "focal" in papers
     assert len(hybrid.discovery_ranking) == 5
 
 
@@ -2766,21 +2778,21 @@ def test_max_papers_is_total_node_cap_including_seed(
     ],
 )
 @pytest.mark.parametrize("eligible_neighbors", [0, 1, 2, 8])
-def test_strategy_caps_reserve_existing_seed_neighbors(
+def test_strategy_caps_reserve_existing_focal_neighbors(
     builder_type: type[GraphBuilderStrategy],
     eligible_neighbors: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stronger candidate clusters must not consume the seed's available edges.
+    """Stronger candidate clusters must not consume the focal paper's available edges.
 
     :param type[GraphBuilderStrategy] builder_type: Capped strategy constructor.
-    :param int eligible_neighbors: Seed neighbors meeting the edge threshold.
+    :param int eligible_neighbors: Focal neighbors meeting the edge threshold.
     :param pytest.MonkeyPatch monkeypatch: Controlled collection and similarity scores.
-    :return None: Asserts the seed retains its strongest existing edges within every cap.
+    :return None: Asserts the focal paper retains its strongest existing edges within every cap.
     """
-    papers = {"seed": _seed_paper(), **{f"p{i}": _paper(f"p{i}") for i in range(8)}}
+    papers = {"focal": _focal_paper(), **{f"p{i}": _paper(f"p{i}") for i in range(8)}}
     builder = builder_type(max_papers=9, client=MagicMock())
-    monkeypatch.setattr(builder, "collect_papers", lambda _seed: papers)
+    monkeypatch.setattr(builder, "collect_papers", lambda _focal: papers)
     monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
     if isinstance(builder, EmbeddingGraphBuilder):
         cap = builder.top_k
@@ -2791,30 +2803,30 @@ def test_strategy_caps_reserve_existing_seed_neighbors(
     base_score = 0.60 if isinstance(builder, HybridGraphBuilder) else 0.30
 
     def score(left: Paper, right: Paper) -> float:
-        """Score the candidate cluster above all eligible seed edges.
+        """Score the candidate cluster above all eligible focal edges.
 
         :param Paper left: First paper.
         :param Paper right: Second paper.
-        :return float: Eligible edge weight or zero for an unsupported seed pair.
+        :return float: Eligible edge weight or zero for an unsupported focal pair.
         """
-        if left.is_seed or right.is_seed:
-            neighbor = right if left.is_seed else left
+        if left.is_focal or right.is_focal:
+            neighbor = right if left.is_focal else left
             index = int(neighbor.paper_id[1:])
             return base_score + index * 0.001 if index < eligible_neighbors else 0.0
         return base_score + 0.05
 
     monkeypatch.setattr(builder, "compute_similarity", score)
-    graph, seed_id = builder.build_graph("seed")
+    graph, focal_id = builder.build_graph("focal")
 
-    expected_seed_neighbors = {
+    expected_focal_neighbors = {
         f"p{i}" for i in range(max(0, eligible_neighbors - cap), eligible_neighbors)
     }
-    assert set(graph.neighbors(seed_id)) == expected_seed_neighbors
-    assert graph.degree(seed_id) == min(cap, eligible_neighbors)
+    assert set(graph.neighbors(focal_id)) == expected_focal_neighbors
+    assert graph.degree(focal_id) == min(cap, eligible_neighbors)
     assert all(degree <= cap for _, degree in graph.degree())
     assert all(score(papers[left], papers[right]) > 0 for left, right in graph.edges())
     papers = dict(reversed(list(papers.items())))
-    reordered, _ = builder.build_graph("seed")
+    reordered, _ = builder.build_graph("focal")
     assert {frozenset(edge) for edge in graph.edges()} == {
         frozenset(edge) for edge in reordered.edges()
     }
@@ -2828,38 +2840,38 @@ def test_strategy_caps_reserve_existing_seed_neighbors(
         (set(), {"o0", "o1", "o2"}),
     ],
 )
-def test_capped_selection_alternates_seed_slots_with_direct_links(
+def test_capped_selection_alternates_focal_slots_with_direct_links(
     direct: set[str], expected: set[str]
 ) -> None:
-    """Weaker direct links share the seed's slots instead of losing all of them."""
-    edges = [("seed", f"o{i}", {"weight": 0.9 - i / 100}) for i in range(4)]
-    edges += [("seed", f"d{i}", {"weight": 0.5 - i / 100}) for i in range(4)]
+    """Weaker direct links share the focal paper's slots instead of losing all of them."""
+    edges = [("focal", f"o{i}", {"weight": 0.9 - i / 100}) for i in range(4)]
+    edges += [("focal", f"d{i}", {"weight": 0.5 - i / 100}) for i in range(4)]
 
     selected = select_capped_undirected_edges(
-        edges, 3, seed_id="seed", priority_seed_neighbors=direct
+        edges, 3, focal_id="focal", priority_focal_neighbors=direct
     )
 
-    assert {u if v == "seed" else v for u, v, _ in selected} == expected
+    assert {u if v == "focal" else v for u, v, _ in selected} == expected
 
 
-@pytest.mark.parametrize("relation", ["referenced_by_seed", "cites_seed", "overlap"])
-def test_hybrid_seed_citation_pairs_face_the_seed_edge_thresholds(
+@pytest.mark.parametrize("relation", ["referenced_by_focal", "cites_focal", "overlap"])
+def test_hybrid_focal_citation_pairs_face_the_focal_edge_thresholds(
     relation: str,
 ) -> None:
-    """A seed's own reference or citer earns an edge only by similarity, like any pair."""
+    """A focal paper's own reference or citer earns an edge only by similarity, like any pair."""
     builder = HybridGraphBuilder(client=MagicMock())
-    seed = Paper(paper_id="seed", title="Algebra", abstract="Rings", year=2024)
-    seed.is_seed = True
+    focal = Paper(paper_id="focal", title="Algebra", abstract="Rings", year=2024)
+    focal.is_focal = True
     cited = Paper(paper_id="cited", title="Biology", abstract="Coral", year=2024)
     builder.embedding_builder.embeddings = {
-        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "focal": np.asarray([1.0, 0.0], dtype=np.float32),
         "cited": np.asarray([0.0, 1.0], dtype=np.float32),
     }
-    builder.seed_relations = {"seed": "seed", "cited": relation}
+    builder.focal_relations = {"focal": "focal", "cited": relation}
 
-    assert builder.compute_similarity(seed, cited) == 0.0
-    assert not builder.should_create_edge(seed, cited, 0.3)
-    assert not builder.should_create_edge(cited, seed, 0.3)
+    assert builder.compute_similarity(focal, cited) == 0.0
+    assert not builder.should_create_edge(focal, cited, 0.3)
+    assert not builder.should_create_edge(cited, focal, 0.3)
 
 
 def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
@@ -2875,9 +2887,9 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     from citemesh.services import SemanticScholarRequestError
 
     client = MagicMock()
-    seed = _seed_paper()
-    seed.citation_count = 7
-    client.get_paper.return_value = seed
+    focal = _focal_paper()
+    focal.citation_count = 7
+    client.get_paper.return_value = focal
     client.get_papers.side_effect = SemanticScholarRequestError("HTTP 403")
     builder = EmbeddingGraphBuilder(
         max_papers=2, semantic_source="arxiv-corpus", client=client
@@ -2905,17 +2917,17 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
         ],
     )
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "arxiv:2501.00001"}
-    assert papers["seed"].citation_count == 7
+    assert set(papers) == {"focal", "arxiv:2501.00001"}
+    assert papers["focal"].citation_count == 7
     assert papers["arxiv:2501.00001"].citation_count == 0
     assert set(builder.retrieval_embeddings) == set(papers)
     assert "Corpus metadata enrichment was rejected" in caplog.text
     assert "HTTP 403" in caplog.text
     client.get_papers.assert_called_once_with(["arxiv:2501.00001"])
     client.get_cached_papers.assert_not_called()
-    client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
+    client.get_paper.assert_called_once_with("focal", raise_on_unavailable=True)
     client.get_papers.side_effect = ValueError("invalid local payload")
     with pytest.raises(ValueError, match="invalid local payload"):
         builder._enrich_corpus_papers(papers)
@@ -2951,7 +2963,7 @@ def test_degree_capping_preserves_per_node_limit(
     builder, max_edges_per_node = _make_constant_similarity_builder(
         builder_factory, monkeypatch
     )
-    graph, _ = builder.build_graph("seed")
+    graph, _ = builder.build_graph("focal")
 
     node_ids = sorted(graph.nodes())
     complete_graph_edges = [
@@ -2964,7 +2976,7 @@ def test_degree_capping_preserves_per_node_limit(
         for u, v, _ in select_capped_undirected_edges(
             complete_graph_edges,
             max_edges_per_node,
-            seed_id="seed",
+            focal_id="focal",
         )
     }
 
@@ -2998,7 +3010,7 @@ def test_capped_strategies_log_final_edge_count(
     builder, _ = _make_constant_similarity_builder(builder_factory, monkeypatch)
 
     with caplog.at_level(logging.DEBUG):
-        graph, _ = builder.build_graph("seed")
+        graph, _ = builder.build_graph("focal")
 
     assert "Graph constructed: 5 nodes, 10 edges" in caplog.text
     assert f"Graph complete: 5 nodes, {graph.number_of_edges()} edges" in caplog.text
@@ -3109,8 +3121,8 @@ def test_bibliographic_coupling_delegates_to_paper(
 
 def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
     """The candidate pool should merge repeated Semantic Scholar paper IDs."""
-    seed = _seed_paper()
-    pool = DiscoveryPool(seed)
+    focal = _focal_paper()
+    pool = DiscoveryPool(focal)
     first = Paper(
         paper_id="b" * 40,
         title="Same Paper",
@@ -3126,7 +3138,7 @@ def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
         abstract="",
         citation_count=0,
     )
-    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(first, source="reference", relation="referenced_by_focal")
     pool.add(duplicate, source="recommendation", relation="semantic_only")
 
     exact_duplicate = Paper(
@@ -3135,7 +3147,7 @@ def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
         year=2022,
         abstract="alternate payload",
     )
-    pool.add(exact_duplicate, source="citation", relation="cites_seed")
+    pool.add(exact_duplicate, source="citation", relation="cites_focal")
 
     assert list(pool.papers) == [first.paper_id]
     assert pool.sources[first.paper_id] == {
@@ -3143,15 +3155,15 @@ def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
         "recommendation",
         "citation",
     }
-    assert pool.seed_relations[first.paper_id] == "overlap"
+    assert pool.focal_relations[first.paper_id] == "overlap"
 
-    seed_duplicate = Paper(
-        paper_id=seed.paper_id,
-        title=seed.title,
-        year=seed.year,
-        abstract="richer seed abstract",
+    focal_duplicate = Paper(
+        paper_id=focal.paper_id,
+        title=focal.title,
+        year=focal.year,
+        abstract="richer focal abstract",
     )
-    pool.add(seed_duplicate, source="citation", relation="cites_seed")
+    pool.add(focal_duplicate, source="citation", relation="cites_focal")
     assert set(pool.papers) == {first.paper_id}
 
 
@@ -3162,17 +3174,17 @@ def test_candidate_pool_merges_s2_ids_with_shared_external_ids(
 
     :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
     """
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     first = Paper(paper_id="1" * 40, title="Same", year=2025, doi="10.1000/shared")
     second = Paper(paper_id="2" * 40, title="Same", year=2025, doi="10.1000/shared")
 
-    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(first, source="reference", relation="referenced_by_focal")
     with caplog.at_level(logging.DEBUG, logger="citemesh.strategies.candidates"):
-        pool.add(second, source="citation", relation="cites_seed")
+        pool.add(second, source="citation", relation="cites_focal")
 
     assert set(pool.papers) == {first.paper_id}
     assert pool.sources[first.paper_id] == {"reference", "citation"}
-    assert pool.seed_relations[first.paper_id] == "overlap"
+    assert pool.focal_relations[first.paper_id] == "overlap"
     assert (
         f"Merged record {second.paper_id} into {first.paper_id} "
         "via shared doi identifier"
@@ -3186,7 +3198,7 @@ def test_candidate_pool_merges_legacy_arxiv_case_variants(primary_id: str) -> No
     :param str primary_id: Opaque S2 ID or an arXiv primary with mixed field casing.
     :return None: Verifies normalized identity and merged relation metadata.
     """
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     first = Paper(
         paper_id=primary_id,
         title="Same work",
@@ -3200,12 +3212,12 @@ def test_candidate_pool_merges_legacy_arxiv_case_variants(primary_id: str) -> No
         arxiv_id="HEP-TH/9901001v2",
     )
 
-    pool.add(first, source="reference", relation="referenced_by_seed")
-    pool.add(second, source="citation", relation="cites_seed")
+    pool.add(first, source="reference", relation="referenced_by_focal")
+    pool.add(second, source="citation", relation="cites_focal")
 
     assert list(pool.papers) == [primary_id]
     assert pool.sources[primary_id] == {"reference", "citation"}
-    assert pool.seed_relations[primary_id] == "overlap"
+    assert pool.focal_relations[primary_id] == "overlap"
 
 
 @pytest.mark.parametrize("opaque_case_distinction", [False, True])
@@ -3234,17 +3246,17 @@ def test_identity_reconciliation_rejects_conflicting_strong_ids(
         abstract="Shared abstract",
         doi="" if opaque_case_distinction else "10.1000/second",
     )
-    seed = Paper(
+    focal = Paper(
         paper_id="3" * 40,
         title="Shared Scientific Title",
         year=2024,
         authors=authors,
         abstract="Shared abstract",
-        is_seed=True,
+        is_focal=True,
     )
-    pool = DiscoveryPool(seed)
+    pool = DiscoveryPool(focal)
 
-    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(first, source="reference", relation="referenced_by_focal")
     pool.add(second, source="recommendation", relation="semantic_only")
 
     assert set(pool.papers) == {first.paper_id, second.paper_id}
@@ -3254,13 +3266,13 @@ def test_identity_reconciliation_rejects_conflicting_strong_ids(
     pool.add(
         Paper(
             paper_id="4" * 40,
-            title=seed.title,
-            year=seed.year,
+            title=focal.title,
+            year=focal.year,
             authors=authors,
-            abstract=seed.abstract,
+            abstract=focal.abstract,
         ),
         source="citation",
-        relation="cites_seed",
+        relation="cites_focal",
     )
     assert "4" * 40 in pool.papers
 
@@ -3269,7 +3281,7 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
     """Same-primary refreshes must not assign a contradictory DOI to that class."""
     primary_a = "a" * 40
     primary_b = "b" * 40
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     canonical = Paper(
         paper_id=primary_a,
         title="Canonical",
@@ -3289,8 +3301,8 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
         doi="10.1000/b",
     )
 
-    pool.add(canonical, source="reference", relation="referenced_by_seed")
-    pool.add(conflicting_refresh, source="citation", relation="cites_seed")
+    pool.add(canonical, source="reference", relation="referenced_by_focal")
+    pool.add(conflicting_refresh, source="citation", relation="cites_focal")
     pool.add(actual_doi_owner, source="recommendation", relation="semantic_only")
 
     assert set(pool.papers) == {primary_a, primary_b}
@@ -3300,7 +3312,7 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
 def test_identity_shared_external_identifier_merges_compatible_records() -> None:
     """An agreed DOI merges compatible records without touching other classes."""
     authors = [Author(name="Grace Hopper")]
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     left = Paper(
         paper_id="c" * 40,
         title="Shared",
@@ -3323,8 +3335,8 @@ def test_identity_shared_external_identifier_merges_compatible_records() -> None
         doi="10.1000/right",
     )
 
-    pool.add(left, source="reference", relation="referenced_by_seed")
-    pool.add(middle, source="citation", relation="cites_seed")
+    pool.add(left, source="reference", relation="referenced_by_focal")
+    pool.add(middle, source="citation", relation="cites_focal")
     pool.add(right, source="recommendation", relation="semantic_only")
 
     assert set(pool.papers) == {left.paper_id, middle.paper_id}
@@ -3354,7 +3366,7 @@ def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
     publication_in_primary: bool,
 ) -> None:
     """A compatible publication DOI remains available for later conflict checks."""
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     preprint = _paper("1" * 40)
     preprint.doi = "https://doi.org/10.48550/arXiv.2310.03262V2"
     publication_doi = "10.1000/published"
@@ -3365,12 +3377,12 @@ def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
     conflicting.arxiv_id = "2310.03262"
     conflicting.doi = "10.1000/other-publication"
 
-    pool.add(preprint, source="reference", relation="referenced_by_seed")
+    pool.add(preprint, source="reference", relation="referenced_by_focal")
     pool.add(published, source="recommendation", relation="semantic_only")
     assert preprint.arxiv_id == "2310.03262"
     assert preprint.doi == publication_doi
     assert candidate_identifiers_conflict(preprint, conflicting)
-    pool.add(conflicting, source="citation", relation="cites_seed")
+    pool.add(conflicting, source="citation", relation="cites_focal")
 
     assert set(pool.papers) == {preprint.paper_id, conflicting.paper_id}
     assert pool.sources[preprint.paper_id] == {"reference", "recommendation"}
@@ -3378,7 +3390,7 @@ def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
 
 def test_identity_publication_merge_keeps_incoming_primary_arxiv_doi_alias() -> None:
     """A shared publication DOI can introduce a compatible arXiv identity."""
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     published = _paper("1" * 40)
     published.doi = "10.1000/published"
     cross_link = _paper("doi:10.48550/arXiv.2310.03262v2")
@@ -3386,7 +3398,7 @@ def test_identity_publication_merge_keeps_incoming_primary_arxiv_doi_alias() -> 
     arxiv_only = _paper("arxiv:2310.03262")
 
     for record in (published, cross_link, arxiv_only):
-        pool.add(record, source="reference", relation="referenced_by_seed")
+        pool.add(record, source="reference", relation="referenced_by_focal")
 
     assert set(pool.papers) == {published.paper_id}
     assert published.arxiv_id == "2310.03262"
@@ -3418,8 +3430,8 @@ def test_identity_arxiv_issued_doi_respects_conflicts_and_local_rows() -> None:
 def test_hybrid_merges_passuntil_doi_alias_and_retains_recommendation_rank() -> None:
     """DOI-only and arXiv-only provider records join the same local work."""
     builder = HybridGraphBuilder(max_papers=4, client=MagicMock())
-    seed = _seed_paper()
-    pool = DiscoveryPool(seed, builder.seed_relations)
+    focal = _focal_paper()
+    pool = DiscoveryPool(focal, builder.focal_relations)
     candidates, sources = pool.papers, pool.sources
     doi_only = _paper("45cbff3a7e803dd949628a91bedef52b28bd63c7")
     doi_only.title = "Unlock Predictable Scaling from Emergent Abilities"
@@ -3433,7 +3445,7 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_recommendation_rank() -> 
     local.is_local_corpus = True
     local.title = arxiv_only.title
 
-    pool.add(arxiv_only, source="citation", relation="cites_seed")
+    pool.add(arxiv_only, source="citation", relation="cites_focal")
     pool.add(local, source="semantic", relation="semantic_only")
     recommendations = CandidateSourceResult(
         "recommendations",
@@ -3444,14 +3456,14 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_recommendation_rank() -> 
 
     assert set(candidates) == {local.paper_id}
     assert sources[local.paper_id] == {"citation", "semantic"}
-    assert builder.seed_relations[local.paper_id] == "cites_seed"
+    assert builder.focal_relations[local.paper_id] == "cites_focal"
     # Both recommendation records name the corpus work; the first position counts.
     assert pool.recommendation_ranks == {local.paper_id: 1}
 
 
 def test_identity_historical_provider_alias_respects_conflicting_identifiers() -> None:
     """A changed provider payload cannot overwrite a reconciled corpus identity."""
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     candidates, sources = pool.papers, pool.sources
     cited = _paper("1" * 40)
     cited.arxiv_id = "2401.00001"
@@ -3462,7 +3474,7 @@ def test_identity_historical_provider_alias_respects_conflicting_identifiers() -
     refreshed.doi = "10.1000/another-paper"
 
     for paper, source, relation in (
-        (cited, "citation", "cites_seed"),
+        (cited, "citation", "cites_focal"),
         (local, "semantic", "semantic_only"),
         (refreshed, "semantic", "semantic_only"),
     ):
@@ -3473,7 +3485,7 @@ def test_identity_historical_provider_alias_respects_conflicting_identifiers() -
     assert not local.doi
     assert sources[local.paper_id] == {"citation", "semantic"}
     assert sources[refreshed.paper_id] == {"semantic"}
-    assert pool.seed_relations[local.paper_id] == "cites_seed"
+    assert pool.focal_relations[local.paper_id] == "cites_focal"
 
 
 @pytest.fixture
@@ -3488,9 +3500,9 @@ def test_hybrid_collection_preserves_reconciled_publication_reference(
 ) -> None:
     """A cited publication folds into its corpus preprint before ranking."""
     corpus, publication = unlinked_publication_pair
-    seed = _seed_paper()
+    focal = _focal_paper()
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [publication]
     client.get_paper_citations.return_value = []
     builder = HybridGraphBuilder(
@@ -3500,19 +3512,19 @@ def test_hybrid_collection_preserves_reconciled_publication_reference(
     offline_hybrid_encoder(monkeypatch, builder)
     builder.reference_hydrator.hydrate = MagicMock()
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
     # The version pair is one member before ranking.
     assert [item.paper_id for item in builder.discovery_ranking] == [corpus.paper_id]
-    assert list(papers) == [seed.paper_id, corpus.paper_id]
+    assert list(papers) == [focal.paper_id, corpus.paper_id]
     assert papers[corpus.paper_id].doi == publication.doi
-    assert builder.seed_relations[corpus.paper_id] == "referenced_by_seed"
+    assert builder.focal_relations[corpus.paper_id] == "referenced_by_focal"
     assert builder.paper_sources[corpus.paper_id] == "both"
 
 
 def test_candidate_pool_keeps_ambiguous_corpus_matches_separate() -> None:
     """An S2 paper must not collapse two matching local-corpus records."""
-    pool = DiscoveryPool(_seed_paper())
+    pool = DiscoveryPool(_focal_paper())
     candidates, sources = pool.papers, pool.sources
     corpus_first = _paper("local-first")
     corpus_first.is_local_corpus = True
@@ -3540,49 +3552,49 @@ def test_candidate_pool_keeps_ambiguous_corpus_matches_separate() -> None:
 
 def test_recommendation_collect_merges_external_primary_aliases() -> None:
     """Recommendation ingestion collapses external primary aliases into S2 records."""
-    seed = _seed_paper("s2-seed")
-    seed.arxiv_id = "2508.12345"
+    focal = _focal_paper("s2-focal")
+    focal.arxiv_id = "2508.12345"
     candidate = _paper("s2-candidate")
     candidate.arxiv_id = "2508.12346"
     candidate_alias = _paper("arxiv:2508.12346")
-    seed_alias = _paper("arxiv:2508.12345")
+    focal_alias = _paper("arxiv:2508.12345")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [
-        seed_alias,
+        focal_alias,
         candidate,
         candidate_alias,
     ]
 
     papers = RecommendationGraphBuilder(
         max_papers=4, fetch_references=False, client=client
-    ).collect_papers("s2-seed")
+    ).collect_papers("s2-focal")
 
-    assert set(papers) == {"s2-seed", "s2-candidate"}
-    assert papers["s2-seed"].is_seed is True
+    assert set(papers) == {"s2-focal", "s2-candidate"}
+    assert papers["s2-focal"].is_focal is True
 
 
-def test_recommendation_collect_merges_s2_seed_duplicate_by_external_id() -> None:
-    """A recommended S2 duplicate of the seed must not become a graph node."""
-    seed = _seed_paper("1" * 40)
-    seed.arxiv_id = "2508.12345"
+def test_recommendation_collect_merges_s2_focal_duplicate_by_external_id() -> None:
+    """A recommended S2 duplicate of the focal paper must not become a graph node."""
+    focal = _focal_paper("1" * 40)
+    focal.arxiv_id = "2508.12345"
     duplicate = _paper("2" * 40)
     duplicate.arxiv_id = "2508.12345"
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [duplicate]
 
     papers = RecommendationGraphBuilder(
         max_papers=3, fetch_references=False, client=client
-    ).collect_papers(seed.paper_id)
+    ).collect_papers(focal.paper_id)
 
-    assert set(papers) == {seed.paper_id}
-    assert papers[seed.paper_id].is_seed is True
+    assert set(papers) == {focal.paper_id}
+    assert papers[focal.paper_id].is_focal is True
 
 
 def test_recommendation_collect_merges_exact_primary_refresh() -> None:
     """A repeated primary ID may supplement its existing record."""
-    seed = _seed_paper()
+    focal = _focal_paper()
     arxiv_record, doi_record, _bridge = _identity_bridge_records()
     sparse_bridge = Paper(
         paper_id=arxiv_record.paper_id,
@@ -3593,7 +3605,7 @@ def test_recommendation_collect_merges_exact_primary_refresh() -> None:
         doi="10.1000/bridge",
     )
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [
         arxiv_record,
         doi_record,
@@ -3602,19 +3614,19 @@ def test_recommendation_collect_merges_exact_primary_refresh() -> None:
 
     papers = RecommendationGraphBuilder(
         max_papers=4, fetch_references=False, client=client
-    ).collect_papers("seed")
+    ).collect_papers("focal")
 
-    assert set(papers) == {"seed", arxiv_record.paper_id, doi_record.paper_id}
+    assert set(papers) == {"focal", arxiv_record.paper_id, doi_record.paper_id}
     assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
 
 
 def test_recommendation_collect_capacity_keeps_first_distinct_records() -> None:
     """Capacity applies after exact-primary deduplication."""
-    seed = _seed_paper()
+    focal = _focal_paper()
     arxiv_record, doi_record, bridge = _identity_bridge_records()
     unrelated = _paper("unrelated")
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [
         arxiv_record,
         doi_record,
@@ -3624,9 +3636,9 @@ def test_recommendation_collect_capacity_keeps_first_distinct_records() -> None:
 
     papers = RecommendationGraphBuilder(
         max_papers=3, fetch_references=False, client=client
-    ).collect_papers("seed")
+    ).collect_papers("focal")
 
-    assert set(papers) == {"seed", arxiv_record.paper_id, doi_record.paper_id}
+    assert set(papers) == {"focal", arxiv_record.paper_id, doi_record.paper_id}
 
 
 def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:
@@ -3638,7 +3650,7 @@ def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:
         title="Unknown",
         year=None,
         references=[" existing-ref ", "", "duplicate-ref"],
-        is_seed=False,
+        is_focal=False,
     )
     incoming = Paper(
         paper_id="alternate",
@@ -3652,7 +3664,7 @@ def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:
         doi="10.1000/example",
         categories=["cs.AI"],
         references=["duplicate-ref", "new-ref", "  ", "new-ref"],
-        is_seed=True,
+        is_focal=True,
     )
 
     merged = merge_paper_metadata(preferred, incoming)
@@ -3668,7 +3680,7 @@ def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:
     assert merged.doi == "10.1000/example"
     assert merged.categories == ["cs.AI"]
     assert merged.references == ["existing-ref", "duplicate-ref", "new-ref"]
-    assert merged.is_seed is True
+    assert merged.is_focal is True
 
     richer = Paper(
         paper_id="richer",
@@ -3760,24 +3772,24 @@ def test_embedding_candidate_budgets_include_every_source_when_possible(
         assert all(budget > 0 for budget in budgets)
 
 
-def test_citation_seed_relations_use_shared_precedence_rules() -> None:
-    """Citation relation updates should retain the shared seed-label semantics."""
+def test_citation_focal_relations_use_shared_precedence_rules() -> None:
+    """Citation relation updates should retain the shared focal-label semantics."""
     builder = CitationGraphBuilder(client=MagicMock())
-    builder.seed_relations = {"seed": "seed", "semantic": "semantic_only"}
+    builder.focal_relations = {"focal": "focal", "semantic": "semantic_only"}
 
-    builder._record_seed_relations(["seed", "semantic", "shared"], "cites_seed")
-    builder._record_seed_relations(["shared"], "referenced_by_seed")
+    builder._record_focal_relations(["focal", "semantic", "shared"], "cites_focal")
+    builder._record_focal_relations(["shared"], "referenced_by_focal")
 
-    assert builder.seed_relations == {
-        "seed": "seed",
-        "semantic": "cites_seed",
+    assert builder.focal_relations == {
+        "focal": "focal",
+        "semantic": "cites_focal",
         "shared": "overlap",
     }
 
 
 def test_recommendation_duplicates_merge_without_replacing_richer_record() -> None:
     """Recommendation duplicates should preserve the initial canonical object."""
-    seed = _seed_paper()
+    focal = _focal_paper()
     existing = Paper(
         paper_id="duplicate",
         title="Canonical Title",
@@ -3798,14 +3810,14 @@ def test_recommendation_duplicates_merge_without_replacing_richer_record() -> No
         references=["existing-ref", "incoming-ref"],
     )
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [existing, incoming]
 
     papers = RecommendationGraphBuilder(
         max_papers=3,
         fetch_references=False,
         client=client,
-    ).collect_papers("seed")
+    ).collect_papers("focal")
 
     assert papers["duplicate"] is existing
     assert existing.title == "Canonical Title"
@@ -3822,7 +3834,7 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
     from tests._helpers import SeededRandomEncodeModel
 
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
     client.get_paper_references.return_value = [_paper("r1"), _paper("r2")]
     client.get_paper_citations.return_value = [_paper("c1")]
     client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
@@ -3846,15 +3858,15 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
     )
     builder.model = SeededRandomEncodeModel(embedding_dim=4)
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert "seed" in papers
+    assert "focal" in papers
     assert len(papers) == 4
     assert client.get_recommended_papers.called
     client.get_papers.assert_not_called()
-    client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
-    non_seed = [paper_id for paper_id in papers if paper_id != "seed"]
-    for paper_id in non_seed:
+    client.get_paper.assert_called_once_with("focal", raise_on_unavailable=True)
+    non_focal = [paper_id for paper_id in papers if paper_id != "focal"]
+    for paper_id in non_focal:
         assert paper_id in builder.retrieval_embeddings
     assert builder.candidate_source_status == {
         "citations": "complete",
@@ -3875,8 +3887,8 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
         lambda: fingerprint_checks.append("second"),
     )
     second.model = _RaisingModel()
-    cached = second.embed_papers({paper_id: papers[paper_id] for paper_id in non_seed})
-    assert sorted(cached) == sorted(non_seed)
+    cached = second.embed_papers({paper_id: papers[paper_id] for paper_id in non_focal})
+    assert sorted(cached) == sorted(non_focal)
     assert fingerprint_checks == ["first", "second"]
 
 
@@ -3968,7 +3980,7 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
 ) -> None:
     """Hybrid candidate mode should source semantics from S2 recommendations."""
     client = MagicMock()
-    client.get_paper.return_value = _seed_paper()
+    client.get_paper.return_value = _focal_paper()
     client.get_paper_references.return_value = [_paper("c1"), _paper("c2")]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
@@ -3990,11 +4002,11 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
         monkeypatch.setattr(builder.embedding_builder, name, _raise_corpus)
     offline_hybrid_encoder(monkeypatch, builder)
 
-    papers = builder.collect_papers("seed")
+    papers = builder.collect_papers("focal")
 
-    assert set(papers) == {"seed", "c1", "c2", "rec1", "rec2"}
+    assert set(papers) == {"focal", "c1", "c2", "rec1", "rec2"}
     client.get_recommended_papers.assert_called_once_with(
-        "seed",
+        "focal",
         limit=200,
         raise_on_unavailable=True,
         pool="all-cs",
@@ -4006,7 +4018,7 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     }
     for paper_id in ("rec1", "rec2"):
         assert builder.paper_sources[paper_id] == "semantic"
-        assert builder.seed_relations[paper_id] == "semantic_only"
+        assert builder.focal_relations[paper_id] == "semantic_only"
 
 
 @pytest.mark.parametrize("recommendation_id", ["reference", "citation"])
@@ -4015,9 +4027,9 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
     recommendation_id: str,
 ) -> None:
     """An alias-free recommendation still joins the matching corpus paper."""
-    seed = _seed_paper("local-seed")
-    seed.is_local_corpus = True
-    seed.arxiv_id = "2501.00001"
+    focal = _focal_paper("local-focal")
+    focal.is_local_corpus = True
+    focal.arxiv_id = "2501.00001"
     reference = _paper("reference")
     reference.doi = "10.1000/shared"
     citation = _paper("citation")
@@ -4040,7 +4052,7 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
 
     def corpus(*_args: object) -> list[Paper]:
         events.append("corpus")
-        return [seed, corpus_overlap, corpus_semantic]
+        return [focal, corpus_overlap, corpus_semantic]
 
     client = MagicMock()
     client.get_paper_references.return_value = [reference]
@@ -4055,20 +4067,20 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
         client=client,
     )
     assert builder.embedding_builder.semantic_source == "arxiv-corpus"
-    search = stub_hybrid_corpus(builder, seed=seed)
+    search = stub_hybrid_corpus(builder, focal=focal)
     search.side_effect = corpus
     offline_hybrid_encoder(monkeypatch, builder)
     builder.embedding_builder._embedding_runtime_metadata = MagicMock(return_value={})
     monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _: None)
 
-    graph, _ = builder.build_graph(seed.paper_id)
+    graph, _ = builder.build_graph(focal.paper_id)
 
     assert events == ["recommendations", "corpus", "corpus"]
     client.get_recommended_papers.assert_called_once_with(
         "arxiv:2501.00001", limit=200, raise_on_unavailable=True, pool="all-cs"
     )
     assert set(graph) == {
-        seed.paper_id,
+        focal.paper_id,
         corpus_overlap.paper_id,
         corpus_semantic.paper_id,
         recommendation_only.paper_id,
@@ -4080,9 +4092,9 @@ def test_hybrid_both_merges_ordered_sources_and_preserves_citation_evidence(
         recommendation_only.paper_id: 2,
     }
     assert builder.paper_sources[corpus_overlap.paper_id] == "both"
-    assert builder.seed_relations[corpus_overlap.paper_id] == "overlap"
+    assert builder.focal_relations[corpus_overlap.paper_id] == "overlap"
     assert builder.paper_sources[corpus_semantic.paper_id] == "semantic"
-    assert builder.seed_relations[corpus_semantic.paper_id] == "semantic_only"
+    assert builder.focal_relations[corpus_semantic.paper_id] == "semantic_only"
     assert builder.candidate_source_status == {
         "arxiv_corpus": "complete",
         "citations": "complete",
@@ -4105,10 +4117,10 @@ def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_sourc
     outage: bool,
     recommendation_status: str,
 ) -> None:
-    """Empty results, outages, and opaque seeds preserve the corpus candidates."""
-    seed = _seed_paper("local-seed")
-    seed.is_local_corpus = True
-    seed.arxiv_id = "2501.00001" if lookup_available else ""
+    """Empty results, outages, and opaque focal papers preserve corpus candidates."""
+    focal = _focal_paper("local-focal")
+    focal.is_local_corpus = True
+    focal.arxiv_id = "2501.00001" if lookup_available else ""
     client = MagicMock()
     client.get_recommended_papers.return_value = []
     if outage:
@@ -4122,10 +4134,13 @@ def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_sourc
         max_citations=0,
         client=client,
     )
-    stub_hybrid_corpus(builder, seed=seed, neighbours=[seed, _paper("local-result")])
+    stub_hybrid_corpus(builder, focal=focal, neighbours=[focal, _paper("local-result")])
     offline_hybrid_encoder(monkeypatch, builder)
 
-    assert set(builder.collect_papers(seed.paper_id)) == {seed.paper_id, "local-result"}
+    assert set(builder.collect_papers(focal.paper_id)) == {
+        focal.paper_id,
+        "local-result",
+    }
     assert builder.candidate_source_status == {
         "recommendations": recommendation_status,
         "arxiv_corpus": "complete",
@@ -4198,16 +4213,16 @@ def test_citation_build_retains_shared_references_with_empty_vocabulary() -> Non
 
     :return None: Verifies successful graph construction with a shared-reference edge.
     """
-    seed = Paper("seed", "To be or not to be", 2024, references=["shared"])
+    focal = Paper("focal", "To be or not to be", 2024, references=["shared"])
     peer = Paper("peer", "What is it", 2024, references=["shared"])
     client = MagicMock()
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [peer]
     builder = CitationGraphBuilder(
         max_papers=2, max_references=1, max_citations=0, client=client
     )
-    graph, _ = builder.build_graph("seed")
-    assert graph.has_edge("seed", "peer")
+    graph, _ = builder.build_graph("focal")
+    assert graph.has_edge("focal", "peer")
 
 
 @pytest.mark.parametrize("cosine", [0.0, -0.1, 0.48, 0.71])
@@ -4217,7 +4232,7 @@ def test_embedding_graph_requires_calibrated_semantic_evidence(
     """Metadata bonuses cannot connect semantically unsupported paper pairs.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture for replacing acquisition and inference.
-    :param float cosine: Unsupported candidate's cosine against the seed.
+    :param float cosine: Unsupported candidate's cosine against the focal paper.
     :return None: Verifies the supported edge survives and the unrelated paper stays isolated.
     """
     papers = {
@@ -4227,10 +4242,10 @@ def test_embedding_graph_requires_calibrated_semantic_evidence(
             2024,
             authors=[Author(name="Shared Author")],
             categories=["Computer Science"],
-            is_seed=paper_id == "seed",
+            is_focal=paper_id == "focal",
         )
         for paper_id, title in (
-            ("seed", "Quantum field theory"),
+            ("focal", "Quantum field theory"),
             ("related", "Quantum field interactions"),
             ("unrelated", "Medieval pottery"),
         )
@@ -4239,14 +4254,14 @@ def test_embedding_graph_requires_calibrated_semantic_evidence(
     monkeypatch.setattr(builder, "collect_papers", MagicMock(return_value=papers))
     monkeypatch.setattr(builder, "prepare_graph_scoring", MagicMock())
     builder.embeddings = {
-        "seed": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        "focal": np.array([1.0, 0.0, 0.0], dtype=np.float32),
         "related": np.array([0.8, 0.6, 0.0], dtype=np.float32),
         "unrelated": np.array(
             [cosine, 0.0, np.sqrt(1.0 - cosine**2)], dtype=np.float32
         ),
     }
-    graph, _ = builder.build_graph("seed")
-    assert graph.has_edge("seed", "related")
+    graph, _ = builder.build_graph("focal")
+    assert graph.has_edge("focal", "related")
     assert graph.degree("unrelated") == 0
 
 

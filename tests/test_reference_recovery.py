@@ -1,4 +1,4 @@
-"""Seed bibliography recovery without live providers or embedding models."""
+"""Focal bibliography recovery without live providers or embedding models."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from citemesh.services.semantic_scholar.disk_cache import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
-    fetch_seed_references,
+    fetch_focal_references,
     require_available_candidate_source,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
@@ -81,8 +81,8 @@ def test_successful_s2_or_disabled_discovery_never_fetches_html(
     client, bibliography, metadata = providers
     client.get_paper_references.return_value = [paper("reference")]
     title_lookup = MagicMock()
-    selector = MagicMock(side_effect=lambda _seed, refs, cap: refs[:cap])
-    results = fetch_seed_references(
+    selector = MagicMock(side_effect=lambda _focal, refs, cap: refs[:cap])
+    results = fetch_focal_references(
         client,
         paper("arxiv:2608.27147"),
         limit,
@@ -127,11 +127,11 @@ def test_empty_or_unavailable_s2_recovers_arxiv_metadata(
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
     title_lookup = MagicMock(return_value={})
     with caplog.at_level(logging.DEBUG):
-        results = fetch_seed_references(
+        results = fetch_focal_references(
             client,
-            paper("seed", arxiv_id="2608.27147"),
+            paper("focal", arxiv_id="2608.27147"),
             2,
-            seed_identifier="arxiv:2608.27147v1",
+            focal_identifier="arxiv:2608.27147v1",
             local_bibliography_lookup=title_lookup,
         )
         require_available_candidate_source(results, context="test")
@@ -184,7 +184,7 @@ def test_local_metadata_is_enriched_and_disk_metadata_reused(providers: tuple) -
     _persist_paper(overlapping_cache, "arxiv:1706.03762")
     _persist_paper(cached, "arxiv:2303.08774")
     lookup = MagicMock(return_value={"arxiv:1706.03762": local})
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client, paper("arxiv:2608.27147"), 3, local_lookup=lookup
     )
     assert [item.paper_id for item in results[-1].papers] == [
@@ -211,7 +211,7 @@ def test_local_metadata_does_not_request_live_s2_enrichment(providers: tuple) ->
     bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     local = paper("local-record", arxiv_id="1706.03762", is_local_corpus=True)
     client.get_papers.side_effect = SemanticScholarRequestError("rejected")
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client,
         paper("arxiv:2608.27147"),
         1,
@@ -236,7 +236,7 @@ def test_refresh_enriches_local_metadata_from_live_s2(providers: tuple) -> None:
     fresh = paper("s2-record", arxiv_id="1706.03762", citation_count=99)
     client.get_papers.return_value = {"arxiv:1706.03762": fresh}
 
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client,
         paper("arxiv:2608.27147"),
         1,
@@ -258,20 +258,20 @@ def test_title_recovery_appends_local_matches_before_reference_cap(
     client, bibliography, metadata = providers
     client.refresh_paper_cache = True
     explicit_id = "arxiv:1706.03762"
-    seed = paper("arxiv:2608.27147", is_local_corpus=True)
+    focal = paper("arxiv:2608.27147", is_local_corpus=True)
     explicit = paper(explicit_id, is_local_corpus=True)
     first = paper("arxiv:2303.08774", is_local_corpus=True)
     second = paper("arxiv:2401.12345", is_local_corpus=True)
     first_key = BibliographyKey("First recovered work", "One Author", 2023)
     second_key = BibliographyKey("Second recovered work", "Another Author", 2024)
     duplicate_key = BibliographyKey("Explicit work", "Some Author", 2017)
-    seed_key = BibliographyKey("Seed work", "Seed Author", 2026)
+    focal_key = BibliographyKey("Focal work", "Focal Author", 2026)
     bibliography.return_value = [
         BibliographyEntry((), first_key),
         BibliographyEntry((explicit_id,), duplicate_key),
         BibliographyEntry((), duplicate_key),
         BibliographyEntry((), first_key),
-        BibliographyEntry((), seed_key),
+        BibliographyEntry((), focal_key),
         BibliographyEntry((), second_key),
     ]
     client.get_papers.return_value = {
@@ -279,7 +279,7 @@ def test_title_recovery_appends_local_matches_before_reference_cap(
     }
 
     def lookup(keys: Sequence[BibliographyKey]) -> dict[BibliographyKey, Paper]:
-        assert keys == [first_key, duplicate_key, seed_key, second_key]
+        assert keys == [first_key, duplicate_key, focal_key, second_key]
         client.get_papers.assert_called_once_with(
             [explicit_id], raise_on_unavailable=True
         )
@@ -287,20 +287,20 @@ def test_title_recovery_appends_local_matches_before_reference_cap(
             second_key: second,
             first_key: first,
             duplicate_key: explicit,
-            seed_key: seed,
+            focal_key: focal,
         }
 
     selector = MagicMock(return_value=[second])
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client,
-        seed,
+        focal,
         1,
         local_lookup=MagicMock(return_value={explicit_id: explicit}),
         local_bibliography_lookup=lookup,
         reference_selector=selector,
     )
 
-    selector.assert_called_once_with(seed, [explicit, first, second], 1)
+    selector.assert_called_once_with(focal, [explicit, first, second], 1)
     assert explicit.citation_count == 99
     assert results[-1].papers == (second,)
     client.get_papers.assert_called_once_with([explicit_id], raise_on_unavailable=True)
@@ -316,7 +316,7 @@ def test_title_lookup_does_not_replace_unresolved_explicit_id(providers: tuple) 
     bibliography.return_value = [BibliographyEntry((identifier,), key)]
     title_lookup = MagicMock(return_value={key: paper("arxiv:2210.00001")})
 
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client,
         paper("arxiv:2608.27147"),
         1,
@@ -335,7 +335,7 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
 ) -> None:
     """Hybrid can admit a reference with no explicit identifier in the bibliography."""
     client, bibliography, metadata = providers
-    seed = paper("arxiv:2608.27147", is_local_corpus=True)
+    focal = paper("arxiv:2608.27147", is_local_corpus=True)
     key = BibliographyKey("A Foundational Paper", "First Author", 2023)
     bibliography.return_value = [BibliographyEntry((), key)]
     client.get_recommended_papers.return_value = []
@@ -349,7 +349,7 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
         client=client,
     )
     engine = builder.embedding_builder
-    stub_hybrid_corpus(builder, seed=seed)
+    stub_hybrid_corpus(builder, focal=focal)
     offline_hybrid_encoder(monkeypatch, builder)
     del engine.cached_bibliography_metadata
     engine._cache_selection = MagicMock()
@@ -365,12 +365,12 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
             "arxiv_id": "2210.00001",
         }
     }
-    selected = builder.collect_papers(seed.paper_id)
+    selected = builder.collect_papers(focal.paper_id)
 
     title_lookup.assert_called_once_with([key], corpus_size=20)
-    assert set(selected) == {seed.paper_id, reference_id}
+    assert set(selected) == {focal.paper_id, reference_id}
     assert selected[reference_id].is_local_corpus
-    assert builder.seed_relations[reference_id] == "referenced_by_seed"
+    assert builder.focal_relations[reference_id] == "referenced_by_focal"
     assert builder.paper_sources[reference_id] == "citation"
     # Recovery resolved the entry locally; the selected row is enriched afterwards.
     engine._enrich_corpus_papers.assert_called_once_with(
@@ -385,15 +385,15 @@ def test_hydration_uses_provider_aliases_for_recovered_corpus_references(
 ) -> None:
     """Use arXiv and DOI lookups while keeping graph and cache IDs local."""
     client, _, _ = providers
-    seed = paper("content:seed", is_local_corpus=True)
+    focal = paper("content:focal", is_local_corpus=True)
     opaque = paper("content:opaque", is_local_corpus=True)
     local_arxiv = paper("content:arxiv", is_local_corpus=True, arxiv_id="2210.00001")
     local_doi = paper("content:doi", is_local_corpus=True, doi="10.1000/test")
-    papers = {item.paper_id: item for item in (seed, opaque, local_arxiv, local_doi)}
+    papers = {item.paper_id: item for item in (focal, opaque, local_arxiv, local_doi)}
     client.get_reference_ids.side_effect = [["arxiv-reference"], ["doi-reference"]]
     builder = CitationGraphBuilder(client=client)
 
-    builder.reference_hydrator.hydrate(papers, seed)
+    builder.reference_hydrator.hydrate(papers, focal)
 
     assert client.get_reference_ids.call_args_list == [
         call("arxiv:2210.00001", force_refresh=False),
@@ -428,7 +428,7 @@ def test_local_alias_ambiguity_does_not_cross_bibliography_entries(
     remote = paper("remote-doi", doi="10.1000/shared")
     client.get_papers.return_value = {"10.1000/shared": remote}
 
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client,
         paper("arxiv:2608.27147"),
         2,
@@ -486,15 +486,15 @@ def test_unresolved_entries_do_not_exhaust_admission_limit(
     metadata.side_effect = lambda ids: {
         value: records[value] for value in ids if value in records
     }
-    seed = Paper(
-        paper_id="seed",
+    focal = Paper(
+        paper_id="focal",
         title="Thomson: Continual Learning of Frontier Models for SovereignAI",
         year=2026,
         abstract="Continual learning updates sovereign frontier language models.",
         arxiv_id="2608.27147",
     )
     with caplog.at_level(logging.INFO):
-        results = fetch_seed_references(client, seed, 2)
+        results = fetch_focal_references(client, focal, 2)
     assert [item.paper_id for item in results[-1].papers] == [
         "arxiv:2303.08774",
         "arxiv:2401.12345",
@@ -518,12 +518,12 @@ def test_hybrid_recommended_reference_keeps_reference_evidence(
 ) -> None:
     """A recommendation of a recovered reference is one member with both tags."""
     client, bibliography, metadata = providers
-    seed = paper("arxiv:2608.27147")
+    focal = paper("arxiv:2608.27147")
     admitted = paper("arxiv:1706.03762")
     omitted = paper("arxiv:2303.08774")
     rediscovered = paper("recommendation", arxiv_id="2303.08774")
     unrelated = paper("other-recommendation")
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     bibliography.return_value = [
         BibliographyEntry((admitted.paper_id,)),
         BibliographyEntry((omitted.paper_id,)),
@@ -543,7 +543,7 @@ def test_hybrid_recommended_reference_keeps_reference_evidence(
     )
     offline_hybrid_encoder(monkeypatch, builder)
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
     pool = builder.discovery_pool
     assert pool is not None
@@ -556,7 +556,7 @@ def test_hybrid_recommended_reference_keeps_reference_evidence(
     assert pool.sources[omitted.paper_id] == {"citation", "semantic"}
     assert pool.provider_aliases == {rediscovered.paper_id: omitted.paper_id}
     assert pool.recommendation_ranks == {omitted.paper_id: 1, unrelated.paper_id: 2}
-    assert builder.seed_relations[omitted.paper_id] == "referenced_by_seed"
+    assert builder.focal_relations[omitted.paper_id] == "referenced_by_focal"
     title_lookup.assert_not_called()
 
 
@@ -565,17 +565,17 @@ def test_hybrid_pools_every_provider_reference_once(
 ) -> None:
     """The full provider list joins the pool, one member per work."""
     client, bibliography, _ = providers
-    seed = paper("arxiv:2608.27147", references=["shared"])
-    seed_alias = paper("seed-alias", arxiv_id="2608.27147")
+    focal = paper("arxiv:2608.27147", references=["shared"])
+    focal_alias = paper("focal-alias", arxiv_id="2608.27147")
     skipped = paper(
         "early", doi="10.1000/early", citation_count=5, references=["shared"]
     )
     duplicate = paper("duplicate", doi=skipped.doi)
     admitted = paper("later", citation_count=10, references=["different"])
     rediscovered = paper("recommendation", doi=skipped.doi)
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.return_value = [
-        seed_alias,
+        focal_alias,
         skipped,
         duplicate,
         admitted,
@@ -590,16 +590,16 @@ def test_hybrid_pools_every_provider_reference_once(
     stub_hybrid_corpus(builder)
     offline_hybrid_encoder(monkeypatch, builder)
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
-    assert set(papers) == {seed.paper_id, skipped.paper_id, admitted.paper_id}
+    assert set(papers) == {focal.paper_id, skipped.paper_id, admitted.paper_id}
     assert papers[admitted.paper_id].references == ["different"]
     assert builder.paper_sources == {
-        seed.paper_id: "citation",
+        focal.paper_id: "citation",
         skipped.paper_id: "both",
         admitted.paper_id: "citation",
     }
-    assert builder.seed_relations[skipped.paper_id] == "referenced_by_seed"
+    assert builder.focal_relations[skipped.paper_id] == "referenced_by_focal"
     assert builder.discovery_pool is not None
     assert set(builder.discovery_pool.papers) == {skipped.paper_id, admitted.paper_id}
     assert builder.discovery_pool.recommendation_ranks == {skipped.paper_id: 1}
@@ -610,7 +610,7 @@ def test_hybrid_pools_every_provider_reference_once(
         "arxiv_corpus": "empty",
     }
     client.get_paper_references.assert_called_once_with(
-        seed.paper_id, limit=1000, raise_on_unavailable=True, reference_evidence={}
+        focal.paper_id, limit=1000, raise_on_unavailable=True, reference_evidence={}
     )
     client.get_reference_ids.assert_not_called()
     bibliography.assert_not_called()
@@ -629,7 +629,7 @@ def test_unusable_arxiv_fallback_does_not_hide_s2_outage(
     client, bibliography, _ = providers
     bibliography.return_value = html
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    results = fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
     assert results[-1].state.value == ("unavailable" if html is None else "empty")
     with pytest.raises(CandidateAcquisitionError, match="references"):
         require_available_candidate_source(results, context="test")
@@ -649,7 +649,7 @@ def test_metadata_outage_marks_recovery_unavailable(
     client.get_papers.side_effect = SemanticScholarUnavailableError("offline")
     metadata.return_value = None
 
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    results = fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
     assert [result.state.value for result in results] == ["empty", "unavailable"]
     with caplog.at_level(logging.WARNING):
         require_available_candidate_source(results, context="test")
@@ -666,13 +666,13 @@ def test_citation_reuses_recovery_without_persisting_partial_bibliography(
     """Cached S2 emptiness cannot prevent HTML recovery or trigger rehydration.
 
     :param tuple providers: Mock services.
-    :return None: Checks seed reference reuse, statuses, caps, and cache isolation.
+    :return None: Checks focal reference reuse, statuses, caps, and cache isolation.
     """
     client, bibliography, metadata = providers
-    seed = paper("arxiv:2608.27147")
-    client.get_paper.return_value = seed
+    focal = paper("arxiv:2608.27147")
+    client.get_paper.return_value = focal
     client.get_cached_reference_ids.return_value = []
-    cache_path = _reference_cache_path(seed.paper_id)
+    cache_path = _reference_cache_path(focal.paper_id)
     cache_path.write_text('{"version":1,"paper_id":"arxiv:2608.27147","references":[]}')
     original = cache_path.read_bytes()
     bibliography.return_value = [
@@ -683,42 +683,42 @@ def test_citation_reuses_recovery_without_persisting_partial_bibliography(
     builder = CitationGraphBuilder(
         max_papers=2, max_references=5, max_citations=0, client=client
     )
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
     assert len(papers) == 2
-    assert papers[seed.paper_id].references == []
+    assert papers[focal.paper_id].references == []
     assert (
-        papers[seed.paper_id].reference_overlap(
+        papers[focal.paper_id].reference_overlap(
             paper("other", references=["arxiv:1706.03762"])
         )
         == 0
     )
-    assert builder.seed_relations["arxiv:1706.03762"] == "referenced_by_seed"
+    assert builder.focal_relations["arxiv:1706.03762"] == "referenced_by_focal"
     assert builder.candidate_source_status == {
         "references": "empty",
         "arxiv_references": "complete",
     }
     assert cache_path.read_bytes() == original
     assert all(
-        call.args[0] != seed.paper_id
+        call.args[0] != focal.paper_id
         for call in client.get_reference_ids.call_args_list
     )
     bibliography.assert_called_once()
 
 
 @pytest.mark.parametrize("html", [None, []])
-def test_citation_hydrates_seed_after_unavailable_arxiv_recovery(
+def test_citation_hydrates_focal_after_unavailable_arxiv_recovery(
     providers: tuple, html: object
 ) -> None:
-    """A failed arXiv fallback must not suppress cached seed hydration.
+    """A failed arXiv fallback must not suppress cached focal paper hydration.
 
     :param tuple providers: Mock services.
     :param object html: Unavailable or empty parsed HTML.
-    :return None: Checks fallback failures retain seed bibliography enrichment.
+    :return None: Checks fallback failures retain focal bibliography enrichment.
     """
     client, bibliography, _ = providers
-    seed = paper("arxiv:2608.27147")
+    focal = paper("arxiv:2608.27147")
     citation = paper("citation", references=["citation-reference"])
-    client.get_paper.return_value = seed
+    client.get_paper.return_value = focal
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
     client.get_paper_citations.return_value = [citation]
     client.get_reference_ids.return_value = ["reference-1", "reference-2"]
@@ -727,10 +727,12 @@ def test_citation_hydrates_seed_after_unavailable_arxiv_recovery(
         max_papers=2, max_references=1, max_citations=1, client=client
     )
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
-    assert papers[seed.paper_id].references == ["reference-1", "reference-2"]
-    client.get_reference_ids.assert_called_once_with(seed.paper_id, force_refresh=False)
+    assert papers[focal.paper_id].references == ["reference-1", "reference-2"]
+    client.get_reference_ids.assert_called_once_with(
+        focal.paper_id, force_refresh=False
+    )
     assert builder.candidate_source_status == {
         "references": "unavailable",
         "arxiv_references": "unavailable" if html is None else "empty",
@@ -738,20 +740,20 @@ def test_citation_hydrates_seed_after_unavailable_arxiv_recovery(
     }
 
 
-def test_citation_hydrates_cached_seed_after_recovered_arxiv_references(
+def test_citation_hydrates_cached_focal_after_recovered_arxiv_references(
     providers: tuple,
 ) -> None:
-    """Recovered candidates must not hide the seed's cached full bibliography.
+    """Recovered candidates must not hide the focal paper's cached full bibliography.
 
     :param tuple providers: Mock services.
-    :return None: Checks S2 outage recovery retains disk-cached seed coupling.
+    :return None: Checks S2 outage recovery retains disk-cached focal paper coupling.
     """
     client, bibliography, metadata = providers
-    seed = paper("arxiv:2608.27147")
-    client.get_paper.return_value = seed
+    focal = paper("arxiv:2608.27147")
+    client.get_paper.return_value = focal
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
     client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
-        ["cached-reference"] if paper_id == seed.paper_id else []
+        ["cached-reference"] if paper_id == focal.paper_id else []
     )
     bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
@@ -759,11 +761,11 @@ def test_citation_hydrates_cached_seed_after_recovered_arxiv_references(
         max_papers=2, max_references=1, max_citations=0, client=client
     )
 
-    papers = builder.collect_papers(seed.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
-    assert papers[seed.paper_id].references == ["cached-reference"]
+    assert papers[focal.paper_id].references == ["cached-reference"]
     assert any(
-        call.args == (seed.paper_id,) and call.kwargs == {"force_refresh": False}
+        call.args == (focal.paper_id,) and call.kwargs == {"force_refresh": False}
         for call in client.get_reference_ids.call_args_list
     )
     assert builder.candidate_source_status == {
@@ -773,7 +775,7 @@ def test_citation_hydrates_cached_seed_after_recovered_arxiv_references(
 
 
 def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> None:
-    """Candidate-mode embeddings share reference recovery and seed relations.
+    """Candidate-mode embeddings share reference recovery and focal relations.
 
     :param tuple providers: Mock services.
     :return None: Checks the shared pool path.
@@ -785,7 +787,7 @@ def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> N
     ]
     metadata.side_effect = lambda ids: {value: paper(value) for value in ids}
     selector = MagicMock(
-        side_effect=lambda _seed, recovered, limit: list(recovered)[-limit:]
+        side_effect=lambda _focal, recovered, limit: list(recovered)[-limit:]
     )
     pool = fetch_candidate_pool(
         client,
@@ -793,22 +795,22 @@ def test_embedding_candidate_pool_uses_reference_fallback(providers: tuple) -> N
         max_references=1,
         reference_selector=selector,
     )
-    assert pool.seed_relations == {"arxiv:2303.08774": "referenced_by_seed"}
+    assert pool.focal_relations == {"arxiv:2303.08774": "referenced_by_focal"}
     assert pool.source_status == {"references": "empty", "arxiv_references": "complete"}
     assert len(selector.call_args.args[1]) == 2
 
 
-def test_opaque_local_seed_does_not_attempt_provider_discovery(
+def test_opaque_local_focal_does_not_attempt_provider_discovery(
     providers: tuple,
 ) -> None:
-    """A local-only seed without external identity has no reference source.
+    """A local-only focal without external identity has no reference source.
 
     :param tuple providers: Mock services.
     :return None: Checks no spurious unavailable source.
     """
     client, bibliography, _ = providers
     assert (
-        fetch_seed_references(client, paper("content:opaque", is_local_corpus=True), 2)
+        fetch_focal_references(client, paper("content:opaque", is_local_corpus=True), 2)
         == ()
     )
     client.get_paper_references.assert_not_called()
@@ -828,7 +830,7 @@ def test_refresh_paper_cache_bypasses_persisted_s2_metadata(providers: tuple) ->
     _persist_paper(stale, "arxiv:1706.03762")
     bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     client.get_papers.return_value = {"arxiv:1706.03762": fresh}
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    results = fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
     client.get_papers.assert_called_once()
     assert results[-1].papers[0].citation_count == 99
 
@@ -845,7 +847,7 @@ def test_small_admission_limit_batches_unresolved_metadata(providers: tuple) -> 
         BibliographyEntry((identifier,)) for identifier in identifiers
     ]
     metadata.return_value = {identifiers[-1]: paper(identifiers[-1])}
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    results = fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
     client.get_papers.assert_called_once()
     metadata.assert_called_once_with(identifiers)
     assert len(results[-1].papers) == 1
@@ -867,7 +869,7 @@ def test_reference_recovery_progress_counts_completed_batches(
     progress = MagicMock(return_value=context)
     monkeypatch.setattr("citemesh.strategies.candidates.progress_task", progress)
 
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    results = fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
 
     assert len(results[-1].papers) == 1
     assert [len(call.args[0]) for call in client.get_papers.call_args_list] == [
@@ -877,7 +879,7 @@ def test_reference_recovery_progress_counts_completed_batches(
     ]
     progress.assert_called_once_with(
         total=105,
-        description="Recovering focal references",
+        description="Recovering focal paper references",
         unit="references",
         enabled=None,
     )
@@ -902,12 +904,12 @@ def test_reference_recovery_progress_closes_after_metadata_failure(
         MagicMock(return_value=context),
     )
     with pytest.raises(ValueError, match="invalid provider result"):
-        fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+        fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
     context.__enter__.return_value.update.assert_not_called()
     context.__exit__.assert_called_once()
 
 
-def test_candidate_pool_preserves_requested_seed_version(providers: tuple) -> None:
+def test_candidate_pool_preserves_requested_focal_version(providers: tuple) -> None:
     """The embedding candidate pool passes the original input to arXiv HTML.
 
     :param tuple providers: Mock services.
@@ -916,9 +918,9 @@ def test_candidate_pool_preserves_requested_seed_version(providers: tuple) -> No
     client, bibliography, _ = providers
     fetch_candidate_pool(
         client,
-        paper("s2-seed", arxiv_id="2608.27147"),
+        paper("s2-focal", arxiv_id="2608.27147"),
         max_references=1,
-        seed_identifier="arxiv:2608.27147v2",
+        focal_identifier="arxiv:2608.27147v2",
     )
     bibliography.assert_called_once_with("2608.27147v2")
 
@@ -936,7 +938,7 @@ def test_s2_lookup_alias_preserves_metadata_without_external_ids(
     client.get_papers.return_value = {
         "arxiv:1706.03762": paper("s2-id", citation_count=77)
     }
-    results = fetch_seed_references(client, paper("arxiv:2608.27147"), 1)
+    results = fetch_focal_references(client, paper("arxiv:2608.27147"), 1)
     assert results[-1].papers[0].paper_id == "s2-id"
     assert results[-1].papers[0].citation_count == 77
     metadata.assert_not_called()

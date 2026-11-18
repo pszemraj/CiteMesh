@@ -633,7 +633,7 @@ def _build_strategy_graph(
 
     :param argparse.Namespace args: Validated build arguments.
     :param str strategy: Selected strategy name.
-    :return tuple[PaperGraph, str]: Graph and normalized seed paper ID.
+    :return tuple[PaperGraph, str]: Graph and normalized focal paper ID.
     :raises ValueError: If the strategy is unsupported.
     """
     if strategy not in _STRATEGY_DISPATCH:

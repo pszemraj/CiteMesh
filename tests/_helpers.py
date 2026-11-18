@@ -51,20 +51,20 @@ def fail_stat_for(
     return fail_stat
 
 
-def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
+def build_focal_graph(focal_id: str = "focal") -> nx.Graph:
     """Create a minimal one-node graph for CLI strategy tests.
 
-    :param str seed_id: Seed-node identifier.
-    :return nx.Graph: Graph containing only the seed node.
+    :param str focal_id: Focal paper identifier.
+    :return nx.Graph: Graph containing only the focal paper.
     """
     graph = nx.Graph()
     graph.add_node(
-        seed_id,
-        title="Seed",
+        focal_id,
+        title="Focal",
         year=2020,
         authors=[],
         citation_count=0,
-        is_seed=True,
+        is_focal=True,
     )
     return graph
 
@@ -297,7 +297,7 @@ def build_publication_pair() -> tuple[Paper, Paper]:
 def stub_hybrid_corpus(
     builder: HybridGraphBuilder,
     *,
-    seed: Paper | None = None,
+    focal: Paper | None = None,
     neighbours: list[Paper] | None = None,
 ) -> MagicMock:
     """Serve a hybrid builder's prepared corpus from memory.
@@ -305,7 +305,7 @@ def stub_hybrid_corpus(
     Provider records match no corpus row and every member is encoded in memory.
 
     :param HybridGraphBuilder builder: Corpus-mode hybrid builder.
-    :param Paper | None seed: Corpus seed returned by seed resolution.
+    :param Paper | None focal: Focal paper returned by the corpus lookup.
     :param list[Paper] | None neighbours: Rows returned by each corpus search.
     :return MagicMock: The corpus search stub.
     """
@@ -315,13 +315,13 @@ def stub_hybrid_corpus(
     cache.hydration_operation_lock.return_value = nullcontext()
     embedding.prepare_embedding_cache = MagicMock(return_value=cache)
     embedding._prepare_corpus_for_build = MagicMock()
-    embedding.resolve_cached_corpus_seed = MagicMock(return_value=seed)
+    embedding.resolve_cached_corpus_focal = MagicMock(return_value=focal)
     embedding.cached_reference_metadata = MagicMock(return_value={})
     embedding.cached_bibliography_metadata = MagicMock(return_value={})
     embedding.cached_corpus_vectors = MagicMock(return_value={})
     embedding.search_prepared_corpus = MagicMock(return_value=list(neighbours or []))
     embedding._enrich_corpus_papers = MagicMock()
-    embedding.enrich_cached_corpus_seed = MagicMock()
+    embedding.enrich_cached_corpus_focal = MagicMock()
     return embedding.search_prepared_corpus
 
 

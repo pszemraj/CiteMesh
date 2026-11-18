@@ -37,8 +37,8 @@ from .ordering import (
 )
 from .paths import MAX_TITLE_CHARS as MAX_TITLE_CHARS
 from .paths import _filename_safe as _filename_safe
+from .paths import _focal_suffix as _focal_suffix
 from .paths import _output_dir_name as _output_dir_name
-from .paths import _seed_suffix as _seed_suffix
 from .paths import generate_output_path as generate_output_path
 from .themes import Theme, get_theme
 from .years import (
@@ -65,7 +65,7 @@ COMMUNITY_SEPARATION_STEP = 0.06
 COMMUNITY_SEPARATION_MAX_EXTRA = 0.32
 COMMUNITY_ANCHOR_MAX_RADIUS = 0.69
 COMMUNITY_SCAFFOLD_WEIGHT = 0.15
-MAX_STATIC_NON_SEED_LABELS = 12
+MAX_STATIC_NON_FOCAL_LABELS = 12
 DISCONNECTED_COMPONENT_GAP = 0.18
 DISCONNECTED_COMPONENT_MIN_SCALE = 0.32
 DISCONNECTED_COMPONENT_MIN_EXTENT = 0.28
@@ -581,7 +581,7 @@ def compute_node_sizes(graph: PaperGraph) -> list[float]:
     """
     nodes = ordered_nodes(graph)
     sizes = []
-    seed_nodes = {node for node in nodes if graph.nodes[node].get("is_seed")}
+    focal_nodes = {node for node in nodes if graph.nodes[node].get("is_focal")}
     sorted_nodes = sorted(
         nodes,
         key=lambda node: (
@@ -597,15 +597,15 @@ def compute_node_sizes(graph: PaperGraph) -> list[float]:
             graph.nodes[node].get("citation_count", 0)
         )
 
-        if node in seed_nodes:
-            # Seed paper gets special treatment
+        if node in focal_nodes:
+            # Focal paper gets special treatment
             if rank < 3:  # Also top-cited
-                size = VIZ_CONFIG.seed_size
+                size = VIZ_CONFIG.focal_size
             else:
                 size = 1000  # Still visible but not dominant
-        elif rank == 0 and not graph.nodes[node].get("is_seed"):
-            # Highest cited non-seed
-            size = VIZ_CONFIG.max_non_seed_size
+        elif rank == 0 and not graph.nodes[node].get("is_focal"):
+            # Highest cited non-focal
+            size = VIZ_CONFIG.max_non_focal_size
         elif rank < 3:
             # Top 3 papers
             base, increment = VIZ_CONFIG.size_tiers["top_3"]
@@ -627,9 +627,9 @@ def compute_node_sizes(graph: PaperGraph) -> list[float]:
         size += citation_bonus
         size = min(
             size,
-            VIZ_CONFIG.seed_size
-            if node in seed_nodes
-            else VIZ_CONFIG.max_non_seed_size,
+            VIZ_CONFIG.focal_size
+            if node in focal_nodes
+            else VIZ_CONFIG.max_non_focal_size,
         )
 
         sizes.append(size)
@@ -638,13 +638,13 @@ def compute_node_sizes(graph: PaperGraph) -> list[float]:
 
 
 def compute_node_colors(
-    graph: PaperGraph, seed_id: str, theme: Theme
+    graph: PaperGraph, focal_id: str, theme: Theme
 ) -> tuple[list[tuple[float, float, float]], int, int]:
     """
     Compute smooth color gradient by publication year.
 
     :param PaperGraph graph: NetworkX graph with paper nodes
-    :param str seed_id: ID of the seed paper (gets special color)
+    :param str focal_id: ID of the focal paper (gets special color)
     :param Theme theme: Theme palette used for interpolation.
     :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
@@ -654,9 +654,9 @@ def compute_node_colors(
 
     colors = []
     for node, year in zip(nodes, years):
-        # Seed paper gets special color
-        if node == seed_id:
-            colors.append(theme.seed_color)
+        # Focal paper gets special color
+        if node == focal_id:
+            colors.append(theme.focal_color)
             continue
 
         if year <= 0:
@@ -819,7 +819,7 @@ def draw_labels(
     ax: plt.Axes,
     graph: PaperGraph,
     pos: Mapping[Hashable, NDArray[np.float64]],
-    seed_id: str,
+    focal_id: str,
     theme: Theme,
     sizes: list[float] | None = None,
 ) -> None:
@@ -829,10 +829,10 @@ def draw_labels(
     :param plt.Axes ax: Matplotlib axes
     :param PaperGraph graph: NetworkX graph
     :param Mapping[Hashable, NDArray[np.float64]] pos: Node position map.
-    :param str seed_id: ID of seed paper (gets bold label)
+    :param str focal_id: ID of focal paper (gets bold label)
     :param Theme theme: Theme palette for text color.
     :param Optional[List[float]] sizes: Optional node-size list aligned with ``ordered_nodes(graph)``.
-    :return None: Draws the seed label and a capped set of non-overlapping paper labels.
+    :return None: Draws the focal label and a capped set of non-overlapping paper labels.
     """
 
     ordered = ordered_nodes(graph)
@@ -843,7 +843,7 @@ def draw_labels(
     candidate_nodes = sorted(
         ordered,
         key=lambda node: (
-            0 if node == seed_id else 1,
+            0 if node == focal_id else 1,
             -coerce_citation_count(graph.nodes[node].get("citation_count", 0)),
             str(node),
         ),
@@ -851,7 +851,7 @@ def draw_labels(
 
     placed: list[NDArray[np.float64]] = []
     label_bounds: list[Bbox] = []
-    non_seed_label_count = 0
+    non_focal_label_count = 0
     ax.figure.canvas.draw()
     renderer = _figure_renderer(ax.figure)
     for node in candidate_nodes:
@@ -870,9 +870,9 @@ def draw_labels(
         year_label = "n.d." if year is None else str(year)
         label = f"{last_name}, {year_label}"
 
-        # Keep the full seed title in the heading, clear of the graph itself.
-        is_seed = node == seed_id
-        if is_seed:
+        # Keep the full focal title in the heading, clear of the graph itself.
+        is_focal = node == focal_id
+        if is_focal:
             label = f"{label} (focal)" if author_parts else "Focal paper"
             fontsize = 9
             xytext = (0, node_radius + 8)
@@ -894,13 +894,13 @@ def draw_labels(
                 linewidth=0,
             )
 
-        fontweight = "bold" if is_seed else VIZ_CONFIG.font_weight
-        if not is_seed:
-            if non_seed_label_count >= MAX_STATIC_NON_SEED_LABELS:
+        fontweight = "bold" if is_focal else VIZ_CONFIG.font_weight
+        if not is_focal:
+            if non_focal_label_count >= MAX_STATIC_NON_FOCAL_LABELS:
                 continue
             node_size = size_map.get(node, float(VIZ_CONFIG.min_size))
             scaled = min(
-                max(node_size / max(float(VIZ_CONFIG.seed_size), 1.0), 0.0), 1.0
+                max(node_size / max(float(VIZ_CONFIG.focal_size), 1.0), 0.0), 1.0
             )
             min_distance = (
                 LABEL_COLLISION_MIN_DISTANCE
@@ -926,18 +926,18 @@ def draw_labels(
             bbox=label_bbox,
         )
         bounds = annotation.get_window_extent(renderer).expanded(1.06, 1.16)
-        if not is_seed and any(bounds.overlaps(previous) for previous in label_bounds):
+        if not is_focal and any(bounds.overlaps(previous) for previous in label_bounds):
             annotation.remove()
             continue
         label_bounds.append(bounds)
         placed.append(np.asarray(p, dtype=float))
-        if not is_seed:
-            non_seed_label_count += 1
+        if not is_focal:
+            non_focal_label_count += 1
 
 
 def visualize_graph(
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
     output_path: Path,
     iterations: int = VIZ_CONFIG.spring_iterations,
     dpi: int | None = None,
@@ -950,7 +950,7 @@ def visualize_graph(
     Create CiteMesh visualization.
 
     :param PaperGraph graph: NetworkX graph with paper nodes
-    :param str seed_id: ID of the seed paper
+    :param str focal_id: ID of the focal paper
     :param Path output_path: Path for output PNG file
     :param int iterations: Iterations used only if spring fallback layout is triggered.
     :param int | None dpi: Output resolution (defaults to config value).
@@ -989,7 +989,7 @@ def visualize_graph(
 
     # Compute visual properties
     sizes = compute_node_sizes(graph)
-    colors, _, _ = compute_node_colors(graph, seed_id, theme)
+    colors, _, _ = compute_node_colors(graph, focal_id, theme)
 
     # The MacOSX canvas requires the GUI main thread. Use an Agg canvas only for
     # this static figure without replacing the application's selected backend.
@@ -1021,11 +1021,11 @@ def visualize_graph(
     # Draw graph components
     draw_edges(ax, graph, pos, theme)
     draw_nodes(ax, graph, pos, sizes, colors, theme)
-    draw_labels(ax, graph, pos, seed_id, theme, sizes=sizes)
+    draw_labels(ax, graph, pos, focal_id, theme, sizes=sizes)
 
     # Add title
-    seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-    title = " ".join(str(seed_attrs.get("title") or "").split()) or "Focal paper"
+    focal_attrs = graph.nodes[focal_id] if focal_id in graph else {}
+    title = " ".join(str(focal_attrs.get("title") or "").split()) or "Focal paper"
     wrapped_title = textwrap.fill(
         title,
         width=72,
@@ -1045,7 +1045,7 @@ def visualize_graph(
     year_bounds = optional_publication_year_bounds(
         attrs.get("year") for _, attrs in graph.nodes(data=True)
     )
-    legend_items = [("Focal paper", theme.seed_color)]
+    legend_items = [("Focal paper", theme.focal_color)]
     if year_bounds is None:
         legend_items.append(("Year unknown", theme.interpolate(0.5)))
     elif year_bounds[0] == year_bounds[1]:

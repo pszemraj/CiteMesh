@@ -29,7 +29,7 @@ from citemesh.cli.commands.cache import run_cache_command
 from citemesh.cli.parser import _create_parser, _pop_tracked_option_dests
 from citemesh.data.embedding_contract import EmbeddingContract, ExistingCacheSelection
 from citemesh.data.user_config import ConfigValue, UserConfig, load_user_config
-from tests._helpers import build_seed_graph
+from tests._helpers import build_focal_graph
 
 
 @pytest.fixture
@@ -115,7 +115,7 @@ def test_explicit_installed_contract_conflicts_are_usage_errors(
     args = parser.parse_args(
         [
             "build",
-            "seed",
+            "focal",
             "--strategy",
             "embedding",
             "--cache-namespace",
@@ -462,7 +462,7 @@ def test_legacy_search_rejects_unsupported_views(
         prepare_embedding_cache=lambda: None,
         embedding_cache=SimpleNamespace(embedding_count=lambda: 5),
     )
-    defaults = build_parser.parse_args(["seed"])
+    defaults = build_parser.parse_args(["focal"])
     monkeypatch.setattr(
         search, "_prepare_local_search_builder", lambda *args: (builder, defaults)
     )
@@ -503,7 +503,7 @@ def _installed_search_footer(
     parser, build_parser, _, _ = _create_parser()
     defaults = build_parser.parse_args(
         [
-            "seed",
+            "focal",
             "--strategy",
             "embedding",
             "--semantic-source",
@@ -912,7 +912,7 @@ def test_namespace_failures_return_operation_errors(
         args = parser.parse_args(
             [
                 "build",
-                "seed",
+                "focal",
                 "--strategy",
                 "embedding",
                 "--cache-namespace",
@@ -1046,7 +1046,7 @@ def test_combined_semantic_source_resolution(
     args = parser.parse_args(
         [
             "build",
-            "seed",
+            "focal",
             "--strategy",
             strategy,
             *(
@@ -1164,7 +1164,7 @@ def test_selected_build_writes_contract_and_runtime_provenance(
         ),
     )
 
-    graph = build_seed_graph()
+    graph = build_focal_graph()
     origin = {
         "bucket_id": "owner/index",
         "config_name": "variant",
@@ -1186,7 +1186,7 @@ def test_selected_build_writes_contract_and_runtime_provenance(
         assert args.model == installed_selection.contract.model_id
         assert args.truncate_dim == installed_selection.contract.dimension
         assert args.semantic_source == ("both" if combined else "arxiv-corpus")
-        return graph, "seed"
+        return graph, "focal"
 
     monkeypatch.setattr(build, "_build_strategy_graph", build_graph)
     output = tmp_path / "graph.json"
@@ -1194,7 +1194,7 @@ def test_selected_build_writes_contract_and_runtime_provenance(
     args = parser.parse_args(
         [
             "build",
-            "seed",
+            "focal",
             "--strategy",
             strategy,
             "--cache-namespace",
@@ -1258,7 +1258,7 @@ def test_minimal_selected_finite_corpus_uses_certified_limit(
     args = parser.parse_args(
         [
             "build",
-            "seed",
+            "focal",
             "--strategy",
             "embedding",
             "--cache-namespace",

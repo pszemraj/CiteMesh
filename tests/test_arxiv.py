@@ -1,4 +1,4 @@
-"""Network-free contracts for the seed-only arXiv fallback service."""
+"""Network-free contracts for the arXiv fallback for focal papers."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from citemesh.services.arxiv import (
     arxiv_identifier,
     extract_reference_identifiers,
 )
-from citemesh.strategies.candidates import fetch_seed_references
+from citemesh.strategies.candidates import fetch_focal_references
 
 
 class _Response:
@@ -274,9 +274,9 @@ def test_arxiv_doi_only_entry_resolves_to_local_arxiv_record_without_provider_ca
     client.get_cached_papers.return_value = {}
     client.get_papers.return_value = {}
 
-    results = fetch_seed_references(
+    results = fetch_focal_references(
         client,
-        Paper(paper_id="arxiv:2608.27147", title="Seed", year=2024),
+        Paper(paper_id="arxiv:2608.27147", title="Focal", year=2024),
         5,
         local_lookup=lambda identifiers: {
             identifier: local
@@ -323,10 +323,10 @@ def test_extract_bibliography_canonicalizes_prefixed_legacy_subject_class() -> N
         ("arxiv:invalid", None),
     ],
 )
-def test_arxiv_identifier_accepts_versioned_seed_identifiers_and_urls(
+def test_arxiv_identifier_accepts_versioned_focal_identifiers_and_urls(
     value: str, expected: str | None
 ) -> None:
-    """Seed input parsing preserves versions for the arXiv HTML request.
+    """Focal paper input parsing preserves versions for the arXiv HTML request.
 
     :param str value: User or metadata identifier supplied to the parser.
     :param str | None expected: Expected request suffix or rejection.
@@ -359,7 +359,7 @@ def test_get_bibliography_canonicalizes_legacy_subject_class(
     """Legacy subject classes use the archive spelling for bibliography HTML.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture that replaces Requests.
-    :return None: Checks the seed fallback requests the resolvable legacy URL.
+    :return None: Checks the focal paper fallback requests the resolvable legacy URL.
     """
     get = MagicMock(
         return_value=_Response("<article><p>No bibliography.</p></article>")

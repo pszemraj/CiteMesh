@@ -173,7 +173,7 @@ class SemanticScholarClient(_EndpointsMixin):
         """Persist normalized reference IDs.
 
         :param Path cache_path: Target JSON path.
-        :param str paper_id: Normalized seed identifier.
+        :param str paper_id: Normalized focal paper identifier.
         :param list[str] reference_ids: Ordered reference identifiers.
         """
         normalized = payloads._coerce_cached_reference_ids(reference_ids) or []

@@ -9,7 +9,7 @@
       --accent-soft: __ACCENT_SOFT__;
       --graph-bg: __GRAPH_BG__;
       --shadow-soft: rgba(0, 0, 0, 0.18);
-      --seed-ring: __SEED_RING__;
+      --focal-ring: __FOCAL_RING__;
       --ui-font: __UI_FONT_FAMILY__;
     }
     * { box-sizing: border-box; }
@@ -345,7 +345,7 @@
       transition: filter 0.2s ease, opacity 0.2s ease;
     }
     .js-plotly-plot .scatterlayer path.point.is-glowing {
-      filter: drop-shadow(0 0 10px color-mix(in srgb, var(--seed-ring) 85%, transparent)) brightness(1.14);
+      filter: drop-shadow(0 0 10px color-mix(in srgb, var(--focal-ring) 85%, transparent)) brightness(1.14);
     }
     .js-plotly-plot .scatterlayer path.point.is-neighbor {
       opacity: 0.74 !important;
@@ -367,12 +367,12 @@
       border-top: 1px solid var(--panel-border);
     }
     .legend-item, #year-timeline { display: inline-flex; align-items: center; gap: 6px; }
-    .legend-marker.seed {
+    .legend-marker.focal {
       width: 11px;
       height: 11px;
       border-radius: 50%;
-      border: 2px solid var(--seed-ring);
-      background: color-mix(in srgb, var(--seed-ring) 28%, transparent);
+      border: 2px solid var(--focal-ring);
+      background: color-mix(in srgb, var(--focal-ring) 28%, transparent);
     }
     #year-timeline { margin-left: auto; font-variant-numeric: tabular-nums; }
     #timeline-bar {

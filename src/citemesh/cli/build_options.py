@@ -45,8 +45,8 @@ class _StrategyBuilderProtocol(Protocol):
     def build_graph(self, paper_id: str) -> tuple[PaperGraph, str]:
         """Build a graph for a paper identifier.
 
-        :param str paper_id: Raw or normalized seed paper identifier.
-        :return tuple[PaperGraph, str]: Built graph and normalized seed paper ID.
+        :param str paper_id: Raw or normalized focal paper identifier.
+        :return tuple[PaperGraph, str]: Built graph and normalized focal paper ID.
         """
         ...
 

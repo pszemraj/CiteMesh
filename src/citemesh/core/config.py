@@ -110,8 +110,8 @@ class VisualizationConfig:
     dpi: int = 150
 
     # Node area caps and minimum (in square points for static scatter plots)
-    seed_size: int = 2500
-    max_non_seed_size: int = 2200
+    focal_size: int = 2500
+    max_non_focal_size: int = 2200
     min_size: int = 100
 
     # Node size tiers (rank: (base, increment))

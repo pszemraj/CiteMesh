@@ -4,11 +4,11 @@ Rules for working on CiteMesh, for humans and coding agents.
 
 ## Project intent
 
-CiteMesh turns one seed paper into a graph of related papers that are relevant and worth considering, however obscure, found through citations and references and through embeddings. It is a discovery tool, not a map of the citation graph: papers that are not relevant are filtered out even when they are cited.
+CiteMesh turns one focal paper into a graph of related papers that are relevant and worth considering, however obscure, found through citations and references and through embeddings. It is a discovery tool, not a map of the citation graph: papers that are not relevant are filtered out even when they are cited.
 
 - It is a similarity graph, not a citation tree: edges are scored similarity between papers, not citation direction.
 - Keep edges sparse. Per-node degree caps bound the edge count ([edge scoring](docs/guides/how-it-works.md#6-edge-scoring)); do not loosen caps or thresholds to add edges.
-- Do not crawl citations recursively. Candidates come from the seed's own neighborhood (its references and citers, provider recommendations, corpus neighbors); reference lists fetched for selected papers serve only as bibliographic-coupling evidence.
+- Do not crawl citations recursively. Candidates come from the focal paper's own neighborhood (its references and citers, provider recommendations, corpus neighbors); reference lists fetched for selected papers serve only as bibliographic-coupling evidence.
 - Corpus modes default to the full selected split; use `--corpus-size` only to cap quick iteration.
 
 ## Scope
@@ -54,7 +54,7 @@ The default suite is network-free and excludes `slow` tests. Run it in parallel 
 
 Run opt-in real-model and compilation checks serially with `pytest -n 0 -m slow`. These tests can compete for the same accelerator, CPU inference threads, and compiler resources. For CUDA only, use `pytest -n 0 -m "slow and cuda"`. Some slow tests may download the designated model or fetch live arXiv data; CPU semantic-quality tests require the model already cached.
 
-For a quick live check, build a small graph from a well-known seed such as `arxiv:1706.03762` (Transformer) or `arxiv:1810.04805` (BERT), for example `citemesh build "arxiv:1706.03762" --strategy citation -p 20`. It calls the live Semantic Scholar API, so run it outside the sandbox.
+For a quick live check, build a small graph from a well-known focal paper such as `arxiv:1706.03762` (Transformer) or `arxiv:1810.04805` (BERT), for example `citemesh build "arxiv:1706.03762" --strategy citation -p 20`. It calls the live Semantic Scholar API, so run it outside the sandbox.
 
 ## Code conventions
 
@@ -69,4 +69,4 @@ The cache root (`CITEMESH_CACHE_DIR`, see [Environment Variables](docs/reference
 
 ## Curated demo
 
-The checked-in Megalodon dashboard under `assets/examples/megalodon/` uses `arxiv:2404.08801`, matching the bare input recorded in its collection package. The Pages workflow publishes that directory's dashboard, collection package, favicon, and Open Graph image as the live demo on every push to main. Use `arxiv:2404.08801v1` only when intentionally pinning arXiv bibliography recovery to version 1. The `arxiv:2608.27147` identifiers in recovery tests refer to Thomson and are not the demo seed.
+The checked-in Megalodon dashboard under `assets/examples/megalodon/` uses `arxiv:2404.08801`, matching the bare input recorded in its collection package. The Pages workflow publishes that directory's dashboard, collection package, favicon, and Open Graph image as the live demo on every push to main. Use `arxiv:2404.08801v1` only when intentionally pinning arXiv bibliography recovery to version 1. The `arxiv:2608.27147` identifiers in recovery tests refer to Thomson and are not the demo focal paper.

@@ -40,7 +40,7 @@ class _DashboardCollectionResultRequired(TypedDict):
 class DashboardCollectionResult(_DashboardCollectionResultRequired, total=False):
     """Optional descriptor fields retained for one collection result."""
 
-    seed_id: object
+    focal_id: object
     title: object
     strategy: object
     summary: object
@@ -48,18 +48,13 @@ class DashboardCollectionResult(_DashboardCollectionResultRequired, total=False)
     build: dict[object, object]
 
 
-class _DashboardCollectionBundleRequired(TypedDict):
+class DashboardCollectionBundle(TypedDict):
     """Fields present in every dashboard collection bundle."""
 
+    kind: Literal["citemesh-dashboard-collection"]
+    schema_version: Literal[2]
     current_result_id: str | None
     results: list[DashboardCollectionResult]
-
-
-class DashboardCollectionBundle(_DashboardCollectionBundleRequired, total=False):
-    """Collection bundle with optional version markers for legacy metadata."""
-
-    kind: Literal["citemesh-dashboard-collection"]
-    schema_version: Literal[1]
 
 
 class _EmbeddingExportMetadataRequired(TypedDict):
@@ -98,7 +93,7 @@ class ExportMetadata(TypedDict, total=False):
     """Optional metadata accepted by graph exporters."""
 
     paper_id: str
-    seed_id: str
+    focal_id: str
     strategy: str
     nodes: int
     edges: int
@@ -134,19 +129,19 @@ class EffectiveNodeMetadata(TypedDict):
     arxiv_id: object
     doi: object
     categories: object
-    is_seed: bool
+    is_focal: bool
     is_local_corpus: bool
 
 
 class DiscoveryFeatures(TypedDict):
-    """Seed-relative evidence the hybrid discovery ranker ordered a paper by.
+    """Focal-relative evidence the hybrid discovery ranker ordered a paper by.
 
-    ``bibliography_similarity`` is ``None`` when the seed has fewer than five
+    ``bibliography_similarity`` is ``None`` when the focal paper has fewer than five
     references other than the paper, and ``recommendation_rank`` is ``None``
     when the provider did not recommend it.
     """
 
-    seed_similarity: float
+    focal_similarity: float
     bibliography_similarity: float | None
     direct_citation: bool
     recommendation_rank: int | None
@@ -192,12 +187,12 @@ class _EnrichedNodePayloadRequired(TypedDict):
     arxiv_id: str
     doi: str
     categories: list[str]
-    is_seed: bool
+    is_focal: bool
     is_local_corpus: bool
     provenance: str
     provenance_base: str
-    seed_relation: str
-    seed_relevance: float
+    focal_relation: str
+    focal_relevance: float
     links: dict[str, str | None]
     bibtex: str
 
@@ -229,7 +224,7 @@ class YearRange(TypedDict):
 class _DashboardMetadataRequired(TypedDict):
     """Summary fields present in every dashboard metadata object."""
 
-    seed_id: str
+    focal_id: str
     strategy: str
     theme: str
     summary: GraphSummary
@@ -259,14 +254,6 @@ class GraphPayloadEdge(TypedDict):
     weight: float
 
 
-class DashboardEdge(TypedDict):
-    """Edge record used by the interactive dashboard viewer."""
-
-    source: str
-    target: str
-    weight: float
-
-
 class _PortableGraphMetadataRequired(TypedDict):
     """Fields always present in portable graph metadata."""
 
@@ -292,21 +279,13 @@ class GraphPayload(TypedDict):
     """Versioned graph export consumed by dashboard collection loaders."""
 
     kind: Literal["citemesh-graph"]
-    schema_version: Literal[1]
-    seed_id: str
+    schema_version: Literal[2]
+    focal_id: str
     meta: PortableGraphMetadata
     summary: GraphSummary
     nodes: list[EnrichedNodePayload]
     dashboard: GraphPayloadDashboard
     edges: list[GraphPayloadEdge]
-
-
-class DashboardPayload(TypedDict):
-    """Graph data consumed by the dashboard JavaScript viewer."""
-
-    meta: DashboardMetadata
-    nodes: list[EnrichedNodePayload]
-    edges: list[DashboardEdge]
 
 
 class ValidatedPayloadNode(TypedDict):
@@ -337,7 +316,7 @@ class ValidatedPortableGraphMetadata(
 class ValidatedDashboardMetadata(TypedDict):
     """Dashboard fields checked before a package can be loaded."""
 
-    seed_id: str
+    focal_id: str
     strategy: str
     summary: GraphSummary
     plotly_node_order: list[str]
@@ -355,8 +334,8 @@ class ValidatedGraphPayload(TypedDict):
     """Graph payload fields guaranteed by collection package validation."""
 
     kind: Literal["citemesh-graph"]
-    schema_version: Literal[1]
-    seed_id: str
+    schema_version: Literal[2]
+    focal_id: str
     meta: ValidatedPortableGraphMetadata
     summary: GraphSummary
     nodes: list[ValidatedPayloadNode]
@@ -368,7 +347,7 @@ class DashboardResultEntry(TypedDict):
     """Normalized result descriptor stored in a dashboard collection."""
 
     result_id: str
-    seed_id: str
+    focal_id: str
     title: str
     strategy: str
     summary: GraphSummary
@@ -381,7 +360,7 @@ class DashboardCollectionPackage(TypedDict):
     """Versioned collection package returned by its loader and updater."""
 
     kind: Literal["citemesh-dashboard-collection"]
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     current_result_id: str | None
     results: list[DashboardResultEntry]
 
@@ -450,7 +429,7 @@ class _BuildConfigRequired(TypedDict):
 
     paper_id_input: str
     paper_id_canonical: str
-    seed_id: str
+    focal_id: str
     strategy: str
     max_papers: int
     refresh_paper_cache: bool
@@ -470,18 +449,18 @@ class BuildConfig(_BuildConfigRequired, total=False):
 class GraphConfigData(TypedDict):
     """Configuration sidecar emitted beside a graph export."""
 
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     build: BuildConfig
     outputs: dict[str, str]
     metadata: ExportMetadata
 
 
 GRAPH_PAYLOAD_KIND: Final[Literal["citemesh-graph"]] = "citemesh-graph"
-GRAPH_PAYLOAD_SCHEMA_VERSION: Final[Literal[1]] = 1
+GRAPH_PAYLOAD_SCHEMA_VERSION: Final[Literal[2]] = 2
 DASHBOARD_COLLECTION_KIND: Final[Literal["citemesh-dashboard-collection"]] = (
     "citemesh-dashboard-collection"
 )
-DASHBOARD_COLLECTION_SCHEMA_VERSION: Final[Literal[1]] = 1
+DASHBOARD_COLLECTION_SCHEMA_VERSION: Final[Literal[2]] = 2
 
 __all__ = [
     "ScoreContract",
@@ -494,11 +473,9 @@ __all__ = [
     "YearRange",
     "DashboardMetadata",
     "GraphPayloadEdge",
-    "DashboardEdge",
     "PortableGraphMetadata",
     "GraphPayloadDashboard",
     "GraphPayload",
-    "DashboardPayload",
     "ValidatedPayloadNode",
     "ValidatedPayloadEdge",
     "ValidatedPortableGraphMetadata",

@@ -113,7 +113,7 @@ def _log_skipped_rows(listing: str, paper_id: str, skipped: int, total: int) -> 
     are routine, so they are logged at debug level.
 
     :param str listing: Listing name, such as ``citations discovery``.
-    :param str paper_id: Normalized seed identifier.
+    :param str paper_id: Normalized focal paper identifier.
     :param int skipped: Rows dropped.
     :param int total: Rows the provider returned.
     :return None: Logs only when rows were dropped.
@@ -422,9 +422,9 @@ class _EndpointsMixin:
         *,
         raise_on_unavailable: bool = False,
     ) -> list[Paper]:
-        """Fetch full metadata for papers citing a seed.
+        """Fetch full metadata for papers citing a focal paper.
 
-        :param str paper_id: Seed identifier.
+        :param str paper_id: Focal paper identifier.
         :param int limit: Maximum unique results.
         :param bool raise_on_unavailable: Raise if a relation page fails.
         :return list[Paper]: Ordered citing papers.
@@ -445,9 +445,9 @@ class _EndpointsMixin:
         raise_on_unavailable: bool = False,
         reference_evidence: dict[str, ReferenceEvidence] | None = None,
     ) -> list[Paper]:
-        """Fetch full metadata for papers referenced by a seed.
+        """Fetch full metadata for papers referenced by a focal paper.
 
-        :param str paper_id: Seed identifier.
+        :param str paper_id: Focal paper identifier.
         :param int limit: Maximum unique results.
         :param bool raise_on_unavailable: Raise if a relation page fails.
         :param dict[str, ReferenceEvidence] | None reference_evidence: Optional
@@ -477,7 +477,7 @@ class _EndpointsMixin:
     ) -> _RelationListing | None:
         """Fetch ordered unique relation records through explicit REST pages.
 
-        :param str paper_id: Normalized seed identifier.
+        :param str paper_id: Normalized focal paper identifier.
         :param str relation: ``references`` or ``citations``.
         :param str nested_key: Relation row's nested paper key.
         :param str fields: Paper fields requested for each nested record.
@@ -598,9 +598,9 @@ class _EndpointsMixin:
 
         Records come from the relation rows themselves, so no batch request is
         made and nothing is written to the paper cache. A complete reference
-        listing also refreshes the seed's reference-ID cache.
+        listing also refreshes the focal paper's reference-ID cache.
 
-        :param str paper_id: Seed identifier.
+        :param str paper_id: Focal paper identifier.
         :param int limit: Maximum unique results.
         :param str relation: Relation endpoint name.
         :param str nested_key: Nested response paper key.
@@ -665,7 +665,7 @@ class _EndpointsMixin:
     def get_cached_reference_ids(self, paper_id: str) -> list[str] | None:
         """Read a validated reference cache entry without network access.
 
-        :param str paper_id: Seed identifier.
+        :param str paper_id: Focal paper identifier.
         :return list[str] | None: Cached list, including authoritative empty, or miss.
         """
         normalized_id = normalize_paper_id(paper_id)
@@ -703,7 +703,7 @@ class _EndpointsMixin:
     ) -> list[str]:
         """Fetch all resolved reference IDs, with an independent persistent cache.
 
-        :param str paper_id: Seed identifier.
+        :param str paper_id: Focal paper identifier.
         :param bool force_refresh: Bypass the reference cache.
         :param bool raise_on_unavailable: Raise on a failed page.
         :return list[str]: Ordered unique reference identifiers.
@@ -784,7 +784,7 @@ class _EndpointsMixin:
         inline, parsed like relation rows: no batch request is made and nothing
         is written to the paper cache.
 
-        :param str paper_id: Seed identifier.
+        :param str paper_id: Focal paper identifier.
         :param int limit: Maximum results, up to 500.
         :param list[str] | None fields: Optional direct-response projection.
         :param bool raise_on_unavailable: Raise on discovery failure.

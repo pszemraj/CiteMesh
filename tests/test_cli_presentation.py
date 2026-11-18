@@ -128,7 +128,7 @@ def test_usage_error_wraps_to_the_terminal(
     monkeypatch.setenv("COLUMNS", "60")
     parser, *_ = _create_parser()
     with pytest.raises(SystemExit, match="2"):
-        parser.parse_args(["build", "seed", "--strategy", "unknown"])
+        parser.parse_args(["build", "focal", "--strategy", "unknown"])
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "invalid choice" in " ".join(captured.err.split())

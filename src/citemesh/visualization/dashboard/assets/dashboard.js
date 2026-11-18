@@ -18,7 +18,8 @@
     let bootstrapFailureMessage = "";
     let bootstrapStatusMessage = "";
     try {
-      initialEntry = collectionEntryFromGraphPayload(payload, "Current graph", true);
+      initialEntry = collectionEntryFromGraphPayload(payload, "Current graph");
+      payload = initialEntry.payload;
     } catch (err) {
       bootstrapFailureMessage =
         "Dashboard graph data is invalid: " + String((err && err.message) || err);
@@ -27,8 +28,7 @@
       try {
         collectionBundle = normalizeCollectionPackage(
           embeddedCollectionBundle,
-          "this dashboard",
-          true
+          "this dashboard"
         );
       } catch (err) {
         bootstrapStatusMessage =
@@ -53,8 +53,8 @@
     let nodeById = new Map();
     let nodeIndexById = new Map();
     let yearRange = {};
-    let seedNode = null;
-    let seedYear = null;
+    let focalNode = null;
+    let focalYear = null;
     let traceSpecs = [];
     let nodeTraceIndex = 0;
     let haloTraceIndex = -1;
@@ -110,8 +110,8 @@
       const rankedIds = order.slice().sort((leftId, rightId) => {
         const left = nodeById.get(leftId) || {};
         const right = nodeById.get(rightId) || {};
-        if (!!left.is_seed !== !!right.is_seed) {
-          return left.is_seed ? -1 : 1;
+        if (!!left.is_focal !== !!right.is_focal) {
+          return left.is_focal ? -1 : 1;
         }
         const citationDelta =
           Number(right.citation_count || 0) - Number(left.citation_count || 0);
@@ -130,7 +130,7 @@
       for (const nodeId of rankedIds) {
         const node = nodeById.get(nodeId) || {};
         const nodeIdx = indexById.get(nodeId);
-        const isCrowded = !node.is_seed && selectedIds.some((selectedId) => {
+        const isCrowded = !node.is_focal && selectedIds.some((selectedId) => {
           const selectedIdx = indexById.get(selectedId);
           return Math.hypot(
             Number(xPairs[nodeIdx] || 0) - Number(xPairs[selectedIdx] || 0),
@@ -159,10 +159,10 @@
       return escapeHtml(title.length <= 26 ? title : `${title.slice(0, 23)}...`);
     }
 
-    function currentSeedRingColor() {
+    function currentFocalRingColor() {
       const styles = getComputedStyle(document.documentElement);
-      const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
-      return color || "__SEED_RING__";
+      const color = String(styles.getPropertyValue("--focal-ring") || "").trim();
+      return color || "__FOCAL_RING__";
     }
 
     function colorWithAlpha(hexColor, alpha) {
@@ -238,18 +238,18 @@
       lines.push(escapeHtml(factBits.join(" | ")));
 
       const relationLabels = {
-        seed: "focal paper",
-        referenced_by_seed: "referenced by focal paper",
-        cites_seed: "cites focal paper",
+        focal: "focal paper",
+        referenced_by_focal: "referenced by focal paper",
+        cites_focal: "cites focal paper",
         overlap: "prior + derivative work",
         semantic_only: "semantic match",
         citation: "citation graph",
         semantic: "semantic match",
         both: "citations + semantic match",
       };
-      const relationKey = node.is_seed
-        ? "seed"
-        : String(node.seed_relation || node.provenance || "");
+      const relationKey = node.is_focal
+        ? "focal"
+        : String(node.focal_relation || node.provenance || "");
       const relationLabel = relationLabels[relationKey] || "";
       if (relationLabel) {
         lines.push(`<i>${escapeHtml(relationLabel)}</i>`);
@@ -308,15 +308,14 @@
           false
         );
         const resultSet = importedCollection
-          ? normalizeCollectionPackage(importedCollection, filename, true)
+          ? normalizeCollectionPackage(importedCollection, filename)
           : emptyCollectionPackage();
         const packageCurrentResultId = String(
           (importedCollection && importedCollection.current_result_id) || ""
         ).trim();
         const currentEntry = collectionEntryFromGraphPayload(
           importedGraph,
-          filename,
-          true
+          filename
         );
         if (!resultSet.results.some((entry) => entry.result_id === currentEntry.result_id)) {
           resultSet.results.push(currentEntry);
@@ -329,9 +328,9 @@
 
       const imported = JSON.parse(text);
       if (imported && imported.kind === COLLECTION_KIND) {
-        return normalizeCollectionPackage(imported, filename, false);
+        return normalizeCollectionPackage(imported, filename);
       }
-      const entry = collectionEntryFromGraphPayload(imported, filename, true);
+      const entry = collectionEntryFromGraphPayload(imported, filename);
       const resultSet = emptyCollectionPackage();
       resultSet.current_result_id = entry.result_id;
       resultSet.results.push(entry);
@@ -441,8 +440,8 @@
         xPairs,
         yPairs
       );
-      const seedId = String(meta.seed_id || "");
-      const seedRingColor = currentSeedRingColor();
+      const focalId = String(meta.focal_id || "");
+      const focalRingColor = currentFocalRingColor();
       const edgeStrengths = normalizeDashboardEdgeStrengths(nextEdges);
 
       const nodeTexts = [];
@@ -460,9 +459,9 @@
           : missingYear;
         nodeYears.push(nodeYear);
         hoverTexts.push(dashboardHoverText(node, nodeId));
-        if (node.is_seed) {
+        if (node.is_focal) {
           lineWidths.push(4.0);
-          lineColors.push(seedRingColor);
+          lineColors.push(focalRingColor);
         } else {
           lineWidths.push(0.0);
           lineColors.push("rgba(0,0,0,0)");
@@ -531,14 +530,14 @@
       nextTraceSpecs[nextNodeTraceIndex] = nodeTrace;
 
       if (nextHaloTraceIndex >= 0) {
-        const seedIdx = order.indexOf(seedId);
+        const focalIdx = order.indexOf(focalId);
         const haloTrace = nextTraceSpecs[nextHaloTraceIndex] || {};
-        haloTrace.x = seedIdx >= 0 ? [xPairs[seedIdx]] : [];
-        haloTrace.y = seedIdx >= 0 ? [yPairs[seedIdx]] : [];
+        haloTrace.x = focalIdx >= 0 ? [xPairs[focalIdx]] : [];
+        haloTrace.y = focalIdx >= 0 ? [yPairs[focalIdx]] : [];
         haloTrace.marker = Object.assign({}, haloTrace.marker || {}, {
-          size: seedIdx >= 0 ? [alignedNodeSizes[seedIdx] * 2.05] : [],
+          size: focalIdx >= 0 ? [alignedNodeSizes[focalIdx] * 2.05] : [],
           sizeref: nextMarkerSizeRef,
-          color: seedIdx >= 0 ? [colorWithAlpha(seedRingColor, 0.26)] : [],
+          color: focalIdx >= 0 ? [colorWithAlpha(focalRingColor, 0.26)] : [],
         });
         nextTraceSpecs[nextHaloTraceIndex] = haloTrace;
       }
@@ -586,7 +585,7 @@
           Math.max(4.0, Math.sqrt(alignedNodeSizes[idx] / (2.0 * nextMarkerSizeRef))) + lineWidths[idx] / 2.0
         ) + 3.0,
       }] : []);
-      layout.uirevision = `citemesh-dashboard-static-layout-v1:${String(meta.strategy || "")}:${String(meta.seed_id || "")}`;
+      layout.uirevision = `citemesh-dashboard-static-layout-v1:${String(meta.strategy || "")}:${String(meta.focal_id || "")}`;
 
       template.data = nextTraceSpecs;
       template.layout = layout;
@@ -601,9 +600,9 @@
       nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
       nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
       yearRange = (payload.meta && payload.meta.year_range) || {};
-      seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "") || null;
-      seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
-        ? Number(seedNode.year)
+      focalNode = nodeById.get((payload.meta && payload.meta.focal_id) || "") || null;
+      focalYear = focalNode && Number.isFinite(Number(focalNode.year)) && Number(focalNode.year) > 0
+        ? Number(focalNode.year)
         : null;
 
       traceSpecs = figureSpec.data || [];
@@ -654,7 +653,7 @@
     let persistedSavedIds = new Set();
 
     const state = {
-      selectedId: (payload.meta && payload.meta.seed_id) || null,
+      selectedId: (payload.meta && payload.meta.focal_id) || null,
       hoverId: null,
       filters: { citation: true, semantic: true, both: true },
       searchText: "",
@@ -712,8 +711,8 @@
     function savedStorageKey() {
       const meta = (payload && payload.meta) || {};
       const strategy = String(meta.strategy || "default");
-      const seedId = String(meta.seed_id || "default");
-      return `citemesh-saved:${strategy}:${seedId}`;
+      const focalId = String(meta.focal_id || "default");
+      return `citemesh-saved:${strategy}:${focalId}`;
     }
 
     function pruneSavedIdsForPayload(savedIds) {
@@ -849,33 +848,32 @@
       return state.filters[base] === true;
     }
 
-    // Scope is a citation-direction question, not a chronology one: a paper the
-    // seed references is prior work whatever year it carries, and a paper citing
-    // the seed is derivative work even when it predates the seed. Publication
-    // year only decides nodes the citation graph places in neither direction.
-    const PRIOR_SEED_RELATIONS = new Set(["referenced_by_seed", "overlap"]);
-    const DERIVATIVE_SEED_RELATIONS = new Set(["cites_seed", "overlap"]);
+    // A reference of the focal paper is prior work and a paper citing it is
+    // derivative work. Use publication year only when the citation direction
+    // is unknown.
+    const PRIOR_FOCAL_RELATIONS = new Set(["referenced_by_focal", "overlap"]);
+    const DERIVATIVE_FOCAL_RELATIONS = new Set(["cites_focal", "overlap"]);
 
     function nodeScopeMatches(node) {
       if (state.scopeMode !== "prior" && state.scopeMode !== "derivative") {
         return true;
       }
-      const relation = String(node.seed_relation || "").trim().toLowerCase();
-      if (node.is_seed || relation === "seed") {
+      const relation = String(node.focal_relation || "").trim().toLowerCase();
+      if (node.is_focal || relation === "focal") {
         return true;
       }
-      const priorRelation = PRIOR_SEED_RELATIONS.has(relation);
-      const derivativeRelation = DERIVATIVE_SEED_RELATIONS.has(relation);
+      const priorRelation = PRIOR_FOCAL_RELATIONS.has(relation);
+      const derivativeRelation = DERIVATIVE_FOCAL_RELATIONS.has(relation);
       if (priorRelation || derivativeRelation) {
         return state.scopeMode === "prior" ? priorRelation : derivativeRelation;
       }
       // "semantic_only", the direction-less "citation" token, and an absent
-      // relation all fall back to the seed year; an unusable year stays visible.
-      if (seedYear === null || !hasYear(node)) {
+      // relation all fall back to the focal year; an unusable year stays visible.
+      if (focalYear === null || !hasYear(node)) {
         return true;
       }
       const nodeYear = Number(node.year);
-      return state.scopeMode === "prior" ? nodeYear <= seedYear : nodeYear >= seedYear;
+      return state.scopeMode === "prior" ? nodeYear <= focalYear : nodeYear >= focalYear;
     }
 
     function nodeMatches(node) {
@@ -920,8 +918,8 @@
     }
 
     function compareNodes(nodeA, nodeB) {
-      if (!!nodeA.is_seed !== !!nodeB.is_seed) {
-        return nodeA.is_seed ? -1 : 1;
+      if (!!nodeA.is_focal !== !!nodeB.is_focal) {
+        return nodeA.is_focal ? -1 : 1;
       }
 
       if (state.sortKey === "title") {
@@ -954,8 +952,8 @@
         return tieBreak(nodeA, nodeB);
       }
 
-      const relevanceA = Number(nodeA.seed_relevance || 0);
-      const relevanceB = Number(nodeB.seed_relevance || 0);
+      const relevanceA = Number(nodeA.focal_relevance || 0);
+      const relevanceB = Number(nodeB.focal_relevance || 0);
       if (relevanceA !== relevanceB) {
         return relevanceB - relevanceA;
       }
@@ -963,14 +961,14 @@
     }
 
     function relationBadgeLabel(node) {
-      const relation = String(node.seed_relation || "").trim();
-      if (node.is_seed || relation === "seed") {
+      const relation = String(node.focal_relation || "").trim();
+      if (node.is_focal || relation === "focal") {
         return "Focal paper";
       }
-      if (relation === "referenced_by_seed") {
+      if (relation === "referenced_by_focal") {
         return "Referenced by focal paper";
       }
-      if (relation === "cites_seed") {
+      if (relation === "cites_focal") {
         return "Cites focal paper";
       }
       if (relation === "semantic_only") {
@@ -983,7 +981,7 @@
     }
 
     function paperSourceLabel(node) {
-      const source = node.provenance === "seed" ? node.provenance_base : node.provenance;
+      const source = node.provenance === "focal" ? node.provenance_base : node.provenance;
       if (source === "both") {
         return "Citation and semantic";
       }
@@ -1166,7 +1164,7 @@
       return {
         kind: GRAPH_PAYLOAD_KIND,
         schema_version: GRAPH_PAYLOAD_SCHEMA_VERSION,
-        seed_id: nextMeta.seed_id || "",
+        focal_id: nextMeta.focal_id || "",
         meta: Object.assign(
           {
             strategy: nextMeta.strategy || "",
@@ -1191,12 +1189,12 @@
 
     function currentResultIdForPayload(nextPayload) {
       const meta = (nextPayload && nextPayload.meta) || {};
-      const seedId = String(meta.seed_id || "");
+      const focalId = String(meta.focal_id || "");
       const strategy = String(meta.strategy || "");
-      if (!seedId || !strategy) {
+      if (!focalId || !strategy) {
         return null;
       }
-      return `${strategy}:${seedId}`;
+      return `${strategy}:${focalId}`;
     }
 
     function emptyCollectionPackage() {
@@ -1216,22 +1214,20 @@
       return Number.isInteger(value) && value >= 0;
     }
 
-    function normalizeImportedDashboardPayload(imported, label, allowLegacy) {
+    function normalizeImportedDashboardPayload(imported, label) {
       if (!isObjectRecord(imported)) {
         throw new Error("Expected a CiteMesh graph object.");
       }
       const declaredKind = String(imported.kind || "");
-      if (declaredKind) {
-        if (declaredKind !== GRAPH_PAYLOAD_KIND) {
-          throw new Error(`Unsupported result kind: ${declaredKind}.`);
-        }
-        if (imported.schema_version !== GRAPH_PAYLOAD_SCHEMA_VERSION) {
-          throw new Error(
-            `Unsupported ${GRAPH_PAYLOAD_KIND} schema version: ${String(imported.schema_version)}.`
-          );
-        }
-      } else if (!allowLegacy) {
-        throw new Error(`Result payload is missing kind=${GRAPH_PAYLOAD_KIND}.`);
+      if (declaredKind !== GRAPH_PAYLOAD_KIND) {
+        throw new Error(
+          `Unsupported graph format. Rebuild with this CiteMesh version before importing results (expected ${GRAPH_PAYLOAD_KIND}).`
+        );
+      }
+      if (imported.schema_version !== GRAPH_PAYLOAD_SCHEMA_VERSION) {
+        throw new Error(
+          `Unsupported ${GRAPH_PAYLOAD_KIND} schema version: ${String(imported.schema_version)}. Rebuild with this CiteMesh version before importing results.`
+        );
       }
 
       if (!Array.isArray(imported.nodes) || !imported.nodes.length) {
@@ -1246,7 +1242,7 @@
       if (nodeIds.some((nodeId) => !nodeId) || new Set(nodeIds).size !== nodeIds.length) {
         throw new Error("Graph result nodes must have unique, non-empty IDs.");
       }
-      if (declaredKind && nodeIds.some((nodeId) => nodeId !== nodeId.trim())) {
+      if (nodeIds.some((nodeId) => nodeId !== nodeId.trim())) {
         throw new Error("Versioned graph node IDs cannot contain surrounding whitespace.");
       }
       const nodeIdSet = new Set(nodeIds);
@@ -1257,24 +1253,22 @@
       ))) {
         throw new Error("Graph result edges must reference included node IDs.");
       }
-      if (declaredKind && importedEdges.some((edge) => (
+      if (importedEdges.some((edge) => (
         String(edge.source || "") !== String(edge.source || "").trim()
         || String(edge.target || "") !== String(edge.target || "").trim()
       ))) {
         throw new Error("Versioned graph edge IDs cannot contain surrounding whitespace.");
       }
-      if (declaredKind) {
-        if (!isObjectRecord(imported.summary)) {
-          throw new Error("Versioned graph results must contain a summary object.");
-        }
-        if (
-          !isNonNegativeInteger(imported.summary.nodes)
-          || !isNonNegativeInteger(imported.summary.edges)
-          || imported.summary.nodes !== importedNodes.length
-          || imported.summary.edges !== importedEdges.length
-        ) {
-          throw new Error("Graph result summary does not match its node and edge arrays.");
-        }
+      if (!isObjectRecord(imported.summary)) {
+        throw new Error("Versioned graph results must contain a summary object.");
+      }
+      if (
+        !isNonNegativeInteger(imported.summary.nodes)
+        || !isNonNegativeInteger(imported.summary.edges)
+        || imported.summary.nodes !== importedNodes.length
+        || imported.summary.edges !== importedEdges.length
+      ) {
+        throw new Error("Graph result summary does not match its node and edge arrays.");
       }
       const importedDashboardMeta =
         imported && imported.dashboard && imported.dashboard.meta
@@ -1284,48 +1278,36 @@
         imported && imported.meta && typeof imported.meta === "object"
           ? imported.meta
           : {};
-      const declaredSeedId = String(imported.seed_id || "");
-      const declaredStrategy = String(importedMeta.strategy || "");
-      if (declaredKind && (
-        !declaredSeedId
-        || declaredSeedId !== declaredSeedId.trim()
+      const focalId = String(imported.focal_id || "");
+      const strategy = String(importedMeta.strategy || "");
+      if (
+        !focalId
+        || focalId !== focalId.trim()
         || !isObjectRecord(imported.meta)
-        || !declaredStrategy
-        || declaredStrategy !== declaredStrategy.trim()
-      )) {
+        || !strategy
+        || strategy !== strategy.trim()
+      ) {
         throw new Error(
-          "Versioned graph results require canonical top-level seed_id and meta.strategy."
+          "Versioned graph results require canonical top-level focal_id and meta.strategy."
         );
       }
-      if (declaredKind && (
+      if (
         !isObjectRecord(importedDashboardMeta)
-        || String(importedDashboardMeta.seed_id || "") !== declaredSeedId
-        || String(importedDashboardMeta.strategy || "") !== declaredStrategy
+        || String(importedDashboardMeta.focal_id || "") !== focalId
+        || String(importedDashboardMeta.strategy || "") !== strategy
         || !isObjectRecord(importedDashboardMeta.summary)
         || importedDashboardMeta.summary.nodes !== importedNodes.length
         || importedDashboardMeta.summary.edges !== importedEdges.length
-      )) {
+      ) {
         throw new Error(
           "Versioned graph dashboard metadata must match its top-level identity and summary."
         );
       }
-      const seedId = String(
-        declaredSeedId
-        || importedDashboardMeta.seed_id
-        || importedMeta.seed_id
-        || ((importedNodes.find((node) => !!(node && node.is_seed)) || {}).id || "")
-      );
-      const strategy = declaredKind
-        ? declaredStrategy
-        : String(importedDashboardMeta.strategy || importedMeta.strategy || "");
-      if (!seedId || !nodeIds.includes(seedId)) {
+      if (!nodeIds.includes(focalId)) {
         throw new Error("Graph results must identify a focal node present in nodes.");
       }
-      if (!strategy) {
-        throw new Error("Graph results must identify the build strategy.");
-      }
       const baseMeta = {
-        seed_id: seedId,
+        focal_id: focalId,
         strategy,
         theme: String(
           (payload.meta && payload.meta.theme)
@@ -1381,21 +1363,21 @@
       };
     }
 
-    function collectionEntryFromGraphPayload(imported, label, allowLegacy) {
-      const normalized = normalizeImportedDashboardPayload(imported, label, allowLegacy);
+    function collectionEntryFromGraphPayload(imported, label) {
+      const normalized = normalizeImportedDashboardPayload(imported, label);
       const normalizedPayload = normalized.payload;
       const resultId = currentResultIdForPayload(normalizedPayload);
       if (!resultId) {
         throw new Error("Graph results do not provide a stable strategy and focal paper ID.");
       }
-      const seedId = String(normalizedPayload.meta.seed_id || "");
-      const seedNode = normalizedPayload.nodes.find(
-        (node) => String((node && node.id) || "") === seedId
+      const focalId = String(normalizedPayload.meta.focal_id || "");
+      const focalNode = normalizedPayload.nodes.find(
+        (node) => String((node && node.id) || "") === focalId
       );
       return {
         result_id: resultId,
-        seed_id: seedId,
-        title: String((seedNode && seedNode.title) || seedId || label || "Graph result"),
+        focal_id: focalId,
+        title: String((focalNode && focalNode.title) || focalId || label || "Graph result"),
         strategy: String(normalizedPayload.meta.strategy || ""),
         summary: {
           nodes: normalizedPayload.nodes.length,
@@ -1407,95 +1389,77 @@
       };
     }
 
-    function normalizeCollectionPackage(imported, label, allowLegacy) {
+    function normalizeCollectionPackage(imported, label) {
       if (!isObjectRecord(imported)) {
         throw new Error("Expected a CiteMesh dashboard collection object.");
       }
       const declaredKind = String(imported.kind || "");
-      const isVersionedCollection = declaredKind === COLLECTION_KIND;
-      if (declaredKind && !isVersionedCollection) {
-        throw new Error(`Unsupported collection kind: ${declaredKind}.`);
-      }
-      if (isVersionedCollection && imported.schema_version !== COLLECTION_SCHEMA_VERSION) {
+      if (declaredKind !== COLLECTION_KIND) {
         throw new Error(
-          `Unsupported ${COLLECTION_KIND} schema version: ${String(imported.schema_version)}.`
+          `Unsupported collection format. Rebuild with this CiteMesh version before importing results (expected ${COLLECTION_KIND}).`
         );
       }
-      if (!isVersionedCollection && !allowLegacy) {
-        throw new Error(`Collection package is missing kind=${COLLECTION_KIND}.`);
+      if (imported.schema_version !== COLLECTION_SCHEMA_VERSION) {
+        throw new Error(
+          `Unsupported ${COLLECTION_KIND} schema version: ${String(imported.schema_version)}. Rebuild with this CiteMesh version before importing results.`
+        );
       }
       if (!Array.isArray(imported.results)) {
         throw new Error("Collection package must contain a results array.");
       }
 
       const normalized = emptyCollectionPackage();
-      const legacyPayloads = isObjectRecord(imported.payloads) ? imported.payloads : {};
       imported.results.forEach((rawEntry, index) => {
         if (!isObjectRecord(rawEntry)) {
           throw new Error(`Collection result ${index + 1} must be an object.`);
         }
         const declaredResultId = String(rawEntry.result_id || "").trim();
-        const rawPayload = isObjectRecord(rawEntry.payload)
-          ? rawEntry.payload
-          : legacyPayloads[declaredResultId];
+        const rawPayload = rawEntry.payload;
         if (!isObjectRecord(rawPayload)) {
           throw new Error(`Collection result ${index + 1} is missing its graph payload.`);
         }
         const normalizedEntry = collectionEntryFromGraphPayload(
           rawPayload,
-          `${label || "collection"} result ${index + 1}`,
-          allowLegacy
+          `${label || "collection"} result ${index + 1}`
         );
         if (declaredResultId && declaredResultId !== normalizedEntry.result_id) {
           throw new Error(
             `Collection result ${index + 1} ID does not match its graph strategy and focal paper.`
           );
         }
-        if (!declaredResultId && isVersionedCollection) {
+        if (!declaredResultId) {
           throw new Error(`Collection result ${index + 1} is missing result_id.`);
         }
-        if (isVersionedCollection) {
-          if (!String(rawEntry.title || "").trim()) {
-            throw new Error(`Collection result ${index + 1} is missing title.`);
-          }
-          if (!String(rawEntry.updated_at || "").trim()) {
-            throw new Error(`Collection result ${index + 1} is missing updated_at.`);
-          }
-          if (!isObjectRecord(rawEntry.summary)) {
-            throw new Error(`Collection result ${index + 1} is missing summary.`);
-          }
-          if (
-            !isNonNegativeInteger(rawEntry.summary.nodes)
-            || !isNonNegativeInteger(rawEntry.summary.edges)
-            || rawEntry.summary.nodes !== normalizedEntry.summary.nodes
-            || rawEntry.summary.edges !== normalizedEntry.summary.edges
-          ) {
-            throw new Error(`Collection result ${index + 1} has an inconsistent summary.`);
-          }
-          if (!isObjectRecord(rawEntry.build)) {
-            throw new Error(`Collection result ${index + 1} is missing build metadata.`);
-          }
+        if (!String(rawEntry.title || "").trim()) {
+          throw new Error(`Collection result ${index + 1} is missing title.`);
         }
-        for (const field of ["seed_id", "strategy"]) {
+        if (!String(rawEntry.updated_at || "").trim()) {
+          throw new Error(`Collection result ${index + 1} is missing updated_at.`);
+        }
+        if (!isObjectRecord(rawEntry.summary)) {
+          throw new Error(`Collection result ${index + 1} is missing summary.`);
+        }
+        if (
+          !isNonNegativeInteger(rawEntry.summary.nodes)
+          || !isNonNegativeInteger(rawEntry.summary.edges)
+          || rawEntry.summary.nodes !== normalizedEntry.summary.nodes
+          || rawEntry.summary.edges !== normalizedEntry.summary.edges
+        ) {
+          throw new Error(`Collection result ${index + 1} has an inconsistent summary.`);
+        }
+        if (!isObjectRecord(rawEntry.build)) {
+          throw new Error(`Collection result ${index + 1} is missing build metadata.`);
+        }
+        for (const field of ["focal_id", "strategy"]) {
           if (
-            rawEntry[field] !== undefined
-            && String(rawEntry[field]) !== String(normalizedEntry[field])
+            String(rawEntry[field] || "") !== String(normalizedEntry[field])
           ) {
             throw new Error(`Collection result ${index + 1} has inconsistent ${field}.`);
           }
         }
-        if (rawEntry.title !== undefined) {
-          normalizedEntry.title = String(rawEntry.title || normalizedEntry.title);
-        }
-        if (rawEntry.updated_at !== undefined) {
-          normalizedEntry.updated_at = String(rawEntry.updated_at || "");
-        }
-        if (rawEntry.build !== undefined) {
-          if (!isObjectRecord(rawEntry.build)) {
-            throw new Error(`Collection result ${index + 1} build metadata must be an object.`);
-          }
-          normalizedEntry.build = rawEntry.build;
-        }
+        normalizedEntry.title = String(rawEntry.title);
+        normalizedEntry.updated_at = String(rawEntry.updated_at);
+        normalizedEntry.build = rawEntry.build;
         const duplicateIndex = normalized.results.findIndex(
           (entry) => entry.result_id === normalizedEntry.result_id
         );
@@ -1538,7 +1502,7 @@
         results: collectionEntries().map((entry) => {
           const portableEntry = {
             result_id: entry.result_id,
-            seed_id: entry.seed_id,
+            focal_id: entry.focal_id,
             title: entry.title,
             strategy: entry.strategy,
             summary: entry.summary,
@@ -1552,7 +1516,7 @@
     }
 
     function collectionEntryLabel(entry) {
-      const title = String(entry.title || entry.seed_id || entry.result_id || "Graph result");
+      const title = String(entry.title || entry.focal_id || entry.result_id || "Graph result");
       const strategy = String(entry.strategy || "");
       const summary = entry.summary || {};
       const nodeCount = Number(summary.nodes || 0);
@@ -1566,7 +1530,7 @@
     }
 
     function renderGraphHeading() {
-      document.getElementById("focal-title").textContent = seedNode?.title || payload.meta.seed_id || "Paper graph";
+      document.getElementById("focal-title").textContent = focalNode?.title || payload.meta.focal_id || "Paper graph";
       const strategy = String(payload.meta.strategy || "");
       const strategyLabel = strategy && strategy !== "unknown"
         ? strategy[0].toUpperCase() + strategy.slice(1) + " discovery" : "";
@@ -1633,7 +1597,7 @@
     function defaultSortKey() {
       // A hybrid graph ranks every related paper, so lead with that order when the
       // ranking is complete. Any other graph keeps the relevance default.
-      const related = nodes.filter((node) => !node.is_seed);
+      const related = nodes.filter((node) => !node.is_focal);
       const fullyRanked = related.length > 0
         && related.every((node) => Number.isInteger(node.discovery_rank));
       return fullyRanked ? "discovery_rank" : "relevance";
@@ -1647,9 +1611,7 @@
       }
     }
 
-    function applyImportedPayload(imported, label) {
-      const normalizedImport = normalizeImportedDashboardPayload(imported, label, true);
-      const nextPayload = normalizedImport.payload;
+    function applyDashboardPayload(nextPayload) {
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
       figureSpec = nextFigureSpec;
@@ -1659,7 +1621,7 @@
       refreshSavedState();
       overlayState.neighborhoodKey = "";
       overlayState.haloKey = "";
-      state.selectedId = (payload.meta && payload.meta.seed_id) || null;
+      state.selectedId = (payload.meta && payload.meta.focal_id) || null;
       state.hoverId = null;
       state.searchText = "";
       state.sortKey = defaultSortKey();
@@ -1715,10 +1677,7 @@
       }
       collectionResultId = normalizedId;
       clearDashboardStatus();
-      return applyImportedPayload(
-        entry.payload,
-        collectionEntryLabel(entry)
-      );
+      return applyDashboardPayload(entry.payload);
     }
 
     function shortestPathIds(sourceId, targetId) {
@@ -1799,7 +1758,7 @@
 
     function focalReferenceEvidenceHtml(node) {
       const evidence = node.focal_reference_evidence;
-      if (!evidence || node.is_seed) {
+      if (!evidence || node.is_focal) {
         return "";
       }
       const count = Number.isInteger(evidence.context_count) ? evidence.context_count : 0;
@@ -1835,7 +1794,7 @@
       evidence.push(["Relation", relation || "Unavailable"]);
       if (ranked) {
         const features = node.discovery_features || {};
-        const signals = [`Focal similarity ${Number(features.seed_similarity || 0).toFixed(3)}`];
+        const signals = [`Focal similarity ${Number(features.focal_similarity || 0).toFixed(3)}`];
         if (Number.isFinite(features.bibliography_similarity)) {
           signals.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
         }
@@ -1848,8 +1807,8 @@
         evidence.push(["Discovery signals", signals.join(" · ")]);
       }
 
-      if (!node.is_seed) {
-        evidence.push(["Graph relevance", Number(node.seed_relevance || 0).toFixed(4)]);
+      if (!node.is_focal) {
+        evidence.push(["Graph relevance", Number(node.focal_relevance || 0).toFixed(4)]);
       }
       const neighbors = (adjacency.get(node.id) || [])
         .slice()
@@ -1859,9 +1818,9 @@
         "Strongest similarity links",
         neighbors.map((entry) => `${compactNodeLabel(entry.id)} (${Number(entry.weight || 0).toFixed(2)})`).join(" · ") || "None",
       ]);
-      if (!node.is_seed) {
-        const seedId = (payload.meta && payload.meta.seed_id) || null;
-        const path = seedId ? shortestPathIds(seedId, node.id).reverse() : [];
+      if (!node.is_focal) {
+        const focalId = (payload.meta && payload.meta.focal_id) || null;
+        const path = focalId ? shortestPathIds(focalId, node.id).reverse() : [];
         evidence.push([
           "Similarity path to focal paper",
           path.map((id) => compactNodeLabel(id)).join(" → ") || "Unavailable",
@@ -2066,7 +2025,7 @@
           haloX = [defaultNodeX[idx]];
           haloY = [defaultNodeY[idx]];
           haloSize = [defaultNodeSizes[idx] * (state.selectedId ? __DASHBOARD_SELECTION_HALO_SCALE__ : 1.88)];
-          haloColor = [colorWithAlpha(currentSeedRingColor(), state.selectedId ? 0.34 : 0.26)];
+          haloColor = [colorWithAlpha(currentFocalRingColor(), state.selectedId ? 0.34 : 0.26)];
         }
         const haloKey = `${focusId || ""}|${state.selectedId ? "selected" : "hover"}`;
         if (overlayState.haloKey !== haloKey) {
@@ -2091,7 +2050,7 @@
     }
 
     function semanticScholarTarget() {
-      const focusId = state.selectedId || ((payload.meta && payload.meta.seed_id) || null);
+      const focusId = state.selectedId || ((payload.meta && payload.meta.focal_id) || null);
       const focusNode = focusId ? nodeById.get(focusId) : null;
       return safeExternalUrl(
         focusNode && focusNode.links && focusNode.links.semantic_scholar
@@ -2179,7 +2138,7 @@
             <span class="paper-meta">
               ${rank}
               <span>${Number(node.citation_count || 0).toLocaleString()} citations</span>
-              ${relation ? `<span${node.is_seed ? ' class="meta-origin"' : ""}>${escapeHtml(relation)}</span>` : ""}
+              ${relation ? `<span${node.is_focal ? ' class="meta-origin"' : ""}>${escapeHtml(relation)}</span>` : ""}
             </span>
           </button>
           <button class="star-btn${saved ? " saved" : ""}" type="button" title="${saved ? "Remove from reading list" : "Save to reading list"}" aria-label="Save ${escapeHtml(title)} to reading list" aria-pressed="${saved}">${saved ? "&#9733;" : "&#9734;"}</button>
@@ -2344,10 +2303,10 @@
         URL.revokeObjectURL(anchor.href);
       }
 
-      function seedSlug() {
-        const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
-        const slug = seedNode && seedNode.title
-          ? seedNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase()
+      function focalSlug() {
+        const focalNode = nodeById.get((payload.meta && payload.meta.focal_id) || "");
+        const slug = focalNode && focalNode.title
+          ? focalNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase()
           : "";
         // Titles without ASCII alphanumerics slug to "", which would name the
         // download ".json" and give the browser no stem to disambiguate.
@@ -2356,7 +2315,7 @@
 
       document.getElementById("export-json-btn").addEventListener("click", () => {
         const exportPayload = buildPortableJsonPayload();
-        downloadBlob(JSON.stringify(exportPayload, null, 2), seedSlug() + ".json", "application/json");
+        downloadBlob(JSON.stringify(exportPayload, null, 2), focalSlug() + ".json", "application/json");
       });
 
       document.getElementById("export-collection-btn").addEventListener("click", () => {
@@ -2373,7 +2332,7 @@
       });
 
       document.getElementById("export-csv-btn").addEventListener("click", () => {
-        const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_seed","provenance","seed_relation","seed_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
+        const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_focal","provenance","focal_relation","focal_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
         // Mirror the CLI CSV writer: neutralize formula-leading cells (CWE-1236).
         function csvGuard(v) { const s = String(v == null ? "" : v); return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; }
         function csvEscape(v) { const s = csvGuard(v); return s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r") ? '"' + s.replace(/"/g, '""') + '"' : s; }
@@ -2382,16 +2341,16 @@
           const links = n.links || {};
           rows.push([
             n.id, n.title, n.year, (n.authors||[]).join("; "), n.citation_count, n.venue||"", n.arxiv_id||"", n.doi||"",
-            (n.categories||[]).join("; "), (n.is_seed ? "true" : "false"), n.provenance||"", n.seed_relation||"",
-            Number(n.seed_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
+            (n.categories||[]).join("; "), (n.is_focal ? "true" : "false"), n.provenance||"", n.focal_relation||"",
+            Number(n.focal_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
           ].map(csvEscape).join(","));
         }
-        downloadBlob(rows.join("\n"), seedSlug() + ".csv", "text/csv;charset=utf-8");
+        downloadBlob(rows.join("\n"), focalSlug() + ".csv", "text/csv;charset=utf-8");
       });
 
       document.getElementById("export-bib-btn").addEventListener("click", () => {
         const entries = (payload.nodes || []).map((n) => (n.bibtex || "").trim()).filter(Boolean);
-        downloadBlob(entries.join("\n\n") + "\n", seedSlug() + ".bib", "text/plain;charset=utf-8");
+        downloadBlob(entries.join("\n\n") + "\n", focalSlug() + ".bib", "text/plain;charset=utf-8");
       });
 
       controls.savedBibBtn.addEventListener("click", () => {
@@ -2399,7 +2358,7 @@
         if (!entries.length) {
           return;
         }
-        downloadBlob(entries.join("\n\n") + "\n", seedSlug() + "-saved.bib", "text/plain;charset=utf-8");
+        downloadBlob(entries.join("\n\n") + "\n", focalSlug() + "-saved.bib", "text/plain;charset=utf-8");
       });
 
       controls.copySavedBtn.addEventListener("click", () => {
@@ -2597,7 +2556,7 @@
       graphResizeObserver.observe(graphDiv);
       renderTimeline();
       // Result IDs survive rebuilds, so the saved payload can be newer than the
-      // initial graph even when both identify the same seed and strategy.
+      // initial graph even when both identify the same focal paper and strategy.
       if (
         collectionResultId
         && !bootstrapStatusMessage

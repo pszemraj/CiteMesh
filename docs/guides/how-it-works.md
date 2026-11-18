@@ -77,7 +77,7 @@ Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each c
 score = Σ weight / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
 ```
 
-The other lists have weight `1`. Candidates sort by score, then paper ID, and the first `max_papers - 1` join the focal paper. A list contributes only for candidates it contains. With no qualifying focal reference evidence, hybrid fuses the other available lists. Ranking runs before optional reference hydration for selected citation-sourced papers, which supplies bibliographic coupling during [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and list ranks are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson). The `seed_relevance` value is computed later over the final graph.
+The other lists have weight `1`. Candidates sort by score, then paper ID, and the first `max_papers - 1` join the focal paper. A list contributes only for candidates it contains. With no qualifying focal reference evidence, hybrid fuses the other available lists. Ranking runs before optional reference hydration for selected citation-sourced papers, which supplies bibliographic coupling during [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and list ranks are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson). The `focal_relevance` value is computed later over the final graph.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
