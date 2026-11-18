@@ -42,7 +42,7 @@ from .runtime import (
     _parse_major_minor,
     _require_transformers_compatibility,
     _suppress_expected_fa2_load_dtype_warning,
-    _suppress_transformers_progress_when_hidden,
+    _suppress_transformers_progress,
 )
 
 if TYPE_CHECKING:
@@ -812,7 +812,7 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
         if self.model_revision is not None:
             st_kwargs["revision"] = self.model_revision
         try:
-            with _suppress_transformers_progress_when_hidden():
+            with _suppress_transformers_progress():
                 with _suppress_expected_fa2_load_dtype_warning(
                     enabled=(
                         self._attention_implementation_hint == "flash_attention_2"
@@ -835,7 +835,7 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
             # downgrade reaches the retry without rebuilding the kwargs.
             self._attention_implementation_hint = "sdpa"
             model_kwargs["attn_implementation"] = "sdpa"
-            with _suppress_transformers_progress_when_hidden():
+            with _suppress_transformers_progress():
                 loaded_model = sentence_transformer_cls(candidate_model, **st_kwargs)
         self._validate_loaded_model_precision(loaded_model, candidate_model)
         self._validate_loaded_model_contract(loaded_model, candidate_model)

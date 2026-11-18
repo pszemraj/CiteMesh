@@ -147,11 +147,8 @@ def test_model_load_enforces_profile_transformers_floor(
         cuda_available=False,
         bf16_supported=False,
     )
-    fake_transformers = types.SimpleNamespace(__version__=transformers_version)
     monkeypatch.setattr(
-        runtime_module.importlib,
-        "import_module",
-        lambda module_name: fake_transformers,
+        sys.modules["transformers"], "__version__", transformers_version
     )
     builder = EmbeddingGraphBuilder(
         max_papers=1,
@@ -182,12 +179,7 @@ def test_transformers_version_falls_back_to_distribution_metadata(
         cuda_available=False,
         bf16_supported=False,
     )
-    fake_transformers = types.SimpleNamespace(__version__="development-build")
-    monkeypatch.setattr(
-        runtime_module.importlib,
-        "import_module",
-        lambda _module_name: fake_transformers,
-    )
+    monkeypatch.setattr(sys.modules["transformers"], "__version__", "development-build")
     monkeypatch.setattr(
         runtime_module.importlib_metadata,
         "version",
@@ -211,12 +203,7 @@ def test_transformers_unknown_version_fails_with_verification_guidance(
         cuda_available=False,
         bf16_supported=False,
     )
-    fake_transformers = types.SimpleNamespace(__version__="development-build")
-    monkeypatch.setattr(
-        runtime_module.importlib,
-        "import_module",
-        lambda _module_name: fake_transformers,
-    )
+    monkeypatch.setattr(sys.modules["transformers"], "__version__", "development-build")
     monkeypatch.setattr(
         runtime_module.importlib_metadata,
         "version",
@@ -251,35 +238,16 @@ def _install_fake_sentence_transformers(
     encode_log: list[dict[str, Any]] = []
     blocked_models = set(fail_model_names or ())
     fake_transformers_logging = types.ModuleType("transformers.utils.logging")
-    fake_transformers_logging.progress_enabled = True
-    fake_transformers_logging.progress_calls = []
+    fake_transformers_logging._tqdm_active = True
 
     def is_progress_bar_enabled() -> bool:
         """Return the fake global Transformers progress state.
 
         :return bool: Whether fake model loading may emit progress frames.
         """
-        return bool(fake_transformers_logging.progress_enabled)
-
-    def disable_progress_bar() -> None:
-        """Disable fake Transformers progress and record the call.
-
-        :return None: Updates fake global progress state.
-        """
-        fake_transformers_logging.progress_calls.append("disable")
-        fake_transformers_logging.progress_enabled = False
-
-    def enable_progress_bar() -> None:
-        """Enable fake Transformers progress and record the call.
-
-        :return None: Updates fake global progress state.
-        """
-        fake_transformers_logging.progress_calls.append("enable")
-        fake_transformers_logging.progress_enabled = True
+        return bool(fake_transformers_logging._tqdm_active)
 
     fake_transformers_logging.is_progress_bar_enabled = is_progress_bar_enabled
-    fake_transformers_logging.disable_progress_bar = disable_progress_bar
-    fake_transformers_logging.enable_progress_bar = enable_progress_bar
     fake_transformers_utils = types.ModuleType("transformers.utils")
     fake_transformers_utils.logging = fake_transformers_logging
     fake_transformers = types.ModuleType("transformers")
@@ -290,7 +258,6 @@ def _install_fake_sentence_transformers(
     monkeypatch.setitem(
         sys.modules, "transformers.utils.logging", fake_transformers_logging
     )
-    init_log["transformers_logging"] = fake_transformers_logging
 
     class _FakeInnerBlock:
         def __init__(self) -> None:
@@ -1728,57 +1695,101 @@ def test_fa2_load_unrelated_failure_does_not_retry_with_sdpa(
 
 
 @pytest.mark.parametrize(
-    ("interactive", "initially_enabled", "expected_calls", "emits_frame"),
+    (
+        "interactive",
+        "progress_visible",
+        "hub_environment",
+        "initially_enabled",
+        "load_fails",
+    ),
     [
-        (False, True, ["disable", "enable"], False),
-        (False, False, [], False),
-        (True, True, [], True),
+        (True, True, None, True, False),
+        (True, False, None, True, True),
+        (False, True, None, True, False),
+        (False, True, False, True, False),
+        (True, True, True, False, False),
     ],
-    ids=["non-tty-enabled", "non-tty-already-disabled", "tty-enabled"],
 )
-def test_non_tty_model_load_suppresses_transformers_progress_temporarily(
+def test_model_load_suppresses_transformers_progress_temporarily(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    interactive: bool,
     initially_enabled: bool,
-    expected_calls: list[str],
-    emits_frame: bool,
+    hub_environment: bool | None,
+    load_fails: bool,
+    interactive: bool,
+    progress_visible: bool,
 ) -> None:
-    """Non-interactive model loads should not leave Transformers bars enabled.
+    """Weight bars stay hidden while Hub environment and group settings persist.
 
     :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
     :param pytest.CaptureFixture[str] capsys: Captured stderr fixture.
-    :param bool interactive: Whether the test stderr is interactive.
     :param bool initially_enabled: Initial global Transformers progress state.
-    :param list[str] expected_calls: Expected progress-toggle calls during loading.
-    :param bool emits_frame: Whether the fake loader should emit a progress frame.
-    :return None: Asserts non-TTY suppression, emitted output, and restoration.
+    :param Optional[bool] hub_environment: Hub environment progress override.
+    :param bool load_fails: Whether the loader fails inside the progress context.
+    :param bool interactive: Whether progress should be visible on stderr.
+    :param bool progress_visible: Whether CiteMesh progress is enabled.
+    :return None: Asserts suppression, download visibility, and state restoration.
     """
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    from huggingface_hub.utils import tqdm as hub_tqdm
+    from transformers.utils import logging as transformers_logging
+
+    _install_fake_sentence_transformers(monkeypatch)
     _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
-    transformers_logging = init_log["transformers_logging"]
-    transformers_logging.progress_enabled = initially_enabled
+    # Exercise the installed progress implementation while model construction is stubbed.
+    monkeypatch.setattr(
+        sys.modules["transformers.utils"], "logging", transformers_logging
+    )
+    monkeypatch.setattr(transformers_logging, "_tqdm_active", initially_enabled)
+    hub_progress_module = sys.modules[hub_tqdm.__module__]
+    hub_states = {"_global": True, "download": False, "download.selected": True}
+    monkeypatch.setattr(
+        hub_progress_module, "HF_HUB_DISABLE_PROGRESS_BARS", hub_environment
+    )
+    monkeypatch.setattr(hub_progress_module, "progress_bar_states", hub_states.copy())
+    monkeypatch.setattr(runtime_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(runtime_module, "progress_enabled", lambda: progress_visible)
     original_cls = deps_module._import_sentence_transformer_class()
 
     def load(model_name: str, **kwargs: Any) -> Any:
-        """Emit a fake progress frame only while the global bar is enabled.
+        """Exercise the weight-loading progress bar without loading a model.
 
         :param str model_name: Requested checkpoint.
         :param Any kwargs: SentenceTransformer constructor arguments.
         :return Any: Fake loaded model.
         """
-        if transformers_logging.is_progress_bar_enabled():
-            print("transformers progress frame", file=sys.stderr, end="\r")
+        assert list(transformers_logging.tqdm(["param"], desc="Loading weights")) == [
+            "param"
+        ]
+        expected_states = (
+            {"_global": False}
+            if not (interactive and progress_visible) and hub_environment is None
+            else hub_states
+        )
+        assert hub_progress_module.progress_bar_states == expected_states
+        assert hub_progress_module.HF_HUB_DISABLE_PROGRESS_BARS is hub_environment
+        if load_fails:
+            raise runtime_module.EmbeddingBackendCompatibilityError(
+                "fake loader failure"
+            )
         return original_cls(model_name, **kwargs)
 
-    monkeypatch.setattr(runtime_module, "stderr_isatty", lambda: interactive)
     monkeypatch.setattr(deps_module, "_import_sentence_transformer_class", lambda: load)
-    EmbeddingGraphBuilder(client=MagicMock())._load_model()
+    failure_context = (
+        pytest.raises(
+            runtime_module.EmbeddingBackendCompatibilityError,
+            match="fake loader failure",
+        )
+        if load_fails
+        else nullcontext()
+    )
+    with failure_context:
+        EmbeddingGraphBuilder(client=MagicMock())._load_model()
 
     captured = capsys.readouterr()
-    assert ("transformers progress frame" in captured.err) is emits_frame
-    assert transformers_logging.progress_calls == expected_calls
-    assert transformers_logging.progress_enabled is initially_enabled
+    assert "Loading weights" not in captured.err
+    assert transformers_logging.is_progress_bar_enabled() is initially_enabled
+    assert hub_progress_module.progress_bar_states == hub_states
+    assert hub_progress_module.HF_HUB_DISABLE_PROGRESS_BARS is hub_environment
 
 
 def test_verified_fa2_autocast_filters_only_redundant_load_warning(
