@@ -61,6 +61,17 @@ _NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
 )
 
 
+#: Search flags that pin a namespace beyond what saved settings select again.
+#: The remaining overrides stay outside the namespace key (``device``), or a
+#: namespace-free hybrid build command restates them (source and corpus view).
+_NAMESPACE_PINNING_DESTS: frozenset[str] = _NAMESPACE_OVERRIDE_DESTS - {
+    "device",
+    "semantic_source",
+    "corpus_size",
+    "all_corpus",
+}
+
+
 class _NamespaceOverrides(TypedDict, total=False):
     """Namespace selectors explicitly supplied to the search command."""
 
@@ -259,15 +270,45 @@ def _apply_active_model_identity(
         defaults.cache_namespace = builder._cache_selection.namespace_id
 
 
+def _installed_index_build_command(defaults: argparse.Namespace) -> str:
+    """Build the namespace-free hybrid command that default settings resolve.
+
+    :param argparse.Namespace defaults: Effective build-equivalent defaults.
+    :return str: Copyable hybrid build command, carrying a corpus selector only
+        when the search used a capped view or overrode a configured cap.
+    """
+    command = [
+        "citemesh",
+        "build",
+        "<ID>",
+        "--strategy",
+        "hybrid",
+        "--semantic-source",
+        "both",
+        "--export",
+        "dashboard",
+    ]
+    if not defaults.all_corpus and defaults.corpus_size is not None:
+        command.extend(["--corpus-size", str(defaults.corpus_size)])
+    elif defaults.all_corpus and defaults.corpus_size is not None:
+        command.append("--all-corpus")
+    return shlex.join(command)
+
+
 def _local_result_build_command(
-    defaults: argparse.Namespace, cache: EmbeddingCache
+    args: argparse.Namespace, defaults: argparse.Namespace, cache: EmbeddingCache
 ) -> str | None:
     """Build a shell-safe command targeting the local search namespace.
 
+    An installed index that saved settings select again is reached without a
+    namespace, as in the import onboarding; a namespace passed to search, or a
+    selector that pinned it, is repeated so the command reopens the same index.
+
+    :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.Namespace defaults: Effective build-equivalent defaults.
     :param EmbeddingCache cache: Cache whose recorded corpus scope was searched.
-    :return str | None: Copyable embedding build command with namespace selectors,
-        or ``None`` when the cache lacks the corpus scope needed to reproduce it.
+    :return str | None: Copyable build command, or ``None`` when the cache lacks
+        the corpus scope needed to reproduce it.
     """
     command = [
         "citemesh",
@@ -285,6 +326,8 @@ def _local_result_build_command(
         str(defaults.storage_precision),
     ]
     if getattr(defaults, "cache_namespace", None):
+        if not _namespace_overrides(args).keys() & _NAMESPACE_PINNING_DESTS:
+            return _installed_index_build_command(defaults)
         command = [
             "citemesh",
             "build",
@@ -401,7 +444,7 @@ def _render_local_search(
             results = builder.search_local(args.query, top_k=args.limit)
             total = getattr(cache, "last_search_total_embeddings", None)
             build_command = (
-                _local_result_build_command(defaults, cache) if results else None
+                _local_result_build_command(args, defaults, cache) if results else None
             )
     except Exception as exc:
         logger.error(

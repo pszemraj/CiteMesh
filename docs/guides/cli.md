@@ -62,7 +62,7 @@ Local search derives its namespace from the [saved embedding settings](configura
 Other search behavior:
 
 - `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source.
-- Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. The command is omitted with a warning if the cache has no recorded split.
+- Local results include the searched count and a copyable build command. When saved settings select an installed index, it is a hybrid build with `--semantic-source both` and no namespace. When the search passed `--cache-namespace` or a model or dataset selector, the command repeats the namespace and corpus view. The command is omitted with a warning if the cache has no recorded split.
 - [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard

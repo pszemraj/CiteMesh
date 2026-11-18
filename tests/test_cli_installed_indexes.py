@@ -477,17 +477,39 @@ def test_legacy_search_rejects_unsupported_views(
     )
 
 
-@pytest.mark.parametrize("flags", [["--corpus-size", "2"], ["--all-corpus"]])
-def test_implicit_installed_search_replays_its_namespace_and_view(
+_HYBRID_FOOTER = (
+    "Use a paper ID with: citemesh build '<ID>' --strategy hybrid "
+    "--semantic-source both --export dashboard"
+)
+
+
+def _installed_search_footer(
     installed_selection: ExistingCacheSelection,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    flags: list[str],
-) -> None:
-    """A discovered certified cache produces a command for the searched view."""
+    search_flags: list[str],
+    defaults_flags: list[str] | None = None,
+) -> str:
+    """Run a local search that discovers the installed index and return its output.
+
+    :param ExistingCacheSelection installed_selection: Index bound by the search.
+    :param pytest.MonkeyPatch monkeypatch: Replaces the builder preparation.
+    :param pytest.CaptureFixture[str] capsys: Captures the rendered search.
+    :param list[str] search_flags: Selector flags passed to ``citemesh search``.
+    :param list[str] | None defaults_flags: Build defaults the search resolved,
+        which differ from ``search_flags`` when a configured value applies.
+    :return str: Whitespace-normalized stdout of the search.
+    """
     parser, build_parser, _, _ = _create_parser()
     defaults = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--semantic-source", "arxiv-corpus", *flags]
+        [
+            "seed",
+            "--strategy",
+            "embedding",
+            "--semantic-source",
+            "arxiv-corpus",
+            *(search_flags if defaults_flags is None else defaults_flags),
+        ]
     )
     builder = SimpleNamespace(
         _cache_selection=None,
@@ -496,7 +518,7 @@ def test_implicit_installed_search_replays_its_namespace_and_view(
         embedding_cache=SimpleNamespace(
             embedding_count=lambda: 5,
             hydration_operation_lock=nullcontext,
-            last_search_total_embeddings=2 if "--corpus-size" in flags else 5,
+            last_search_total_embeddings=5,
         ),
         search_local=lambda query, top_k: [
             SimpleNamespace(paper_id="paper", score=0.9, metadata={"title": "Result"})
@@ -510,14 +532,94 @@ def test_implicit_installed_search_replays_its_namespace_and_view(
     monkeypatch.setattr(
         search, "_prepare_local_search_builder", lambda *args: (builder, defaults)
     )
-    args = parser.parse_args(["search", "query", "--mode", "local", *flags])
+    args = parser.parse_args(["search", "query", "--mode", "local", *search_flags])
     assert (
         search._run_search_command(args, build_parser, UserConfig(Path("config.toml")))
         == 0
     )
-    output = " ".join(capsys.readouterr().out.split())
-    assert f"--cache-namespace {installed_selection.namespace_id}" in output
-    assert " ".join(flags) in output
+    return " ".join(capsys.readouterr().out.split())
+
+
+@pytest.mark.parametrize(
+    ("search_flags", "defaults_flags", "footer"),
+    [
+        pytest.param([], None, _HYBRID_FOOTER, id="default-settings"),
+        pytest.param(
+            ["--semantic-source", "arxiv-corpus"],
+            None,
+            _HYBRID_FOOTER,
+            id="corpus-source",
+        ),
+        pytest.param(
+            ["--corpus-size", "2"],
+            None,
+            f"{_HYBRID_FOOTER} --corpus-size 2",
+            id="capped-view",
+        ),
+        pytest.param(["--all-corpus"], None, _HYBRID_FOOTER, id="full-view"),
+        pytest.param(
+            ["--all-corpus"],
+            ["--corpus-size", "3", "--all-corpus"],
+            f"{_HYBRID_FOOTER} --all-corpus",
+            id="full-view-over-configured-cap",
+        ),
+    ],
+)
+def test_auto_selected_installed_search_footer_needs_no_namespace(
+    installed_selection: ExistingCacheSelection,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    search_flags: list[str],
+    defaults_flags: list[str] | None,
+    footer: str,
+) -> None:
+    """Default settings select the installed index again, so the footer omits it."""
+    output = _installed_search_footer(
+        installed_selection, monkeypatch, capsys, search_flags, defaults_flags
+    )
+    assert output.endswith(footer)
+    assert "--cache-namespace" not in output
+
+
+@pytest.mark.parametrize(
+    ("search_flags", "footer"),
+    [
+        pytest.param(
+            ["--cache-namespace", "0123456789ab"],
+            "--cache-namespace 0123456789ab --all-corpus",
+            id="explicit-namespace",
+        ),
+        pytest.param(
+            ["--cache-namespace", "0123456789ab", "--corpus-size", "2"],
+            "--cache-namespace 0123456789ab --corpus-size 2",
+            id="explicit-namespace-capped-view",
+        ),
+        pytest.param(
+            ["--truncate-dim", "256"],
+            "--cache-namespace 0123456789ab --all-corpus",
+            id="pinned-by-truncate-dim",
+        ),
+        pytest.param(
+            ["--model", "publisher/model", "--corpus-size", "2"],
+            "--cache-namespace 0123456789ab --corpus-size 2",
+            id="pinned-by-model",
+        ),
+    ],
+)
+def test_pinned_installed_search_footer_keeps_namespace(
+    installed_selection: ExistingCacheSelection,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    search_flags: list[str],
+    footer: str,
+) -> None:
+    """A namespace or selector the search passed is repeated to reopen that index."""
+    output = _installed_search_footer(
+        installed_selection, monkeypatch, capsys, search_flags
+    )
+    assert output.endswith(
+        f"Use a paper ID with: citemesh build '<ID>' --strategy embedding {footer}"
+    )
 
 
 def test_cache_import_requires_one_source() -> None:
