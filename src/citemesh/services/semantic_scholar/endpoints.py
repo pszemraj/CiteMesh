@@ -238,6 +238,7 @@ class _EndpointsMixin:
             params: dict[str, str | int],
             *,
             context: str,
+            summary: str,
             payload: payloads.PaperBatchRequest | None = None,
             raise_on_unavailable: bool = False,
             retry_not_found: bool = False,
@@ -287,6 +288,7 @@ class _EndpointsMixin:
             f"{PAPER_BASE_URL}/{quote(normalized_id, safe='/')}",
             {"fields": ",".join(payloads._default_paper_fields())},
             context=f"fetching {normalized_id}",
+            summary="fetching paper details",
             raise_on_unavailable=raise_on_unavailable,
         )
         if response is None:
@@ -367,6 +369,7 @@ class _EndpointsMixin:
                         {"fields": ",".join(payloads._default_paper_fields())},
                         payload={"ids": batch_ids},
                         context=f"batch fetching {len(batch_ids)} papers",
+                        summary="fetching paper details",
                         raise_on_unavailable=raise_on_unavailable,
                         retry_not_found=True,
                     )
@@ -507,6 +510,7 @@ class _EndpointsMixin:
                         "offset": offset,
                     },
                     context=f"fetching {relation} for {paper_id} at offset {offset}",
+                    summary=f"fetching {relation}",
                     raise_on_unavailable=raise_on_unavailable,
                     retry_not_found=offset > 0,
                 )
@@ -819,6 +823,7 @@ class _EndpointsMixin:
                 f"{RECOMMENDATION_BASE_URL}/{encoded_id}",
                 params,
                 context=f"fetching {active_pool} recommendations for {normalized_id}",
+                summary="fetching recommendations",
                 raise_on_unavailable=raise_on_unavailable,
             )
             if response is None:
@@ -898,6 +903,7 @@ class _EndpointsMixin:
                     "offset": offset,
                 },
                 context=f"searching for {normalized_query!r} at offset {offset}",
+                summary="searching papers",
                 raise_on_unavailable=raise_on_unavailable,
                 retry_not_found=offset > 0,
             )

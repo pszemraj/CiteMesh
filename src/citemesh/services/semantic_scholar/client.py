@@ -346,6 +346,7 @@ class SemanticScholarClient(_EndpointsMixin):
         params: dict[str, str | int],
         *,
         context: str,
+        summary: str,
         payload: payloads.PaperBatchRequest | None = None,
         raise_on_unavailable: bool = False,
         retry_not_found: bool = False,
@@ -354,7 +355,9 @@ class SemanticScholarClient(_EndpointsMixin):
 
         :param str url: Semantic Scholar endpoint.
         :param dict[str, str | int] params: Query parameters.
-        :param str context: Human-readable operation.
+        :param str context: Detailed operation for diagnostics and errors.
+        :param str summary: Brief operation without identifiers or offsets, shown in
+            the INFO notice for long waits.
         :param PaperBatchRequest | None payload: Optional batch POST body.
         :param bool raise_on_unavailable: Raise after recovery stops.
         :param bool retry_not_found: Treat HTTP 404 as transient only during the
@@ -367,6 +370,7 @@ class SemanticScholarClient(_EndpointsMixin):
                     url,
                     params,
                     context=context,
+                    summary=summary,
                     payload=payload,
                     raise_on_unavailable=raise_on_unavailable,
                     retry_not_found=retry_not_found,
@@ -523,7 +527,7 @@ class SemanticScholarClient(_EndpointsMixin):
                 logger.info(
                     "Semantic Scholar is %s while %s. Attempt %d/%d in %.0fs.",
                     status,
-                    context,
+                    summary,
                     attempt + 1,
                     API_CONFIG.max_retries,
                     delay,

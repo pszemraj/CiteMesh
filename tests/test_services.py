@@ -1328,7 +1328,7 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
         if record.levelno >= logging.INFO
     ]
     assert visible == [
-        f"Semantic Scholar is {status} while fetching p1. "
+        f"Semantic Scholar is {status} while fetching paper details. "
         f"Attempt {attempt}/{API_CONFIG.max_retries} in {delay:.0f}s."
         for attempt in announced_attempts
     ]
@@ -1342,6 +1342,50 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
     assert all("while fetching p1 (attempt " in message for message in diagnostics)
     assert all(
         f"HTTP {status_code} from https://" in message for message in diagnostics
+    )
+
+
+def test_retry_notice_omits_provider_identifiers_and_offsets(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The INFO notice names the operation; IDs and offsets stay at DEBUG."""
+    paper_id = "1296631b36a3b390466978f4fd80b683bf13573a"
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 43.0)
+    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(429),
+                _MockResponse(200, _relation_payload(["reference"], "citedPaper")),
+            ]
+        )
+        with caplog.at_level(logging.DEBUG):
+            assert client.get_reference_ids(paper_id, force_refresh=True) == [
+                "reference"
+            ]
+
+    visible = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.INFO
+    ]
+    assert visible == [
+        "Semantic Scholar is rate-limited while fetching references. "
+        f"Attempt 2/{API_CONFIG.max_retries} in 43s."
+    ]
+    assert paper_id not in visible[0]
+    assert "offset" not in visible[0]
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+        and "Semantic Scholar request failed" in record.getMessage()
+    ]
+    assert len(diagnostics) == 1
+    assert (
+        f"while fetching references for {paper_id} at offset 0 (attempt 1/"
+        in diagnostics[0]
     )
 
 
