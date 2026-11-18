@@ -115,7 +115,7 @@ What recovery does not do:
 ### Help and console output
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
-Log lines carry local `HH:MM:SS` timestamps. The build completion summary includes total elapsed time, including export. Progress rows show the same clock where width permits, recording the last completed-count advance or the task's start before its first increment.
+Log lines carry local `HH:MM:SS` timestamps. Builds show the resolved focal title and year when available. The completion summary gives total elapsed time including export, followed by one copyable path per output. Progress rows show the same clock where width permits, recording the last completed-count advance or the task's start before its first increment.
 Redirected logs use plain text without terminal padding or forced line breaks, unless you set `--log-width` or force color.
 
 `-v`/`--verbose` is shorthand for `--log-level debug`; it works before or after a subcommand. When several verbosity options are present, the last one wins. `--log-level debug --log-file out/run.log` adds option routing, cache and provider details, runtime configuration, retry attempts, and namespace decisions.
@@ -128,7 +128,7 @@ Redirected logs use plain text without terminal padding or forced line breaks, u
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
 Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
-Routine HTTP request logs stay hidden; long Semantic Scholar retry waits show a brief status at `info`, with request details at `debug`.
+During long Semantic Scholar waits, `info` shows which operation is waiting, the next attempt number, and its delay. Individual request diagnostics appear at `debug`.
 
 ## Option reference
 

@@ -513,18 +513,14 @@ def _log_run_summary(
     :return None: Emits the closing informational and debug log lines.
     """
     nodes, edges = graph.number_of_nodes(), graph.number_of_edges()
-    label_width = max(len(format_name) for format_name in output_paths)
-    primary_outputs = "\n".join(
-        f"  {format_name:<{label_width}}  {path}"
-        for format_name, path in sorted(output_paths.items())
-    )
     logger.info(
-        "Build complete: %s, %s in %s.\nSaved outputs:\n%s",
+        "Build complete: %s, %s in %s.",
         f"{nodes:,} paper{'s' if nodes != 1 else ''}",
         f"{edges:,} edge{'s' if edges != 1 else ''}",
         _format_runtime(elapsed_seconds),
-        primary_outputs,
     )
+    for format_name, path in sorted(output_paths.items()):
+        logger.info("Saved %s: %s", format_name, path, extra={"soft_wrap": True})
 
     auxiliary_paths: dict[str, Path] = {}
     if graph_config_path is not None:

@@ -1153,6 +1153,7 @@ class EmbeddingGraphBuilder(
             else:
                 self._load_model()
             resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
+            self._log_focal_paper(resolved_seed)
             if seed_paper is None and resolved_seed.is_local_corpus:
                 self.enrich_cached_corpus_seed(resolved_seed)
             return resolved_seed

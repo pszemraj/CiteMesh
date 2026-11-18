@@ -12,6 +12,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.text import Text
 
 from citemesh._runtime import stderr_isatty, stdout_isatty
 from citemesh.progress import (
@@ -82,6 +83,22 @@ class _PlainLogHandler(logging.Handler):
         )
 
 
+class _RichLogHandler(RichHandler):
+    """Let the terminal wrap records containing copyable output paths."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not getattr(record, "soft_wrap", False):
+            super().emit(record)
+            return
+        assert self.formatter is not None
+        self.console.print(
+            Text(self.formatter.formatTime(record, CONSOLE_TIME_FORMAT), "log.time"),
+            self.get_level_text(record),
+            Text(self.format(record)),
+            soft_wrap=True,
+        )
+
+
 def _configure_logging(
     *,
     log_level: str = "info",
@@ -111,7 +128,7 @@ def _configure_logging(
     set_progress_enabled(resolved_level <= logging.INFO)
     console_handler: logging.Handler
     if interactive or log_console.is_terminal or log_width > 0:
-        console_handler = RichHandler(
+        console_handler = _RichLogHandler(
             console=log_console,
             show_time=True,
             omit_repeated_times=False,

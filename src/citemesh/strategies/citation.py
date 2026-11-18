@@ -211,7 +211,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations[seed.paper_id] = "seed"
         pool = DiscoveryPool(seed)
 
-        logger.debug("Focal paper: %s", seed.title)
+        self._log_focal_paper(seed)
 
         if self.max_papers > len(papers) and (
             self.max_references > 0 or self.max_citations > 0

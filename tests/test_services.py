@@ -1294,7 +1294,7 @@ def test_transient_transport_errors_retry(
 
 @pytest.mark.parametrize(
     ("delay", "failed_attempts"),
-    [(30.0, 2), (15.0, 3)],
+    [(30.0, 2), (15.0, 4)],
     ids=["single-wait", "cumulative-waits"],
 )
 @pytest.mark.parametrize(
@@ -1309,7 +1309,7 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
     status_code: int,
     status: str,
 ) -> None:
-    """Long retries show a brief status and keep request details at DEBUG."""
+    """Long waits report ongoing attempts and the operation awaiting a response."""
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: delay)
     monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
     with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
@@ -1318,7 +1318,6 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
             side_effect=[_MockResponse(status_code)] * failed_attempts
             + [_MockResponse(200, _paper_payload("p1"))]
         )
-        caplog.clear()  # Assert retry output separately from client startup status.
         with caplog.at_level(logging.DEBUG):
             assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
 
@@ -1327,7 +1326,14 @@ def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
         for record in caplog.records
         if record.levelno >= logging.INFO
     ]
-    assert visible == [f"Semantic Scholar is {status}; retrying in {delay:.0f}s."]
+    attempts_per_notice = int(30.0 / delay)
+    assert visible == [
+        f"Semantic Scholar is {status} while fetching p1. "
+        f"Attempt {failed + 1}/{API_CONFIG.max_retries} in {delay:.0f}s."
+        for failed in range(
+            attempts_per_notice, failed_attempts + 1, attempts_per_notice
+        )
+    ]
     diagnostics = [
         record.getMessage()
         for record in caplog.records
@@ -1355,7 +1361,6 @@ def test_short_retry_waits_only_log_diagnostics(
                 _MockResponse(200, _paper_payload("p1")),
             ]
         )
-        caplog.clear()  # Assert retry output separately from client startup status.
         with caplog.at_level(logging.DEBUG):
             assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
 

@@ -1483,8 +1483,10 @@ def test_search_mode_local_prints_cached_results(
     builder_factory = MagicMock(return_value=fake_builder)
     monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
 
+    monkeypatch.setenv("S2_API_KEY", "unused-by-local-search")
     result = run_cli_command(["search", "cached topic", "--mode", "local", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Semantic Scholar:" not in result.stderr
     # Rich folds table cells at console width; compare on whitespace-normalized text.
     plain_stdout = flatten_console_text(result.stdout)
     assert "Local semantic search for 'cached topic'" in plain_stdout
@@ -4971,45 +4973,45 @@ def test_build_run_summary_reports_requested_outputs_once(
     elapsed_seconds: float,
     runtime: str,
 ) -> None:
-    """The closing INFO record should contain graph counts and requested paths."""
-    info_mock = MagicMock()
-    debug_mock = MagicMock()
-    monkeypatch.setattr(build_module.logger, "info", info_mock)
-    monkeypatch.setattr(build_module.logger, "debug", debug_mock)
+    """At 80 columns each output stays copyable, including in the log file."""
+    stderr = io.StringIO()
+    saved = _reset_cli_logging_state()
+    monkeypatch.setattr(
+        console_module,
+        "log_console",
+        cli_module.Console(file=stderr, color_system=None),
+    )
+    monkeypatch.setattr(console_module, "set_progress_console", lambda _console: None)
     graph = build_seed_graph("seed")
     output_paths = {
-        "dashboard": tmp_path / "dashboard.html",
-        "json": tmp_path / "graph.json",
+        "dashboard": Path("out/dashboard.html"),
+        "json": tmp_path / ("long-directory-" * 8) / "[draft] result.json",
     }
+    log_file = tmp_path / "build.log"
+    try:
+        console_module._configure_logging(log_width=80, log_file=str(log_file))
+        build_module._log_run_summary(
+            graph,
+            output_paths=output_paths,
+            graph_config_path=tmp_path / "graph.config.json",
+            dashboard_package_path=tmp_path / "dashboard.citemesh.json",
+            elapsed_seconds=elapsed_seconds,
+        )
+    finally:
+        _restore_cli_logging_state(*saved)
 
-    build_module._log_run_summary(
-        graph,
-        output_paths=output_paths,
-        graph_config_path=tmp_path / "graph.config.json",
-        dashboard_package_path=tmp_path / "dashboard.citemesh.json",
-        elapsed_seconds=elapsed_seconds,
-    )
-
-    info_mock.assert_called_once_with(
-        "Build complete: %s, %s in %s.\nSaved outputs:\n%s",
-        "1 paper",
-        "0 edges",
-        runtime,
-        f"  dashboard  {output_paths['dashboard']}\n"
-        f"  json       {output_paths['json']}",
-    )
-    debug_mock.assert_called_once_with(
-        "Build auxiliary artifacts: %s",
-        "config="
-        f"{tmp_path / 'graph.config.json'}, dashboard_package="
-        f"{tmp_path / 'dashboard.citemesh.json'}",
-    )
+    for output in (stderr.getvalue(), log_file.read_text(encoding="utf-8")):
+        assert f"Build complete: 1 paper, 0 edges in {runtime}." in output
+        for fmt, path in output_paths.items():
+            assert output.count(f"Saved {fmt}: {path}\n") == 1
+        assert "graph.config.json" not in output
+        assert "dashboard.citemesh.json" not in output
 
 
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI should pass compact PNG metadata and emit one export summary line."""
+    """CLI should pass compact PNG metadata and report every exported format."""
     graph = build_seed_graph("seed")
 
     captured: dict[str, object] = {}
@@ -5084,15 +5086,9 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "theme": "dark",
     }
     summaries = [message for message in logged if message.startswith("Build complete:")]
-    assert len(summaries) == 1
-    assert summaries[0].startswith(
-        "Build complete: 1 paper, 0 edges in 2m15s.\nSaved outputs:"
-    )
+    assert summaries == ["Build complete: 1 paper, 0 edges in 2m15s."]
     for format_name in build_module.EXPORT_FORMATS:
-        assert any(
-            line.strip().startswith(format_name + " ")
-            for line in summaries[0].splitlines()
-        )
+        assert sum(line.startswith(f"Saved {format_name}: ") for line in logged) == 1
     assert all("outputs: bibtex=" not in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)

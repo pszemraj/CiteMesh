@@ -91,11 +91,6 @@ class SemanticScholarClient(_EndpointsMixin):
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
-        logger.info(
-            "Semantic Scholar: %s (local pacing: %g request/s).",
-            "API key configured" if api_key else "anonymous shared pool",
-            self.requests_per_second,
-        )
 
     @contextlib.contextmanager
     def candidate_operation_scope(self) -> Iterator[None]:
@@ -267,6 +262,12 @@ class SemanticScholarClient(_EndpointsMixin):
         """
         min_interval = 1.0 / self.requests_per_second
         with self._rate_limit_lock:
+            if self._next_request_time == 0.0:
+                logger.info(
+                    "Semantic Scholar: %s (local pacing: %g request/s).",
+                    "API key configured" if self._api_key else "anonymous shared pool",
+                    self.requests_per_second,
+                )
             wait_seconds = max(0.0, self._next_request_time - monotonic())
             if state is not None and recovery_started_at is not None:
                 remaining = self._remaining_recovery_budget(state)
@@ -517,19 +518,22 @@ class SemanticScholarClient(_EndpointsMixin):
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
-            previous_retry_wait_seconds = retry_wait_seconds
             retry_wait_seconds += delay
-            if (
-                previous_retry_wait_seconds
-                < retry._LONG_RETRY_WARNING_SECONDS
-                <= retry_wait_seconds
-            ):
+            if retry_wait_seconds >= retry._LONG_RETRY_WARNING_SECONDS:
                 status = (
                     "rate-limited"
                     if last_error is not None and retry._is_rate_limit_error(last_error)
                     else "temporarily unavailable"
                 )
-                logger.info("Semantic Scholar is %s; retrying in %.0fs.", status, delay)
+                logger.info(
+                    "Semantic Scholar is %s while %s. Attempt %d/%d in %.0fs.",
+                    status,
+                    context,
+                    attempt + 1,
+                    API_CONFIG.max_retries,
+                    delay,
+                )
+                retry_wait_seconds = 0.0
             logger.debug(
                 "Semantic Scholar request failed while %s (attempt %d/%d); "
                 "retrying in %.1fs: %s",

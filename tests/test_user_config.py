@@ -1605,7 +1605,7 @@ def test_s2_access_status_matches_resolved_credentials(
     source: str,
     level: int,
 ) -> None:
-    """Startup reports configured authentication without exposing or validating keys."""
+    """Only the first network request reports access mode, without exposing keys."""
     from citemesh.services import SemanticScholarClient
 
     environment_key, saved_key = "private-environment-key", "private-config-key"
@@ -1630,6 +1630,14 @@ def test_s2_access_status_matches_resolved_credentials(
         with SemanticScholarClient(api_key=key) as client:
             assert client._session.headers.get("x-api-key") == expected_key
             expected_rate = client.requests_per_second
+            assert "local pacing" not in caplog.text
+            client._session.get = MagicMock(return_value=MagicMock(status_code=404))
+            monkeypatch.setattr(
+                "citemesh.services.semantic_scholar.client.time.sleep", lambda _: None
+            )
+            assert client.get_paper("first") is None
+            assert client.get_paper("second") is None
+            assert client._session.get.call_count == 2
 
     statuses = [
         record.getMessage()

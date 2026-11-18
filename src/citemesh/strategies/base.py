@@ -317,6 +317,15 @@ class GraphBuilderStrategy(ABC):
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
 
+    @staticmethod
+    def _log_focal_paper(paper: Paper) -> None:
+        """Report the resolved focal paper before collecting its neighbors."""
+        logger.info(
+            "Focal paper: %s%s",
+            " ".join(paper.title.split()),
+            f" ({paper.year})" if paper.year is not None else "",
+        )
+
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
         """Prepare strategy-specific state required by pairwise graph scoring.
 
@@ -354,7 +363,6 @@ class GraphBuilderStrategy(ABC):
             logger.info(summary)
         else:
             logger.info("Collected %s papers", len(self.papers))
-        logger.debug("Focal paper: %s", seed_paper.title)
         self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes

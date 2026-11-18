@@ -16,6 +16,7 @@ from citemesh.core import (
     DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
     Paper,
 )
+from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
 from citemesh.strategies.base import (
@@ -102,6 +103,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         seed = replace(seed, is_seed=True)
         papers[seed.paper_id] = seed
 
+        self._log_focal_paper(seed)
         logger.info("Collecting recommendations...")
         logger.debug("Recommendation focal paper: %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
@@ -122,12 +124,24 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
         # Discovery is the primary acquisition path. Do it before optional seed
         # enrichment, whose retries share the collection's S2 recovery budget.
+        recommendations = recommendation_result.papers
+        if recommendations and self.reference_hydrator.fetch_references:
+            logger.info(
+                "Checking reference lists for the focal paper and its recommendations..."
+            )
         self.reference_hydrator.ensure(seed)
 
         # The pool merges records of one work, including records of the seed,
         # which enrich the original seed object so the graph keeps its seed node.
         pool = DiscoveryPool(seed)
-        for paper in recommendation_result.papers:
+        for paper in progress_iterator(
+            recommendations,
+            description="Checking recommendations",
+            unit="papers",
+            enabled=None
+            if recommendations and self.reference_hydrator.fetch_references
+            else False,
+        ):
             if not str(paper.paper_id).strip():
                 continue
             target_id = pool.resolve(paper)

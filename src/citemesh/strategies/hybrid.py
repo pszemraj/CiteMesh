@@ -271,6 +271,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         started = perf_counter()
         seed, corpus_seed = self._resolve_seed(seed_id)
+        self._log_focal_paper(seed)
         timings["prepare"] = perf_counter() - started
         self.seed_relations[seed.paper_id] = "seed"
         self.paper_sources[seed.paper_id] = (

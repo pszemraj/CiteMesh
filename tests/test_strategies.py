@@ -17,6 +17,7 @@ import requests
 
 from citemesh.core import API_CONFIG, EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
 from citemesh.core.paper_ids import arxiv_identifier_from_doi, normalize_paper_id
+from citemesh.progress import progress_iterator
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
 from citemesh.strategies import hybrid as hybrid_strategy
@@ -241,22 +242,36 @@ def test_citation_and_recommendation_should_create_edge_thresholds() -> None:
         HybridGraphBuilder,
     ],
 )
+@pytest.mark.parametrize("seed_year", [None, 2020])
 def test_repeated_collection_preserves_client_owned_seed_role(
-    builder_type: type[GraphBuilderStrategy], monkeypatch: pytest.MonkeyPatch
+    builder_type: type[GraphBuilderStrategy],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    seed_year: int | None,
 ) -> None:
     """Reusing a seed's metadata as a later candidate must retain that candidate.
 
     :param type[GraphBuilderStrategy] builder_type: Public builder constructor.
     :param pytest.MonkeyPatch monkeypatch: Offline semantic inference stubs.
+    :param pytest.LogCaptureFixture caplog: Captures focal-paper notices.
+    :param int | None seed_year: Known or unavailable publication year.
     :return None: Both collections have exactly one seed and preserve input roles.
     """
-    first = _paper("first")
-    second = _paper("second")
+    first = replace(_paper("first"), title="Paper\n  first", year=seed_year)
+    second = replace(_paper("second"), year=seed_year)
+    caplog.set_level(logging.DEBUG)
     client = MagicMock()
     client.get_paper.side_effect = [first, second]
-    client.get_paper_references.return_value = [first]
+
+    def candidates(*_args: object, **_kwargs: object) -> list[Paper]:
+        current_seed = first if client.get_paper.call_count == 1 else second
+        suffix = f" ({seed_year})" if seed_year is not None else ""
+        assert f"Focal paper: Paper {current_seed.paper_id}{suffix}" in caplog.messages
+        return [first]
+
+    client.get_paper_references.side_effect = candidates
     client.get_paper_citations.return_value = []
-    client.get_recommended_papers.return_value = [first]
+    client.get_recommended_papers.side_effect = candidates
     client.get_reference_ids.return_value = []
     builder = builder_type(max_papers=2, client=client)
     if isinstance(builder, HybridGraphBuilder):
@@ -276,9 +291,12 @@ def test_repeated_collection_preserves_client_owned_seed_role(
                 for paper_id in papers
             },
         )
+        monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
+        monkeypatch.setattr(builder, "compute_similarity", lambda *_papers: 1.0)
 
     first_collection = builder.collect_papers("first")
-    second_collection = builder.collect_papers("second")
+    builder.build_graph("second")
+    second_collection = builder.papers
 
     assert first.is_seed is False
     assert second.is_seed is False
@@ -286,6 +304,12 @@ def test_repeated_collection_preserves_client_owned_seed_role(
     assert first_collection["first"].is_seed is True
     assert set(second_collection) == {"first", "second"}
     assert [p.paper_id for p in second_collection.values() if p.is_seed] == ["second"]
+    suffix = f" ({seed_year})" if seed_year is not None else ""
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Focal paper:")
+    ] == [f"Focal paper: Paper first{suffix}", f"Focal paper: Paper second{suffix}"]
 
 
 @pytest.mark.parametrize("provided_seed", [False, True])
@@ -907,7 +931,9 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
     assert len(calls) == 2
 
 
-def test_recommendation_fetches_primary_discovery_before_seed_references() -> None:
+def test_recommendation_fetches_primary_discovery_before_seed_references(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Recommendation acquisition must precede optional seed reference hydration.
 
     :return None: Verifies the primary candidate fetch wins the shared budget.
@@ -934,15 +960,27 @@ def test_recommendation_fetches_primary_discovery_before_seed_references() -> No
         :return list[str]: Empty reference list for this fixture.
         """
         assert force_refresh is False
+        assert "Checking reference lists" in caplog.text
         events.append(f"references:{paper_id}")
         return []
 
     client.get_recommended_papers.side_effect = fetch_recommendations
     client.get_reference_ids.side_effect = fetch_references
 
-    RecommendationGraphBuilder(max_papers=2, client=client).collect_papers("seed")
+    with (
+        caplog.at_level(logging.INFO),
+        patch(
+            "citemesh.strategies.recommendation.progress_iterator",
+            wraps=progress_iterator,
+        ) as progress,
+    ):
+        RecommendationGraphBuilder(max_papers=2, client=client).collect_papers("seed")
 
     assert events == ["recommendations", "references:seed", "references:candidate"]
+    assert [paper.paper_id for paper in progress.call_args.args[0]] == ["candidate"]
+    assert progress.call_args.kwargs == dict(
+        description="Checking recommendations", unit="papers", enabled=None
+    )
 
 
 def test_recommendation_collect_clamps_endpoint_request_limit() -> None:
