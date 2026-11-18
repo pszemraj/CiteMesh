@@ -9,8 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from citemesh.cli.parser import _create_parser
+from citemesh.cli.parser import (
+    _create_parser,
+    corpus_build_example,
+    corpus_search_example,
+)
 from citemesh.data.user_config import known_config_keys
+from citemesh.strategies.embedding.config import PUBLIC_ARXIV_INDEX_IMPORT
 
 
 @pytest.mark.parametrize("width", [60, 80, 120])
@@ -32,6 +37,59 @@ def test_cache_adoption_help_labels_every_selector(
         "Original corpus used the full selected split",
     ):
         assert description in flattened
+
+
+@pytest.mark.parametrize("width", [60, 80])
+@pytest.mark.parametrize(
+    ("command", "examples"),
+    [
+        (
+            ["build"],
+            [
+                'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
+                'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
+                corpus_build_example(),
+            ],
+        ),
+        (
+            ["cache", "import"],
+            [
+                "citemesh cache import --path out/corpus",
+                " ".join(PUBLIC_ARXIV_INDEX_IMPORT),
+            ],
+        ),
+        (
+            ["search"],
+            [
+                'citemesh search "long-context language models" -n 10',
+                'citemesh search "long-context language models" --mode local',
+                corpus_search_example(),
+                'citemesh search "Megalodon" --mode s2',
+            ],
+        ),
+    ],
+    ids=["build", "cache-import", "search"],
+)
+def test_help_examples_stay_pasteable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+    examples: list[str],
+    width: int,
+) -> None:
+    """A long example breaks only at option boundaries, each cut ending in a backslash."""
+    monkeypatch.setenv("COLUMNS", str(width))
+    parser, *_ = _create_parser()
+    with pytest.raises(SystemExit, match="0"):
+        parser.parse_args([*command, "--help"])
+    lines = capsys.readouterr().out.splitlines()
+    assert max(map(len, lines)) <= width
+    for line, following in zip(lines, lines[1:], strict=False):
+        if line.endswith(" \\"):
+            assert following.startswith("      -")
+    joined = "\n".join(lines).replace(" \\\n      ", " ")
+    pasteable = {line.strip() for line in joined.splitlines()}
+    assert set(examples) <= pasteable
 
 
 @pytest.mark.parametrize("command", ["get", "set", "unset"])

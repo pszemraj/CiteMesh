@@ -54,8 +54,9 @@ def test_cache_namespace_report_preserves_source_and_origin(
     assert all(len(line) <= width for line in rendered.splitlines())
 
 
+@pytest.mark.parametrize("automatic", [True, False], ids=["selected", "explicit"])
 def test_installed_corpus_hint_keeps_command_copyable(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, automatic: bool
 ) -> None:
     """The command occupies its own unmodified line even in a narrow terminal."""
     output = io.StringIO()
@@ -63,8 +64,9 @@ def test_installed_corpus_hint_keeps_command_copyable(
         console, "output_console", Console(file=output, width=60, color_system=None)
     )
 
-    cache._print_installed_namespace("0123456789ab")
+    cache._print_installed_namespace("0123456789ab", automatic=automatic)
 
+    selector = [] if automatic else ["--cache-namespace", "0123456789ab"]
     lines = output.getvalue().splitlines()
     assert [shlex.split(line) for line in lines if line.startswith("citemesh ")] == [
         [
@@ -75,6 +77,7 @@ def test_installed_corpus_hint_keeps_command_copyable(
             "hybrid",
             "--semantic-source",
             "both",
+            *selector,
             "--export",
             "dashboard",
         ],
@@ -84,6 +87,84 @@ def test_installed_corpus_hint_keeps_command_copyable(
             "long-context language models",
             "--semantic-source",
             "arxiv-corpus",
+            *selector,
         ],
         ["citemesh", "config", "set", "defaults.semantic_source", "both"],
     ]
+    text = " ".join(output.getvalue().split())
+    assert ("Default settings select this index automatically." in text) is automatic
+    assert (
+        "Default settings do not select this index; add --cache-namespace "
+        "0123456789ab to the commands below." in text
+    ) is not automatic
+    assert ("--cache-namespace" in text) is not automatic
+
+
+def _installed_corpus(
+    monkeypatch: pytest.MonkeyPatch, namespace_id: str, source_repo_id: str
+) -> None:
+    """Serve one installed corpus whose model artifact is ``artifact``."""
+    from citemesh.data.embedding_cache import lifecycle
+    from citemesh.data.embedding_contract import (
+        EmbeddingContract,
+        ExistingCacheSelection,
+    )
+
+    selection = ExistingCacheSelection(
+        namespace_id=namespace_id,
+        namespace_serialization="address",
+        contract=EmbeddingContract(
+            model_id="unsloth/embeddinggemma-300m",
+            model_revision="revision",
+            model_artifact_identity="artifact",
+            profile_key="embeddinggemma",
+            profile_schema="embeddinggemma-v2",
+            representation="retrieval-document-v1",
+            formatter_identity="formatter",
+            normalization="l2-v1",
+            dimension=512,
+            stored_dtype="int8",
+            quantization="affine-int8-v1",
+            calibration_sample_size=2000,
+        ),
+        source_repo_id=source_repo_id,
+        source_config_name=None,
+        source_split="train",
+    )
+    monkeypatch.setattr(lifecycle, "select_existing_cache", lambda _: selection)
+
+
+def test_default_settings_select_a_corpus_by_address_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an installed corpus the default builder would address is selected."""
+    from citemesh.data.embedding_contract import embedding_namespace_id
+    from citemesh.strategies.embedding import EmbeddingGraphBuilder
+    from citemesh.strategies.embedding.config import DEFAULT_DATASET_SOURCE
+
+    default = EmbeddingGraphBuilder(semantic_source="arxiv-corpus")
+    address = default._embedding_cache_namespace(artifact_identity="artifact")
+    namespace = embedding_namespace_id(address)
+
+    _installed_corpus(monkeypatch, namespace, DEFAULT_DATASET_SOURCE)
+    assert cache._default_settings_select(namespace)
+
+    _installed_corpus(monkeypatch, namespace, "publisher/source")
+    assert not cache._default_settings_select(namespace)
+
+    _installed_corpus(monkeypatch, "0123456789ab", DEFAULT_DATASET_SOURCE)
+    assert not cache._default_settings_select("0123456789ab")
+
+
+def test_default_settings_need_the_embeddings_extra_to_select_a_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the extra the address cannot be derived, so the explicit route is shown."""
+    from citemesh.strategies.embedding import deps
+
+    def missing(*, require_corpus: bool = True) -> None:
+        raise ImportError("Embedding strategy requires: torch")
+
+    monkeypatch.setattr(deps, "_check_embedding_deps", missing)
+
+    assert not cache._default_settings_select("0123456789ab")

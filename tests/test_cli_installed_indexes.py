@@ -630,8 +630,12 @@ def test_cache_import_requires_one_source() -> None:
         assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("automatic", [True, False], ids=["selected", "explicit"])
 def test_local_import_reports_namespace_and_copyable_use(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    automatic: bool,
 ) -> None:
     from citemesh.data.embedding_cache import portable
 
@@ -644,19 +648,26 @@ def test_local_import_reports_namespace_and_copyable_use(
         return SimpleNamespace(namespace_id="0123456789ab")
 
     monkeypatch.setattr(portable, "import_snapshot", install)
+    monkeypatch.setattr(
+        "citemesh.cli.commands.cache._default_settings_select", lambda _: automatic
+    )
     assert run_cache_command(args, cache_parser) == 0
     assert observed == [(tmp_path, None)]
     output = capsys.readouterr().out
     normalized = " ".join(output.split())
-    assert "--cache-namespace 0123456789ab" in normalized
+    selector = "" if automatic else " --cache-namespace 0123456789ab"
     assert (
-        "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both "
-        "--export dashboard"
+        "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both"
+        f"{selector} --export dashboard"
     ) in normalized
     assert (
-        "citemesh search 'long-context language models' --semantic-source arxiv-corpus"
+        "citemesh search 'long-context language models' "
+        f"--semantic-source arxiv-corpus{selector}"
     ) in normalized
-    assert "For other imported indexes or custom model settings, append" in normalized
+    assert (
+        "Default settings select this index automatically." in normalized
+    ) is automatic
+    assert "For other imported indexes or custom model settings" not in normalized
     assert "citemesh config set defaults.semantic_source both" in normalized
     assert "query and graph encoding" in normalized
 
@@ -714,6 +725,9 @@ def test_bucket_import_preflights_destination_before_transfer(
     )
     monkeypatch.setattr(embedding_indexes, "download_publication", download)
     monkeypatch.setattr(portable, "import_snapshot", install)
+    monkeypatch.setattr(
+        "citemesh.cli.commands.cache._default_settings_select", lambda _: True
+    )
     status = run_cache_command(args, cache_parser)
     if refused:
         assert status == 1

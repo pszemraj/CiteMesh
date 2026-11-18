@@ -11,7 +11,7 @@ from rich.text import Text
 from .. import console
 from ..cache_ops import _clear_cache_directory, _scan_cache_directory
 from ..console import logger
-from ..parser import CORPUS_BUILD_EXAMPLE, CORPUS_SEARCH_EXAMPLE, _missing_command
+from ..parser import _missing_command, corpus_build_example, corpus_search_example
 
 _ADOPTION_SELECTORS = (
     "model",
@@ -31,6 +31,55 @@ class _CacheUsageError(ValueError):
     """Report portable-source selection errors through argparse."""
 
 
+def _default_corpus_args() -> argparse.Namespace:
+    """Return the built-in build defaults for an arXiv-corpus embedding build.
+
+    :return argparse.Namespace: Parsed defaults without config.toml overrides.
+    """
+    from ..parser import _create_parser, _pop_tracked_option_dests
+
+    _, build_parser, _, _ = _create_parser()
+    defaults = build_parser.parse_args(["corpus-defaults", "--strategy", "embedding"])
+    _pop_tracked_option_dests(defaults)
+    defaults.semantic_source = "arxiv-corpus"
+    return defaults
+
+
+def _default_settings_select(namespace: str) -> bool:
+    """Check whether built-in defaults select an installed corpus on their own.
+
+    A build or search selects an installed corpus without ``--cache-namespace``
+    when the address its settings derive for the corpus's recorded model
+    artifact is the installed namespace and the corpus has the requested
+    source. This derives that address from a default builder, which loads no
+    model and touches no network or cache file.
+
+    :param str namespace: Installed native namespace ID.
+    :return bool: ``True`` when default settings reach the namespace; ``False``
+        also when the embeddings extra that builds the address is not installed.
+    """
+    from citemesh.data.embedding_cache.lifecycle import select_existing_cache
+    from citemesh.data.embedding_contract import embedding_namespace_id
+    from citemesh.strategies.embedding import EmbeddingGraphBuilder
+
+    from ..build_options import _shared_embedding_builder_kwargs
+
+    try:
+        builder = EmbeddingGraphBuilder(
+            **_shared_embedding_builder_kwargs(_default_corpus_args())
+        )
+    except ImportError:
+        return False
+    selection = select_existing_cache(namespace)
+    address = builder._embedding_cache_namespace(
+        artifact_identity=selection.contract.model_artifact_identity
+    )
+    return embedding_namespace_id(address) == namespace and (
+        builder.dataset_source,
+        builder.dataset_split,
+    ) == (selection.source_repo_id, selection.source_split)
+
+
 def _adopt_legacy_namespace(
     args: argparse.Namespace, error_sink: argparse.ArgumentParser
 ) -> None:
@@ -44,7 +93,6 @@ def _adopt_legacy_namespace(
 
     from ..build_contract import _validate_build_cli_contract
     from ..build_options import _shared_embedding_builder_kwargs
-    from ..parser import _create_parser, _pop_tracked_option_dests
 
     if args.all_corpus:
         from citemesh.data.embedding_cache.constants import (
@@ -62,11 +110,8 @@ def _adopt_legacy_namespace(
                 "--all-corpus conflicts with the recorded legacy corpus limit"
             )
 
-    _, build_parser, _, _ = _create_parser()
-    defaults = build_parser.parse_args(["legacy-adoption", "--strategy", "embedding"])
-    _pop_tracked_option_dests(defaults)
+    defaults = _default_corpus_args()
     provided = {"semantic_source"}
-    defaults.semantic_source = "arxiv-corpus"
     for dest in _ADOPTION_SELECTORS:
         value = getattr(args, dest, None)
         if value is not None:
@@ -77,21 +122,29 @@ def _adopt_legacy_namespace(
     adopt_legacy_cache(builder, args.namespace, revision=args.dataset_revision)
 
 
-def _print_installed_namespace(namespace: str) -> None:
-    """Show a copyable route from corpus installation to local retrieval."""
+def _print_installed_namespace(namespace: str, *, automatic: bool) -> None:
+    """Show a copyable route from corpus installation to local retrieval.
+
+    :param str namespace: Installed native namespace ID.
+    :param bool automatic: Whether default settings select the corpus without
+        ``--cache-namespace``.
+    """
     console.output_console.print(
         Text.assemble(("Installed corpus namespace: ", "bold"), (namespace, "cyan"))
     )
-    console.output_console.print(
-        Text(
-            "Default model settings select the public arXiv index automatically. "
-            "For other imported indexes or custom model settings, append "
-            f"--cache-namespace {namespace} to the search or build command below."
+    if automatic:
+        selector = None
+        note = "Default settings select this index automatically."
+    else:
+        selector = namespace
+        note = (
+            "Default settings do not select this index; add "
+            f"--cache-namespace {namespace} to the commands below."
         )
-    )
+    console.output_console.print(Text(note))
     for label, command in (
-        ("Build a hybrid graph", CORPUS_BUILD_EXAMPLE),
-        ("Search the corpus", CORPUS_SEARCH_EXAMPLE),
+        ("Build a hybrid graph", corpus_build_example(selector)),
+        ("Search the corpus", corpus_search_example(selector)),
         (
             "Use the corpus for future hybrid builds",
             "citemesh config set defaults.semantic_source both",
@@ -148,7 +201,10 @@ def _run_portable_command(args: argparse.Namespace) -> int:
         snapshot_path = download_publication(resolved)
         publication = resolved.origin
     cache = import_snapshot(snapshot_path, publication=publication)
-    _print_installed_namespace(cache.namespace_id)
+    _print_installed_namespace(
+        cache.namespace_id,
+        automatic=_default_settings_select(cache.namespace_id),
+    )
     return 0
 
 

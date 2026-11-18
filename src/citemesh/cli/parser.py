@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import shlex
 import shutil
 import sys
 import textwrap
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import NoReturn, cast
 
 from rich import box
-from rich.console import Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.table import Table
 from rich.text import Text
 from rich_argparse import RichHelpFormatter
@@ -72,13 +73,32 @@ _TRACKED_ACTION_CACHE: dict[type[argparse.Action], type[argparse.Action]] = {}
 _HYBRID_DASHBOARD_EXAMPLE = (
     'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard'
 )
-CORPUS_BUILD_EXAMPLE = (
-    "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both "
-    "--export dashboard"
-)
-CORPUS_SEARCH_EXAMPLE = (
-    "citemesh search 'long-context language models' --semantic-source arxiv-corpus"
-)
+
+
+def corpus_build_example(namespace: str | None = None) -> str:
+    """Return the hybrid build command that uses an installed corpus.
+
+    :param str | None namespace: Installed namespace to select explicitly.
+    :return str: Copyable build command.
+    """
+    selector = f" --cache-namespace {namespace}" if namespace else ""
+    return (
+        "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both"
+        f"{selector} --export dashboard"
+    )
+
+
+def corpus_search_example(namespace: str | None = None) -> str:
+    """Return the corpus search command for an installed corpus.
+
+    :param str | None namespace: Installed namespace to select explicitly.
+    :return str: Copyable search command.
+    """
+    selector = f" --cache-namespace {namespace}" if namespace else ""
+    return (
+        "citemesh search 'long-context language models' "
+        f"--semantic-source arxiv-corpus{selector}"
+    )
 
 
 class _HelpFormatter(RichHelpFormatter):
@@ -170,24 +190,85 @@ def _missing_command(parser: argparse.ArgumentParser) -> int:
     return 2
 
 
-def _help_examples(*examples: tuple[str, str]) -> Table:
-    """Render labeled command examples that wrap with the help's terminal width.
+_EXAMPLE_PADDING = 2
+_EXAMPLE_CONTINUATION = "    "
+
+
+def _wrap_command(command: str, width: int) -> str:
+    """Break a shell command at option boundaries so every line stays pasteable.
+
+    An option and its values stay together, so a line never ends between a flag
+    and its value or inside a quoted argument. Continuation lines end with a
+    backslash and are indented; a single option longer than ``width`` is kept
+    whole.
+
+    :param str command: Single-line shell command.
+    :param int width: Widest line to emit, including a trailing ``" \\"``.
+    :return str: The command, wrapped when it exceeds ``width``.
+    """
+    chunks: list[str] = []
+    for token in shlex.split(command, posix=False):
+        if token.startswith("-") or not chunks:
+            chunks.append(token)
+        else:
+            chunks[-1] += " " + token
+    lines = [chunks[0]]
+    for index, chunk in enumerate(chunks[1:], start=1):
+        reserved = 0 if index == len(chunks) - 1 else len(" \\")
+        if len(lines[-1]) + 1 + len(chunk) + reserved <= width:
+            lines[-1] += " " + chunk
+        else:
+            lines.append(_EXAMPLE_CONTINUATION + chunk)
+    return " \\\n".join(lines)
+
+
+class _HelpExamples:
+    """Labeled command examples wrapped to the width help is rendered at."""
+
+    def __init__(self, examples: Sequence[tuple[str, str]]) -> None:
+        """Keep the examples until the formatter supplies the render width.
+
+        :param Sequence[tuple[str, str]] examples: Description and command pairs.
+        :return None: Store the examples.
+        """
+        self._examples = examples
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        """Render a borderless table whose commands fit its cell width.
+
+        :param Console console: Console rendering the help.
+        :param ConsoleOptions options: Render options carrying the help width.
+        :return RenderResult: The example table.
+        """
+        table = Table(
+            box=None,
+            show_header=False,
+            padding=(0, _EXAMPLE_PADDING),
+            leading=1,
+            title="Examples:",
+            title_style="bold",
+            title_justify="left",
+        )
+        width = options.max_width - 2 * _EXAMPLE_PADDING
+        for label, command in self._examples:
+            table.add_row(
+                Text.assemble(
+                    (label + "\n", "dim"),
+                    (_wrap_command(command, width) + "\n", "cyan"),
+                )
+            )
+        yield table
+
+
+def _help_examples(*examples: tuple[str, str]) -> _HelpExamples:
+    """Describe labeled command examples that wrap with the help's width.
 
     :param tuple[str, str] examples: Description and command pairs.
-    :return Table: Borderless, single-column example block.
+    :return _HelpExamples: Renderable that wraps long commands at option boundaries.
     """
-    table = Table(
-        box=None,
-        show_header=False,
-        padding=(0, 2),
-        leading=1,
-        title="Examples:",
-        title_style="bold",
-        title_justify="left",
-    )
-    for label, command in examples:
-        table.add_row(Text.assemble((label + "\n", "dim"), (command + "\n", "cyan")))
-    return table
+    return _HelpExamples(examples)
 
 
 def _rich_epilog(renderable: RenderableType) -> str:
@@ -995,7 +1076,7 @@ def _add_build_arguments(
                 ),
                 (
                     "Build with the installed arXiv corpus (recommended extra)",
-                    CORPUS_BUILD_EXAMPLE,
+                    corpus_build_example(),
                 ),
             ),
         ),
@@ -1112,7 +1193,7 @@ def _add_search_arguments(
                 ),
                 (
                     "Search an arXiv-corpus build",
-                    CORPUS_SEARCH_EXAMPLE,
+                    corpus_search_example(),
                 ),
                 (
                     "Search Semantic Scholar by keyword",

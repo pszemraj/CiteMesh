@@ -5656,7 +5656,9 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         assert result.stderr == ""
         assert "\x1b[" not in result.stdout
         assert max(map(len, result.stdout.splitlines())) <= width
-        lowered = flatten_console_text(result.stdout).lower()
+        # Long example commands continue on the next line after " \".
+        joined = result.stdout.replace(" \\\n", " ")
+        lowered = flatten_console_text(joined).lower()
         for token in expected_tokens:
             assert token.lower() in lowered
 
