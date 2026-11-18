@@ -6,9 +6,9 @@ CiteMesh uses local embeddings in its hybrid and embedding strategies to find an
 
 **[Explore the live demo](https://pszemraj.github.io/CiteMesh/)** to try the Megalodon dashboard in your browser without installing anything.
 
-![CiteMesh dashboard showing a Megalodon hybrid graph with Lightning Attention-2 selected](assets/ui.png)
+![CiteMesh dashboard showing a Megalodon hybrid graph with Mega selected and a citation passage open](assets/ui.png)
 
-_A hybrid graph built around "Megalodon" that combines its references, citers, and Semantic Scholar recommendations with nearest neighbors from the 3.2-million-paper arXiv index (45 papers, 108 links). The selected paper, "Lightning Attention-2," ranks 26th. The "Why this paper" panel shows the Semantic Scholar recommendation and its similarity to papers in Megalodon's bibliography._
+_A hybrid graph built around "Megalodon" that combines its references, citers, and Semantic Scholar recommendations with nearest neighbors from the 3.2-million-paper arXiv index (45 papers, 110 links). The selected paper, "Mega," ranks first. The "Why this paper" panel shows its similarity signals and a passage from the seven places where Megalodon cites it. **More papers** lists further references and arXiv matches that did not make the graph._
 
 After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
