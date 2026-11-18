@@ -359,24 +359,24 @@ def build_discovery_leads(
     """Build secondary reading lists from the already ranked candidate pool.
 
     References require at least two distinct provider contexts and are ordered
-    by context count, then fused rank. Corpus leads keep their original native
-    query-role retrieval rank and exclude papers acquired through a citation
-    or recommendation. Both lists exclude every paper in the final graph.
+    by fused rank. Corpus leads keep their original native query-role retrieval
+    rank and exclude papers acquired through a citation or recommendation. Both
+    lists exclude every paper in the final graph.
     """
     if limit <= 0:
         return None
     omitted = {
         item.paper_id: item for item in ranked if item.paper_id not in final_graph_ids
     }
-    cited: list[tuple[int, int, str]] = []
+    cited: list[tuple[int, str]] = []
     for paper_id, evidence in pool.focal_reference_evidence.items():
         item = omitted.get(paper_id)
         if item is not None and evidence.context_count >= 2:
-            cited.append((-evidence.context_count, item.rank, paper_id))
+            cited.append((item.rank, paper_id))
     references: list[DiscoveryLead] = []
-    for count, rank, paper_id in sorted(cited)[:limit]:
+    for rank, paper_id in sorted(cited)[:limit]:
         lead = _discovery_lead(pool.papers[paper_id], rank)
-        lead["context_count"] = -count
+        lead["context_count"] = pool.focal_reference_evidence[paper_id].context_count
         references.append(lead)
 
     corpus_positions = sorted(

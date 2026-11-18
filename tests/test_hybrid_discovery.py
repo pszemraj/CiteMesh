@@ -775,6 +775,38 @@ def test_focal_reference_evidence_tracks_canonical_work_and_build(
         assert scenario.world.requests["reference_ids"] == 0
 
 
+def test_build_caps_additional_reading_and_excludes_graph_papers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public build exports two omitted-paper lists within the related budget."""
+    scenario = _scenario()
+    scenario.world.reference_evidence = {
+        paper_id: {"contexts": ["First excerpt", "Second excerpt"]}
+        for paper_id in scenario.references
+    }
+    with fake_client(scenario.world) as client:
+        builder = _builder(client, scenario, "both", max_papers=4)
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        graph, seed_id = builder.build_graph(_SEED_ID)
+
+    payload = GraphExporter(graph, seed_id).graph_payload()
+    leads = payload["meta"]["discovery_leads"]
+    assert payload["dashboard"]["meta"]["discovery_leads"] == leads
+    assert len(graph) == 4
+    assert any("focal_reference_evidence" in data for _, data in graph.nodes(data=True))
+    for reading_list in leads.values():
+        assert len(reading_list) == 3
+        assert {row["paper_id"] for row in reading_list}.isdisjoint(graph)
+    assert [row["rank"] for row in leads["references"]] == sorted(
+        row["rank"] for row in leads["references"]
+    )
+
+
 @pytest.mark.parametrize(
     ("mode", "cold", "warm"),
     [

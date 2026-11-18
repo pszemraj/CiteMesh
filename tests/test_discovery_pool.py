@@ -80,7 +80,7 @@ def test_discovery_leads_use_evidence_from_the_omitted_pool() -> None:
     assert [
         (row["paper_id"], row["rank"], row["context_count"])
         for row in leads["references"]
-    ] == [("most-contexts", 5, 4), ("earlier-tie", 3, 2)]
+    ] == [("earlier-tie", 3, 2), ("later-tie", 4, 2)]
     assert [(row["paper_id"], row["rank"]) for row in leads["corpus"]] == [
         ("arxiv:2401.00001", 4),
         ("arxiv:2401.00002", 6),

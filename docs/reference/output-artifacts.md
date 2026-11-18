@@ -88,7 +88,7 @@ Each node carries:
 
 A selected focal reference can carry `focal_reference_evidence`. Its `context_count` counts distinct nonempty passages supplied by Semantic Scholar, `excerpt` holds a sample passage when available, and `is_influential` records the provider flag when supplied. These fields refer to the relationship with this particular focal paper.
 
-**More papers** opens additional reading suggestions beyond the graph. The optional `meta.discovery_leads.references` list contains omitted focal references with at least two reported citation passages, ordered by count then fused rank. The `corpus` list contains omitted papers found only by the arXiv index, ordered by the focal query’s native retrieval rank. Each list uses at most the graph’s requested related-paper budget. Entries carry a title, identifiers and original rank. Only `nodes` and `edges` define the graph.
+**More papers** opens additional reading suggestions beyond the graph. The optional `meta.discovery_leads.references` list contains omitted focal references with at least two reported citation passages, ordered by fused discovery rank. The `corpus` list contains omitted papers found only by the arXiv index, ordered by the focal query’s native retrieval rank. Each list uses at most the graph’s requested related-paper budget. Entries carry a title, identifiers and original rank. Only `nodes` and `edges` define the graph.
 
 JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
 
