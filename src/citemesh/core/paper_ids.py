@@ -151,6 +151,8 @@ def arxiv_id_chronology_key(raw_id: object) -> tuple[int, int, int] | None:
     style = "new" if match.group("new_year") is not None else "old"
     year_token = int(match.group(f"{style}_year"))
     month = int(match.group(f"{style}_month"))
+    if not 1 <= month <= 12:
+        return None
     sequence = int(match.group(f"{style}_sequence"))
     # arXiv started in 1991; two-digit years wrap at the century boundary.
     year = 1900 + year_token if year_token >= 91 else 2000 + year_token

@@ -11650,3 +11650,16 @@ def test_embedding_real_mps_task_space_quality_smoke() -> None:
     assert similarity_vectors.shape == (8, builder.truncate_dim)
     assert np.isfinite(similarity_vectors).all()
     assert related_mean >= unrelated_mean + 0.05
+
+
+@pytest.mark.parametrize(
+    "invalid_id", ["2600.00001", "2613.00001", "hep-th/9900001", "hep-th/9913001"]
+)
+def test_impossible_arxiv_months_do_not_rank_as_submissions(invalid_id: str) -> None:
+    """Malformed dates must not outrank real submissions in a capped corpus."""
+    assert paper_ids_module.arxiv_id_chronology_key(invalid_id) is None
+    assert paper_ids_module.encode_arxiv_id_chronology_key(invalid_id) is None
+    valid = {"id": "2612.00001"}
+    assert records_module._newest_records_by_arxiv_id(
+        [valid, {"id": invalid_id}], 1
+    ) == [valid]
