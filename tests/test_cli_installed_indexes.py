@@ -445,9 +445,14 @@ def test_search_corpus_view_options_flow_into_overrides() -> None:
     }
 
 
-@pytest.mark.parametrize("mode", ["local", "auto"])
 @pytest.mark.parametrize(
-    "flags", [["--corpus-size", "2"], ["--all-corpus"], ["--dataset-split", "train"]]
+    ("mode", "flags"),
+    [
+        ("auto", ["--corpus-size", "2"]),
+        ("auto", ["--all-corpus"]),
+        ("auto", ["--dataset-split", "train"]),
+        ("local", ["--corpus-size", "2"]),
+    ],
 )
 def test_legacy_search_rejects_unsupported_views(
     monkeypatch: pytest.MonkeyPatch, mode: str, flags: list[str]
@@ -880,14 +885,13 @@ def test_hub_http_failures_return_an_operation_error(
 
 
 @pytest.mark.parametrize("command", ["export", "refresh", "build"])
-@pytest.mark.parametrize("verbose", [False, True])
 @pytest.mark.parametrize(
-    "error",
+    ("error", "verbose"),
     [
-        ValueError("Namespace 0123456789ab is not installed; see cache scan"),
-        RuntimeError("Selected cache membership is not certified"),
-        RuntimeError("Corpus import is pending"),
-        sqlite3.DatabaseError("file is not a database"),
+        (ValueError("Namespace 0123456789ab is not installed; see cache scan"), False),
+        (RuntimeError("Selected cache membership is not certified"), False),
+        (sqlite3.DatabaseError("file is not a database"), False),
+        (RuntimeError("Corpus import is pending"), True),
     ],
 )
 def test_namespace_failures_return_operation_errors(

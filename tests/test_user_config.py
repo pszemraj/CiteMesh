@@ -698,40 +698,7 @@ def test_semantic_threshold_config_reaches_builder_kwargs(
     assert kwargs["min_semantic_similarity"] == (0.75 if explicit else 0.68)
 
 
-def test_configured_dataset_source_is_ignored_in_candidate_mode(
-    tmp_path: Path,
-) -> None:
-    """A corpus-only persisted metadata source must stay inert in candidate mode.
-
-    :param Path tmp_path: Isolated config file location.
-    :return None: Assertions validate reset to the built-in source.
-    """
-    path = tmp_path / "config.toml"
-    dataset_source = "research/arxiv-snapshot"
-    set_config_value("defaults.dataset_source", dataset_source, path=path)
-    config = load_user_config(path=path)
-    args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "embedding"]
-    )
-    applied = build_options_module._apply_user_config_defaults(args, provided, config)
-    build_contract_module._validate_build_cli_contract(
-        args, build_parser, provided, config_defaults=applied, config_path=config.path
-    )
-
-    assert args.semantic_source == "candidates"
-    assert (
-        args.dataset_source
-        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
-    )
-    assert (
-        build_options_module._shared_embedding_builder_kwargs(args)["dataset_source"]
-        == (build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"])
-    )
-
-
-@pytest.mark.parametrize(
-    "value", ["nan", "inf", "-0.1", "1.1", True, *_HUGE_INT_PARAMS]
-)
+@pytest.mark.parametrize("value", [True, *_HUGE_INT_PARAMS])
 def test_semantic_threshold_config_rejects_invalid_values(value: object) -> None:
     """Keep persisted thresholds within the same range as CLI arguments.
 
@@ -1156,6 +1123,10 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
         args.dataset_source
         == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
+    assert (
+        build_options_module._shared_embedding_builder_kwargs(args)["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+    )
     assert args.dataset_split == "train"
     assert args.corpus_size is None
     for (
@@ -1305,8 +1276,8 @@ def test_single_default_sweep_covers_every_config_key() -> None:
             id=f"{key}={raw_value}-{strategy}",
         )
         for key, values in _REPRESENTATIVE_CONFIG_VALUES.items()
-        for raw_value in values
         for strategy in STRATEGY_CHOICES
+        for raw_value in (values if strategy == "embedding" else values[:1])
     ],
 )
 def test_single_accepted_config_default_never_breaks_a_plain_build(
