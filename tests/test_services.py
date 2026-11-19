@@ -709,18 +709,23 @@ def test_get_papers_aggregates_malformed_rows_into_one_warning(
 
 
 @pytest.mark.parametrize(
-    ("paper_id", "url_id"),
+    ("paper_id", "url_id", "method", "relation", "nested"),
     [
-        ("focal", "focal"),
-        ("DOI:10.1000/example", "10.1000/example"),
-        ("arXiv:hep-th/9901001", "arxiv%3Ahep-th/9901001"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("method", "relation", "nested"),
-    [
-        ("get_paper_references", "references", "citedPaper"),
-        ("get_paper_citations", "citations", "citingPaper"),
+        ("focal", "focal", "get_paper_references", "references", "citedPaper"),
+        (
+            "DOI:10.1000/example",
+            "10.1000/example",
+            "get_paper_citations",
+            "citations",
+            "citingPaper",
+        ),
+        (
+            "arXiv:hep-th/9901001",
+            "arxiv%3Ahep-th/9901001",
+            "get_paper_references",
+            "references",
+            "citedPaper",
+        ),
     ],
 )
 def test_relation_discovery_pages_inline_metadata_without_batch(
@@ -1175,7 +1180,10 @@ def test_custom_projection_recommendations_keep_first_row_per_paper(
     )
 
 
-def test_search_paginates_deduplicates_and_validates_query_offsets() -> None:
+@pytest.mark.parametrize("first_id", ["a", " a "])
+def test_search_paginates_deduplicates_and_validates_query_offsets(
+    first_id: str,
+) -> None:
     """Search follows offsets, honors limits, and rejects invalid inputs.
 
     :return None: Verifies search pagination and validation.
@@ -1184,14 +1192,14 @@ def test_search_paginates_deduplicates_and_validates_query_offsets() -> None:
         _disable_pacing(client)
         client._session.get = MagicMock(
             side_effect=[
-                _MockResponse(200, {"data": [_paper_payload("a")], "next": 10}),
+                _MockResponse(200, {"data": [_paper_payload(first_id)], "next": 10}),
                 _MockResponse(
                     200, {"data": [_paper_payload("a"), _paper_payload("b")]}
                 ),
             ]
         )
         papers = client.search_papers(" graph ", limit=2, raise_on_unavailable=True)
-        assert [paper.paper_id for paper in papers] == ["a", "b"]
+        assert [paper.paper_id for paper in papers] == [first_id, "b"]
         assert (
             client._session.get.call_args_list[0].kwargs["params"]["query"] == "graph"
         )
@@ -1941,33 +1949,19 @@ def test_interrupting_recovery_releases_collection_scope(
         assert client.get_paper("p1", raise_on_unavailable=True) is not None
 
 
-@pytest.mark.parametrize(
-    ("method", "nested_key"),
-    [
-        ("get_paper_references", "citedPaper"),
-        ("get_paper_citations", "citingPaper"),
-    ],
-)
-def test_repeated_relation_discovery_refetches_pages_only(
-    method: str, nested_key: str
-) -> None:
-    """Every relation call reads fresh pages and never hydrates through a batch.
-
-    :param str method: Public relation method.
-    :param str nested_key: Relation payload key.
-    :return None: Verifies one GET per call and no batch or paper-cache write.
-    """
+def test_repeated_citation_discovery_refetches_pages_only() -> None:
+    """Citation calls read fresh pages without a batch or paper-cache write."""
     raw_id = "a" * 40
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
-            return_value=_MockResponse(200, _relation_payload([raw_id], nested_key))
+            return_value=_MockResponse(200, _relation_payload([raw_id], "citingPaper"))
         )
         client._session.post = MagicMock()
         for _ in range(2):
             assert [
                 paper.paper_id
-                for paper in getattr(client, method)(
+                for paper in client.get_paper_citations(
                     "focal", limit=1, raise_on_unavailable=True
                 )
             ] == [raw_id]
@@ -2286,3 +2280,91 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
         assert client.get_cached_reference_ids("focal") == ["old-reference"]
 
     client._session.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("method", "nested_key", "malformed_kind"),
+    [
+        ("get_recommended_papers", None, "invalid-year"),
+        ("search_papers", None, "invalid-year"),
+        ("get_paper_references", "citedPaper", "invalid-year"),
+        ("get_paper_citations", "citingPaper", "invalid-year"),
+        ("get_recommended_papers", None, "blank-id"),
+        ("search_papers", None, "blank-id"),
+    ],
+)
+def test_discovery_limits_count_usable_records(
+    method: str, nested_key: str | None, malformed_kind: str
+) -> None:
+    """Malformed metadata must not hide a later usable row or fill its quota."""
+    malformed = (
+        {**_paper_payload("same"), "year": "unknown"}
+        if malformed_kind == "invalid-year"
+        else _paper_payload(" ")
+    )
+    usable = _paper_payload("same", title="First usable row")
+    other = _paper_payload("other", title="Other usable row")
+    if method == "get_recommended_papers":
+        responses = [
+            _MockResponse(
+                200,
+                {
+                    "recommendedPapers": [
+                        malformed,
+                        other,
+                        usable,
+                        _paper_payload("same"),
+                    ]
+                },
+            )
+        ]
+    elif method == "search_papers":
+        responses = [
+            _MockResponse(200, {"data": [malformed], "next": 1}),
+            _MockResponse(200, {"data": [other, usable]}),
+        ]
+    else:
+        assert nested_key is not None
+        responses = [
+            _MockResponse(200, _relation_page([malformed], nested_key, next_offset=1)),
+            _MockResponse(200, _relation_page([other, usable], nested_key)),
+        ]
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(side_effect=responses)
+        kwargs = {"pool": "all-cs"} if method == "get_recommended_papers" else {}
+        papers = getattr(client, method)("focal", limit=2, **kwargs)
+
+    assert [(paper.paper_id, paper.title) for paper in papers] == [
+        ("other", "Other usable row"),
+        ("same", "First usable row"),
+    ]
+    assert client._session.get.call_count == len(responses)
+
+
+@pytest.mark.parametrize("returned_id", ["same", " same "])
+def test_recovered_relation_metadata_preserves_complete_reference_ids(
+    returned_id: str,
+) -> None:
+    """A complete listing retains IDs even when their metadata cannot be used."""
+    rows = [
+        {"citedPaper": {**_paper_payload("same"), "year": "unknown"}},
+        {"citedPaper": {**_paper_payload("id-only"), "title": ["invalid"]}},
+        {
+            "citedPaper": _paper_payload(returned_id, title="Recovered metadata"),
+            "contexts": ["A useful reference passage."],
+        },
+    ]
+    evidence: dict[str, s2.endpoints.ReferenceEvidence] = {}
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(return_value=_MockResponse(200, {"data": rows}))
+        papers = client.get_paper_references(
+            "focal", limit=10, reference_evidence=evidence
+        )
+        assert client.get_cached_reference_ids("focal") == ["same", "id-only"]
+
+    assert [(paper.paper_id, paper.title) for paper in papers] == [
+        (returned_id, "Recovered metadata")
+    ]
+    assert evidence[returned_id].contexts == ("A useful reference passage.",)

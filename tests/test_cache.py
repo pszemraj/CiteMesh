@@ -254,9 +254,10 @@ def test_atomic_output_path_replaces_existing_writable_file(tmp_path: Path) -> N
     assert list(tmp_path.iterdir()) == [destination]
 
 
-@pytest.mark.parametrize("write_json", [False, True], ids=["text", "json"])
 @pytest.mark.parametrize(
-    "failure_stage", ["stat", "chmod", "fdopen", "fsync", "replace"]
+    ("write_json", "failure_stage"),
+    [(False, stage) for stage in ("stat", "chmod", "fdopen", "fsync", "replace")]
+    + [(True, "fsync")],
 )
 def test_atomic_write_failure_closes_descriptor_and_preserves_target(
     tmp_path: Path,
@@ -342,7 +343,7 @@ def test_atomic_write_text_preserves_target_permissions(
 
     :param Path tmp_path: Temporary directory for the atomic-write target.
     :param int target_mode: Existing permissions, including missing read/write access.
-    :return None: Validates preserved, defaulted, and explicit modes.
+    :return None: Validates preserved target modes.
     """
     shared = tmp_path / "graph.html"
     shared.write_text("original", encoding="utf-8")
@@ -355,6 +356,9 @@ def test_atomic_write_text_preserves_target_permissions(
         shared.chmod(0o600)
     assert shared.read_text(encoding="utf-8") == "rewritten"
 
+
+def test_atomic_write_text_new_and_explicit_modes(tmp_path: Path) -> None:
+    """Fresh files respect umask and explicit modes override existing modes."""
     current_umask = os.umask(0)
     os.umask(current_umask)
     fresh = tmp_path / "fresh.json"

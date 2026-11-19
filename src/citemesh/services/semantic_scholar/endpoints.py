@@ -53,10 +53,11 @@ SEARCH_PAGE_SIZE = 100
 
 
 class _RelationListing(NamedTuple):
-    """Relation records by normalized ID and whether the provider listed them all."""
+    """Relation IDs, usable metadata, and whether the provider listed them all."""
 
     records: dict[str, object]
     complete: bool
+    papers: list[Paper]
 
 
 @dataclass(frozen=True)
@@ -150,11 +151,11 @@ def _inline_recommendations(records: Sequence[JSONValue]) -> tuple[list[Paper], 
         normalized_id = normalize_paper_id(raw_id)
         if normalized_id in seen_ids:
             continue
-        seen_ids.add(normalized_id)
         paper = payloads._convert_api_paper(record)
         if paper is None:
             skipped += 1
             continue
+        seen_ids.add(normalized_id)
         papers.append(paper)
     return papers, skipped
 
@@ -491,6 +492,10 @@ class _EndpointsMixin:
             provider order, or ``None`` after a tolerated failed page.
         """
         records: dict[str, object] = {}
+        papers: list[Paper] = []
+        converted_ids: set[str] = set()
+        metadata_requested = fields != "paperId"
+        collected = 0
         complete = False
         offset = 0
         with (
@@ -498,10 +503,10 @@ class _EndpointsMixin:
             if progress_description is not None
             else contextlib.nullcontext()
         ) as progress:
-            while limit is None or len(records) < limit:
+            while limit is None or collected < limit:
                 page_limit = GRAPH_RELATION_PAGE_SIZE
                 if limit is not None:
-                    page_limit = min(page_limit, max(1, limit - len(records)))
+                    page_limit = min(page_limit, max(1, limit - collected))
                 response = self._request_json(
                     f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}/{relation}",
                     {
@@ -527,7 +532,7 @@ class _EndpointsMixin:
                     raise _SemanticScholarResponseContractError(
                         f"Semantic Scholar returned non-list {relation} data."
                     )
-                previous_count = len(records)
+                previous_count = collected
                 for row in rows:
                     if not isinstance(row, dict) or nested_key not in row:
                         raise _SemanticScholarResponseContractError(
@@ -555,16 +560,33 @@ class _EndpointsMixin:
                             if previous is not None
                             else evidence
                         )
+                    # Reference caches retain IDs even when metadata is unusable.
                     if normalized_id not in records:
                         records[normalized_id] = paper
-                        if limit is not None and len(records) >= limit:
-                            break
+                    if metadata_requested:
+                        if normalized_id in converted_ids:
+                            continue
+                        converted = payloads._convert_api_paper(paper)
+                        if converted is None:
+                            logger.debug(
+                                "Skipping malformed %s paper for %s.",
+                                relation,
+                                normalized_id,
+                            )
+                            continue
+                        converted_ids.add(normalized_id)
+                        papers.append(converted)
+                        collected = len(papers)
+                    else:
+                        collected = len(records)
+                    if limit is not None and collected >= limit:
+                        break
                 if progress is not None:
-                    progress.update(len(records) - previous_count)
+                    progress.update(collected - previous_count)
                 next_offset = response.get("next")
                 if not rows or next_offset is None:
                     # A listing that filled its limit may have stopped early.
-                    complete = limit is None or len(records) < limit
+                    complete = limit is None or collected < limit
                     break
                 if (
                     isinstance(next_offset, bool)
@@ -581,7 +603,7 @@ class _EndpointsMixin:
             paper_id,
             len(records),
         )
-        return _RelationListing(records, complete)
+        return _RelationListing(records, complete, papers)
 
     @_scoped_endpoint
     def _get_related_papers(
@@ -641,25 +663,17 @@ class _EndpointsMixin:
                 normalized_id,
                 list(listing.records),
             )
-        papers: list[Paper] = []
-        for related_id, record in listing.records.items():
-            paper = payloads._convert_api_paper(record)
-            if paper is None:
-                logger.debug(
-                    "Skipping malformed %s paper for %s.", relation, related_id
-                )
-                continue
-            papers.append(paper)
+        for paper in listing.papers:
             if reference_evidence is not None and fetched_evidence is not None:
-                if evidence := fetched_evidence.get(related_id):
+                if evidence := fetched_evidence.get(normalize_paper_id(paper.paper_id)):
                     reference_evidence[paper.paper_id] = evidence
         _log_skipped_rows(
             f"{relation} discovery",
             normalized_id,
-            len(listing.records) - len(papers),
+            len(listing.records) - len(listing.papers),
             len(listing.records),
         )
-        return papers
+        return listing.papers
 
     @_scoped_endpoint
     def get_cached_reference_ids(self, paper_id: str) -> list[str] | None:
@@ -756,13 +770,14 @@ class _EndpointsMixin:
         malformed_records = 0
         for record in records:
             paper = payloads._convert_recommendation(record)
-            if paper is None:
+            if paper is None or not paper.paper_id.strip():
                 malformed_records += 1
                 logger.debug("Skipping malformed Semantic Scholar paper row.")
                 continue
-            if paper.paper_id in seen_ids:
+            normalized_id = normalize_paper_id(paper.paper_id)
+            if normalized_id in seen_ids:
                 continue
-            seen_ids.add(paper.paper_id)
+            seen_ids.add(normalized_id)
             papers.append(paper)
             if cache_full_metadata:
                 disk_cache._persist_paper(paper, paper.paper_id)
@@ -889,17 +904,17 @@ class _EndpointsMixin:
         if fields is not None and "paperId" not in requested_fields:
             requested_fields.append("paperId")
 
-        records: list[JSONValue] = []
+        papers: list[Paper] = []
         seen_ids: set[str] = set()
         malformed_records = 0
         offset = 0
-        while len(records) < parsed_limit:
+        while len(papers) < parsed_limit:
             response = self._request_json(
                 SEARCH_BASE_URL,
                 {
                     "query": normalized_query,
                     "fields": ",".join(requested_fields),
-                    "limit": min(SEARCH_PAGE_SIZE, parsed_limit - len(records)),
+                    "limit": min(SEARCH_PAGE_SIZE, parsed_limit - len(papers)),
                     "offset": offset,
                 },
                 context=f"searching for {normalized_query!r} at offset {offset}",
@@ -920,17 +935,16 @@ class _EndpointsMixin:
             page = response["data"]
             if not page:
                 break
-            for record in page:
-                raw_id = payloads._payload_get(record, "paperId")
-                if not isinstance(raw_id, str) or not raw_id.strip():
-                    malformed_records += 1
-                    logger.debug("Skipping malformed search row.")
-                    continue
-                paper_id = normalize_paper_id(raw_id)
-                if paper_id not in seen_ids:
-                    seen_ids.add(paper_id)
-                    records.append(record)
-                    if len(records) >= parsed_limit:
+            page_papers, malformed = self._papers_from_records(
+                page, cache_full_metadata=False
+            )
+            malformed_records += malformed
+            for paper in page_papers:
+                normalized_id = normalize_paper_id(paper.paper_id)
+                if normalized_id not in seen_ids:
+                    seen_ids.add(normalized_id)
+                    papers.append(paper)
+                    if len(papers) >= parsed_limit:
                         break
             next_offset = response.get("next")
             if next_offset is None:
@@ -944,10 +958,9 @@ class _EndpointsMixin:
                     "Semantic Scholar returned invalid search pagination offset."
                 )
             offset = next_offset
-        papers, conversion_malformed_records = self._papers_from_records(
-            records[:parsed_limit], cache_full_metadata=cache_full_metadata
-        )
-        malformed_records += conversion_malformed_records
+        if cache_full_metadata:
+            for paper in papers:
+                disk_cache._persist_paper(paper, paper.paper_id)
         if malformed_records:
             logger.warning(
                 "Search for %r skipped %d malformed records.",

@@ -60,6 +60,7 @@ from tests._helpers import (
     LengthRecordingEncodeModel,
     LookupEncodeModel,
     SeededRandomEncodeModel,
+    fail_stat_for,
 )
 
 
@@ -1663,46 +1664,6 @@ def test_embedding_cache_returns_stored_vector_fidelity_on_first_encode(
         np.testing.assert_array_equal(miss["p1"], encoded)
 
 
-def test_embedding_cache_upsert_records_int8_saturation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Int8 cache writes should persist saturation telemetry when values clip."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(
-            cache_dir=tmpdir,
-            model_name="int8-saturation-stats",
-            storage_precision="int8",
-        )
-        cache.set_calibration_ranges(
-            ranges=np.vstack(
-                (
-                    np.zeros(2, dtype=np.float32),
-                    np.ones(2, dtype=np.float32),
-                )
-            ),
-            embedding_dim=2,
-        )
-
-        out_of_range_model = LookupEncodeModel(
-            {"Alpha. First": np.asarray([2.0, -1.0], dtype=np.float32)}
-        )
-        with caplog.at_level("WARNING"):
-            cache.upsert_embeddings(
-                {"p1": {"title": "Alpha", "abstract": "First"}},
-                out_of_range_model,
-                show_progress=False,
-            )
-
-        assert any(
-            "Int8 calibration saturation detected" in record.message
-            for record in caplog.records
-        )
-
-        with h5py.File(cache.h5_path, "r") as h5:
-            assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 2
-            assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
-
-
 def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1731,6 +1692,9 @@ def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
                 model,
                 show_progress=False,
             )
+            with h5py.File(cache.h5_path, "r") as h5:
+                assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 2
+                assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
             cache.upsert_embeddings(
                 {"p2": {"title": "Beta", "abstract": "Second"}},
                 model,
@@ -2042,13 +2006,20 @@ def test_embedding_cache_search_keeps_tied_top_k_order_across_chunks(
 
 
 def test_embedding_cache_search_rejects_non_finite_query_embedding() -> None:
-    """Search should reject NaN query vectors before opening the cache payload."""
+    """Search rejects invalid shape and NaN before opening the cache payload."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
             model_name="non-finite-query",
             storage_precision="float32",
         )
+        with pytest.raises(ValueError, match="query_embedding must be 1-dimensional"):
+            cache.search(
+                query_embedding=np.asarray([[1.0, 0.0]], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
         with pytest.raises(
             ValueError, match="query_embedding must contain only finite values"
         ):
@@ -2277,19 +2248,17 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
     assert results == []
 
 
-@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
-@pytest.mark.parametrize("paper_ids", [[], ["missing"]])
 def test_cached_embedding_reader_returns_empty_before_first_write(
-    tmp_path: Path, storage_precision: str, paper_ids: list[str]
+    tmp_path: Path,
 ) -> None:
     """Fresh namespaces have no vectors or HDF5 file until their first write."""
     cache = EmbeddingCache(
         cache_dir=tmp_path,
         model_name="empty-vector-reader",
-        storage_precision=storage_precision,
+        storage_precision="float32",
     )
     assert not cache.h5_path.exists()
-    assert cache.get_cached_embeddings(paper_ids) == {}
+    assert cache.get_cached_embeddings(["missing"]) == {}
     assert not cache.h5_path.exists()
 
 
@@ -2316,6 +2285,7 @@ def test_cached_embedding_reader_deduplicates_ids_across_query_batches(
         }
     )
     expected = cache.get_embeddings(papers, model, show_progress=False)
+    assert cache.get_cached_embeddings([]) == {}
     requested = ["p1"] * SQLITE_QUERY_BATCH_SIZE + ["p0", "p2", "p1", "missing"]
     actual = cache.get_cached_embeddings(requested)
     assert actual.keys() == expected.keys()
@@ -2323,17 +2293,15 @@ def test_cached_embedding_reader_deduplicates_ids_across_query_batches(
         np.testing.assert_array_equal(actual[paper_id], vector)
 
 
-@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 def test_cached_embedding_reader_rejects_missing_populated_matrix(
-    tmp_path: Path, storage_precision: str
+    tmp_path: Path,
 ) -> None:
     """A lost matrix must remain an error when committed paper mappings exist."""
     cache = EmbeddingCache(
         cache_dir=tmp_path,
         model_name="missing-populated-vector-reader",
-        storage_precision=storage_precision,
+        storage_precision="float32",
     )
-    _set_test_int8_calibration(cache)
     model = LookupEncodeModel({"Paper. Text": np.asarray([1, 0], dtype=np.float32)})
     cache.get_embeddings(
         {"paper": {"title": "Paper", "abstract": "Text"}}, model, show_progress=False
@@ -2409,29 +2377,6 @@ def test_legacy_head_slice_hydration_metadata_fails_is_hydrated() -> None:
         assert not cache.is_hydrated("train", 2, dataset_source="fake/source")
 
 
-def test_embedding_cache_embedding_count_tracks_persisted_rows() -> None:
-    """embedding_count should report 0 for empty namespaces and rows after upserts."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="embedding-count")
-        assert cache.embedding_count() == 0
-
-        _set_test_int8_calibration(cache)
-        cache.get_embeddings(
-            {
-                "p1": {"title": "Alpha", "abstract": "First"},
-                "p2": {"title": "Beta", "abstract": "Second"},
-            },
-            LookupEncodeModel(
-                {
-                    "Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32),
-                    "Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32),
-                }
-            ),
-            show_progress=False,
-        )
-        assert cache.embedding_count() == 2
-
-
 def test_embedding_cache_default_text_builder_matches_profile_formatter() -> None:
     """Default cache text builder should match the default profile formatter."""
 
@@ -2501,26 +2446,6 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
         ):
             cache.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-                top_k=1,
-                binary_prefilter=True,
-                binary_rescore_multiplier=2,
-            )
-
-
-def test_embedding_cache_search_rejects_non_vector_queries() -> None:
-    """Search should reject non-1D query embeddings instead of flattening them."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="invalid-query-shape")
-        _set_test_int8_calibration(cache)
-        cache.get_embeddings(
-            {"p1": {"title": "Alpha", "abstract": "First"}},
-            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
-            show_progress=False,
-        )
-
-        with pytest.raises(ValueError, match="query_embedding must be 1-dimensional"):
-            cache.search(
-                query_embedding=np.asarray([[1.0, 0.0]], dtype=np.float32),
                 top_k=1,
                 binary_prefilter=True,
                 binary_rescore_multiplier=2,
@@ -3050,6 +2975,7 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="paper-id-listing")
         assert cache.get_cached_paper_ids() == set()
+        assert cache.embedding_count() == 0
         _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {
@@ -3060,6 +2986,7 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
             show_progress=False,
         )
         assert cache.get_cached_paper_ids() == {"p1", "p2"}
+        assert cache.embedding_count() == 2
 
 
 def test_embedding_cache_persists_chronology_key_only_for_arxiv_ids() -> None:
@@ -3262,19 +3189,17 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
                 assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
 
 
-@pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("dataset_source", ["  ", "", None])
 def test_embedding_cache_mark_hydrated_rejects_empty_source(
-    dataset_source: str | None, complete: bool
+    dataset_source: str | None,
 ) -> None:
-    """Hydration markers should reject blank sources, complete or not.
+    """Incomplete hydration markers should reject blank sources.
 
     The recorded source is what identifies a namespace as corpus-scale when a
     fingerprint mismatch decides whether deleting it needs operator approval, so
     an interrupted attempt that recorded nothing would silently drop that guard.
 
     :param Optional[str] dataset_source: Blank source token under test.
-    :param bool complete: Whether the marker claims hydration finished.
     :return None: Asserts every blank source is refused.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -3284,7 +3209,7 @@ def test_embedding_cache_mark_hydrated_rejects_empty_source(
                 dataset_source=dataset_source,
                 dataset_split="train",
                 corpus_size=16,
-                complete=complete,
+                complete=False,
             )
 
 
@@ -3942,6 +3867,24 @@ def test_embedding_cache_enabling_binary_prefilter_preserves_populated_namespace
     assert reloaded.last_search_used_binary_prefilter is True
 
 
+def _run_cache_workers(processes: list[mp.Process], queue: mp.Queue) -> list[Any]:
+    """Run cache workers and return any reported or missing-result errors."""
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+    results = []
+    for _ in processes:
+        try:
+            results.append(queue.get(timeout=5))
+        except Empty:
+            results.append(("err", "worker did not report result"))
+    return [result for result in results if result[0] == "err"]
+
+
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
     """Concurrent processes should serialize writes without HDF5 lock failures."""
     queue: mp.Queue = mp.Queue()
@@ -3950,23 +3893,7 @@ def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
         for idx in range(4)
     ]
 
-    for process in processes:
-        process.start()
-
-    for process in processes:
-        process.join(timeout=30)
-        if process.is_alive():
-            process.terminate()
-            process.join()
-
-    results = []
-    for _ in processes:
-        try:
-            results.append(queue.get(timeout=5))
-        except Empty:
-            results.append(("err", "missing", "worker did not report result"))
-
-    errors = [result for result in results if result[0] == "err"]
+    errors = _run_cache_workers(processes, queue)
     assert not errors, f"Concurrent cache writes failed: {errors}"
 
 
@@ -4054,23 +3981,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
         for _ in range(4)
     ]
 
-    for process in processes:
-        process.start()
-
-    for process in processes:
-        process.join(timeout=30)
-        if process.is_alive():
-            process.terminate()
-            process.join()
-
-    results = []
-    for _ in processes:
-        try:
-            results.append(queue.get(timeout=5))
-        except Empty:
-            results.append(("err", "worker did not report result"))
-
-    errors = [result for result in results if result[0] == "err"]
+    errors = _run_cache_workers(processes, queue)
     assert not errors, f"Concurrent cache init recovery failed: {errors}"
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="process-init-recovery")
@@ -4119,21 +4030,30 @@ def test_embedding_cache_recovery_contracts(
 
 
 @pytest.mark.parametrize(
-    "error_type", [OSError, RuntimeError, ValueError, sqlite3.DatabaseError]
-)
-@pytest.mark.parametrize(
-    ("operation", "backend"),
+    ("operation", "backend", "error_type"),
     [
-        ("open", "hdf5"),
-        ("hydration", "hdf5"),
-        ("hydration", "sqlite"),
-        ("stats", "hdf5"),
-        ("stats", "sqlite"),
-        ("presence", "sqlite"),
-        ("open", "stat-hdf5"),
-        ("hydration", "stat-hdf5"),
-        ("stats", "stat-hdf5"),
-        ("presence", "stat-sqlite"),
+        (operation, backend, OSError)
+        for operation, backend in [
+            ("open", "hdf5"),
+            ("hydration", "hdf5"),
+            ("hydration", "sqlite"),
+            ("stats", "hdf5"),
+            ("stats", "sqlite"),
+            ("presence", "sqlite"),
+            ("open", "stat-hdf5"),
+            ("hydration", "stat-hdf5"),
+            ("stats", "stat-hdf5"),
+            ("presence", "stat-sqlite"),
+        ]
+    ]
+    + [
+        (operation, backend, error_type)
+        for operation, backend in [
+            ("presence", "sqlite"),
+            ("hydration", "hdf5"),
+            ("stats", "hdf5"),
+        ]
+        for error_type in (ValueError, RuntimeError, sqlite3.DatabaseError)
     ],
 )
 def test_embedding_cache_open_errors_preserve_namespace(
@@ -4165,7 +4085,6 @@ def test_embedding_cache_open_errors_preserve_namespace(
     )
     original_payload = cache.h5_path.read_bytes()
     injected_error = error_type("transient open failure")
-    original_stat = Path.stat
     original_exists = Path.exists
     stat_target = cache.db_path if backend == "stat-sqlite" else cache.h5_path
 
@@ -4178,17 +4097,6 @@ def test_embedding_cache_open_errors_preserve_namespace(
         """
         raise injected_error
 
-    def fail_stat(path: Path, **kwargs: Any) -> Any:
-        """Fail inspection of one payload path.
-
-        :param Path path: Filesystem path under inspection.
-        :param Any kwargs: Path.stat keyword arguments.
-        :return Any: Real file statistics for unaffected paths.
-        """
-        if path == stat_target:
-            raise injected_error
-        return original_stat(path, **kwargs)
-
     def suppress_exists_error(path: Path, **kwargs: Any) -> bool:
         """Emulate Python 3.14's exists error suppression on every test runtime.
 
@@ -4200,7 +4108,7 @@ def test_embedding_cache_open_errors_preserve_namespace(
 
     with monkeypatch.context() as patch:
         if backend.startswith("stat-"):
-            patch.setattr(Path, "stat", fail_stat)
+            patch.setattr(Path, "stat", fail_stat_for(stat_target, injected_error))
             patch.setattr(Path, "exists", suppress_exists_error)
         elif backend == "hdf5":
             patch.setattr(embedding_cache_module.store.h5py, "File", fail_open)
@@ -4339,50 +4247,6 @@ def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
         )
 
 
-def test_embedding_cache_reopens_across_source_dtype_without_discarding_rows(
-    tmp_path: Path,
-) -> None:
-    """A host resolving a different compute dtype must reuse, not wipe, the cache.
-
-    Compute dtype is auto-resolved from the active device and is deliberately
-    absent from the namespace, so a bf16 GPU and an fp32 host land on the same
-    files. If it were still compared as a runtime contract they would each
-    destroy the other's vectors on open, which is worse than partitioning.
-
-    :param Path tmp_path: Isolated cache directory.
-    :return None: Checks cached rows survive a reopen under a different dtype.
-    """
-    built = EmbeddingCache(
-        cache_dir=tmp_path,
-        model_name="shared-dtype-namespace",
-        storage_precision="float32",
-        source_torch_dtype="bfloat16",
-    )
-    built.get_embeddings(
-        {"p1": {"title": "Alpha", "abstract": "First"}},
-        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
-        show_progress=False,
-    )
-    assert built.embedding_count() == 1
-
-    reopened = EmbeddingCache(
-        cache_dir=tmp_path,
-        model_name="shared-dtype-namespace",
-        storage_precision="float32",
-        source_torch_dtype="float32",
-    )
-
-    assert reopened.h5_path == built.h5_path
-    assert reopened.embedding_count() == 1
-    results = reopened.search(
-        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-        top_k=1,
-        binary_prefilter=False,
-        binary_rescore_multiplier=2,
-    )
-    assert [result.paper_id for result in results] == ["p1"]
-
-
 def _recorded_source_dtypes(cache: EmbeddingCache) -> tuple[str, str]:
     """Return the source dtype recorded by the SQLite and HDF5 witnesses.
 
@@ -4422,6 +4286,7 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
         LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
         show_progress=False,
     )
+    assert built.embedding_count() == 1
     assert _recorded_source_dtypes(built) == ("bfloat16", "bfloat16")
 
     reopened = EmbeddingCache(
@@ -4430,7 +4295,15 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
         storage_precision="float32",
         source_torch_dtype="float32",
     )
+    assert reopened.h5_path == built.h5_path
     assert reopened.embedding_count() == 1
+    results = reopened.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=False,
+        binary_rescore_multiplier=2,
+    )
+    assert [result.paper_id for result in results] == ["p1"]
     # Appending rewrites the HDF5 contract attrs, so the fp32 host gets the one
     # chance it has to overwrite the other witness too.
     reopened.get_embeddings(

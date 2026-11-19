@@ -19,10 +19,9 @@ from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
 from citemesh.strategies.base import (
-    RELATIONSHIP_DEGREE_CAP,
     GraphBuilderStrategy,
     GraphCollectionOptions,
-    build_capped_undirected_graph,
+    _finalize_relationship_graph,
 )
 from citemesh.strategies.candidates import (
     fetch_candidate_source,
@@ -160,18 +159,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :return tuple[PaperGraph, str]: Built graph and canonical focal paper identifier.
         """
         graph, actual_focal_id = super().build_graph(focal_id, **kwargs)
-        graph.graph["candidate_source_status"] = dict(
-            sorted(self.candidate_source_status.items())
+        graph = _finalize_relationship_graph(
+            graph, actual_focal_id, self.candidate_source_status
         )
-        filtered_graph = build_capped_undirected_graph(
-            graph, RELATIONSHIP_DEGREE_CAP, focal_id=actual_focal_id
-        )
-        logger.debug(
-            "Graph complete: %s nodes, %s edges",
-            filtered_graph.number_of_nodes(),
-            filtered_graph.number_of_edges(),
-        )
-        return filtered_graph, actual_focal_id
+        return graph, actual_focal_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

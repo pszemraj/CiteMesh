@@ -230,6 +230,22 @@ def build_capped_undirected_graph(
     return filtered_graph
 
 
+def _finalize_relationship_graph(
+    graph: PaperGraph, focal_id: str, source_status: Mapping[str, str]
+) -> PaperGraph:
+    """Attach source status and apply the citation/recommendation edge cap."""
+    graph.graph["candidate_source_status"] = dict(sorted(source_status.items()))
+    filtered_graph = build_capped_undirected_graph(
+        graph, RELATIONSHIP_DEGREE_CAP, focal_id=focal_id
+    )
+    logger.debug(
+        "Graph complete: %s nodes, %s edges",
+        filtered_graph.number_of_nodes(),
+        filtered_graph.number_of_edges(),
+    )
+    return filtered_graph
+
+
 class GraphBuilderStrategy(ABC):
     """
     Abstract base class for all paper graph building strategies.

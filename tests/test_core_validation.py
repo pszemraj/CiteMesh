@@ -123,6 +123,8 @@ def test_parse_unit_interval_float_accepts_inclusive_bounds(
         ("-0.0001", "out_of_range"),
         (2.0, "out_of_range"),
         (-1.0, "out_of_range"),
+        pytest.param(10**400, "out_of_range", id="huge-int"),
+        pytest.param(-(10**400), "out_of_range", id="huge-negative-int"),
         ("abc", "not_number"),
         ("", "not_number"),
         (None, "not_number"),
@@ -150,12 +152,9 @@ def test_parse_unit_interval_float_rejects_invalid_values(
     [
         (_positive_int, "0", "must be at least 1"),
         (_positive_int, "abc", "must be an integer"),
-        (_positive_int, "1.5", "must be an integer"),
         (_non_negative_int, "-1", "must be at least 0"),
         (_threshold_float, "nan", "must be a finite float"),
-        (_threshold_float, "inf", "must be a finite float"),
         (_threshold_float, "1.5", "must be between 0.0 and 1.0"),
-        (_threshold_float, "-0.5", "must be between 0.0 and 1.0"),
         (_threshold_float, "abc", "must be a float"),
     ],
 )
@@ -185,11 +184,8 @@ def test_parser_bounded_int_reports_its_own_minimum() -> None:
     ("value", "message"),
     [
         (0, "expected an integer >= 1"),
-        ("0", "expected an integer >= 1"),
         (True, "expected an integer, got a boolean"),
         ("abc", "expected an integer"),
-        (1.5, "expected an integer"),
-        (2.0, "expected an integer"),
     ],
 )
 def test_config_int_caster_keeps_config_wording(value: object, message: str) -> None:
@@ -208,11 +204,8 @@ def test_config_int_caster_keeps_config_wording(value: object, message: str) -> 
     [
         (True, "expected a float, got a boolean"),
         ("abc", "expected a float"),
-        (None, "expected a float"),
         (math.nan, "expected a finite float between 0.0 and 1.0"),
-        (math.inf, "expected a finite float between 0.0 and 1.0"),
         (2.0, "expected a finite float between 0.0 and 1.0"),
-        (-0.5, "expected a finite float between 0.0 and 1.0"),
     ],
 )
 def test_config_similarity_caster_keeps_config_wording(

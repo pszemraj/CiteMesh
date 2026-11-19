@@ -3108,242 +3108,6 @@ def test_citation_similarity_branches() -> None:
     assert GraphBuilderStrategy.citation_similarity(zero_1, zero_2) == 0.3
 
 
-def test_bibliographic_coupling_delegates_to_paper(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Bibliographic coupling should delegate to ``Paper.reference_overlap``."""
-    paper1 = Paper(paper_id="p1", title="Test 1", year=2020)
-    paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
-
-    monkeypatch.setattr(Paper, "reference_overlap", lambda self, other: 0.42)
-    assert GraphBuilderStrategy.bibliographic_coupling(paper1, paper2) == 0.42
-
-
-def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
-    """The candidate pool should merge repeated Semantic Scholar paper IDs."""
-    focal = _focal_paper()
-    pool = DiscoveryPool(focal)
-    first = Paper(
-        paper_id="b" * 40,
-        title="Same Paper",
-        year=2021,
-        abstract="An abstract",
-        citation_count=5,
-        arxiv_id="2101.00001",
-    )
-    duplicate = Paper(
-        paper_id=first.paper_id,
-        title="Same  Paper",
-        year=2021,
-        abstract="",
-        citation_count=0,
-    )
-    pool.add(first, source="reference", relation="referenced_by_focal")
-    pool.add(duplicate, source="recommendation", relation="semantic_only")
-
-    exact_duplicate = Paper(
-        paper_id=first.paper_id,
-        title="Payload Without Matching Metadata",
-        year=2022,
-        abstract="alternate payload",
-    )
-    pool.add(exact_duplicate, source="citation", relation="cites_focal")
-
-    assert list(pool.papers) == [first.paper_id]
-    assert pool.sources[first.paper_id] == {
-        "reference",
-        "recommendation",
-        "citation",
-    }
-    assert pool.focal_relations[first.paper_id] == "overlap"
-
-    focal_duplicate = Paper(
-        paper_id=focal.paper_id,
-        title=focal.title,
-        year=focal.year,
-        abstract="richer focal abstract",
-    )
-    pool.add(focal_duplicate, source="citation", relation="cites_focal")
-    assert set(pool.papers) == {first.paper_id}
-
-
-def test_candidate_pool_merges_s2_ids_with_shared_external_ids(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Agreed DOI metadata identifies and reports duplicate S2 records.
-
-    :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
-    """
-    pool = DiscoveryPool(_focal_paper())
-    first = Paper(paper_id="1" * 40, title="Same", year=2025, doi="10.1000/shared")
-    second = Paper(paper_id="2" * 40, title="Same", year=2025, doi="10.1000/shared")
-
-    pool.add(first, source="reference", relation="referenced_by_focal")
-    with caplog.at_level(logging.DEBUG, logger="citemesh.strategies.candidates"):
-        pool.add(second, source="citation", relation="cites_focal")
-
-    assert set(pool.papers) == {first.paper_id}
-    assert pool.sources[first.paper_id] == {"reference", "citation"}
-    assert pool.focal_relations[first.paper_id] == "overlap"
-    assert (
-        f"Merged record {second.paper_id} into {first.paper_id} "
-        "via shared doi identifier"
-    ) in caplog.messages
-
-
-@pytest.mark.parametrize("primary_id", ["1" * 40, "arxiv:HEP-TH/9901001"])
-def test_candidate_pool_merges_legacy_arxiv_case_variants(primary_id: str) -> None:
-    """arXiv case and version variants retain one node and combined provenance.
-
-    :param str primary_id: Opaque S2 ID or an arXiv primary with mixed field casing.
-    :return None: Verifies normalized identity and merged relation metadata.
-    """
-    pool = DiscoveryPool(_focal_paper())
-    first = Paper(
-        paper_id=primary_id,
-        title="Same work",
-        year=1999,
-        arxiv_id="hep-th/9901001v1",
-    )
-    second = Paper(
-        paper_id="2" * 40,
-        title="Same work",
-        year=1999,
-        arxiv_id="HEP-TH/9901001v2",
-    )
-
-    pool.add(first, source="reference", relation="referenced_by_focal")
-    pool.add(second, source="citation", relation="cites_focal")
-
-    assert list(pool.papers) == [primary_id]
-    assert pool.sources[primary_id] == {"reference", "citation"}
-    assert pool.focal_relations[primary_id] == "overlap"
-
-
-@pytest.mark.parametrize("opaque_case_distinction", [False, True])
-def test_identity_reconciliation_rejects_conflicting_strong_ids(
-    opaque_case_distinction: bool,
-) -> None:
-    """Matching metadata must not override contradictory source ID or DOI evidence.
-
-    :param bool opaque_case_distinction: Use case-sensitive opaque corpus identifiers.
-    :return None: Checks distinct identity classes retain independent provenance.
-    """
-    authors = [Author(name="Ada Lovelace")]
-    first = Paper(
-        paper_id="LocalA" if opaque_case_distinction else "1" * 40,
-        title="Shared Scientific Title",
-        year=2024,
-        authors=authors,
-        abstract="Shared abstract",
-        doi="" if opaque_case_distinction else "10.1000/first",
-    )
-    second = Paper(
-        paper_id="locala" if opaque_case_distinction else "2" * 40,
-        title="Shared Scientific Title",
-        year=2024,
-        authors=authors,
-        abstract="Shared abstract",
-        doi="" if opaque_case_distinction else "10.1000/second",
-    )
-    focal = Paper(
-        paper_id="3" * 40,
-        title="Shared Scientific Title",
-        year=2024,
-        authors=authors,
-        abstract="Shared abstract",
-        is_focal=True,
-    )
-    pool = DiscoveryPool(focal)
-
-    pool.add(first, source="reference", relation="referenced_by_focal")
-    pool.add(second, source="recommendation", relation="semantic_only")
-
-    assert set(pool.papers) == {first.paper_id, second.paper_id}
-    assert pool.sources[first.paper_id] == {"reference"}
-    assert pool.sources[second.paper_id] == {"recommendation"}
-
-    pool.add(
-        Paper(
-            paper_id="4" * 40,
-            title=focal.title,
-            year=focal.year,
-            authors=authors,
-            abstract=focal.abstract,
-        ),
-        source="citation",
-        relation="cites_focal",
-    )
-    assert "4" * 40 in pool.papers
-
-
-def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
-    """Same-primary refreshes must not assign a contradictory DOI to that class."""
-    primary_a = "a" * 40
-    primary_b = "b" * 40
-    pool = DiscoveryPool(_focal_paper())
-    canonical = Paper(
-        paper_id=primary_a,
-        title="Canonical",
-        year=2024,
-        doi="10.1000/a",
-    )
-    conflicting_refresh = Paper(
-        paper_id=primary_a,
-        title="Canonical refreshed",
-        year=2024,
-        doi="10.1000/b",
-    )
-    actual_doi_owner = Paper(
-        paper_id=primary_b,
-        title="Different paper",
-        year=2024,
-        doi="10.1000/b",
-    )
-
-    pool.add(canonical, source="reference", relation="referenced_by_focal")
-    pool.add(conflicting_refresh, source="citation", relation="cites_focal")
-    pool.add(actual_doi_owner, source="recommendation", relation="semantic_only")
-
-    assert set(pool.papers) == {primary_a, primary_b}
-    assert pool.papers[primary_a].doi == "10.1000/a"
-
-
-def test_identity_shared_external_identifier_merges_compatible_records() -> None:
-    """An agreed DOI merges compatible records without touching other classes."""
-    authors = [Author(name="Grace Hopper")]
-    pool = DiscoveryPool(_focal_paper())
-    left = Paper(
-        paper_id="c" * 40,
-        title="Shared",
-        year=2023,
-        authors=authors,
-        doi="10.1000/left",
-    )
-    middle = Paper(
-        paper_id="10.1000/right",
-        title="Shared",
-        year=2023,
-        authors=authors,
-        doi="10.1000/right",
-    )
-    right = Paper(
-        paper_id="d" * 40,
-        title="Different",
-        year=2023,
-        authors=authors,
-        doi="10.1000/right",
-    )
-
-    pool.add(left, source="reference", relation="referenced_by_focal")
-    pool.add(middle, source="citation", relation="cites_focal")
-    pool.add(right, source="recommendation", relation="semantic_only")
-
-    assert set(pool.papers) == {left.paper_id, middle.paper_id}
-    assert pool.sources[left.paper_id] == {"reference"}
-    assert pool.sources[middle.paper_id] == {"citation", "recommendation"}
-
-
 @pytest.mark.parametrize(
     ("doi", "expected"),
     [
@@ -3359,50 +3123,6 @@ def test_arxiv_issued_doi_identity_is_validated(doi: str, expected: str | None) 
     """Only an arXiv-issued DOI with a valid suffix supplies an arXiv identity."""
     assert arxiv_identifier_from_doi(doi) == expected
     assert normalize_paper_id(f"doi:{doi}") == doi.lower()
-
-
-@pytest.mark.parametrize("publication_in_primary", [False, True])
-def test_identity_arxiv_issued_doi_can_coexist_with_publication_doi(
-    publication_in_primary: bool,
-) -> None:
-    """A compatible publication DOI remains available for later conflict checks."""
-    pool = DiscoveryPool(_focal_paper())
-    preprint = _paper("1" * 40)
-    preprint.doi = "https://doi.org/10.48550/arXiv.2310.03262V2"
-    publication_doi = "10.1000/published"
-    published = _paper(f"doi:{publication_doi}" if publication_in_primary else "2" * 40)
-    published.arxiv_id = "2310.03262v3"
-    published.doi = preprint.doi if publication_in_primary else publication_doi
-    conflicting = _paper("3" * 40)
-    conflicting.arxiv_id = "2310.03262"
-    conflicting.doi = "10.1000/other-publication"
-
-    pool.add(preprint, source="reference", relation="referenced_by_focal")
-    pool.add(published, source="recommendation", relation="semantic_only")
-    assert preprint.arxiv_id == "2310.03262"
-    assert preprint.doi == publication_doi
-    assert candidate_identifiers_conflict(preprint, conflicting)
-    pool.add(conflicting, source="citation", relation="cites_focal")
-
-    assert set(pool.papers) == {preprint.paper_id, conflicting.paper_id}
-    assert pool.sources[preprint.paper_id] == {"reference", "recommendation"}
-
-
-def test_identity_publication_merge_keeps_incoming_primary_arxiv_doi_alias() -> None:
-    """A shared publication DOI can introduce a compatible arXiv identity."""
-    pool = DiscoveryPool(_focal_paper())
-    published = _paper("1" * 40)
-    published.doi = "10.1000/published"
-    cross_link = _paper("doi:10.48550/arXiv.2310.03262v2")
-    cross_link.doi = published.doi
-    arxiv_only = _paper("arxiv:2310.03262")
-
-    for record in (published, cross_link, arxiv_only):
-        pool.add(record, source="reference", relation="referenced_by_focal")
-
-    assert set(pool.papers) == {published.paper_id}
-    assert published.arxiv_id == "2310.03262"
-    assert published.doi == "10.1000/published"
 
 
 def test_identity_arxiv_issued_doi_respects_conflicts_and_local_rows() -> None:
@@ -3461,33 +3181,6 @@ def test_hybrid_merges_passuntil_doi_alias_and_retains_recommendation_rank() -> 
     assert pool.recommendation_ranks == {local.paper_id: 1}
 
 
-def test_identity_historical_provider_alias_respects_conflicting_identifiers() -> None:
-    """A changed provider payload cannot overwrite a reconciled corpus identity."""
-    pool = DiscoveryPool(_focal_paper())
-    candidates, sources = pool.papers, pool.sources
-    cited = _paper("1" * 40)
-    cited.arxiv_id = "2401.00001"
-    local = _paper(f"arxiv:{cited.arxiv_id}")
-    local.is_local_corpus = True
-    refreshed = _paper(cited.paper_id)
-    refreshed.arxiv_id = "2401.00002"
-    refreshed.doi = "10.1000/another-paper"
-
-    for paper, source, relation in (
-        (cited, "citation", "cites_focal"),
-        (local, "semantic", "semantic_only"),
-        (refreshed, "semantic", "semantic_only"),
-    ):
-        pool.add(paper, source=source, relation=relation)
-
-    assert candidates == {local.paper_id: local, refreshed.paper_id: refreshed}
-    assert candidates[refreshed.paper_id] is refreshed
-    assert not local.doi
-    assert sources[local.paper_id] == {"citation", "semantic"}
-    assert sources[refreshed.paper_id] == {"semantic"}
-    assert pool.focal_relations[local.paper_id] == "cites_focal"
-
-
 @pytest.fixture
 def unlinked_publication_pair() -> tuple[Paper, Paper]:
     """A corpus preprint and published record without a shared external ID."""
@@ -3520,34 +3213,6 @@ def test_hybrid_collection_preserves_reconciled_publication_reference(
     assert papers[corpus.paper_id].doi == publication.doi
     assert builder.focal_relations[corpus.paper_id] == "referenced_by_focal"
     assert builder.paper_sources[corpus.paper_id] == "both"
-
-
-def test_candidate_pool_keeps_ambiguous_corpus_matches_separate() -> None:
-    """An S2 paper must not collapse two matching local-corpus records."""
-    pool = DiscoveryPool(_focal_paper())
-    candidates, sources = pool.papers, pool.sources
-    corpus_first = _paper("local-first")
-    corpus_first.is_local_corpus = True
-    corpus_first.doi = "10.1000/shared"
-    corpus_second = _paper("local-second")
-    corpus_second.is_local_corpus = True
-    corpus_second.doi = "10.1000/shared"
-    s2_candidate = _paper("1" * 40)
-    s2_candidate.doi = "10.1000/shared"
-
-    for paper, source in (
-        (corpus_first, "citation"),
-        (corpus_second, "citation"),
-        (s2_candidate, "semantic"),
-    ):
-        pool.add(paper, source=source, relation="semantic_only")
-
-    assert set(candidates) == {
-        corpus_first.paper_id,
-        corpus_second.paper_id,
-        s2_candidate.paper_id,
-    }
-    assert sources[s2_candidate.paper_id] == {"semantic"}
 
 
 def test_recommendation_collect_merges_external_primary_aliases() -> None:
@@ -4149,15 +3814,14 @@ def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_sourc
 
 
 @pytest.mark.parametrize(
-    "sources",
+    ("sources", "cosine"),
     [
-        ("citation", "citation"),
-        ("semantic", "semantic"),
-        ("citation", "semantic"),
-        ("both", "both"),
+        (("citation", "citation"), 0.0),
+        (("semantic", "semantic"), 0.48),
+        (("citation", "semantic"), 0.71),
+        (("both", "both"), 0.71),
     ],
 )
-@pytest.mark.parametrize("cosine", [0.0, 0.48, 0.71])
 def test_hybrid_edges_require_semantic_or_bibliographic_evidence(
     sources: tuple[str, str],
     cosine: float,

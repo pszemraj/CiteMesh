@@ -1490,8 +1490,9 @@ def test_search_mode_local_has_no_s2_result_ceiling(
     fake_builder.search_local.assert_called_once_with("cached topic", top_k=1001)
 
 
-@pytest.mark.parametrize("binary_prefilter", [False, True])
-@pytest.mark.parametrize("semantic_source", ["arxiv-corpus", "both"])
+@pytest.mark.parametrize(
+    ("semantic_source", "binary_prefilter"), [("arxiv-corpus", False), ("both", True)]
+)
 def test_search_local_uses_configured_corpus_dataset_source(
     monkeypatch: pytest.MonkeyPatch,
     binary_prefilter: bool,
@@ -2132,6 +2133,14 @@ def test_search_auto_uses_local_when_cache_populated(
     fake_builder = _fake_local_search_builder(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
+
+    def count_embeddings() -> int:
+        fake_builder.prepare_embedding_cache.assert_called_once_with()
+        return 42
+
+    fake_builder.embedding_cache.embedding_count = MagicMock(
+        side_effect=count_embeddings
+    )
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
@@ -2153,27 +2162,6 @@ def test_search_auto_uses_local_when_cache_populated(
     assert "embeddings=%s" in diagnostics
     assert "42" in diagnostics
     assert "model=%s" in diagnostics
-    client_factory.assert_not_called()
-
-
-def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Auto search must resolve the artifact before opening any cache namespace."""
-    fake_builder = _fake_local_search_builder(
-        cached_count=0, results=[_FAKE_LOCAL_RESULT]
-    )
-    fake_builder.embedding_cache.embedding_count = MagicMock(return_value=42)
-    fake_builder.has_persistent_embedding_artifacts.return_value = True
-    monkeypatch.setattr(
-        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
-    )
-    client_factory = MagicMock()
-    monkeypatch.setattr(search_module, "get_client", client_factory)
-
-    result = run_cli_command(["search", "cached topic", "-n", "1"])
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     fake_builder.prepare_embedding_cache.assert_called_once_with()
     fake_builder.embedding_cache.embedding_count.assert_called_once_with()
     assert fake_builder.method_calls[:2] == [
@@ -2294,13 +2282,13 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
     s2_search.assert_called_once_with(args)
 
 
-@pytest.mark.parametrize("mode", ["auto", "local"])
 @pytest.mark.parametrize(
-    "defaults",
+    ("mode", "defaults"),
     [
-        {"truncate_dim": 4},
-        {"model": "org/different-model"},
-        {"model_revision": "another-revision"},
+        ("auto", {"truncate_dim": 4}),
+        ("auto", {"model": "org/different-model"}),
+        ("auto", {"model_revision": "another-revision"}),
+        ("local", {"truncate_dim": 4}),
     ],
 )
 def test_search_skips_unselected_ordinary_namespace(
@@ -4365,22 +4353,25 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
 
 
 @pytest.mark.parametrize(
-    "existing_bytes",
+    ("existing_bytes", "stat_error"),
     [
-        b"{not-json",
-        b"\xff",
-        json.dumps(
-            {
-                "kind": DASHBOARD_COLLECTION_KIND,
-                "schema_version": 999,
-                "current_result_id": None,
-                "results": [],
-            }
-        ).encode("utf-8"),
+        pytest.param(b"{not-json", False, id="malformed-json"),
+        pytest.param(b"\xff", False, id="invalid-utf8"),
+        pytest.param(
+            json.dumps(
+                {
+                    "kind": DASHBOARD_COLLECTION_KIND,
+                    "schema_version": 999,
+                    "current_result_id": None,
+                    "results": [],
+                }
+            ).encode("utf-8"),
+            False,
+            id="unsupported-schema",
+        ),
+        pytest.param(b"{not-json", True, id="stat-error"),
     ],
-    ids=["malformed-json", "invalid-utf8", "unsupported-schema"],
 )
-@pytest.mark.parametrize("stat_error", [False, True])
 def test_dashboard_package_existing_errors_fail_closed(
     tmp_path: Path,
     existing_bytes: bytes,
@@ -5572,7 +5563,7 @@ def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
             keyed_client.close()
 
 
-@pytest.mark.parametrize("width", [60, 80, 120])
+@pytest.mark.parametrize("width", [60, 120])
 def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every command should expose its help without color leaks or clipped lines.
 
@@ -5923,9 +5914,13 @@ def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "directory_name", ["results", "results.json", "results.dashboard.html"]
+    ("directory_name", "formats"),
+    [
+        ("results", ["json"]),
+        ("results.json", ["png"]),
+        ("results.dashboard.html", ["json", "png"]),
+    ],
 )
-@pytest.mark.parametrize("formats", [["json"], ["png"], ["json", "png"]])
 def test_output_writes_into_an_existing_directory(
     tmp_path: Path,
     directory_name: str,

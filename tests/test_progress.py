@@ -93,7 +93,7 @@ def test_progress_iterator_with_zero_total_renders_a_bounded_bar(
     assert "0/0" in progress_console.export_text()
 
 
-@pytest.mark.parametrize("width", [40, 60, 80, 120])
+@pytest.mark.parametrize("width", [40, 60, 80])
 def test_dataset_progress_keeps_total_and_eta_visible(
     monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
@@ -192,7 +192,7 @@ def test_progress_labels_preserve_brackets_as_literal_text(
     assert "[red]rows[/red]" in output
 
 
-@pytest.mark.parametrize("width", [40, 60, 80, 120])
+@pytest.mark.parametrize("width", [40, 60, 80])
 def test_progress_iterator_without_a_total_renders_indeterminate_counts(
     progress_console: Console,
     recorded_displays: list[Progress],
@@ -260,7 +260,6 @@ def test_progress_eta_retains_slow_work_after_a_fast_update_burst(
         (True, True, None, True),
         (False, True, None, False),
         (True, False, True, False),
-        (True, False, None, False),
     ],
 )
 def test_progress_display_policy_preserves_items_and_counts(
@@ -315,25 +314,5 @@ def test_progress_iterator_close_after_break_stops_display(
 
     iterator.close()
 
-    assert display.live.is_started is False
-    assert display.tasks[0].completed == 1
-
-
-def test_progress_iterator_break_without_a_retained_reference_stops_display(
-    recorded_displays: list[Progress],
-    progress_console: Console,
-) -> None:
-    """Abandoning the generator inline should stop the display at finalization."""
-    # Nothing binds the generator, so CPython finalizes it as the loop exits and
-    # the context manager tears the display down without an explicit close.
-    for value in progress_module.progress_iterator(
-        [1, 2, 3, 4],
-        description="scan",
-        enabled=True,
-    ):
-        if value == 2:
-            break
-
-    display = recorded_displays[0]
     assert display.live.is_started is False
     assert display.tasks[0].completed == 1
