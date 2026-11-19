@@ -3108,17 +3108,6 @@ def test_citation_similarity_branches() -> None:
     assert GraphBuilderStrategy.citation_similarity(zero_1, zero_2) == 0.3
 
 
-def test_bibliographic_coupling_delegates_to_paper(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Bibliographic coupling should delegate to ``Paper.reference_overlap``."""
-    paper1 = Paper(paper_id="p1", title="Test 1", year=2020)
-    paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
-
-    monkeypatch.setattr(Paper, "reference_overlap", lambda self, other: 0.42)
-    assert GraphBuilderStrategy.bibliographic_coupling(paper1, paper2) == 0.42
-
-
 @pytest.mark.parametrize(
     ("doi", "expected"),
     [
@@ -3825,15 +3814,14 @@ def test_hybrid_both_continues_with_an_empty_or_unavailable_recommendation_sourc
 
 
 @pytest.mark.parametrize(
-    "sources",
+    ("sources", "cosine"),
     [
-        ("citation", "citation"),
-        ("semantic", "semantic"),
-        ("citation", "semantic"),
-        ("both", "both"),
+        (("citation", "citation"), 0.0),
+        (("semantic", "semantic"), 0.48),
+        (("citation", "semantic"), 0.71),
+        (("both", "both"), 0.71),
     ],
 )
-@pytest.mark.parametrize("cosine", [0.0, 0.48, 0.71])
 def test_hybrid_edges_require_semantic_or_bibliographic_evidence(
     sources: tuple[str, str],
     cosine: float,

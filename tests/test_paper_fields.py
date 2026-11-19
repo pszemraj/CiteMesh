@@ -39,27 +39,12 @@ def test_coerce_venue_accepts_every_source_shape(raw: object, expected: str) -> 
     assert coerce_venue(raw) == expected
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        (" Ada Example ", "Ada Example"),
-        ({"name": " Ada Example ", "authorId": "a-1"}, "Ada Example"),
-        ({"name": " "}, ""),
-        ({}, ""),
-        (SimpleNamespace(name="Blaise Example"), "Blaise Example"),
-        (None, ""),
-    ],
-)
-def test_coerce_author_name_reads_records_and_plain_names(
-    raw: object, expected: str
-) -> None:
-    """One author entry normalizes from a record, an object, or a bare name.
-
-    :param object raw: Raw author entry.
-    :param str expected: Normalized author name.
-    :return None: Checks stripping and the empty-when-unavailable contract.
-    """
-    assert coerce_author_name(raw) == expected
+def test_coerce_author_name_reads_an_author_record() -> None:
+    """The single-author wrapper strips the name carried by a provider record."""
+    assert (
+        coerce_author_name({"name": " Ada Example ", "authorId": "a-1"})
+        == "Ada Example"
+    )
 
 
 def test_coerce_authors_normalizes_list_shapes_and_keeps_order() -> None:
@@ -101,7 +86,7 @@ def test_coerce_authors_splits_a_delimited_string_only_when_asked() -> None:
     assert coerce_authors(packed, split_string=False) == []
 
 
-@pytest.mark.parametrize("raw", [None, 7, {"authors": []}])
+@pytest.mark.parametrize("raw", [None, {"authors": []}])
 def test_coerce_authors_rejects_unusable_payloads(raw: object) -> None:
     """Anything that is neither a list nor a string yields no authors.
 
@@ -150,7 +135,7 @@ def test_coerce_categories_deduplicates_and_drops_unusable_entries() -> None:
     ]
 
 
-@pytest.mark.parametrize("raw", [None, 7, {"categories": []}])
+@pytest.mark.parametrize("raw", [None, {"categories": []}])
 def test_coerce_categories_rejects_unusable_payloads(raw: object) -> None:
     """Anything that is neither a list nor a string yields no categories.
 

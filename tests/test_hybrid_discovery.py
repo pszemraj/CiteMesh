@@ -487,16 +487,9 @@ def test_pool_holds_every_list_of_its_mode(
     ("mode", "provider_subjects", "corpus_subjects", "expected_pool"),
     [
         ("candidates", ["Medicine", "Physics"], "", "recent"),
-        ("candidates", ["Geology", "Medicine"], "", "recent"),
         ("candidates", ["Mathematics", "Computer Science"], "", "all-cs"),
-        ("candidates", ["CS", "Physics"], "", "all-cs"),
-        ("candidates", [], "", "all-cs"),
-        ("candidates", ["Unknown"], "", "all-cs"),
         ("both", ["Computer Science"], "astro-ph.HE astro-ph.CO", "recent"),
         ("both", ["Physics"], "astro-ph.HE cs.AI", "all-cs"),
-        ("both", ["Physics"], "stat.ML math.ST", "all-cs"),
-        ("both", ["Physics"], "cmp-lg", "all-cs"),
-        ("both", ["Physics"], "", "all-cs"),
     ],
 )
 def test_recommendation_pool_uses_the_resolved_focal_subjects(
@@ -524,6 +517,32 @@ def test_recommendation_pool_uses_the_resolved_focal_subjects(
     assert scenario.world.requests["recommendations"] == 1
     assert (
         scenario.world.recommendation_params[0].get("from", "recent") == expected_pool
+    )
+
+
+@pytest.mark.parametrize(
+    ("categories", "expected_pool"),
+    [
+        (["Geology", "Medicine"], "recent"),
+        (["CS", "Physics"], "all-cs"),
+        ([], "all-cs"),
+        (["Unknown"], "all-cs"),
+        (["stat.ML", "math.ST"], "all-cs"),
+        (["cmp-lg"], "all-cs"),
+    ],
+)
+def test_recommendation_pool_subject_policy(
+    categories: list[str], expected_pool: str
+) -> None:
+    """Select the recommendation pool from resolved provider or corpus subjects."""
+    client = MagicMock()
+    client.get_recommended_papers.return_value = []
+    builder = HybridGraphBuilder(client=client)
+
+    builder._fetch_recommendations("focal", categories)
+
+    client.get_recommended_papers.assert_called_once_with(
+        "focal", limit=200, raise_on_unavailable=True, pool=expected_pool
     )
 
 

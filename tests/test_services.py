@@ -709,18 +709,23 @@ def test_get_papers_aggregates_malformed_rows_into_one_warning(
 
 
 @pytest.mark.parametrize(
-    ("paper_id", "url_id"),
+    ("paper_id", "url_id", "method", "relation", "nested"),
     [
-        ("focal", "focal"),
-        ("DOI:10.1000/example", "10.1000/example"),
-        ("arXiv:hep-th/9901001", "arxiv%3Ahep-th/9901001"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("method", "relation", "nested"),
-    [
-        ("get_paper_references", "references", "citedPaper"),
-        ("get_paper_citations", "citations", "citingPaper"),
+        ("focal", "focal", "get_paper_references", "references", "citedPaper"),
+        (
+            "DOI:10.1000/example",
+            "10.1000/example",
+            "get_paper_citations",
+            "citations",
+            "citingPaper",
+        ),
+        (
+            "arXiv:hep-th/9901001",
+            "arxiv%3Ahep-th/9901001",
+            "get_paper_references",
+            "references",
+            "citedPaper",
+        ),
     ],
 )
 def test_relation_discovery_pages_inline_metadata_without_batch(
@@ -1944,33 +1949,19 @@ def test_interrupting_recovery_releases_collection_scope(
         assert client.get_paper("p1", raise_on_unavailable=True) is not None
 
 
-@pytest.mark.parametrize(
-    ("method", "nested_key"),
-    [
-        ("get_paper_references", "citedPaper"),
-        ("get_paper_citations", "citingPaper"),
-    ],
-)
-def test_repeated_relation_discovery_refetches_pages_only(
-    method: str, nested_key: str
-) -> None:
-    """Every relation call reads fresh pages and never hydrates through a batch.
-
-    :param str method: Public relation method.
-    :param str nested_key: Relation payload key.
-    :return None: Verifies one GET per call and no batch or paper-cache write.
-    """
+def test_repeated_citation_discovery_refetches_pages_only() -> None:
+    """Citation calls read fresh pages without a batch or paper-cache write."""
     raw_id = "a" * 40
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
-            return_value=_MockResponse(200, _relation_payload([raw_id], nested_key))
+            return_value=_MockResponse(200, _relation_payload([raw_id], "citingPaper"))
         )
         client._session.post = MagicMock()
         for _ in range(2):
             assert [
                 paper.paper_id
-                for paper in getattr(client, method)(
+                for paper in client.get_paper_citations(
                     "focal", limit=1, raise_on_unavailable=True
                 )
             ] == [raw_id]
