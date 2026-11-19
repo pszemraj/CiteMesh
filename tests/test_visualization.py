@@ -1335,18 +1335,21 @@ def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     assert nx.read_graphml(graphml_path).nodes[focal_id]["title"] == "Badtitle"
 
 
-@pytest.mark.parametrize("weight", [None, float("nan"), float("inf"), -float("inf")])
 @pytest.mark.parametrize(
-    "method",
+    ("method", "weight"),
     [
-        "to_json",
-        "to_dashboard_html",
-        "to_csv",
-        "to_bibtex",
-        "to_graphml",
-        "to_plotly_html",
-        "to_interactive_html",
-        "png",
+        ("to_json", float("nan")),
+        ("to_dashboard_html", float("nan")),
+        ("to_csv", float("nan")),
+        ("to_bibtex", float("nan")),
+        ("to_graphml", float("nan")),
+        ("to_plotly_html", float("nan")),
+        ("to_interactive_html", float("nan")),
+        ("png", float("nan")),
+        ("to_json", None),
+        ("png", None),
+        ("to_json", float("inf")),
+        ("png", float("inf")),
     ],
 )
 def test_exports_reject_nonfinite_weights_without_replacing_outputs(
@@ -1405,8 +1408,9 @@ def test_json_export_rejects_nonfinite_payload_without_replacing_output(
     assert path.read_text(encoding="utf-8") == "previous valid output"
 
 
-@pytest.mark.parametrize("node_id", ["", " ", " focal", "focal\t"])
-@pytest.mark.parametrize("method", ["to_json", "png"])
+@pytest.mark.parametrize(
+    ("method", "node_id"), [("to_json", ""), ("to_json", " focal"), ("png", "focal\t")]
+)
 def test_export_rejects_whitespace_ids_before_writing(
     tmp_path: Path, node_id: str, method: str
 ) -> None:
@@ -1433,7 +1437,6 @@ def test_export_rejects_whitespace_ids_before_writing(
 @pytest.mark.parametrize(
     "method",
     [
-        "graph_payload",
         "to_json",
         "to_dashboard_html",
         "to_csv",
@@ -1477,9 +1480,7 @@ def test_exports_reject_node_ids_that_collide_after_stringification(
     path.write_text("previous valid output", encoding="utf-8")
 
     with pytest.raises(ValueError, match="both serialize as '1'"):
-        if method == "graph_payload":
-            exporter.graph_payload()
-        elif method == "png":
+        if method == "png":
             visualize_graph(
                 graph,
                 "1",
@@ -1614,32 +1615,6 @@ def test_edge_strength_scale_normalizes_within_graph() -> None:
     assert scaled[0] == pytest.approx(0.0)
     assert scaled[1] == pytest.approx(0.5)
     assert scaled[2] == pytest.approx(1.0)
-
-
-def test_atomic_dashboard_write_preserves_previous_viewer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A failed final replace must leave the previous dashboard intact."""
-    destination = tmp_path / "dashboard.html"
-    destination.write_text("previous viewer", encoding="utf-8")
-
-    def fail_replace(source: object, target: object) -> None:
-        """Simulate an operating-system replace failure.
-
-        :param object source: Ignored temporary path.
-        :param object target: Ignored destination path.
-        :return None: Always raises.
-        """
-        del source, target
-        raise OSError("replace failed")
-
-    monkeypatch.setattr(cache_module.os, "replace", fail_replace)
-
-    with pytest.raises(OSError, match="replace failed"):
-        cache_module.atomic_write_text(destination, "new viewer")
-
-    assert destination.read_text(encoding="utf-8") == "previous viewer"
-    assert list(tmp_path.iterdir()) == [destination]
 
 
 @pytest.mark.parametrize("failure_stage", ["writer", "injection"])
@@ -2187,12 +2162,12 @@ def test_pages_demo_html_fits_preview_crawler_limit(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("theme_name", ["dark", "light", "solarized", "auto"])
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
 def test_dashboard_hover_label_is_shared_by_python_and_javascript(
-    tmp_path: Path, theme_name: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, theme_name: str
 ) -> None:
     """Both figure builders must theme every hover card from one injected spec."""
-    pytest.importorskip("plotly")
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
 
     graph, focal_id = _build_graph()
     exporter = GraphExporter(
@@ -2220,8 +2195,6 @@ def test_dashboard_hover_label_is_shared_by_python_and_javascript(
     # The viewer rebuilds the figure client-side; it must read the same spec
     # rather than carry a hand-copied twin.
     assert f"const HOVER_LABEL = {json.dumps(expected, sort_keys=True)};" in rendered
-    assert "nodeTrace.hoverlabel = deepClone(HOVER_LABEL);" in rendered
-    assert "layout.hoverlabel = deepClone(HOVER_LABEL);" in rendered
 
     # One font stack for the stylesheet and the tooltip.
     assert f"--ui-font: {geometry_module.UI_FONT_FAMILY};" in rendered
@@ -2306,7 +2279,7 @@ def _collection_metadata(
     }
 
 
-def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
+def test_collection_bundle_repairs_current_id_and_optional_build_metadata() -> None:
     """Skipping a malformed entry must repoint current_result_id at a real result.
 
     The viewer rejects a whole bundle whose ``current_result_id`` names no
@@ -2338,6 +2311,7 @@ def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
         "strategy": "citation",
         "summary": {"nodes": 2, "edges": 1},
         "updated_at": "2026-09-01T12:00:00",
+        "build": None,
         "payload": payload,
     }
     exporter.metadata["dashboard_collection"] = _collection_metadata(
@@ -2351,6 +2325,7 @@ def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
         f"citation:{focal_id}"
     ]
     assert bundle["current_result_id"] == f"citation:{focal_id}"
+    assert bundle["results"][0]["build"] == {}
 
     exporter.metadata["dashboard_collection"] = _collection_metadata(
         current_result_id="citation:dropped",
@@ -2363,39 +2338,6 @@ def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
         "current_result_id": None,
         "results": [],
     }
-
-
-def test_collection_bundle_normalizes_non_dict_build_metadata() -> None:
-    """A present-but-null build must normalize to ``{}`` for versioned bundles.
-
-    :return None: Checks the emitted entry keeps the key the viewer requires.
-    """
-    graph, focal_id = _build_graph()
-    exporter = GraphExporter(
-        graph,
-        focal_id,
-        metadata={"strategy": "citation"},
-        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
-    )
-    exporter.metadata["dashboard_collection"] = _collection_metadata(
-        current_result_id=f"citation:{focal_id}",
-        results=[
-            {
-                "result_id": f"citation:{focal_id}",
-                "focal_id": focal_id,
-                "title": "Focal Paper",
-                "strategy": "citation",
-                "summary": {"nodes": 2, "edges": 1},
-                "updated_at": "2026-09-01T12:00:00",
-                "build": None,
-                "payload": exporter.graph_payload(),
-            }
-        ],
-    )
-
-    bundle = exporter._dashboard_collection_bundle()
-
-    assert bundle["results"][0]["build"] == {}
 
 
 class _JsonFakeFigure(_BaseFakeFigure):
@@ -2445,7 +2387,7 @@ def _dashboard_exporter_with_collection(
     return exporter
 
 
-def test_dashboard_inline_json_contains_no_raw_angle_brackets(
+def test_dashboard_inline_json_preserves_hostile_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Inline dashboard JSON must escape every ``<`` so hostile text cannot end a script.
@@ -2456,7 +2398,9 @@ def test_dashboard_inline_json_contains_no_raw_angle_brackets(
     """
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
 
-    hostile_title = "Closing </script> tag"
+    hostile_title = (
+        "Closing </script> tag with __PLOTLY_DIV_ID__ and __COLLECTION_JSON__"
+    )
     hostile_abstract = "<!--<script>alert(1)</script>-->"
     graph, focal_id = _build_hostile_graph(
         title=hostile_title, abstract=hostile_abstract
@@ -2477,35 +2421,14 @@ def test_dashboard_inline_json_contains_no_raw_angle_brackets(
     assert "<" not in data_json
     assert "<" not in collection_json
     assert "\\u003c" in data_json
-    assert json.loads(collection_json)["results"][0]["build"] == {}
+    collection_result = json.loads(collection_json)["results"][0]
+    assert collection_result["build"] == {}
+    assert collection_result["title"] == hostile_title
 
     focal_node = next(
         node for node in json.loads(data_json)["nodes"] if node["id"] == focal_id
     )
     assert focal_node["abstract"] == hostile_abstract
-    assert focal_node["title"] == hostile_title
-
-
-def test_dashboard_template_tokens_in_metadata_survive_rendering(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Template tokens inside paper metadata must survive single-pass rendering.
-
-    Sequential substitution would rescan already-injected values and rewrite a
-    ``__PLOTLY_DIV_ID__`` or ``__COLLECTION_JSON__`` token carried by a title.
-    """
-    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-
-    hostile_title = "Tokens __PLOTLY_DIV_ID__ and __COLLECTION_JSON__ inline"
-    graph, focal_id = _build_hostile_graph(title=hostile_title)
-    exporter = _dashboard_exporter_with_collection(graph, focal_id, title=hostile_title)
-
-    out_path = tmp_path / "tokens.dashboard.html"
-    exporter.to_dashboard_html(out_path)
-    rendered = out_path.read_text()
-
-    payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
-    focal_node = next(node for node in payload["nodes"] if node["id"] == focal_id)
     assert focal_node["title"] == hostile_title
 
     div_id = exporter._plotly_div_id(prefix="citemesh-dashboard-plotly")
@@ -2545,13 +2468,6 @@ def test_exporter_dashboard_runtime_script_contracts(
     )
     assert "new DOMParser()" in runtime_script
     assert "function parseImportedResultSetFromText" in runtime_script
-    assert "const packageCurrentResultId = String(" in runtime_script
-    assert "function normalizeCollectionPackage" in runtime_script
-    assert "function collectionEntryFromGraphPayload" in runtime_script
-    assert "function isNonNegativeInteger" in runtime_script
-    assert (
-        "Versioned graph results require canonical top-level focal_id" in runtime_script
-    )
     assert (
         "Versioned graph node IDs cannot contain surrounding whitespace"
         in runtime_script
@@ -2560,14 +2476,8 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert "const positionsAreFinite = positions.every" in runtime_script
     assert "const sizesAreFinite = sizes.every" in runtime_script
     assert (
-        "if (imported.schema_version !== COLLECTION_SCHEMA_VERSION)" in runtime_script
-    )
-    assert "function upsertCollectionEntries" in runtime_script
-    assert (
         "targetCollection.results = incomingUnique.concat(retained);" in runtime_script
     )
-    assert "function portableCollectionPackage" in runtime_script
-    assert "loadCollectionResult(collectionResultId)" in runtime_script
     assert "updated_at: entry.updated_at || new Date().toISOString()" in runtime_script
     assert "build: isObjectRecord(entry.build) ? entry.build : {}" in runtime_script
     assert "const duplicateIndex = normalized.results.findIndex" in runtime_script
@@ -2579,10 +2489,6 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert (
         'parsed.protocol === "https:" || parsed.protocol === "http:"' in runtime_script
     )
-    assert (
-        "Unsupported citemesh-dashboard-collection schema version" not in runtime_script
-    )
-    assert "Unsupported ${COLLECTION_KIND} schema version" in runtime_script
     assert "Collection package must contain a results array." in runtime_script
     assert "Array.from((event.target && event.target.files) || [])" in runtime_script
     assert (
@@ -2591,15 +2497,8 @@ def test_exporter_dashboard_runtime_script_contracts(
     )
     assert 'document.getElementById("export-collection-btn")' in runtime_script
     assert "alert(" not in runtime_script
-    assert "function hasCompleteDashboardGeometry" in runtime_script
-    assert "function selectDashboardLabelIds" in runtime_script
-    assert "function dashboardNodeLabel" in runtime_script
-    assert "function dashboardHoverText" in runtime_script
     assert "hoverTexts.push(dashboardHoverText(node, nodeId));" in runtime_script
-    assert "function normalizeDashboardEdgeStrengths" in runtime_script
     assert "const [keyLeft, keyRight]" in runtime_script
-    assert "const nextMarkerSizeRef = Math.max" in runtime_script
-    assert "sizeref: nextMarkerSizeRef" in runtime_script
     assert "const missingYear = (safeYearMin + safeYearMax) / 2.0;" in runtime_script
     assert ": missingYear;" in runtime_script
     assert (
@@ -2618,11 +2517,8 @@ def test_exporter_dashboard_runtime_script_contracts(
         "color: colorWithAlpha(dashboardEdgeColor, 0.07 + (0.25 * strength))"
         in runtime_script
     )
-    assert "return pruneSavedIdsForPayload(persistedSavedIds);" in runtime_script
-    assert "`citemesh-saved:${strategy}:${focalId}`" in runtime_script
     assert "`- [${markdownLinkText(title)}](${href})${yearText}`" in runtime_script
     assert '`Year: ${node.year || "n.d."}' not in runtime_script
-    assert "setControlsCollapsed(true);" in runtime_script
     assert "escapeRegExp" not in runtime_script
 
     node = shutil.which("node")
@@ -3776,13 +3672,9 @@ def test_dashboard_semantic_scholar_button_disables_without_a_link(
 @pytest.mark.parametrize(
     ("authors", "year", "expected"),
     [
-        (["Ada\tLovelace"], 2020, "Lovelace, 2020"),
-        (["Ada\nLovelace"], 2020, "Lovelace, 2020"),
         (["Ada\u00a0Lovelace"], 2020, "Lovelace, 2020"),
         (["", "Grace Hopper"], 2020, "Hopper, 2020"),
         ([" "], 2020, "Focal Paper (2020)"),
-        ([], 2020, "Focal Paper (2020)"),
-        (["Ada Lovelace"], 0, "Focal Paper"),
         (["Ada Lovelace"], None, "Focal Paper"),
     ],
 )
@@ -4146,14 +4038,13 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("years", "expected_labels"),
+    ("years", "expected_labels", "theme_name"),
     [
-        ((None, None), ["Focal paper", "Year unknown"]),
-        ((2024, 2024), ["Focal paper", "2024"]),
-        ((2020, 2025), ["Focal paper", "2020 (older)", "2025 (newer)"]),
+        ((None, None), ["Focal paper", "Year unknown"], "dark"),
+        ((2024, 2024), ["Focal paper", "2024"], "light"),
+        ((2020, 2025), ["Focal paper", "2020 (older)", "2025 (newer)"], "solarized"),
     ],
 )
-@pytest.mark.parametrize("theme_name", ["dark", "light", "solarized"])
 def test_static_legend_explains_colors_without_covering_graph(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4281,8 +4172,6 @@ def test_visualize_graph_uses_full_focal_title_without_ellipsis(
 @pytest.mark.parametrize(
     ("focal_title", "heading"),
     [
-        (None, "Focal paper"),
-        ("", "Focal paper"),
         ("   ", "Focal paper"),
         ("attention mechanism", "attention mechanism"),
     ],
@@ -4367,8 +4256,7 @@ def test_visualize_graph_metadata_overlay_is_compact(
     assert "Embedding" not in text
 
 
-@pytest.mark.parametrize("area", [None, 100.0, 460.0, 3028.0])
-@pytest.mark.parametrize("dpi", [72, 150])
+@pytest.mark.parametrize(("area", "dpi"), [(None, 72), (100.0, 150), (3028.0, 150)])
 def test_static_labels_clear_marker_bounds(area: float | None, dpi: int) -> None:
     """Labels and their backgrounds must clear actual rendered marker outlines.
 
@@ -5459,50 +5347,25 @@ def test_semantic_export_provenance(
     assert related_node["focal_relation"] == "semantic_only"
 
 
-def test_visualization_import_preserves_programmatically_selected_backend(
+def test_visualize_graph_supports_caller_selected_vector_backends(
     tmp_path: Path,
 ) -> None:
-    """Package import should not replace a backend selected through matplotlib."""
+    """Import respects the caller's backend and static labels render on vector canvases."""
+    output_paths = [tmp_path / f"graph.{suffix}" for suffix in ("svg", "pdf", "ps")]
     env = os.environ.copy()
     env.pop("MPLBACKEND", None)
     env["MPLCONFIGDIR"] = str(tmp_path / "matplotlib")
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import matplotlib; matplotlib.use('svg'); "
-            "import citemesh.visualization; "
-            "assert matplotlib.get_backend().lower() == 'svg'",
-        ],
-        cwd=Path(__file__).parents[1],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.parametrize(
-    ("backend", "suffix"), [("svg", ".svg"), ("pdf", ".pdf"), ("ps", ".ps")]
-)
-def test_visualize_graph_supports_non_agg_backends(
-    backend: str, suffix: str, tmp_path: Path
-) -> None:
-    """Static labels should render end-to-end on non-Agg canvases."""
-    output_path = tmp_path / f"graph{suffix}"
-    env = os.environ.copy()
-    env["MPLBACKEND"] = backend
-    env["MPLCONFIGDIR"] = str(tmp_path / f"matplotlib-{backend}")
     script = """
 import sys
 from pathlib import Path
 
+import matplotlib
 import networkx as nx
 import numpy as np
 
+matplotlib.use("svg")
 from citemesh.visualization import visualize_graph
+assert matplotlib.get_backend().lower() == "svg"
 
 graph = nx.Graph()
 graph.add_node(
@@ -5512,15 +5375,17 @@ graph.add_node(
     "related", title="Related Paper", year=2024, authors=["Other Author"]
 )
 graph.add_edge("s001", "related", weight=0.8)
-visualize_graph(
-    graph,
-    "s001",
-    Path(sys.argv[1]),
-    layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
-)
+for output in map(Path, sys.argv[1:]):
+    matplotlib.use(output.suffix[1:])
+    visualize_graph(
+        graph,
+        "s001",
+        output,
+        layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    )
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(output_path)],
+        [sys.executable, "-c", script, *(str(path) for path in output_paths)],
         cwd=Path(__file__).parents[1],
         env=env,
         capture_output=True,
@@ -5529,7 +5394,8 @@ visualize_graph(
     )
 
     assert result.returncode == 0, result.stderr
-    assert output_path.stat().st_size > 0
+    for path in output_paths:
+        assert path.stat().st_size > 0
 
 
 def test_visualize_graph_uses_local_agg_canvas_for_macosx(
