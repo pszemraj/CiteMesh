@@ -10,7 +10,6 @@ from pathlib import Path
 import httpx
 import httpx2
 import pytest
-import requests
 
 
 @pytest.mark.parametrize("preimport_transformers", [False, True])
@@ -60,23 +59,12 @@ assert transformers_hub.hf_hub_download is original
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_arxiv_request_guard_blocks_non_slow_tests() -> None:
-    """The shared test guard rejects accidental direct arXiv transport use.
-
-    :return None: Verifies unit tests cannot silently reach arXiv.org.
-    """
-    from citemesh.services import arxiv as arxiv_module
-
-    with pytest.raises(AssertionError, match="attempted an arXiv request"):
-        arxiv_module.requests.get("https://arxiv.org/html/2608.27147")
-
-
 def test_external_http_guard_blocks_unpatched_sessions() -> None:
     """The shared test guard rejects provider calls below patched SDK helpers."""
+    from citemesh.services import arxiv as arxiv_module
+
     with pytest.raises(AssertionError, match="attempted an external HTTP request"):
-        requests.Session().send(
-            requests.Request("GET", "https://huggingface.co").prepare()
-        )
+        arxiv_module.requests.get("https://arxiv.org/html/2608.27147")
     with pytest.raises(AssertionError, match="attempted an external HTTP request"):
         httpx.Client().send(httpx.Request("GET", "https://huggingface.co"))
     with pytest.raises(AssertionError, match="attempted an external HTTP request"):
