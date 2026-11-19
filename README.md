@@ -115,6 +115,8 @@ Follow the pipeline in [How CiteMesh builds a graph](docs/guides/how-it-works.md
 
 Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues). For an editable development checkout with the `all` extra, run `pip install -e ".[all]"`. Development setup and checks are in [AGENTS.md](AGENTS.md).
 
+For demo updates and social preview verification, see [hosted demo maintenance](docs/internals/architecture.md#hosted-demo).
+
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/CiteMesh)
 
 ## License

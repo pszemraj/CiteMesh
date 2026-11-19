@@ -46,3 +46,30 @@ The viewer rebuilds its Plotly figure client-side from the embedded payload, so 
 ## External dependencies
 
 The core CLI uses the Semantic Scholar API and, only when reference discovery for the focal paper is empty or unavailable, arXiv HTML and its metadata API. The arXiv fallback uses the standard library and adds no package dependency. Everything torch- or Plotly-shaped lives behind the `embeddings` and `viz` extras; h5py, NetworkX, Matplotlib, scikit-learn, and Rich ship in the base install.
+
+## Hosted demo
+
+The [Pages workflow](../../.github/workflows/pages.yml) publishes `assets/examples/megalodon/` on each push to `main`. The saved `dashboard.html` embeds its scripts and graph data for offline use. [`scripts/stage_pages_demo.py`](../../scripts/stage_pages_demo.py) extracts those scripts and data into `dashboard.js` for hosting, leaving the branded metadata and interface markup in `index.html`. Pages also publishes the collection package, favicon, and Open Graph image.
+
+**Working link previews are a required outcome of a demo refresh.** Keep the staged HTML below 512 KiB (524,288 bytes), the limit reported by the preview scanner. Copying the standalone dashboard directly to `index.html` exceeds that limit because it embeds Plotly and the graph data. The image's compressed size is separate from the HTML response limit.
+
+After refreshing the saved dashboard, preserve its branded title, description, canonical URL, favicon, Open Graph tags, and Twitter card tags; the generic dashboard exporter does not supply them. When replacing `og-image.png`, update its declared width and height to match the image. The [curated demo notes](../../AGENTS.md#curated-demo) identify the focal paper used for the saved example.
+
+From the repository root, reproduce Pages staging and serve it locally:
+
+```bash
+python scripts/stage_pages_demo.py assets/examples/megalodon/dashboard.html out/pages-demo
+cp assets/examples/megalodon/{dashboard.citemesh.json,favicon.ico,og-image.png} out/pages-demo/
+wc -c out/pages-demo/index.html
+python -m http.server 8000 --directory out/pages-demo
+```
+
+Open `http://localhost:8000/` and check the graph, search, and paper selection. The staging script uses only Python's standard library. Staged files belong in the ignored output directory; commit the source assets and staging code.
+
+After deployment, check the [public demo](https://pszemraj.github.io/CiteMesh/) again:
+
+- Inspect the initial HTML response for the size limit and complete Open Graph and Twitter metadata, without relying on JavaScript to add it.
+- Fetch the image URL from the metadata and confirm HTTP 200, the image content type, dimensions, and compressed file size.
+- Rescan the deployed URL with the preview checker and confirm that the title, description, and image appear.
+
+Report live preview verification as pending until the deployed page has passed these checks. A local browser render alone does not verify the public preview.

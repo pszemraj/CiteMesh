@@ -110,6 +110,8 @@ A reduced node schema: `provenance`, `provenance_base`, `focal_relation`, `focal
 
 `dashboard.html` in collection mode, `<name>.dashboard.html` standalone: a tri-pane interface with an embedded Plotly graph, paper list, and detail panel. Collection-mode HTML embeds a package snapshot because browsers do not reliably let a `file://` page fetch adjacent local files; the package itself stays authoritative.
 
+The curated demo uses a [Pages staging step](../internals/architecture.md#hosted-demo) to serve its scripts and graph data separately for social preview crawlers.
+
 The header names the focal paper, discovery strategy, and graph size. When recorded in a build, it also identifies an arXiv corpus that supplied candidates and any requested source that was unavailable. Search titles, authors, and abstracts from the search box. On a narrow screen, use **Graph**, **Papers**, and **Details** to switch panels. Typing a query shows matching papers, and selecting a paper opens its details.
 
 ![CiteMesh dashboard with Prior works active and a paper selected](../../assets/ui-prior-works.png)
