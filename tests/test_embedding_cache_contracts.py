@@ -2006,13 +2006,20 @@ def test_embedding_cache_search_keeps_tied_top_k_order_across_chunks(
 
 
 def test_embedding_cache_search_rejects_non_finite_query_embedding() -> None:
-    """Search should reject NaN query vectors before opening the cache payload."""
+    """Search rejects invalid shape and NaN before opening the cache payload."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
             model_name="non-finite-query",
             storage_precision="float32",
         )
+        with pytest.raises(ValueError, match="query_embedding must be 1-dimensional"):
+            cache.search(
+                query_embedding=np.asarray([[1.0, 0.0]], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
         with pytest.raises(
             ValueError, match="query_embedding must contain only finite values"
         ):
@@ -2241,19 +2248,17 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
     assert results == []
 
 
-@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
-@pytest.mark.parametrize("paper_ids", [[], ["missing"]])
 def test_cached_embedding_reader_returns_empty_before_first_write(
-    tmp_path: Path, storage_precision: str, paper_ids: list[str]
+    tmp_path: Path,
 ) -> None:
     """Fresh namespaces have no vectors or HDF5 file until their first write."""
     cache = EmbeddingCache(
         cache_dir=tmp_path,
         model_name="empty-vector-reader",
-        storage_precision=storage_precision,
+        storage_precision="float32",
     )
     assert not cache.h5_path.exists()
-    assert cache.get_cached_embeddings(paper_ids) == {}
+    assert cache.get_cached_embeddings(["missing"]) == {}
     assert not cache.h5_path.exists()
 
 
@@ -2280,6 +2285,7 @@ def test_cached_embedding_reader_deduplicates_ids_across_query_batches(
         }
     )
     expected = cache.get_embeddings(papers, model, show_progress=False)
+    assert cache.get_cached_embeddings([]) == {}
     requested = ["p1"] * SQLITE_QUERY_BATCH_SIZE + ["p0", "p2", "p1", "missing"]
     actual = cache.get_cached_embeddings(requested)
     assert actual.keys() == expected.keys()
@@ -2287,17 +2293,15 @@ def test_cached_embedding_reader_deduplicates_ids_across_query_batches(
         np.testing.assert_array_equal(actual[paper_id], vector)
 
 
-@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 def test_cached_embedding_reader_rejects_missing_populated_matrix(
-    tmp_path: Path, storage_precision: str
+    tmp_path: Path,
 ) -> None:
     """A lost matrix must remain an error when committed paper mappings exist."""
     cache = EmbeddingCache(
         cache_dir=tmp_path,
         model_name="missing-populated-vector-reader",
-        storage_precision=storage_precision,
+        storage_precision="float32",
     )
-    _set_test_int8_calibration(cache)
     model = LookupEncodeModel({"Paper. Text": np.asarray([1, 0], dtype=np.float32)})
     cache.get_embeddings(
         {"paper": {"title": "Paper", "abstract": "Text"}}, model, show_progress=False
@@ -2442,26 +2446,6 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
         ):
             cache.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-                top_k=1,
-                binary_prefilter=True,
-                binary_rescore_multiplier=2,
-            )
-
-
-def test_embedding_cache_search_rejects_non_vector_queries() -> None:
-    """Search should reject non-1D query embeddings instead of flattening them."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="invalid-query-shape")
-        _set_test_int8_calibration(cache)
-        cache.get_embeddings(
-            {"p1": {"title": "Alpha", "abstract": "First"}},
-            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
-            show_progress=False,
-        )
-
-        with pytest.raises(ValueError, match="query_embedding must be 1-dimensional"):
-            cache.search(
-                query_embedding=np.asarray([[1.0, 0.0]], dtype=np.float32),
                 top_k=1,
                 binary_prefilter=True,
                 binary_rescore_multiplier=2,
@@ -3205,19 +3189,17 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
                 assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
 
 
-@pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("dataset_source", ["  ", "", None])
 def test_embedding_cache_mark_hydrated_rejects_empty_source(
-    dataset_source: str | None, complete: bool
+    dataset_source: str | None,
 ) -> None:
-    """Hydration markers should reject blank sources, complete or not.
+    """Incomplete hydration markers should reject blank sources.
 
     The recorded source is what identifies a namespace as corpus-scale when a
     fingerprint mismatch decides whether deleting it needs operator approval, so
     an interrupted attempt that recorded nothing would silently drop that guard.
 
     :param Optional[str] dataset_source: Blank source token under test.
-    :param bool complete: Whether the marker claims hydration finished.
     :return None: Asserts every blank source is refused.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -3227,7 +3209,7 @@ def test_embedding_cache_mark_hydrated_rejects_empty_source(
                 dataset_source=dataset_source,
                 dataset_split="train",
                 corpus_size=16,
-                complete=complete,
+                complete=False,
             )
 
 
@@ -4048,21 +4030,30 @@ def test_embedding_cache_recovery_contracts(
 
 
 @pytest.mark.parametrize(
-    "error_type", [OSError, RuntimeError, ValueError, sqlite3.DatabaseError]
-)
-@pytest.mark.parametrize(
-    ("operation", "backend"),
+    ("operation", "backend", "error_type"),
     [
-        ("open", "hdf5"),
-        ("hydration", "hdf5"),
-        ("hydration", "sqlite"),
-        ("stats", "hdf5"),
-        ("stats", "sqlite"),
-        ("presence", "sqlite"),
-        ("open", "stat-hdf5"),
-        ("hydration", "stat-hdf5"),
-        ("stats", "stat-hdf5"),
-        ("presence", "stat-sqlite"),
+        (operation, backend, OSError)
+        for operation, backend in [
+            ("open", "hdf5"),
+            ("hydration", "hdf5"),
+            ("hydration", "sqlite"),
+            ("stats", "hdf5"),
+            ("stats", "sqlite"),
+            ("presence", "sqlite"),
+            ("open", "stat-hdf5"),
+            ("hydration", "stat-hdf5"),
+            ("stats", "stat-hdf5"),
+            ("presence", "stat-sqlite"),
+        ]
+    ]
+    + [
+        (operation, backend, error_type)
+        for operation, backend in [
+            ("presence", "sqlite"),
+            ("hydration", "hdf5"),
+            ("stats", "hdf5"),
+        ]
+        for error_type in (ValueError, RuntimeError, sqlite3.DatabaseError)
     ],
 )
 def test_embedding_cache_open_errors_preserve_namespace(

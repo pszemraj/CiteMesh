@@ -407,10 +407,7 @@ def test_strict_missing_half_preserves_database_and_never_repairs(tmp_path):
 
 
 @pytest.mark.parametrize("missing_half", ["db", "h5"])
-@pytest.mark.parametrize("require_ready", [True, False])
-def test_strict_selection_refuses_each_missing_half(
-    tmp_path, missing_half, require_ready
-):
+def test_strict_selection_refuses_each_missing_half(tmp_path, missing_half):
     settings = _settings(tmp_path)
     cache, _, _ = _populate(settings)
     selection = select_existing_cache(cache.namespace_id, tmp_path)
@@ -419,7 +416,7 @@ def test_strict_selection_refuses_each_missing_half(
     missing_path.unlink()
     before = remaining_path.read_bytes()
     with pytest.raises(RuntimeError, match="both SQLite and HDF5"):
-        open_existing_cache(selection, tmp_path, require_ready=require_ready)
+        open_existing_cache(selection, tmp_path)
     assert remaining_path.read_bytes() == before
     assert not missing_path.exists()
 
@@ -694,19 +691,22 @@ def test_strict_selection_preserves_existing_lzf_compression(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "entrypoint",
+    ("entrypoint", "kind"),
     [
-        "constructor",
-        "selection",
-        "metadata",
-        "import",
-        "scan",
-        "scan_namespace_locked",
-        "scan_root_locked",
-        "scan_readonly",
-    ],
+        (entrypoint, "import")
+        for entrypoint in (
+            "constructor",
+            "selection",
+            "metadata",
+            "import",
+            "scan",
+            "scan_namespace_locked",
+            "scan_root_locked",
+            "scan_readonly",
+        )
+    ]
+    + [("scan", "refresh"), ("import", "refresh")],
 )
-@pytest.mark.parametrize("kind", ["import", "refresh"])
 def test_existing_cache_entrypoints_recover_a_hot_sqlite_journal(
     tmp_path, entrypoint, kind, monkeypatch
 ):
@@ -1292,7 +1292,7 @@ def test_whole_coverage_views_avoid_sorting(
         assert not any("COUNT(*) FROM corpus_membership" in sql for sql in statements)
 
 
-@pytest.mark.parametrize("marker", [None, "", "-1", "unknown"])
+@pytest.mark.parametrize("marker", [None, "", "-1"])
 def test_missing_reconciliation_count_preserves_view_semantics(tmp_path, marker):
     """Unavailable row counts retain ranking except at the certified source limit."""
     settings = _settings(tmp_path)

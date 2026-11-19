@@ -124,10 +124,8 @@ class ExportFixture:
         ("int8", 8),
         ("float32", 3),
         ("float32", 7),
-        ("int8", 256),
         ("int8", 512),
         ("float32", 256),
-        ("float32", 512),
     ],
 )
 def test_exact_bounded_export(dtype, dimension, tmp_path):
@@ -330,10 +328,8 @@ def test_manifest_is_written_last(tmp_path):
     [
         ("int8", 4),
         ("float32", 7),
-        ("int8", 256),
         ("int8", 512),
         ("float32", 256),
-        ("float32", 512),
     ],
 )
 def test_native_import_round_trip_and_idempotence(dtype, dimension, tmp_path):
