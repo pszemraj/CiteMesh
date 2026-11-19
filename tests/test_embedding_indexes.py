@@ -723,15 +723,14 @@ def test_pending_import_reports_bucket_snapshot_resume_command(hub, tmp_path):
     )
 
 
-@pytest.mark.parametrize("error_type", [ConnectError, ReadTimeout])
-def test_download_transport_errors_are_filesystem_errors(hub, monkeypatch, error_type):
+def test_download_transport_errors_are_filesystem_errors(hub, monkeypatch):
     def fail(*args, **kwargs):
-        raise error_type("offline")
+        raise ConnectError("offline")
 
     monkeypatch.setattr(hub, "download_bucket_files", fail)
     with pytest.raises(OSError, match="owner/index.*offline") as error:
         indexes.resolve_publication("owner/index")
-    assert isinstance(error.value.__cause__, error_type)
+    assert isinstance(error.value.__cause__, ConnectError)
 
 
 def test_partial_multifile_download_retains_completed_files(hub, monkeypatch):

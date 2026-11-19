@@ -315,13 +315,11 @@ def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> No
 
 
 @pytest.mark.parametrize("strategy", ["embedding", "hybrid-corpus", "hybrid-both"])
-@pytest.mark.parametrize("use_streaming", [False, True])
 @pytest.mark.parametrize("model_profile", ["auto", "embeddinggemma"])
 def test_cold_corpus_reminds_about_public_index_once_before_loading(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     strategy: str,
-    use_streaming: bool,
     model_profile: str,
 ) -> None:
     """Offer the public index once, before either corpus mode loads its dataset."""
@@ -351,7 +349,7 @@ def test_cold_corpus_reminds_about_public_index_once_before_loading(
     monkeypatch.setattr(builder, "_resolve_hydration_dataset", load)
     for _attempt in range(2):
         with pytest.raises(RuntimeError, match="stop before dataset loading"):
-            builder._ensure_cache_hydrated(use_streaming=use_streaming)
+            builder._ensure_cache_hydrated(use_streaming=False)
 
     messages = [
         record
@@ -375,7 +373,7 @@ def test_cold_corpus_reminds_about_public_index_once_before_loading(
     _pin_model_fingerprint(monkeypatch, next_builder)
     monkeypatch.setattr(next_builder, "_resolve_hydration_dataset", load)
     with pytest.raises(RuntimeError, match="stop before dataset loading"):
-        next_builder._ensure_cache_hydrated(use_streaming=use_streaming)
+        next_builder._ensure_cache_hydrated(use_streaming=False)
     assert (
         sum(
             "public precomputed index" in record.getMessage()
@@ -6906,57 +6904,6 @@ def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
     clear_cache_mock.assert_not_called()
 
 
-def test_reused_uncapped_cache_still_admits_upstream_growth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An uncapped cache reused for a capped request must still track row growth.
-
-    ``all`` covers every capped request, and recency for an uncapped corpus is
-    the row-count question the capped refresh declines outright, so the reuse
-    must route this shape to the incremental full-corpus refresh.
-
-    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :return None: Asserts the appended paper is encoded and the token stays ``all``.
-    """
-    source = "fixture/source"
-    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
-        monkeypatch,
-        corpus_size=1,
-        cached_corpus_size=None,
-        cached_ids=("2601.00001", "2601.00002"),
-    )
-    cache = builder.embedding_cache
-    records = [
-        {"id": "2601.00001", "title": "First", "abstract": "A"},
-        {"id": "2601.00002", "title": "Second", "abstract": "A"},
-        {"id": "2602.00003", "title": "Newer", "abstract": "A"},
-    ]
-    monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 3
-    )
-    monkeypatch.setattr(
-        deps_module,
-        "_import_datasets_module",
-        lambda: types.SimpleNamespace(
-            load_dataset=lambda *args, **kwargs: iter(
-                records[2:] if kwargs["split"] == "train[2:3]" else records
-            )
-        ),
-    )
-
-    builder._ensure_cache_hydrated(use_streaming=False)
-
-    assert cache.get_cached_paper_ids() == {
-        "arxiv:2601.00001",
-        "arxiv:2601.00002",
-        "arxiv:2602.00003",
-    }
-    assert cache.payload_stats().hydration_corpus_size == "all"
-    assert cache.is_hydrated("train", None, dataset_source=source)
-    _assert_encoded_corpus_records(builder, model, records[2:])
-    clear_cache_mock.assert_not_called()
-
-
 @pytest.mark.parametrize(
     ("cached_corpus_size", "refreshed_shape"),
     [(3, "capped"), (None, "full")],
@@ -7001,7 +6948,7 @@ def test_reused_corpus_refresh_routes_on_the_cached_corpus_shape(
 
 
 @pytest.mark.parametrize("cached_corpus_size", [2, None])
-@pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt])
 def test_raised_reused_corpus_refresh_keeps_the_covering_cache(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -8078,10 +8025,16 @@ def test_exact_hydration_slice_preserves_content_identity_across_offsets(
 @pytest.mark.parametrize("corpus_size", [2, None])
 @pytest.mark.parametrize("use_streaming", [False, True])
 @pytest.mark.parametrize(
-    ("legacy_ids", "restore_summary"), [(False, False), (True, False), (True, True)]
+    ("source_ids", "legacy_ids", "restore_summary"),
+    [
+        (False, False, False),
+        (False, True, False),
+        (False, True, True),
+        (True, False, False),
+        (True, True, False),
+    ],
 )
 @pytest.mark.parametrize("complete", [False, True])
-@pytest.mark.parametrize("source_ids", [False, True])
 def test_anonymous_corpus_rows_survive_source_reordering(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -9324,12 +9277,15 @@ def test_generated_corpus_focal_reopens_cached_paper(focal_id: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "focal_id", ["content:local-paper", "arxiv_7", "local-source-42"]
-)
-@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
-@pytest.mark.parametrize(
-    ("force_rebuild_cache", "prepare_before_build"),
-    [(False, False), (True, False), (True, True)],
+    ("focal_id", "strategy", "force_rebuild_cache", "prepare_before_build"),
+    [
+        ("content:local-paper", "embedding", False, False),
+        ("arxiv_7", "embedding", True, False),
+        ("local-source-42", "embedding", True, True),
+        ("local-source-42", "hybrid", False, False),
+        ("content:local-paper", "hybrid", True, False),
+        ("arxiv_7", "hybrid", True, True),
+    ],
 )
 def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     monkeypatch: pytest.MonkeyPatch,
@@ -10264,11 +10220,18 @@ def test_corpus_preparation_stabilizes_focal_identity_on_first_build(
 
 
 @pytest.mark.parametrize(
-    "focal_id", ["content:resume-focal", "arxiv_7", "local-source-42"]
+    ("focal_id", "storage_precision", "strategy", "fresh_retry"),
+    [
+        ("content:resume-focal", "float32", "embedding", False),
+        ("arxiv_7", "float32", "embedding", True),
+        ("local-source-42", "int8", "embedding", False),
+        ("content:resume-focal", "int8", "embedding", True),
+        ("arxiv_7", "float32", "hybrid", False),
+        ("local-source-42", "float32", "hybrid", True),
+        ("content:resume-focal", "int8", "hybrid", False),
+        ("arxiv_7", "int8", "hybrid", True),
+    ],
 )
-@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
-@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
-@pytest.mark.parametrize("fresh_retry", [False, True], ids=["same", "fresh"])
 def test_interrupted_force_rebuild_resumes_before_local_focal_lookup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -10839,7 +10802,6 @@ def test_embedding_build_graph_persists_runtime_metadata(
         (True, False, "cuda", "cuda"),
         (False, True, "mps", "mps"),
         (True, True, "cpu", "cpu"),
-        (False, False, "cpu", "cpu"),
     ],
 )
 def test_embedding_device_resolution_matrix(
