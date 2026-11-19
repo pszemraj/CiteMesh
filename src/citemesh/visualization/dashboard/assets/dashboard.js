@@ -367,6 +367,15 @@
       return positionsAreFinite && sizesAreFinite;
     }
 
+    function findNodeTraceIndex(traces) {
+      const namedIdx = traces.findIndex((trace) => String(trace.name || "") === "nodes");
+      if (namedIdx >= 0) {
+        return namedIdx;
+      }
+      const fallbackIdx = traces.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
+      return fallbackIdx >= 0 ? fallbackIdx : 0;
+    }
+
     function buildFigureSpecFromPayload(nextPayload) {
       const meta = (nextPayload && nextPayload.meta) || {};
       const order = Array.isArray(meta.plotly_node_order)
@@ -395,18 +404,7 @@
       const nextEdges = Array.isArray(nextPayload.edges) ? nextPayload.edges : [];
       const nextYearRange = meta.year_range || {};
       const nextTraceSpecs = Array.isArray(template.data) ? template.data : [];
-      const nextNodeTraceIndex = (() => {
-        const namedIdx = nextTraceSpecs.findIndex(
-          (trace) => String(trace.name || "") === "nodes"
-        );
-        if (namedIdx >= 0) {
-          return namedIdx;
-        }
-        const fallbackIdx = nextTraceSpecs.findIndex((trace) =>
-          String(trace.mode || "").includes("markers+text")
-        );
-        return fallbackIdx >= 0 ? fallbackIdx : 0;
-      })();
+      const nextNodeTraceIndex = findNodeTraceIndex(nextTraceSpecs);
       const nextHaloTraceIndex = nextTraceSpecs.findIndex(
         (trace) => String(trace.name || "") === "selection-halo"
       );
@@ -606,14 +604,7 @@
         : null;
 
       traceSpecs = figureSpec.data || [];
-      nodeTraceIndex = (() => {
-        const namedIdx = traceSpecs.findIndex((trace) => String(trace.name || "") === "nodes");
-        if (namedIdx >= 0) {
-          return namedIdx;
-        }
-        const fallbackIdx = traceSpecs.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
-        return fallbackIdx >= 0 ? fallbackIdx : 0;
-      })();
+      nodeTraceIndex = findNodeTraceIndex(traceSpecs);
       haloTraceIndex = traceSpecs.findIndex(
         (trace) => String(trace.name || "") === "selection-halo"
       );
