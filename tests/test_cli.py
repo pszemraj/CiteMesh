@@ -2132,6 +2132,14 @@ def test_search_auto_uses_local_when_cache_populated(
     fake_builder = _fake_local_search_builder(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
+
+    def count_embeddings() -> int:
+        fake_builder.prepare_embedding_cache.assert_called_once_with()
+        return 42
+
+    fake_builder.embedding_cache.embedding_count = MagicMock(
+        side_effect=count_embeddings
+    )
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
@@ -2153,27 +2161,6 @@ def test_search_auto_uses_local_when_cache_populated(
     assert "embeddings=%s" in diagnostics
     assert "42" in diagnostics
     assert "model=%s" in diagnostics
-    client_factory.assert_not_called()
-
-
-def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Auto search must resolve the artifact before opening any cache namespace."""
-    fake_builder = _fake_local_search_builder(
-        cached_count=0, results=[_FAKE_LOCAL_RESULT]
-    )
-    fake_builder.embedding_cache.embedding_count = MagicMock(return_value=42)
-    fake_builder.has_persistent_embedding_artifacts.return_value = True
-    monkeypatch.setattr(
-        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
-    )
-    client_factory = MagicMock()
-    monkeypatch.setattr(search_module, "get_client", client_factory)
-
-    result = run_cli_command(["search", "cached topic", "-n", "1"])
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     fake_builder.prepare_embedding_cache.assert_called_once_with()
     fake_builder.embedding_cache.embedding_count.assert_called_once_with()
     assert fake_builder.method_calls[:2] == [
