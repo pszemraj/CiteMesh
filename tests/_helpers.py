@@ -27,12 +27,12 @@ if TYPE_CHECKING:
 
 
 def fail_stat_for(
-    target_path: Path, error: OSError
+    target_path: Path, error: Exception
 ) -> Callable[[Path], os.stat_result]:
     """Return a ``Path.stat`` wrapper that fails for one path only.
 
     :param Path target_path: Path whose metadata lookup should fail.
-    :param OSError error: Exception raised for the selected path.
+    :param Exception error: Exception raised for the selected path.
     :return Callable[[Path], os.stat_result]: Wrapper preserving other stat calls.
     """
     original_stat = Path.stat

@@ -60,6 +60,7 @@ from tests._helpers import (
     LengthRecordingEncodeModel,
     LookupEncodeModel,
     SeededRandomEncodeModel,
+    fail_stat_for,
 )
 
 
@@ -1663,46 +1664,6 @@ def test_embedding_cache_returns_stored_vector_fidelity_on_first_encode(
         np.testing.assert_array_equal(miss["p1"], encoded)
 
 
-def test_embedding_cache_upsert_records_int8_saturation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Int8 cache writes should persist saturation telemetry when values clip."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(
-            cache_dir=tmpdir,
-            model_name="int8-saturation-stats",
-            storage_precision="int8",
-        )
-        cache.set_calibration_ranges(
-            ranges=np.vstack(
-                (
-                    np.zeros(2, dtype=np.float32),
-                    np.ones(2, dtype=np.float32),
-                )
-            ),
-            embedding_dim=2,
-        )
-
-        out_of_range_model = LookupEncodeModel(
-            {"Alpha. First": np.asarray([2.0, -1.0], dtype=np.float32)}
-        )
-        with caplog.at_level("WARNING"):
-            cache.upsert_embeddings(
-                {"p1": {"title": "Alpha", "abstract": "First"}},
-                out_of_range_model,
-                show_progress=False,
-            )
-
-        assert any(
-            "Int8 calibration saturation detected" in record.message
-            for record in caplog.records
-        )
-
-        with h5py.File(cache.h5_path, "r") as h5:
-            assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 2
-            assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
-
-
 def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1731,6 +1692,9 @@ def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
                 model,
                 show_progress=False,
             )
+            with h5py.File(cache.h5_path, "r") as h5:
+                assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 2
+                assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
             cache.upsert_embeddings(
                 {"p2": {"title": "Beta", "abstract": "Second"}},
                 model,
@@ -2409,29 +2373,6 @@ def test_legacy_head_slice_hydration_metadata_fails_is_hydrated() -> None:
         assert not cache.is_hydrated("train", 2, dataset_source="fake/source")
 
 
-def test_embedding_cache_embedding_count_tracks_persisted_rows() -> None:
-    """embedding_count should report 0 for empty namespaces and rows after upserts."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="embedding-count")
-        assert cache.embedding_count() == 0
-
-        _set_test_int8_calibration(cache)
-        cache.get_embeddings(
-            {
-                "p1": {"title": "Alpha", "abstract": "First"},
-                "p2": {"title": "Beta", "abstract": "Second"},
-            },
-            LookupEncodeModel(
-                {
-                    "Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32),
-                    "Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32),
-                }
-            ),
-            show_progress=False,
-        )
-        assert cache.embedding_count() == 2
-
-
 def test_embedding_cache_default_text_builder_matches_profile_formatter() -> None:
     """Default cache text builder should match the default profile formatter."""
 
@@ -3050,6 +2991,7 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="paper-id-listing")
         assert cache.get_cached_paper_ids() == set()
+        assert cache.embedding_count() == 0
         _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {
@@ -3060,6 +3002,7 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
             show_progress=False,
         )
         assert cache.get_cached_paper_ids() == {"p1", "p2"}
+        assert cache.embedding_count() == 2
 
 
 def test_embedding_cache_persists_chronology_key_only_for_arxiv_ids() -> None:
@@ -3942,6 +3885,24 @@ def test_embedding_cache_enabling_binary_prefilter_preserves_populated_namespace
     assert reloaded.last_search_used_binary_prefilter is True
 
 
+def _run_cache_workers(processes: list[mp.Process], queue: mp.Queue) -> list[Any]:
+    """Run cache workers and return any reported or missing-result errors."""
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+    results = []
+    for _ in processes:
+        try:
+            results.append(queue.get(timeout=5))
+        except Empty:
+            results.append(("err", "worker did not report result"))
+    return [result for result in results if result[0] == "err"]
+
+
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
     """Concurrent processes should serialize writes without HDF5 lock failures."""
     queue: mp.Queue = mp.Queue()
@@ -3950,23 +3911,7 @@ def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
         for idx in range(4)
     ]
 
-    for process in processes:
-        process.start()
-
-    for process in processes:
-        process.join(timeout=30)
-        if process.is_alive():
-            process.terminate()
-            process.join()
-
-    results = []
-    for _ in processes:
-        try:
-            results.append(queue.get(timeout=5))
-        except Empty:
-            results.append(("err", "missing", "worker did not report result"))
-
-    errors = [result for result in results if result[0] == "err"]
+    errors = _run_cache_workers(processes, queue)
     assert not errors, f"Concurrent cache writes failed: {errors}"
 
 
@@ -4054,23 +3999,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
         for _ in range(4)
     ]
 
-    for process in processes:
-        process.start()
-
-    for process in processes:
-        process.join(timeout=30)
-        if process.is_alive():
-            process.terminate()
-            process.join()
-
-    results = []
-    for _ in processes:
-        try:
-            results.append(queue.get(timeout=5))
-        except Empty:
-            results.append(("err", "worker did not report result"))
-
-    errors = [result for result in results if result[0] == "err"]
+    errors = _run_cache_workers(processes, queue)
     assert not errors, f"Concurrent cache init recovery failed: {errors}"
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="process-init-recovery")
@@ -4165,7 +4094,6 @@ def test_embedding_cache_open_errors_preserve_namespace(
     )
     original_payload = cache.h5_path.read_bytes()
     injected_error = error_type("transient open failure")
-    original_stat = Path.stat
     original_exists = Path.exists
     stat_target = cache.db_path if backend == "stat-sqlite" else cache.h5_path
 
@@ -4178,17 +4106,6 @@ def test_embedding_cache_open_errors_preserve_namespace(
         """
         raise injected_error
 
-    def fail_stat(path: Path, **kwargs: Any) -> Any:
-        """Fail inspection of one payload path.
-
-        :param Path path: Filesystem path under inspection.
-        :param Any kwargs: Path.stat keyword arguments.
-        :return Any: Real file statistics for unaffected paths.
-        """
-        if path == stat_target:
-            raise injected_error
-        return original_stat(path, **kwargs)
-
     def suppress_exists_error(path: Path, **kwargs: Any) -> bool:
         """Emulate Python 3.14's exists error suppression on every test runtime.
 
@@ -4200,7 +4117,7 @@ def test_embedding_cache_open_errors_preserve_namespace(
 
     with monkeypatch.context() as patch:
         if backend.startswith("stat-"):
-            patch.setattr(Path, "stat", fail_stat)
+            patch.setattr(Path, "stat", fail_stat_for(stat_target, injected_error))
             patch.setattr(Path, "exists", suppress_exists_error)
         elif backend == "hdf5":
             patch.setattr(embedding_cache_module.store.h5py, "File", fail_open)
@@ -4339,50 +4256,6 @@ def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
         )
 
 
-def test_embedding_cache_reopens_across_source_dtype_without_discarding_rows(
-    tmp_path: Path,
-) -> None:
-    """A host resolving a different compute dtype must reuse, not wipe, the cache.
-
-    Compute dtype is auto-resolved from the active device and is deliberately
-    absent from the namespace, so a bf16 GPU and an fp32 host land on the same
-    files. If it were still compared as a runtime contract they would each
-    destroy the other's vectors on open, which is worse than partitioning.
-
-    :param Path tmp_path: Isolated cache directory.
-    :return None: Checks cached rows survive a reopen under a different dtype.
-    """
-    built = EmbeddingCache(
-        cache_dir=tmp_path,
-        model_name="shared-dtype-namespace",
-        storage_precision="float32",
-        source_torch_dtype="bfloat16",
-    )
-    built.get_embeddings(
-        {"p1": {"title": "Alpha", "abstract": "First"}},
-        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
-        show_progress=False,
-    )
-    assert built.embedding_count() == 1
-
-    reopened = EmbeddingCache(
-        cache_dir=tmp_path,
-        model_name="shared-dtype-namespace",
-        storage_precision="float32",
-        source_torch_dtype="float32",
-    )
-
-    assert reopened.h5_path == built.h5_path
-    assert reopened.embedding_count() == 1
-    results = reopened.search(
-        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-        top_k=1,
-        binary_prefilter=False,
-        binary_rescore_multiplier=2,
-    )
-    assert [result.paper_id for result in results] == ["p1"]
-
-
 def _recorded_source_dtypes(cache: EmbeddingCache) -> tuple[str, str]:
     """Return the source dtype recorded by the SQLite and HDF5 witnesses.
 
@@ -4422,6 +4295,7 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
         LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
         show_progress=False,
     )
+    assert built.embedding_count() == 1
     assert _recorded_source_dtypes(built) == ("bfloat16", "bfloat16")
 
     reopened = EmbeddingCache(
@@ -4430,7 +4304,15 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
         storage_precision="float32",
         source_torch_dtype="float32",
     )
+    assert reopened.h5_path == built.h5_path
     assert reopened.embedding_count() == 1
+    results = reopened.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=False,
+        binary_rescore_multiplier=2,
+    )
+    assert [result.paper_id for result in results] == ["p1"]
     # Appending rewrites the HDF5 contract attrs, so the fp32 host gets the one
     # chance it has to overwrite the other witness too.
     reopened.get_embeddings(
