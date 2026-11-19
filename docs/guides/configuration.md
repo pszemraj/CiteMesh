@@ -19,14 +19,7 @@ citemesh config path
 
 ## Precedence
 
-Build defaults resolve as explicit CLI flag, then `config.toml`, then the built-in value. Credentials use the separate [API-key precedence](#api-key).
-
-Configured values behave like *your* built-in defaults rather than like flags you typed:
-
-- They never trigger "unsupported option for strategy" errors: `defaults.device` does not break a `--strategy citation` run, it is just unused there.
-- They outrank tuned implicit defaults such as hybrid's 45-paper limit and its 1000-record citation and reference fetch limits. The reference's Graph section explains what that means for a cap chosen for citation builds.
-- They lose to an explicit flag that implies a different mode, such as `--corpus-size` against a configured `semantic_source = "candidates"`. The reference lists these flags under Semantic discovery.
-- A configured `semantic_source = "both"` is never rejected for the strategy in use: the reference's `semantic_source` entry says what each strategy and local search read it as. Only the command-line flag `--semantic-source both` requires `--strategy hybrid`.
+The [config reference](../reference/config/config_reference.toml) defines how saved defaults interact with command-line flags, strategy-specific budgets, and installed indexes. Its Graph and Semantic discovery sections explain which values apply to each strategy. The `[api]` section covers credential precedence separately.
 
 Config defaults, including ignored corpus-only settings, are logged at DEBUG with their keys and file path. The build sidecar records only settings applicable to the selected source and precision.
 

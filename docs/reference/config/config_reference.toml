@@ -1,12 +1,12 @@
 # config_reference.toml: every key CiteMesh reads from its user config file, config.toml. Start from example.toml.
 # Loadable form: an uncommented key holds its built-in default, and a commented-out key has no single literal default and shows an example value.
-# Hand-maintained. tests/test_config_reference.py checks its keys and default values against the loader and the build parser.
+# Hand-maintained. Paths in comments are relative to the repository root.
 # Location: config.toml in the cache root, as printed by `citemesh config path`. CITEMESH_CACHE_DIR moves the cache root (docs/reference/environment.md).
-# Read once per command, and applied only by `citemesh build` and `citemesh search`. docs/guides/configuration.md covers the `citemesh config` commands.
+# Read at command startup, with no live reload. Build/search apply defaults, and cache import reads them for follow-up commands (docs/guides/configuration.md).
 # Precedence, lowest to highest: built-in defaults, this file, command-line flags.
 # Each [defaults] key is the default of the build flag spelled with `-` for `_`, so max_papers is --max-papers. Exceptions are named on the key.
-# A configured value is a default, not a flag: it never causes an unsupported-option error, and a strategy that does not use it ignores it.
-# Keys under the Semantic discovery, Embedding model and storage, and arXiv corpus banners are read only by embedding and hybrid builds and by local search.
+# Saved options that do not apply to the selected strategy are ignored.
+# Semantic discovery, model/storage and corpus settings apply to embedding/hybrid builds. Local search reuses relevant runtime and cache selectors.
 # --cache-namespace overrides model, model_revision, model_profile, truncate_dim, storage_precision, calibration_sample_size, dataset_source and dataset_split.
 # Unknown tables and keys are ignored with a warning.
 # A value that breaks a constraint stated here is ignored with a warning naming the key, and the built-in default applies.
@@ -23,8 +23,7 @@
 # Hybrid builds: they are fetch limits for the candidate pool, which ranking then cuts to max_papers.
 # Warning: one configured value serves both strategies, so a cap chosen for citation builds also shrinks hybrid's candidate pool.
 
-# 'recommendation' | 'citation' | 'embedding' | 'hybrid'. Discovery strategy of `citemesh build` (docs/guides/strategies.md).
-# embedding and hybrid need the embeddings extra and download the embedding model on first use.
+# 'recommendation' | 'citation' | 'embedding' | 'hybrid'. Discovery strategy. Embedding and hybrid require the embeddings extra.
 strategy = "recommendation"
 
 # int. Maximum papers in the graph, focal paper included.
@@ -37,12 +36,12 @@ strategy = "recommendation"
 # max_references = 1000
 
 # int. Maximum edges per paper in an embedding graph, strongest kept first.
-# Only used when: strategy is embedding.
+# Only used when: the effective build strategy is 'embedding' (ignored otherwise).
 top_k = 4
 
 # ---------- Output ----------
 
-# list of 'png' | 'html' | 'plotly' | 'dashboard' | 'json' | 'csv' | 'bibtex' | 'graphml' | 'all'. Formats `citemesh build` writes, where 'all' is every format.
+# list['png' | 'html' | 'plotly' | 'dashboard' | 'json' | 'csv' | 'bibtex' | 'graphml' | 'all']. Formats to write, where 'all' selects every format.
 # Also accepts one comma-separated string such as "json,dashboard". Duplicates are dropped, and an explicit --export replaces the list.
 # 'html', 'plotly' and 'dashboard' need the viz extra, and a build without it fails when it writes them.
 export = ["png"]
@@ -63,7 +62,7 @@ theme = "dark"
 semantic_source = "candidates"
 
 # int. Semantic Scholar references, citers and recommendations an embedding build gathers as its candidate pool.
-# Only used when: strategy is embedding and semantic_source is 'candidates'. Hybrid takes whole provider lists instead.
+# Only used when: the build uses 'embedding' with 'candidates' (ignored otherwise).
 candidate_pool_size = 400
 
 # float, 0.0 to 1.0. Minimum embedding cosine for an edge. Hybrid also passes a pair that shares references.
@@ -73,13 +72,12 @@ min_semantic_similarity = 0.74
 
 # ---------- Embedding model and storage ----------
 # Changing model, model_revision, the resolved model_profile, truncate_dim, storage_precision or int8 calibration_sample_size selects another cache namespace.
-# A new namespace starts empty, so a corpus source must be hydrated or installed again. Switching back to the old settings reopens the old vectors.
 # See: docs/guides/caching.md#embedding-namespaces
 # Candidate pools and graph-similarity vectors are always stored as float32, so the storage keys shape corpus storage only.
-# binary_prefilter and calibration_sample_size apply only when storage_precision is 'int8'.
+# With storage_precision = 'float32', configured binary_prefilter and calibration_sample_size are ignored.
 
-# string. Hugging Face model ID or local checkpoint path that encodes papers and queries.
-# The default model falls back to google/embeddinggemma-300m when it fails to load, unless model_revision is set (docs/reference/embedding-runtime.md).
+# string. Hugging Face model ID or local checkpoint path for encoding papers and queries. Hub weights download when not cached.
+# The default tries google/embeddinggemma-300m on eligible load failures when defaults.model_revision is unset (docs/reference/embedding-runtime.md).
 model = "unsloth/embeddinggemma-300m"
 
 # 'auto' | 'default' | 'embeddinggemma'. Model family, which sets prompt formatting, the dimension policy and compile eligibility.
@@ -87,7 +85,7 @@ model = "unsloth/embeddinggemma-300m"
 # Recommended: 'embeddinggemma' for a stripped or custom EmbeddingGemma export that 'auto' does not recognize.
 model_profile = "auto"
 
-# string (optional). Hub branch, tag or commit of model to load. Setting it disables the default model's fallback.
+# string (optional). Hub branch, tag or commit of the model to load.
 # Unset: the main branch.
 # model_revision = "main"
 
@@ -118,7 +116,7 @@ calibration_sample_size = 2000
 # These keys are read only when the effective semantic source is 'arxiv-corpus' or 'both'.
 # Under 'candidates', configured values are reset to their built-in defaults, with a DEBUG log line.
 # Without an installed index, the first corpus build encodes the selected split, or its corpus_size newest papers, at far more cost than candidates.
-# Warning: changing dataset_source or dataset_split clears a self-hydrated corpus namespace and encodes it again. An installed index refuses the change instead.
+# Warning: source/split changes can clear and rebuild a self-hydrated corpus during a build. Installed corpora reject a mismatch.
 # See: docs/guides/caching.md#corpus-hydration-and-resume
 
 # string. Hugging Face dataset of arXiv metadata that corpus hydration reads.
@@ -127,22 +125,23 @@ dataset_source = "librarian-bots/arxiv-metadata-snapshot"
 # string. Split of dataset_source to hydrate. A slice such as "train[:5%]" bounds the papers considered.
 dataset_split = "train"
 
-# int (optional). Hydrate only the N newest submissions of the split, by arXiv ID. An installed index searches only its N newest members.
-# Unset: the full split.
-# Overridden by: --all-corpus. With --cache-namespace, the index's recorded cap also bounds it.
+# int (optional). Number of newest papers to hydrate or search, by arXiv ID.
+# Unset: the full split for hydration, or all members of the installed index.
+# Overridden by: --all-corpus. --cache-namespace clamps a saved cap to the installed coverage.
+# An explicit --corpus-size above a capped index's recorded limit stops the search or build.
 # corpus_size = 100000
 
-# bool. Stream the dataset instead of loading it into memory.
-# Requires: an unsliced dataset_split. A slice stops the build with an error.
+# bool. Stream source rows instead of downloading a prepared dataset.
+# Requires: an unsliced dataset split. A slice stops the build with an error.
 streaming = false
 
 # ---------- Search ----------
 
 # 'auto' | 'local' | 's2'. Where `citemesh search` looks. Flag: search --mode.
-# 'local' searches the local embedding cache and fails when it holds no vectors for the current settings. 's2' runs a Semantic Scholar keyword search.
-# 'auto' searches local vectors when the namespace has any, and Semantic Scholar otherwise.
-# Overridden by: search's namespace flags, such as --model or --cache-namespace, which select local mode.
-# In 'auto', a configured value local search cannot use, such as an unavailable device, falls back to Semantic Scholar with a warning.
+# 'local' requires cached vectors, 's2' runs keyword search, and 'auto' prefers local with S2 fallback for an empty cache or unavailable local runtime.
+# Overridden by: local-search selectors such as --model or --cache-namespace, which select local mode over a saved mode.
+# An unusable installed index or a failed local query stays an error, including in 'auto'.
+# See: docs/guides/cli.md#find-a-focal-paper
 search_mode = "auto"
 
 [api]

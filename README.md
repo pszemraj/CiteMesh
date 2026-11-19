@@ -8,7 +8,7 @@ CiteMesh uses local embeddings in its hybrid and embedding strategies to find an
 
 ![CiteMesh dashboard showing a Megalodon hybrid graph with Mega selected and a citation passage open](assets/ui.png)
 
-_A hybrid graph built around "Megalodon" that combines its references, citers, and Semantic Scholar recommendations with nearest neighbors from the 3.2-million-paper arXiv index (45 papers, 110 links). The selected paper, "Mega," ranks first. The "Why this paper" panel shows its similarity signals and a passage from the seven places where Megalodon cites it. **More papers** lists further references and arXiv matches that did not make the graph._
+_The Megalodon hybrid graph shows 45 papers and 110 similarity links. Its papers come from references, citers, Semantic Scholar recommendations, and the 3.2-million-paper arXiv index. Mega ranks first; **Why this paper** shows its similarity signals and one of the seven passages where Megalodon cites it. **More papers** lists further references and arXiv matches outside the graph._
 
 After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
@@ -28,9 +28,9 @@ citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard
 citemesh view
 ```
 
-This build needs no arXiv index. With the default candidate source, CiteMesh embeds the focal paper and candidates from Semantic Scholar on your machine. It ranks references, citing papers, and recommendations using local embeddings and citation evidence. The first build downloads about 1.2 GB of model weights. Later builds reuse cached vectors. [Embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback) · [Cache behavior](docs/guides/caching.md)
+Hybrid embeds the focal paper and Semantic Scholar candidates on your machine, then ranks them using local embeddings and citation evidence. This build needs no arXiv index. The first build downloads about 1.2 GB of model weights; later builds reuse cached vectors. [Embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback) · [Cache behavior](docs/guides/caching.md)
 
-For a faster first hybrid build, append `--no-references` to skip the extra reference lookups used for edge scoring. You still get the same ranked reading list for the same candidate data.
+For a faster first hybrid build, append `--no-references` to skip the extra reference lookups used for edge scoring. The ranked reading list is unchanged for the same candidate data.
 
 The build writes `out/dashboard.html` and `out/dashboard.citemesh.json`. `citemesh view` opens the dashboard in your browser. Building another focal paper with `--export dashboard` adds it to the same collection. A build without `--export` writes a static PNG. [Output artifacts](docs/reference/output-artifacts.md#output-location)
 
@@ -74,7 +74,7 @@ citemesh build "arxiv:2404.08801" --strategy hybrid --semantic-source both \
   --export dashboard
 ```
 
-Save `both` as the source for future hybrid builds with `citemesh config set defaults.semantic_source both`. Import checks your settings, including saved config defaults; when they do not select the index, as with non-default model settings, the commands it prints add `--cache-namespace NAMESPACE`.
+Save `both` as the source for future hybrid builds with `citemesh config set defaults.semantic_source both`. For other model settings, use the commands import prints to [select the installed index](docs/guides/caching.md#import-and-selection).
 
 Import needs no GPU or model weights. Queries and graph similarity use the index's pinned model on your local device, including CPU. On an installed index, `--corpus-size N` searches the newest N indexed papers while keeping the full download and cache on disk. [Portable corpus indexes](docs/guides/caching.md#portable-corpus-indexes)
 
@@ -101,8 +101,8 @@ Every flag is in `citemesh COMMAND --help` and the [CLI guide](docs/guides/cli.m
 ## Limits
 
 - **Pre-1.0 public beta.** Export formats, cache layouts, and defaults may change between revisions. CiteMesh runs on macOS, Linux, and Windows.
-- **Semantic Scholar sets the pace.** Focal paper lookup and most candidate collection go through its API, which rate-limits clients and can return HTTP 429. CiteMesh retries with backoff; [configure an API key](docs/guides/configuration.md#api-key) for steadier builds. Anonymous builds share a 90-second recovery budget, and a total outage fails a citation or hybrid build instead of emitting a graph containing only the focal paper ([retry policy](docs/guides/cli.md#troubleshooting)).
-- **Thin provider coverage gives thin graphs.** Recommendation depends on what Semantic Scholar recommends for the focal paper. When it omits a focal paper's references, CiteMesh can [recover explicit identifiers from an available arXiv HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references).
+- **Semantic Scholar sets the pace.** Focal paper lookup and most candidate collection go through its API, which rate-limits clients and can return HTTP 429. CiteMesh retries with backoff; [configure an API key](docs/guides/configuration.md#api-key) for steadier builds. See the [retry policy](docs/guides/cli.md#troubleshooting) for recovery budgets and outage handling.
+- **Thin provider coverage gives thin graphs.** Recommendation depends on what Semantic Scholar recommends for the focal paper. For an arXiv focal paper, citation, hybrid, and embedding candidate builds can [recover references from its HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references) when Semantic Scholar returns none.
 - **Graphs are sparse by design.** Each paper keeps only its few strongest links (3 for recommendation and citation, 4 by default for embedding, 5 for hybrid), so the graph shows the closest relations rather than every one ([edge scoring](docs/guides/how-it-works.md#6-edge-scoring)).
 
 ## How it works

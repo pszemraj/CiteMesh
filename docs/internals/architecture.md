@@ -25,6 +25,8 @@ The [embedding-cache internals](embedding-cache.md), [arXiv recovery guide](../g
 
 Option vocabularies in `core/choices.py` have no runtime dependencies. The parser, persisted configuration, and relevant runtimes import them directly; changing a vocabulary does not require a second literal list or a test comparing copies.
 
+The loadable [config reference](../reference/config/config_reference.toml) is hand-maintained against the key whitelist in `data/user_config.py`. `tests/test_config_reference.py` checks key coverage and default values, and loads the [minimal example](../reference/config/example.toml) through the real loader.
+
 ## Python ↔ JavaScript duplication
 
 The viewer rebuilds its Plotly figure client-side from the embedded payload, so a dozen algorithms exist in both languages on purpose: `stableCurveDirection`, `selectDashboardLabelIds`, `normalizeDashboardEdgeStrengths`, `dashboardHoverText`, `buildFigureSpecFromPayload` (mirroring `_build_plotly_figure` and its label/halo geometry), `csvGuard`/`csvEscape` and the CSV column order, `focalSlug`, `dashboardNodeLabel`, `safeExternalUrl`, `normalizeCollectionPackage`/`hasCompleteDashboardGeometry`, and `upsertCollectionEntries`. The Python counterparts live in `visualization/export/{geometry,plotly_figure,links,csv_,nodes}.py`, `visualization/render.py`, and `visualization/dashboard/{package,payload}.py`.
