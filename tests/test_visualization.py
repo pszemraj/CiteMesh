@@ -2142,6 +2142,51 @@ def test_pages_demo_assets_and_graph_package_are_valid() -> None:
         assert social_image.read(8) == b"\x89PNG\r\n\x1a\n"
 
 
+def test_pages_demo_html_fits_preview_crawler_limit(tmp_path: Path) -> None:
+    """Pages keeps metadata in small HTML and restores graph data before startup."""
+    repository = Path(__file__).resolve().parents[1]
+    source = repository / "assets" / "examples" / "megalodon" / "dashboard.html"
+    subprocess.run(
+        [
+            sys.executable,
+            str(repository / "scripts" / "stage_pages_demo.py"),
+            str(source),
+            str(tmp_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    original = source.read_text(encoding="utf-8")
+    staged = (tmp_path / "index.html").read_text(encoding="utf-8")
+    javascript = (tmp_path / "dashboard.js").read_text(encoding="utf-8")
+    assert len(staged.encode("utf-8")) < 524_288
+    assert staged.split("</head>")[0] == original.split("</head>")[0]
+    assert '<script src="dashboard.js"></script>' in staged
+    assert javascript.index("plotly.js v") < javascript.index(
+        'document.getElementById("citemesh-dashboard-data").textContent = '
+    )
+    for script_id in [
+        "citemesh-dashboard-data",
+        "citemesh-dashboard-figure",
+        "citemesh-dashboard-collection",
+    ]:
+        pattern = rf'<script id="{script_id}" type="application/json">(.*?)</script>'
+        original_block = re.search(pattern, original, flags=re.DOTALL)
+        assert original_block is not None
+        staged_block = re.search(pattern, staged)
+        assert staged_block is not None
+        assert staged_block.group(1) == ""
+        assignment = (
+            f"document.getElementById({json.dumps(script_id)}).textContent = "
+            f"{json.dumps(original_block.group(1))};"
+        )
+        assert assignment in javascript
+        assert javascript.index(assignment) < javascript.index(
+            "let payload = JSON.parse("
+        )
+
+
 @pytest.mark.parametrize("theme_name", ["dark", "light", "solarized", "auto"])
 def test_dashboard_hover_label_is_shared_by_python_and_javascript(
     tmp_path: Path, theme_name: str

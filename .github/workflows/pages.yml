@@ -27,7 +27,7 @@ jobs:
       - name: Stage Megalodon demo
         run: |
           mkdir -p "$RUNNER_TEMP/citemesh-pages"
-          cp assets/examples/megalodon/dashboard.html "$RUNNER_TEMP/citemesh-pages/index.html"
+          python scripts/stage_pages_demo.py assets/examples/megalodon/dashboard.html "$RUNNER_TEMP/citemesh-pages"
           cp assets/examples/megalodon/dashboard.citemesh.json "$RUNNER_TEMP/citemesh-pages/dashboard.citemesh.json"
           cp assets/examples/megalodon/favicon.ico "$RUNNER_TEMP/citemesh-pages/favicon.ico"
           cp assets/examples/megalodon/og-image.png "$RUNNER_TEMP/citemesh-pages/og-image.png"
