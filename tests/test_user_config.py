@@ -35,7 +35,6 @@ from citemesh.core.choices import (
     THEME_CHOICES,
 )
 from citemesh.core.config import EmbeddingStorageConfig
-from citemesh.core.validation import ValueValidationError, parse_unit_interval_float
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
 from citemesh.data.user_config import (
@@ -464,18 +463,6 @@ def test_huge_toml_threshold_is_ignored_with_a_warning(
     )
     assert "expected a finite float between 0.0 and 1.0" in caplog.text
     assert _run_cli(["config", "list"]).returncode == 0
-
-
-@pytest.mark.parametrize("value", _HUGE_INT_PARAMS)
-def test_unit_interval_parser_rejects_ints_beyond_float_range(value: int) -> None:
-    """The shared CLI/config float parser reports overflow as out of range.
-
-    :param int value: Integer too large to convert to a float.
-    :return None: Assertions validate the validation reason.
-    """
-    with pytest.raises(ValueValidationError) as error:
-        parse_unit_interval_float(value)
-    assert error.value.reason == "out_of_range"
 
 
 def test_config_write_wraps_parent_directory_error(

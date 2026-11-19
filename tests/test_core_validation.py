@@ -123,6 +123,8 @@ def test_parse_unit_interval_float_accepts_inclusive_bounds(
         ("-0.0001", "out_of_range"),
         (2.0, "out_of_range"),
         (-1.0, "out_of_range"),
+        pytest.param(10**400, "out_of_range", id="huge-int"),
+        pytest.param(-(10**400), "out_of_range", id="huge-negative-int"),
         ("abc", "not_number"),
         ("", "not_number"),
         (None, "not_number"),
