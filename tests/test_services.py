@@ -1175,7 +1175,10 @@ def test_custom_projection_recommendations_keep_first_row_per_paper(
     )
 
 
-def test_search_paginates_deduplicates_and_validates_query_offsets() -> None:
+@pytest.mark.parametrize("first_id", ["a", " a "])
+def test_search_paginates_deduplicates_and_validates_query_offsets(
+    first_id: str,
+) -> None:
     """Search follows offsets, honors limits, and rejects invalid inputs.
 
     :return None: Verifies search pagination and validation.
@@ -1184,14 +1187,14 @@ def test_search_paginates_deduplicates_and_validates_query_offsets() -> None:
         _disable_pacing(client)
         client._session.get = MagicMock(
             side_effect=[
-                _MockResponse(200, {"data": [_paper_payload("a")], "next": 10}),
+                _MockResponse(200, {"data": [_paper_payload(first_id)], "next": 10}),
                 _MockResponse(
                     200, {"data": [_paper_payload("a"), _paper_payload("b")]}
                 ),
             ]
         )
         papers = client.search_papers(" graph ", limit=2, raise_on_unavailable=True)
-        assert [paper.paper_id for paper in papers] == ["a", "b"]
+        assert [paper.paper_id for paper in papers] == [first_id, "b"]
         assert (
             client._session.get.call_args_list[0].kwargs["params"]["query"] == "graph"
         )
@@ -2289,19 +2292,25 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
 
 
 @pytest.mark.parametrize(
-    ("method", "nested_key"),
+    ("method", "nested_key", "malformed_kind"),
     [
-        ("get_recommended_papers", None),
-        ("search_papers", None),
-        ("get_paper_references", "citedPaper"),
-        ("get_paper_citations", "citingPaper"),
+        ("get_recommended_papers", None, "invalid-year"),
+        ("search_papers", None, "invalid-year"),
+        ("get_paper_references", "citedPaper", "invalid-year"),
+        ("get_paper_citations", "citingPaper", "invalid-year"),
+        ("get_recommended_papers", None, "blank-id"),
+        ("search_papers", None, "blank-id"),
     ],
 )
 def test_discovery_limits_count_usable_records(
-    method: str, nested_key: str | None
+    method: str, nested_key: str | None, malformed_kind: str
 ) -> None:
     """Malformed metadata must not hide a later usable row or fill its quota."""
-    malformed = {**_paper_payload("same"), "year": "unknown"}
+    malformed = (
+        {**_paper_payload("same"), "year": "unknown"}
+        if malformed_kind == "invalid-year"
+        else _paper_payload(" ")
+    )
     usable = _paper_payload("same", title="First usable row")
     other = _paper_payload("other", title="Other usable row")
     if method == "get_recommended_papers":
@@ -2342,13 +2351,16 @@ def test_discovery_limits_count_usable_records(
     assert client._session.get.call_count == len(responses)
 
 
-def test_recovered_relation_metadata_preserves_complete_reference_ids() -> None:
+@pytest.mark.parametrize("returned_id", ["same", " same "])
+def test_recovered_relation_metadata_preserves_complete_reference_ids(
+    returned_id: str,
+) -> None:
     """A complete listing retains IDs even when their metadata cannot be used."""
     rows = [
         {"citedPaper": {**_paper_payload("same"), "year": "unknown"}},
         {"citedPaper": {**_paper_payload("id-only"), "title": ["invalid"]}},
         {
-            "citedPaper": _paper_payload("same", title="Recovered metadata"),
+            "citedPaper": _paper_payload(returned_id, title="Recovered metadata"),
             "contexts": ["A useful reference passage."],
         },
     ]
@@ -2362,6 +2374,6 @@ def test_recovered_relation_metadata_preserves_complete_reference_ids() -> None:
         assert client.get_cached_reference_ids("focal") == ["same", "id-only"]
 
     assert [(paper.paper_id, paper.title) for paper in papers] == [
-        ("same", "Recovered metadata")
+        (returned_id, "Recovered metadata")
     ]
-    assert evidence["same"].contexts == ("A useful reference passage.",)
+    assert evidence[returned_id].contexts == ("A useful reference passage.",)

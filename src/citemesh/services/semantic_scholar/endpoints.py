@@ -665,7 +665,7 @@ class _EndpointsMixin:
             )
         for paper in listing.papers:
             if reference_evidence is not None and fetched_evidence is not None:
-                if evidence := fetched_evidence.get(paper.paper_id):
+                if evidence := fetched_evidence.get(normalize_paper_id(paper.paper_id)):
                     reference_evidence[paper.paper_id] = evidence
         _log_skipped_rows(
             f"{relation} discovery",
@@ -770,13 +770,14 @@ class _EndpointsMixin:
         malformed_records = 0
         for record in records:
             paper = payloads._convert_recommendation(record)
-            if paper is None:
+            if paper is None or not paper.paper_id.strip():
                 malformed_records += 1
                 logger.debug("Skipping malformed Semantic Scholar paper row.")
                 continue
-            if paper.paper_id in seen_ids:
+            normalized_id = normalize_paper_id(paper.paper_id)
+            if normalized_id in seen_ids:
                 continue
-            seen_ids.add(paper.paper_id)
+            seen_ids.add(normalized_id)
             papers.append(paper)
             if cache_full_metadata:
                 disk_cache._persist_paper(paper, paper.paper_id)
@@ -939,8 +940,9 @@ class _EndpointsMixin:
             )
             malformed_records += malformed
             for paper in page_papers:
-                if paper.paper_id not in seen_ids:
-                    seen_ids.add(paper.paper_id)
+                normalized_id = normalize_paper_id(paper.paper_id)
+                if normalized_id not in seen_ids:
+                    seen_ids.add(normalized_id)
                     papers.append(paper)
                     if len(papers) >= parsed_limit:
                         break
