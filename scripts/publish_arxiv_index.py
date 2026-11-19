@@ -13,6 +13,26 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from citemesh.cli import _discard_stdout
+from citemesh.cli.console import _configure_logging
+from citemesh.cli.parser import (
+    _ArgumentParser,
+    _help_examples,
+    _HelpFormatter,
+    _rich_epilog,
+)
+
+
+class _PublisherHelpFormatter(_HelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
+    """Use the CLI's help style and show only meaningful defaults."""
+
+    def _get_help_string(self, action: argparse.Action) -> str:
+        if action.default is None or action.default == 0:
+            return action.help or ""
+        return (
+            argparse.ArgumentDefaultsHelpFormatter._get_help_string(self, action) or ""
+        )
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the publication destination and local corpus settings.
@@ -20,12 +40,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     :param list[str] argv: Optional argument list; defaults to process arguments.
     :return argparse.Namespace: Parsed publication options.
     """
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    parser = _ArgumentParser(
+        description=__doc__,
+        formatter_class=_PublisherHelpFormatter,
+        usage="%(prog)s BUCKET OUTPUT [options]",
+        epilog=_rich_epilog(
+            _help_examples(
+                (
+                    "Publish an existing corpus namespace",
+                    "python scripts/publish_arxiv_index.py OWNER/BUCKET out/corpus --namespace NAMESPACE",
+                )
+            )
+        ),
     )
-    parser.add_argument("bucket", help="existing Hugging Face bucket (owner/name)")
+    parser._positionals.title = "Arguments"
+    parser._optionals.title = "Options"
     parser.add_argument(
-        "output", type=Path, help="new directory for the complete portable export"
+        "bucket", metavar="BUCKET", help="existing Hugging Face bucket (owner/name)"
+    )
+    parser.add_argument(
+        "output",
+        metavar="OUTPUT",
+        type=Path,
+        help="new directory for the complete portable export",
     )
     parser.add_argument(
         "--config",
@@ -33,31 +70,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument(
-        "--namespace", help="existing native cache namespace to refresh"
+        "--namespace",
+        metavar="NAMESPACE",
+        help="existing native cache namespace to refresh",
     )
     existing.add_argument(
         "--adopt-namespace",
+        metavar="NAMESPACE",
         help="legacy namespace to certify using the supplied original model settings",
     )
     parser.add_argument(
         "--dataset-revision",
+        metavar="REV",
         help="source revision; latest for new work, the recorded pin for interrupted "
         "work and adoption",
     )
     parser.add_argument(
-        "--model-revision", help="model revision for a new native configuration"
+        "--model-revision",
+        metavar="REV",
+        help="model revision for a new native configuration",
     )
     parser.add_argument(
         "--dimension",
+        metavar="N",
         type=int,
         default=512,
         help="embedding dimension for a new native configuration",
     )
     parser.add_argument(
         "--storage-precision",
+        metavar="PRECISION",
         choices=("int8", "float32"),
         default="int8",
-        help="stored vector dtype for a new native configuration",
+        help="stored vectors: int8 or float32 for a new native configuration",
     )
     parser.add_argument("--device", help="encoder device")
     parser.add_argument(
@@ -65,7 +110,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--verbose",
         action="count",
         default=0,
-        help="increase diagnostic verbosity",
+        help="show build phases (-v) or debug diagnostics (-vv)",
     )
     return parser.parse_args(argv)
 
@@ -139,11 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     :return int: Process-style exit code.
     """
     args = parse_args(argv)
-    logging.basicConfig(
-        level=max(logging.WARNING - 10 * args.verbose, logging.DEBUG),
-        stream=sys.stderr,
-        format="%(levelname)s: %(message)s",
-    )
+    _configure_logging(log_level=("warning", "info", "debug")[min(args.verbose, 2)])
     try:
         snapshot_id = publish_arxiv_index(
             args.bucket,
@@ -169,7 +210,12 @@ def main(argv: list[str] | None = None) -> int:
         logging.debug("Index publication failed", exc_info=True)
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(snapshot_id)
+    try:
+        print(snapshot_id)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _discard_stdout()
+        return 1
     return 0
 
 

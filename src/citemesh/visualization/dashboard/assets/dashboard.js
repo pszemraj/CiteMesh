@@ -18,7 +18,8 @@
     let bootstrapFailureMessage = "";
     let bootstrapStatusMessage = "";
     try {
-      initialEntry = collectionEntryFromGraphPayload(payload, "Current graph", true);
+      initialEntry = collectionEntryFromGraphPayload(payload, "Current graph");
+      payload = initialEntry.payload;
     } catch (err) {
       bootstrapFailureMessage =
         "Dashboard graph data is invalid: " + String((err && err.message) || err);
@@ -27,8 +28,7 @@
       try {
         collectionBundle = normalizeCollectionPackage(
           embeddedCollectionBundle,
-          "this dashboard",
-          true
+          "this dashboard"
         );
       } catch (err) {
         bootstrapStatusMessage =
@@ -53,8 +53,8 @@
     let nodeById = new Map();
     let nodeIndexById = new Map();
     let yearRange = {};
-    let seedNode = null;
-    let seedYear = null;
+    let focalNode = null;
+    let focalYear = null;
     let traceSpecs = [];
     let nodeTraceIndex = 0;
     let haloTraceIndex = -1;
@@ -110,8 +110,8 @@
       const rankedIds = order.slice().sort((leftId, rightId) => {
         const left = nodeById.get(leftId) || {};
         const right = nodeById.get(rightId) || {};
-        if (!!left.is_seed !== !!right.is_seed) {
-          return left.is_seed ? -1 : 1;
+        if (!!left.is_focal !== !!right.is_focal) {
+          return left.is_focal ? -1 : 1;
         }
         const citationDelta =
           Number(right.citation_count || 0) - Number(left.citation_count || 0);
@@ -130,7 +130,7 @@
       for (const nodeId of rankedIds) {
         const node = nodeById.get(nodeId) || {};
         const nodeIdx = indexById.get(nodeId);
-        const isCrowded = !node.is_seed && selectedIds.some((selectedId) => {
+        const isCrowded = !node.is_focal && selectedIds.some((selectedId) => {
           const selectedIdx = indexById.get(selectedId);
           return Math.hypot(
             Number(xPairs[nodeIdx] || 0) - Number(xPairs[selectedIdx] || 0),
@@ -159,10 +159,10 @@
       return escapeHtml(title.length <= 26 ? title : `${title.slice(0, 23)}...`);
     }
 
-    function currentSeedRingColor() {
+    function currentFocalRingColor() {
       const styles = getComputedStyle(document.documentElement);
-      const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
-      return color || "__SEED_RING__";
+      const color = String(styles.getPropertyValue("--focal-ring") || "").trim();
+      return color || "__FOCAL_RING__";
     }
 
     function colorWithAlpha(hexColor, alpha) {
@@ -238,18 +238,18 @@
       lines.push(escapeHtml(factBits.join(" | ")));
 
       const relationLabels = {
-        seed: "seed paper",
-        referenced_by_seed: "referenced by seed",
-        cites_seed: "cites seed",
+        focal: "focal paper",
+        referenced_by_focal: "referenced by focal paper",
+        cites_focal: "cites focal paper",
         overlap: "prior + derivative work",
         semantic_only: "semantic match",
         citation: "citation graph",
         semantic: "semantic match",
         both: "citations + semantic match",
       };
-      const relationKey = node.is_seed
-        ? "seed"
-        : String(node.seed_relation || node.provenance || "");
+      const relationKey = node.is_focal
+        ? "focal"
+        : String(node.focal_relation || node.provenance || "");
       const relationLabel = relationLabels[relationKey] || "";
       if (relationLabel) {
         lines.push(`<i>${escapeHtml(relationLabel)}</i>`);
@@ -308,15 +308,14 @@
           false
         );
         const resultSet = importedCollection
-          ? normalizeCollectionPackage(importedCollection, filename, true)
+          ? normalizeCollectionPackage(importedCollection, filename)
           : emptyCollectionPackage();
         const packageCurrentResultId = String(
           (importedCollection && importedCollection.current_result_id) || ""
         ).trim();
         const currentEntry = collectionEntryFromGraphPayload(
           importedGraph,
-          filename,
-          true
+          filename
         );
         if (!resultSet.results.some((entry) => entry.result_id === currentEntry.result_id)) {
           resultSet.results.push(currentEntry);
@@ -329,9 +328,9 @@
 
       const imported = JSON.parse(text);
       if (imported && imported.kind === COLLECTION_KIND) {
-        return normalizeCollectionPackage(imported, filename, false);
+        return normalizeCollectionPackage(imported, filename);
       }
-      const entry = collectionEntryFromGraphPayload(imported, filename, true);
+      const entry = collectionEntryFromGraphPayload(imported, filename);
       const resultSet = emptyCollectionPackage();
       resultSet.current_result_id = entry.result_id;
       resultSet.results.push(entry);
@@ -441,8 +440,8 @@
         xPairs,
         yPairs
       );
-      const seedId = String(meta.seed_id || "");
-      const seedRingColor = currentSeedRingColor();
+      const focalId = String(meta.focal_id || "");
+      const focalRingColor = currentFocalRingColor();
       const edgeStrengths = normalizeDashboardEdgeStrengths(nextEdges);
 
       const nodeTexts = [];
@@ -460,9 +459,9 @@
           : missingYear;
         nodeYears.push(nodeYear);
         hoverTexts.push(dashboardHoverText(node, nodeId));
-        if (node.is_seed) {
+        if (node.is_focal) {
           lineWidths.push(4.0);
-          lineColors.push(seedRingColor);
+          lineColors.push(focalRingColor);
         } else {
           lineWidths.push(0.0);
           lineColors.push("rgba(0,0,0,0)");
@@ -531,14 +530,14 @@
       nextTraceSpecs[nextNodeTraceIndex] = nodeTrace;
 
       if (nextHaloTraceIndex >= 0) {
-        const seedIdx = order.indexOf(seedId);
+        const focalIdx = order.indexOf(focalId);
         const haloTrace = nextTraceSpecs[nextHaloTraceIndex] || {};
-        haloTrace.x = seedIdx >= 0 ? [xPairs[seedIdx]] : [];
-        haloTrace.y = seedIdx >= 0 ? [yPairs[seedIdx]] : [];
+        haloTrace.x = focalIdx >= 0 ? [xPairs[focalIdx]] : [];
+        haloTrace.y = focalIdx >= 0 ? [yPairs[focalIdx]] : [];
         haloTrace.marker = Object.assign({}, haloTrace.marker || {}, {
-          size: seedIdx >= 0 ? [alignedNodeSizes[seedIdx] * 2.05] : [],
+          size: focalIdx >= 0 ? [alignedNodeSizes[focalIdx] * 2.05] : [],
           sizeref: nextMarkerSizeRef,
-          color: seedIdx >= 0 ? [colorWithAlpha(seedRingColor, 0.26)] : [],
+          color: focalIdx >= 0 ? [colorWithAlpha(focalRingColor, 0.26)] : [],
         });
         nextTraceSpecs[nextHaloTraceIndex] = haloTrace;
       }
@@ -586,7 +585,7 @@
           Math.max(4.0, Math.sqrt(alignedNodeSizes[idx] / (2.0 * nextMarkerSizeRef))) + lineWidths[idx] / 2.0
         ) + 3.0,
       }] : []);
-      layout.uirevision = `citemesh-dashboard-static-layout-v1:${String(meta.strategy || "")}:${String(meta.seed_id || "")}`;
+      layout.uirevision = `citemesh-dashboard-static-layout-v1:${String(meta.strategy || "")}:${String(meta.focal_id || "")}`;
 
       template.data = nextTraceSpecs;
       template.layout = layout;
@@ -601,9 +600,9 @@
       nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
       nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
       yearRange = (payload.meta && payload.meta.year_range) || {};
-      seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "") || null;
-      seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
-        ? Number(seedNode.year)
+      focalNode = nodeById.get((payload.meta && payload.meta.focal_id) || "") || null;
+      focalYear = focalNode && Number.isFinite(Number(focalNode.year)) && Number(focalNode.year) > 0
+        ? Number(focalNode.year)
         : null;
 
       traceSpecs = figureSpec.data || [];
@@ -654,7 +653,7 @@
     let persistedSavedIds = new Set();
 
     const state = {
-      selectedId: (payload.meta && payload.meta.seed_id) || null,
+      selectedId: (payload.meta && payload.meta.focal_id) || null,
       hoverId: null,
       filters: { citation: true, semantic: true, both: true },
       searchText: "",
@@ -672,8 +671,11 @@
     };
 
     const controls = {
+      root: document.getElementById("dashboard-root"),
       list: document.getElementById("paper-list"),
       count: document.getElementById("paper-count"),
+      morePapersBtn: document.getElementById("more-papers-btn"),
+      morePapersDialog: document.getElementById("more-papers-dialog"),
       search: document.getElementById("search-input"),
       sort: document.getElementById("sort-select"),
       yearMin: document.getElementById("year-min"),
@@ -682,19 +684,21 @@
       chips: Array.from(document.querySelectorAll("#provenance-filters .chip")),
       scopeButtons: Array.from(document.querySelectorAll("#scope-nav [data-scope]")),
       filtersToggle: document.getElementById("filters-toggle"),
-      listViewBtn: document.getElementById("list-view-btn"),
+      paneButtons: Array.from(document.querySelectorAll("#pane-nav [data-pane]")),
       moreBtn: document.getElementById("more-btn"),
       toolbar: document.getElementById("dashboard-toolbar"),
       detailMode: document.getElementById("detail-mode"),
+      detailContent: document.getElementById("detail-content"),
       detailTitle: document.getElementById("detail-title"),
       detailSubtitle: document.getElementById("detail-subtitle"),
       detailMetrics: document.getElementById("detail-metrics"),
       detailCategories: document.getElementById("detail-categories"),
       detailLinks: document.getElementById("detail-links"),
       detailWhy: document.getElementById("detail-why-lines"),
+      detailRanking: document.getElementById("detail-ranking"),
+      detailReference: document.getElementById("detail-reference"),
       detailActions: document.getElementById("detail-actions"),
       detailAbstract: document.getElementById("detail-abstract"),
-      graphHint: document.getElementById("graph-hint"),
       timelineYearMin: document.getElementById("timeline-year-min"),
       timelineYearMax: document.getElementById("timeline-year-max"),
       resultSelect: document.getElementById("result-select"),
@@ -707,8 +711,8 @@
     function savedStorageKey() {
       const meta = (payload && payload.meta) || {};
       const strategy = String(meta.strategy || "default");
-      const seedId = String(meta.seed_id || "default");
-      return `citemesh-saved:${strategy}:${seedId}`;
+      const focalId = String(meta.focal_id || "default");
+      return `citemesh-saved:${strategy}:${focalId}`;
     }
 
     function pruneSavedIdsForPayload(savedIds) {
@@ -757,6 +761,7 @@
       if (controls.savedChip) {
         controls.savedChip.textContent = count ? `Saved (${count})` : "Saved";
         controls.savedChip.classList.toggle("active", state.savedOnly);
+        controls.savedChip.setAttribute("aria-pressed", String(state.savedOnly));
       }
       const showExports = count > 0;
       if (controls.savedBibBtn) {
@@ -792,7 +797,7 @@
       updateSavedUi();
       renderList();
       if (state.hoverId === key) {
-        renderDetail(key, true);
+        renderDetail(key, key !== state.selectedId);
       } else if (state.selectedId === key && !state.hoverId) {
         renderDetail(key, false);
       }
@@ -843,33 +848,32 @@
       return state.filters[base] === true;
     }
 
-    // Scope is a citation-direction question, not a chronology one: a paper the
-    // seed references is prior work whatever year it carries, and a paper citing
-    // the seed is derivative work even when it predates the seed. Publication
-    // year only decides nodes the citation graph places in neither direction.
-    const PRIOR_SEED_RELATIONS = new Set(["referenced_by_seed", "overlap"]);
-    const DERIVATIVE_SEED_RELATIONS = new Set(["cites_seed", "overlap"]);
+    // A reference of the focal paper is prior work and a paper citing it is
+    // derivative work. Use publication year only when the citation direction
+    // is unknown.
+    const PRIOR_FOCAL_RELATIONS = new Set(["referenced_by_focal", "overlap"]);
+    const DERIVATIVE_FOCAL_RELATIONS = new Set(["cites_focal", "overlap"]);
 
     function nodeScopeMatches(node) {
       if (state.scopeMode !== "prior" && state.scopeMode !== "derivative") {
         return true;
       }
-      const relation = String(node.seed_relation || "").trim().toLowerCase();
-      if (node.is_seed || relation === "seed") {
+      const relation = String(node.focal_relation || "").trim().toLowerCase();
+      if (node.is_focal || relation === "focal") {
         return true;
       }
-      const priorRelation = PRIOR_SEED_RELATIONS.has(relation);
-      const derivativeRelation = DERIVATIVE_SEED_RELATIONS.has(relation);
+      const priorRelation = PRIOR_FOCAL_RELATIONS.has(relation);
+      const derivativeRelation = DERIVATIVE_FOCAL_RELATIONS.has(relation);
       if (priorRelation || derivativeRelation) {
         return state.scopeMode === "prior" ? priorRelation : derivativeRelation;
       }
       // "semantic_only", the direction-less "citation" token, and an absent
-      // relation all fall back to the seed year; an unusable year stays visible.
-      if (seedYear === null || !hasYear(node)) {
+      // relation all fall back to the focal year; an unusable year stays visible.
+      if (focalYear === null || !hasYear(node)) {
         return true;
       }
       const nodeYear = Number(node.year);
-      return state.scopeMode === "prior" ? nodeYear <= seedYear : nodeYear >= seedYear;
+      return state.scopeMode === "prior" ? nodeYear <= focalYear : nodeYear >= focalYear;
     }
 
     function nodeMatches(node) {
@@ -914,8 +918,8 @@
     }
 
     function compareNodes(nodeA, nodeB) {
-      if (!!nodeA.is_seed !== !!nodeB.is_seed) {
-        return nodeA.is_seed ? -1 : 1;
+      if (!!nodeA.is_focal !== !!nodeB.is_focal) {
+        return nodeA.is_focal ? -1 : 1;
       }
 
       if (state.sortKey === "title") {
@@ -948,8 +952,8 @@
         return tieBreak(nodeA, nodeB);
       }
 
-      const relevanceA = Number(nodeA.seed_relevance || 0);
-      const relevanceB = Number(nodeB.seed_relevance || 0);
+      const relevanceA = Number(nodeA.focal_relevance || 0);
+      const relevanceB = Number(nodeB.focal_relevance || 0);
       if (relevanceA !== relevanceB) {
         return relevanceB - relevanceA;
       }
@@ -957,23 +961,37 @@
     }
 
     function relationBadgeLabel(node) {
-      const relation = String(node.seed_relation || "").trim();
-      if (relation === "referenced_by_seed") {
-        return "referenced by seed";
+      const relation = String(node.focal_relation || "").trim();
+      if (node.is_focal || relation === "focal") {
+        return "Focal paper";
       }
-      if (relation === "cites_seed") {
-        return "cites seed";
+      if (relation === "referenced_by_focal") {
+        return "Referenced by focal paper";
+      }
+      if (relation === "cites_focal") {
+        return "Cites focal paper";
       }
       if (relation === "semantic_only") {
-        return "semantic-only";
+        return "No direct citation recorded";
       }
       if (relation === "overlap") {
-        return "prior+derivative";
+        return "Cites and is cited by focal paper";
       }
-      if (relation === "seed") {
-        return "origin";
+      return "";
+    }
+
+    function paperSourceLabel(node) {
+      const source = node.provenance === "focal" ? node.provenance_base : node.provenance;
+      if (source === "both") {
+        return "Citation and semantic";
       }
-      return String(node.provenance_base || node.provenance || "citation");
+      if (source === "citation") {
+        return "Citation";
+      }
+      if (source === "semantic") {
+        return "Semantic";
+      }
+      return "";
     }
 
     function filteredNodes() {
@@ -1004,44 +1022,81 @@
       const doiUrl = safeExternalUrl(links && links.doi);
       const semanticScholarUrl = safeExternalUrl(links && links.semantic_scholar);
       if (pdfUrl) {
-        entries.push({ kind: "pdf", title: "Open PDF", href: pdfUrl });
+        entries.push({ label: "PDF", href: pdfUrl });
       }
       if (arxivUrl) {
-        entries.push({ kind: "arxiv", title: "Open arXiv page", href: arxivUrl });
+        entries.push({ label: "arXiv", href: arxivUrl });
       }
       if (doiUrl) {
-        entries.push({ kind: "doi", title: "Open DOI", href: doiUrl });
+        entries.push({ label: "DOI", href: doiUrl });
       }
       if (semanticScholarUrl) {
-        entries.push({ kind: "s2", title: "Open Semantic Scholar", href: semanticScholarUrl });
+        entries.push({ label: "Semantic Scholar", href: semanticScholarUrl });
       }
       return entries;
     }
 
-    function linkIconSvg(kind) {
-      if (kind === "pdf") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"></path><polyline points="14 2 14 7 19 7"></polyline><line x1="8" y1="12" x2="16" y2="12"></line><line x1="8" y1="16" x2="13" y2="16"></line></svg>';
-      }
-      if (kind === "arxiv") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18L10 6l2 6 2-4 6 10"></path><circle cx="10" cy="6" r="1.2"></circle><circle cx="12" cy="12" r="1.2"></circle><circle cx="14" cy="8" r="1.2"></circle></svg>';
-      }
-      if (kind === "doi") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7h6"></path><path d="M9 12h6"></path><path d="M9 17h6"></path><circle cx="6.5" cy="7" r="1"></circle><circle cx="6.5" cy="12" r="1"></circle><circle cx="6.5" cy="17" r="1"></circle><path d="M17.5 7a2.5 2.5 0 0 1 0 5"></path><path d="M17.5 12a2.5 2.5 0 0 0 0 5"></path></svg>';
-      }
-      if (kind === "s2") {
-        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h12"></path><path d="M6 12h9"></path><path d="M6 19h12"></path><path d="M17 10l2 2-2 2"></path></svg>';
-      }
-      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"></path><path d="M8 8h8v8H8z"></path></svg>';
+    function detailLinksHtml(links) {
+      return detailLinkEntries(links)
+        .map((entry, index) => `<a${index === 0 ? ' class="primary-link"' : ""} href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer">${entry.label} <span aria-hidden="true">↗</span></a>`)
+        .join("");
     }
 
-    function detailLinksHtml(links) {
-      const entries = detailLinkEntries(links);
-      if (!entries.length) {
-        return "";
+    function discoveryLeadUrl(lead) {
+      const arxiv = [lead.arxiv_id, lead.paper_id]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim().replace(/^arxiv:/i, ""))
+        .find((value) => /^(?:\d{4}\.\d{4,5}|[a-z.-]+\/\d{7})(?:v\d+)?$/i.test(value));
+      if (arxiv) {
+        return `https://arxiv.org/abs/${arxiv}`;
       }
-      return entries
-        .map((entry) => `<a class="icon-link" href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(entry.title)}" aria-label="${escapeHtml(entry.title)}">${linkIconSvg(entry.kind)}</a>`)
+      const doi = [lead.doi, lead.paper_id]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.trim().replace(/^doi:/i, ""))
+        .find((value) => /^10\.\d{4,9}\/[!-~]+$/.test(value));
+      if (doi) {
+        return `https://doi.org/${doi.split("/").map(encodeURIComponent).join("/")}`;
+      }
+      const s2 = typeof lead.paper_id === "string"
+        ? /^(?:s2:)?([0-9a-f]{40})$/i.exec(lead.paper_id.trim())
+        : null;
+      return s2 ? `https://www.semanticscholar.org/paper/${s2[1]}` : "";
+    }
+
+    function discoveryLeadRowsHtml(entries, kind) {
+      return (Array.isArray(entries) ? entries : [])
+        .filter((entry) => typeof entry?.title === "string" && entry.title.trim())
+        .map((entry) => {
+          const title = escapeHtml(entry.title);
+          const href = discoveryLeadUrl(entry);
+          const link = href
+            ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+            : `<span>${title}</span>`;
+          let detail = "";
+          if (kind === "references" && Number.isInteger(entry.context_count) && entry.context_count > 0) {
+            const count = entry.context_count;
+            detail = `${count} ${count === 1 ? "mention" : "mentions"} in the focal paper`;
+          } else if (kind === "corpus" && Number.isInteger(entry.rank) && entry.rank > 0) {
+            detail = `arXiv index query rank #${entry.rank}`;
+          }
+          return `<li>${link}${detail ? `<span class="muted">${detail}</span>` : ""}</li>`;
+        })
         .join("");
+    }
+
+    function syncDiscoveryLeads() {
+      if (controls.morePapersDialog.open === true) {
+        controls.morePapersDialog.close();
+      }
+      const leads = payload.meta?.discovery_leads;
+      let hasLeads = false;
+      for (const kind of ["references", "corpus"]) {
+        const rows = discoveryLeadRowsHtml(leads?.[kind], kind);
+        document.getElementById(`more-papers-${kind}-list`).innerHTML = rows;
+        document.getElementById(`more-papers-${kind}`).hidden = !rows;
+        hasLeads ||= !!rows;
+      }
+      controls.morePapersBtn.hidden = !hasLeads;
     }
 
     function copyText(value) {
@@ -1109,14 +1164,15 @@
       return {
         kind: GRAPH_PAYLOAD_KIND,
         schema_version: GRAPH_PAYLOAD_SCHEMA_VERSION,
-        seed_id: nextMeta.seed_id || "",
+        focal_id: nextMeta.focal_id || "",
         meta: Object.assign(
           {
             strategy: nextMeta.strategy || "",
             year_range: nextMeta.year_range ?? null,
             candidate_source_status: nextMeta.candidate_source_status || {},
           },
-          nextMeta.discovery_ranker ? { discovery_ranker: nextMeta.discovery_ranker } : {}
+          nextMeta.discovery_ranker ? { discovery_ranker: nextMeta.discovery_ranker } : {},
+          nextMeta.discovery_leads ? { discovery_leads: nextMeta.discovery_leads } : {}
         ),
         summary,
         dashboard: {
@@ -1133,12 +1189,12 @@
 
     function currentResultIdForPayload(nextPayload) {
       const meta = (nextPayload && nextPayload.meta) || {};
-      const seedId = String(meta.seed_id || "");
+      const focalId = String(meta.focal_id || "");
       const strategy = String(meta.strategy || "");
-      if (!seedId || !strategy) {
+      if (!focalId || !strategy) {
         return null;
       }
-      return `${strategy}:${seedId}`;
+      return `${strategy}:${focalId}`;
     }
 
     function emptyCollectionPackage() {
@@ -1158,22 +1214,20 @@
       return Number.isInteger(value) && value >= 0;
     }
 
-    function normalizeImportedDashboardPayload(imported, label, allowLegacy) {
+    function normalizeImportedDashboardPayload(imported, label) {
       if (!isObjectRecord(imported)) {
         throw new Error("Expected a CiteMesh graph object.");
       }
       const declaredKind = String(imported.kind || "");
-      if (declaredKind) {
-        if (declaredKind !== GRAPH_PAYLOAD_KIND) {
-          throw new Error(`Unsupported result kind: ${declaredKind}.`);
-        }
-        if (imported.schema_version !== GRAPH_PAYLOAD_SCHEMA_VERSION) {
-          throw new Error(
-            `Unsupported ${GRAPH_PAYLOAD_KIND} schema version: ${String(imported.schema_version)}.`
-          );
-        }
-      } else if (!allowLegacy) {
-        throw new Error(`Result payload is missing kind=${GRAPH_PAYLOAD_KIND}.`);
+      if (declaredKind !== GRAPH_PAYLOAD_KIND) {
+        throw new Error(
+          `Unsupported graph format. Rebuild with this CiteMesh version before importing results (expected ${GRAPH_PAYLOAD_KIND}).`
+        );
+      }
+      if (imported.schema_version !== GRAPH_PAYLOAD_SCHEMA_VERSION) {
+        throw new Error(
+          `Unsupported ${GRAPH_PAYLOAD_KIND} schema version: ${String(imported.schema_version)}. Rebuild with this CiteMesh version before importing results.`
+        );
       }
 
       if (!Array.isArray(imported.nodes) || !imported.nodes.length) {
@@ -1188,7 +1242,7 @@
       if (nodeIds.some((nodeId) => !nodeId) || new Set(nodeIds).size !== nodeIds.length) {
         throw new Error("Graph result nodes must have unique, non-empty IDs.");
       }
-      if (declaredKind && nodeIds.some((nodeId) => nodeId !== nodeId.trim())) {
+      if (nodeIds.some((nodeId) => nodeId !== nodeId.trim())) {
         throw new Error("Versioned graph node IDs cannot contain surrounding whitespace.");
       }
       const nodeIdSet = new Set(nodeIds);
@@ -1199,24 +1253,22 @@
       ))) {
         throw new Error("Graph result edges must reference included node IDs.");
       }
-      if (declaredKind && importedEdges.some((edge) => (
+      if (importedEdges.some((edge) => (
         String(edge.source || "") !== String(edge.source || "").trim()
         || String(edge.target || "") !== String(edge.target || "").trim()
       ))) {
         throw new Error("Versioned graph edge IDs cannot contain surrounding whitespace.");
       }
-      if (declaredKind) {
-        if (!isObjectRecord(imported.summary)) {
-          throw new Error("Versioned graph results must contain a summary object.");
-        }
-        if (
-          !isNonNegativeInteger(imported.summary.nodes)
-          || !isNonNegativeInteger(imported.summary.edges)
-          || imported.summary.nodes !== importedNodes.length
-          || imported.summary.edges !== importedEdges.length
-        ) {
-          throw new Error("Graph result summary does not match its node and edge arrays.");
-        }
+      if (!isObjectRecord(imported.summary)) {
+        throw new Error("Versioned graph results must contain a summary object.");
+      }
+      if (
+        !isNonNegativeInteger(imported.summary.nodes)
+        || !isNonNegativeInteger(imported.summary.edges)
+        || imported.summary.nodes !== importedNodes.length
+        || imported.summary.edges !== importedEdges.length
+      ) {
+        throw new Error("Graph result summary does not match its node and edge arrays.");
       }
       const importedDashboardMeta =
         imported && imported.dashboard && imported.dashboard.meta
@@ -1226,48 +1278,36 @@
         imported && imported.meta && typeof imported.meta === "object"
           ? imported.meta
           : {};
-      const declaredSeedId = String(imported.seed_id || "");
-      const declaredStrategy = String(importedMeta.strategy || "");
-      if (declaredKind && (
-        !declaredSeedId
-        || declaredSeedId !== declaredSeedId.trim()
+      const focalId = String(imported.focal_id || "");
+      const strategy = String(importedMeta.strategy || "");
+      if (
+        !focalId
+        || focalId !== focalId.trim()
         || !isObjectRecord(imported.meta)
-        || !declaredStrategy
-        || declaredStrategy !== declaredStrategy.trim()
-      )) {
+        || !strategy
+        || strategy !== strategy.trim()
+      ) {
         throw new Error(
-          "Versioned graph results require canonical top-level seed_id and meta.strategy."
+          "Versioned graph results require canonical top-level focal_id and meta.strategy."
         );
       }
-      if (declaredKind && (
+      if (
         !isObjectRecord(importedDashboardMeta)
-        || String(importedDashboardMeta.seed_id || "") !== declaredSeedId
-        || String(importedDashboardMeta.strategy || "") !== declaredStrategy
+        || String(importedDashboardMeta.focal_id || "") !== focalId
+        || String(importedDashboardMeta.strategy || "") !== strategy
         || !isObjectRecord(importedDashboardMeta.summary)
         || importedDashboardMeta.summary.nodes !== importedNodes.length
         || importedDashboardMeta.summary.edges !== importedEdges.length
-      )) {
+      ) {
         throw new Error(
           "Versioned graph dashboard metadata must match its top-level identity and summary."
         );
       }
-      const seedId = String(
-        declaredSeedId
-        || importedDashboardMeta.seed_id
-        || importedMeta.seed_id
-        || ((importedNodes.find((node) => !!(node && node.is_seed)) || {}).id || "")
-      );
-      const strategy = declaredKind
-        ? declaredStrategy
-        : String(importedDashboardMeta.strategy || importedMeta.strategy || "");
-      if (!seedId || !nodeIds.includes(seedId)) {
-        throw new Error("Graph results must identify a seed node present in nodes.");
-      }
-      if (!strategy) {
-        throw new Error("Graph results must identify the build strategy.");
+      if (!nodeIds.includes(focalId)) {
+        throw new Error("Graph results must identify a focal node present in nodes.");
       }
       const baseMeta = {
-        seed_id: seedId,
+        focal_id: focalId,
         strategy,
         theme: String(
           (payload.meta && payload.meta.theme)
@@ -1296,6 +1336,10 @@
       if (discoveryRanker) {
         baseMeta.discovery_ranker = discoveryRanker;
       }
+      const discoveryLeads = importedDashboardMeta.discovery_leads || importedMeta.discovery_leads;
+      if (isObjectRecord(discoveryLeads)) {
+        baseMeta.discovery_leads = discoveryLeads;
+      }
       if (!hasCompleteDashboardGeometry(baseMeta)) {
         throw new Error(
           `Imported results from ${String(label || "the selected file")} are missing stored dashboard geometry. Export dashboard-compatible CiteMesh results first.`
@@ -1319,21 +1363,21 @@
       };
     }
 
-    function collectionEntryFromGraphPayload(imported, label, allowLegacy) {
-      const normalized = normalizeImportedDashboardPayload(imported, label, allowLegacy);
+    function collectionEntryFromGraphPayload(imported, label) {
+      const normalized = normalizeImportedDashboardPayload(imported, label);
       const normalizedPayload = normalized.payload;
       const resultId = currentResultIdForPayload(normalizedPayload);
       if (!resultId) {
-        throw new Error("Graph results do not provide a stable strategy and seed ID.");
+        throw new Error("Graph results do not provide a stable strategy and focal paper ID.");
       }
-      const seedId = String(normalizedPayload.meta.seed_id || "");
-      const seedNode = normalizedPayload.nodes.find(
-        (node) => String((node && node.id) || "") === seedId
+      const focalId = String(normalizedPayload.meta.focal_id || "");
+      const focalNode = normalizedPayload.nodes.find(
+        (node) => String((node && node.id) || "") === focalId
       );
       return {
         result_id: resultId,
-        seed_id: seedId,
-        title: String((seedNode && seedNode.title) || seedId || label || "Graph result"),
+        focal_id: focalId,
+        title: String((focalNode && focalNode.title) || focalId || label || "Graph result"),
         strategy: String(normalizedPayload.meta.strategy || ""),
         summary: {
           nodes: normalizedPayload.nodes.length,
@@ -1345,95 +1389,77 @@
       };
     }
 
-    function normalizeCollectionPackage(imported, label, allowLegacy) {
+    function normalizeCollectionPackage(imported, label) {
       if (!isObjectRecord(imported)) {
         throw new Error("Expected a CiteMesh dashboard collection object.");
       }
       const declaredKind = String(imported.kind || "");
-      const isVersionedCollection = declaredKind === COLLECTION_KIND;
-      if (declaredKind && !isVersionedCollection) {
-        throw new Error(`Unsupported collection kind: ${declaredKind}.`);
-      }
-      if (isVersionedCollection && imported.schema_version !== COLLECTION_SCHEMA_VERSION) {
+      if (declaredKind !== COLLECTION_KIND) {
         throw new Error(
-          `Unsupported ${COLLECTION_KIND} schema version: ${String(imported.schema_version)}.`
+          `Unsupported collection format. Rebuild with this CiteMesh version before importing results (expected ${COLLECTION_KIND}).`
         );
       }
-      if (!isVersionedCollection && !allowLegacy) {
-        throw new Error(`Collection package is missing kind=${COLLECTION_KIND}.`);
+      if (imported.schema_version !== COLLECTION_SCHEMA_VERSION) {
+        throw new Error(
+          `Unsupported ${COLLECTION_KIND} schema version: ${String(imported.schema_version)}. Rebuild with this CiteMesh version before importing results.`
+        );
       }
       if (!Array.isArray(imported.results)) {
         throw new Error("Collection package must contain a results array.");
       }
 
       const normalized = emptyCollectionPackage();
-      const legacyPayloads = isObjectRecord(imported.payloads) ? imported.payloads : {};
       imported.results.forEach((rawEntry, index) => {
         if (!isObjectRecord(rawEntry)) {
           throw new Error(`Collection result ${index + 1} must be an object.`);
         }
         const declaredResultId = String(rawEntry.result_id || "").trim();
-        const rawPayload = isObjectRecord(rawEntry.payload)
-          ? rawEntry.payload
-          : legacyPayloads[declaredResultId];
+        const rawPayload = rawEntry.payload;
         if (!isObjectRecord(rawPayload)) {
           throw new Error(`Collection result ${index + 1} is missing its graph payload.`);
         }
         const normalizedEntry = collectionEntryFromGraphPayload(
           rawPayload,
-          `${label || "collection"} result ${index + 1}`,
-          allowLegacy
+          `${label || "collection"} result ${index + 1}`
         );
         if (declaredResultId && declaredResultId !== normalizedEntry.result_id) {
           throw new Error(
-            `Collection result ${index + 1} ID does not match its graph strategy and seed.`
+            `Collection result ${index + 1} ID does not match its graph strategy and focal paper.`
           );
         }
-        if (!declaredResultId && isVersionedCollection) {
+        if (!declaredResultId) {
           throw new Error(`Collection result ${index + 1} is missing result_id.`);
         }
-        if (isVersionedCollection) {
-          if (!String(rawEntry.title || "").trim()) {
-            throw new Error(`Collection result ${index + 1} is missing title.`);
-          }
-          if (!String(rawEntry.updated_at || "").trim()) {
-            throw new Error(`Collection result ${index + 1} is missing updated_at.`);
-          }
-          if (!isObjectRecord(rawEntry.summary)) {
-            throw new Error(`Collection result ${index + 1} is missing summary.`);
-          }
-          if (
-            !isNonNegativeInteger(rawEntry.summary.nodes)
-            || !isNonNegativeInteger(rawEntry.summary.edges)
-            || rawEntry.summary.nodes !== normalizedEntry.summary.nodes
-            || rawEntry.summary.edges !== normalizedEntry.summary.edges
-          ) {
-            throw new Error(`Collection result ${index + 1} has an inconsistent summary.`);
-          }
-          if (!isObjectRecord(rawEntry.build)) {
-            throw new Error(`Collection result ${index + 1} is missing build metadata.`);
-          }
+        if (!String(rawEntry.title || "").trim()) {
+          throw new Error(`Collection result ${index + 1} is missing title.`);
         }
-        for (const field of ["seed_id", "strategy"]) {
+        if (!String(rawEntry.updated_at || "").trim()) {
+          throw new Error(`Collection result ${index + 1} is missing updated_at.`);
+        }
+        if (!isObjectRecord(rawEntry.summary)) {
+          throw new Error(`Collection result ${index + 1} is missing summary.`);
+        }
+        if (
+          !isNonNegativeInteger(rawEntry.summary.nodes)
+          || !isNonNegativeInteger(rawEntry.summary.edges)
+          || rawEntry.summary.nodes !== normalizedEntry.summary.nodes
+          || rawEntry.summary.edges !== normalizedEntry.summary.edges
+        ) {
+          throw new Error(`Collection result ${index + 1} has an inconsistent summary.`);
+        }
+        if (!isObjectRecord(rawEntry.build)) {
+          throw new Error(`Collection result ${index + 1} is missing build metadata.`);
+        }
+        for (const field of ["focal_id", "strategy"]) {
           if (
-            rawEntry[field] !== undefined
-            && String(rawEntry[field]) !== String(normalizedEntry[field])
+            String(rawEntry[field] || "") !== String(normalizedEntry[field])
           ) {
             throw new Error(`Collection result ${index + 1} has inconsistent ${field}.`);
           }
         }
-        if (rawEntry.title !== undefined) {
-          normalizedEntry.title = String(rawEntry.title || normalizedEntry.title);
-        }
-        if (rawEntry.updated_at !== undefined) {
-          normalizedEntry.updated_at = String(rawEntry.updated_at || "");
-        }
-        if (rawEntry.build !== undefined) {
-          if (!isObjectRecord(rawEntry.build)) {
-            throw new Error(`Collection result ${index + 1} build metadata must be an object.`);
-          }
-          normalizedEntry.build = rawEntry.build;
-        }
+        normalizedEntry.title = String(rawEntry.title);
+        normalizedEntry.updated_at = String(rawEntry.updated_at);
+        normalizedEntry.build = rawEntry.build;
         const duplicateIndex = normalized.results.findIndex(
           (entry) => entry.result_id === normalizedEntry.result_id
         );
@@ -1476,7 +1502,7 @@
         results: collectionEntries().map((entry) => {
           const portableEntry = {
             result_id: entry.result_id,
-            seed_id: entry.seed_id,
+            focal_id: entry.focal_id,
             title: entry.title,
             strategy: entry.strategy,
             summary: entry.summary,
@@ -1490,7 +1516,7 @@
     }
 
     function collectionEntryLabel(entry) {
-      const title = String(entry.title || entry.seed_id || entry.result_id || "Graph result");
+      const title = String(entry.title || entry.focal_id || entry.result_id || "Graph result");
       const strategy = String(entry.strategy || "");
       const summary = entry.summary || {};
       const nodeCount = Number(summary.nodes || 0);
@@ -1501,6 +1527,23 @@
 
     function collectionEntries() {
       return Array.isArray(collectionBundle.results) ? collectionBundle.results : [];
+    }
+
+    function renderGraphHeading() {
+      document.getElementById("focal-title").textContent = focalNode?.title || payload.meta.focal_id || "Paper graph";
+      const strategy = String(payload.meta.strategy || "");
+      const strategyLabel = strategy && strategy !== "unknown"
+        ? strategy[0].toUpperCase() + strategy.slice(1) + " discovery" : "";
+      const sources = payload.meta.candidate_source_status || {};
+      const names = { references: "references", citations: "citing papers", recommendations: "recommendations", arxiv_corpus: "arXiv corpus" };
+      const unavailable = Object.keys(sources).filter(key => sources[key] === "unavailable");
+      document.getElementById("graph-summary").textContent = [
+        strategyLabel,
+        sources.arxiv_corpus === "complete" ? "Includes arXiv corpus" : "",
+        `${nodes.length.toLocaleString()} ${nodes.length === 1 ? "paper" : "papers"}`,
+        `${payload.edges.length.toLocaleString()} ${payload.edges.length === 1 ? "link" : "links"}`,
+        unavailable.length ? "Unavailable: " + unavailable.map(key => names[key] || key).join(", ") : "",
+      ].filter(Boolean).join(" · ");
     }
 
     function populateCollectionSelector() {
@@ -1554,7 +1597,7 @@
     function defaultSortKey() {
       // A hybrid graph ranks every related paper, so lead with that order when the
       // ranking is complete. Any other graph keeps the relevance default.
-      const related = nodes.filter((node) => !node.is_seed);
+      const related = nodes.filter((node) => !node.is_focal);
       const fullyRanked = related.length > 0
         && related.every((node) => Number.isInteger(node.discovery_rank));
       return fullyRanked ? "discovery_rank" : "relevance";
@@ -1568,9 +1611,7 @@
       }
     }
 
-    function applyImportedPayload(imported, label) {
-      const normalizedImport = normalizeImportedDashboardPayload(imported, label, true);
-      const nextPayload = normalizedImport.payload;
+    function applyDashboardPayload(nextPayload) {
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
       figureSpec = nextFigureSpec;
@@ -1580,7 +1621,7 @@
       refreshSavedState();
       overlayState.neighborhoodKey = "";
       overlayState.haloKey = "";
-      state.selectedId = (payload.meta && payload.meta.seed_id) || null;
+      state.selectedId = (payload.meta && payload.meta.focal_id) || null;
       state.hoverId = null;
       state.searchText = "";
       state.sortKey = defaultSortKey();
@@ -1592,7 +1633,7 @@
       controls.sort.value = state.sortKey;
       controls.yearMin.value = "";
       controls.yearMax.value = "";
-      controls.scopeButtons.forEach((entry) => entry.classList.remove("active"));
+      syncScopeButtons();
       controls.chips.forEach((chip) => {
         const filterKey = chip.getAttribute("data-filter");
         if (!filterKey) {
@@ -1600,10 +1641,13 @@
         }
         state.filters[filterKey] = true;
         chip.classList.add("active");
+        chip.setAttribute("aria-pressed", "true");
       });
+      renderGraphHeading();
       populateCollectionSelector();
       updateYearPlaceholders();
       syncDiscoverySortOption();
+      syncDiscoveryLeads();
       renderTimeline();
       return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
         setupGraphInteractions();
@@ -1613,8 +1657,6 @@
           renderDetail(null, false);
         }
         renderList();
-        const loadedTitle = nodeById.get(state.selectedId || "");
-        controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : label);
       });
     }
 
@@ -1635,10 +1677,7 @@
       }
       collectionResultId = normalizedId;
       clearDashboardStatus();
-      return applyImportedPayload(
-        entry.payload,
-        collectionEntryLabel(entry)
-      );
+      return applyDashboardPayload(entry.payload);
     }
 
     function shortestPathIds(sourceId, targetId) {
@@ -1678,72 +1717,137 @@
       return [];
     }
 
+    function detailEvidenceHtml(evidence) {
+      return evidence
+        .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+        .join("");
+    }
+
+    function discoveryBreakdownHtml(node) {
+      if (!Number.isFinite(node.discovery_score)) {
+        return "";
+      }
+      const score = node.discovery_score.toFixed(4);
+      const ranks = node.discovery_list_ranks || {};
+      const entries = [
+        ["semantic", "Focal similarity list"],
+        ["reference_context", "Bibliography similarity list"],
+        ["direct", "Direct citation list"],
+        ["recommended", "Recommendation list"],
+        ["focal_reference", "Focal reference use"],
+      ];
+      const positions = entries
+        .filter(([key]) => Number.isInteger(ranks[key]))
+        .map(([key, label]) => [label, `#${ranks[key]}`]);
+      if (!positions.length) {
+        return `<p>Discovery score ${score}</p>`;
+      }
+      const ranker = payload.meta?.discovery_ranker;
+      const halfWeight = ranker?.weights?.focal_reference === 0.5
+        ? " The focal reference list contributes half that amount."
+        : "";
+      const formula = ranker?.method === "reciprocal_rank_fusion" && Number.isInteger(ranker.k)
+        ? `<p>Each list adds 1 / (${ranker.k} + position) to the score.${halfWeight}</p>`
+        : "";
+      return `<details>
+        <summary>Discovery score ${score}</summary>
+        ${formula}
+        <dl class="detail-evidence">${detailEvidenceHtml(positions)}</dl>
+      </details>`;
+    }
+
+    function focalReferenceEvidenceHtml(node) {
+      const evidence = node.focal_reference_evidence;
+      if (!evidence || node.is_focal) {
+        return "";
+      }
+      const count = Number.isInteger(evidence.context_count) ? evidence.context_count : 0;
+      const excerpt = typeof evidence.excerpt === "string" ? evidence.excerpt.trim() : "";
+      const influential = evidence.is_influential === true;
+      if (count <= 0 && !excerpt && !influential) {
+        return "";
+      }
+      const summary = count > 0
+        ? `${count} citation ${count === 1 ? "passage" : "passages"} in the focal paper`
+        : (excerpt ? "Citation passage in the focal paper" : "Influential citation");
+      const source = influential
+        ? "Marked influential by Semantic Scholar"
+        : "From Semantic Scholar";
+      if (!excerpt) {
+        return `<p>${summary} <span class="muted">· ${source}</span></p>`;
+      }
+      return `<details>
+        <summary>${summary}</summary>
+        <blockquote>${escapeHtml(excerpt)}</blockquote>
+        <p class="muted">${source}</p>
+      </details>`;
+    }
+
     function renderWhyLines(nodeId) {
-      const node = nodeId ? nodeById.get(nodeId) : null;
-      if (!node) {
-        controls.detailWhy.textContent = "Select a paper to inspect neighborhood evidence.";
-        controls.detailWhy.classList.add("muted");
-        return;
+      const node = nodeById.get(nodeId);
+      const ranked = Number.isInteger(node.discovery_rank);
+      const relation = relationBadgeLabel(node);
+      const evidence = [];
+      if (ranked) {
+        evidence.push(["Discovery rank", `#${node.discovery_rank} in the candidate pool`]);
+      }
+      evidence.push(["Relation", relation || "Unavailable"]);
+      if (ranked) {
+        const features = node.discovery_features || {};
+        const signals = [`Focal similarity ${Number(features.focal_similarity || 0).toFixed(3)}`];
+        if (Number.isFinite(features.bibliography_similarity)) {
+          signals.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
+        }
+        if (features.direct_citation && !relation) {
+          signals.push("direct citation");
+        }
+        if (Number.isInteger(features.recommendation_rank)) {
+          signals.push(`provider recommendation #${features.recommendation_rank}`);
+        }
+        evidence.push(["Discovery signals", signals.join(" · ")]);
       }
 
-      // Share the list badge's label map so one paper never reads
-      // "semantic-only" in the list and "semantic_only" in this card.
-      const relationLabel = relationBadgeLabel(node);
+      if (!node.is_focal) {
+        evidence.push(["Graph relevance", Number(node.focal_relevance || 0).toFixed(4)]);
+      }
       const neighbors = (adjacency.get(node.id) || [])
         .slice()
         .sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0))
         .slice(0, 3);
-      const neighborLine = neighbors.length
-        ? `Top links: ${neighbors.map((entry) => `${compactNodeLabel(entry.id)} (w=${Number(entry.weight || 0).toFixed(2)})`).join("; ")}`
-        : "Top links: none";
-      if (node.is_seed) {
-        controls.detailWhy.classList.remove("muted");
-        controls.detailWhy.innerHTML = [
-          `<div>${escapeHtml("Seed paper - every other node in this graph was gathered around it.")}</div>`,
-          `<div>${escapeHtml(neighborLine)}</div>`,
-        ].join("");
-        return;
+      evidence.push([
+        "Strongest similarity links",
+        neighbors.map((entry) => `${compactNodeLabel(entry.id)} (${Number(entry.weight || 0).toFixed(2)})`).join(" · ") || "None",
+      ]);
+      if (!node.is_focal) {
+        const focalId = (payload.meta && payload.meta.focal_id) || null;
+        const path = focalId ? shortestPathIds(focalId, node.id).reverse() : [];
+        evidence.push([
+          "Similarity path to focal paper",
+          path.map((id) => compactNodeLabel(id)).join(" → ") || "Unavailable",
+        ]);
       }
-      const seedId = (payload.meta && payload.meta.seed_id) || null;
-      const path = seedId ? shortestPathIds(seedId, node.id) : [];
-      const pathLine = path.length
-        ? `Shortest path to seed: ${path.map((pid) => compactNodeLabel(pid)).join(" -> ")}`
-        : "Shortest path to seed: unavailable";
-      const relevanceLine = `Seed relevance: ${Number(node.seed_relevance || 0).toFixed(4)} | Relation: ${relationLabel}`;
-      const discoveryLine = discoveryWhyLine(node);
-
-      controls.detailWhy.classList.remove("muted");
-      controls.detailWhy.innerHTML = [
-        `<div>${escapeHtml(relevanceLine)}</div>`,
-        discoveryLine ? `<div>${escapeHtml(discoveryLine)}</div>` : "",
-        `<div>${escapeHtml(neighborLine)}</div>`,
-        `<div>${escapeHtml(pathLine)}</div>`,
-      ].join("");
+      controls.detailWhy.innerHTML = detailEvidenceHtml(evidence);
+      controls.detailRanking.innerHTML = ranked ? discoveryBreakdownHtml(node) : "";
+      controls.detailReference.innerHTML = focalReferenceEvidenceHtml(node);
     }
 
-    function discoveryWhyLine(node) {
-      if (!Number.isInteger(node.discovery_rank)) {
-        return "";
+    function paperAuthorText(node, limit) {
+      const authors = Array.isArray(node.authors) ? node.authors : [];
+      if (authors.length > limit) {
+        return `${authors.slice(0, limit).join(", ")} +${authors.length - limit} more`;
       }
-      const features = node.discovery_features || {};
-      const parts = [
-        `Discovery rank ${node.discovery_rank} (score ${Number(node.discovery_score || 0).toFixed(4)})`,
-        `seed similarity ${Number(features.seed_similarity || 0).toFixed(3)}`,
-      ];
-      if (Number.isFinite(features.bibliography_similarity)) {
-        parts.push(`bibliography similarity ${features.bibliography_similarity.toFixed(3)}`);
-      }
-      if (features.direct_citation) {
-        parts.push("direct citation");
-      }
-      if (Number.isInteger(features.recommendation_rank)) {
-        parts.push(`recommended #${features.recommendation_rank}`);
-      }
-      return parts.join(" | ");
+      return authors.join(", ") || "Unknown authors";
     }
+
+    let detailNodeId = null;
 
     function renderDetail(nodeId, previewOnly) {
       const node = nodeId ? nodeById.get(nodeId) : null;
+      controls.detailContent.classList.toggle("is-empty", !node);
+      if (detailNodeId !== nodeId) {
+        controls.detailContent.scrollTop = 0;
+        detailNodeId = nodeId;
+      }
       if (!node) {
         controls.detailMode.textContent = "No selection";
         controls.detailTitle.textContent = "Select a paper";
@@ -1751,46 +1855,24 @@
         controls.detailMetrics.innerHTML = "";
         controls.detailCategories.innerHTML = "";
         controls.detailLinks.innerHTML = "";
-        controls.detailWhy.textContent = "Select a paper to inspect neighborhood evidence.";
-        controls.detailWhy.classList.add("muted");
+        controls.detailWhy.innerHTML = "";
+        controls.detailRanking.innerHTML = "";
+        controls.detailReference.innerHTML = "";
         controls.detailActions.innerHTML = "";
-        controls.detailAbstract.textContent = "Hover or click a paper to inspect abstract and metadata.";
+        controls.detailAbstract.textContent = "Choose a paper from the graph or list.";
         controls.detailAbstract.classList.add("muted");
-        controls.graphHint.textContent = "Hover to preview, click to lock";
         return;
       }
 
       controls.detailMode.textContent = previewOnly ? "Preview" : "Selected";
-      if (previewOnly && state.selectedId && state.selectedId !== node.id) {
-        controls.graphHint.textContent = "Previewing node (selection locked)";
-      } else if (previewOnly) {
-        controls.graphHint.textContent = "Previewing node • arcs show strongest direct links";
-      } else {
-        controls.graphHint.textContent = "Selection locked • red arcs are strongest direct links";
-      }
       controls.detailTitle.textContent = node.title || node.id;
-      let authorText = "Unknown authors";
-      if (Array.isArray(node.authors) && node.authors.length > 0) {
-        if (node.authors.length > 2) {
-          authorText = `${node.authors[0]} + ${node.authors.length - 1} authors`;
-        } else {
-          authorText = node.authors.join(", ");
-        }
-      }
       const yearText = hasYear(node) ? String(node.year) : "n.d.";
-      const venueText = node.venue ? `, ${node.venue}` : "";
-      controls.detailSubtitle.textContent = `${authorText} | ${yearText}${venueText}`;
+      const publication = node.venue ? `${yearText} · ${node.venue}` : yearText;
+      controls.detailSubtitle.innerHTML = `<div>${escapeHtml(paperAuthorText(node, 4))}</div><div>${escapeHtml(publication)}</div>`;
 
-      const provenance = node.provenance || "unknown";
-      const provenanceLabel = provenance === "seed" ? `seed (${node.provenance_base || "citation"})` : provenance;
-      const metrics = [
-        `Citations: ${Number(node.citation_count || 0).toLocaleString()}`,
-        `Source: ${provenanceLabel}`,
-        `Year: ${yearText}`,
-      ];
-      controls.detailMetrics.innerHTML = metrics
-        .map((metric) => `<span class="metric-pill">${escapeHtml(metric)}</span>`)
-        .join("");
+      const source = paperSourceLabel(node);
+      const citations = Number(node.citation_count || 0).toLocaleString();
+      controls.detailMetrics.textContent = `${citations} citations${source ? ` · Source: ${source}` : ""}`;
 
       const categories = Array.isArray(node.categories) ? node.categories.filter(Boolean).slice(0, 8) : [];
       controls.detailCategories.innerHTML = categories
@@ -1805,12 +1887,17 @@
       controls.detailActions.innerHTML = "";
       const saveBtn = document.createElement("button");
       saveBtn.type = "button";
-      saveBtn.textContent = isSaved(node.id) ? "★ Saved" : "☆ Save";
-      saveBtn.title = isSaved(node.id)
+      saveBtn.className = "detail-save";
+      const saved = isSaved(node.id);
+      saveBtn.textContent = saved ? "★ Saved" : "☆ Save";
+      saveBtn.setAttribute("aria-label", "Save to reading list");
+      saveBtn.setAttribute("aria-pressed", String(saved));
+      saveBtn.title = saved
         ? "Remove from reading list"
         : "Save to reading list";
       saveBtn.addEventListener("click", () => {
         toggleSaved(node.id);
+        controls.detailActions.querySelector(".detail-save")?.focus({ preventScroll: true });
       });
       controls.detailActions.appendChild(saveBtn);
 
@@ -1938,7 +2025,7 @@
           haloX = [defaultNodeX[idx]];
           haloY = [defaultNodeY[idx]];
           haloSize = [defaultNodeSizes[idx] * (state.selectedId ? __DASHBOARD_SELECTION_HALO_SCALE__ : 1.88)];
-          haloColor = [colorWithAlpha(currentSeedRingColor(), state.selectedId ? 0.34 : 0.26)];
+          haloColor = [colorWithAlpha(currentFocalRingColor(), state.selectedId ? 0.34 : 0.26)];
         }
         const haloKey = `${focusId || ""}|${state.selectedId ? "selected" : "hover"}`;
         if (overlayState.haloKey !== haloKey) {
@@ -1963,7 +2050,7 @@
     }
 
     function semanticScholarTarget() {
-      const focusId = state.selectedId || ((payload.meta && payload.meta.seed_id) || null);
+      const focusId = state.selectedId || ((payload.meta && payload.meta.focal_id) || null);
       const focusNode = focusId ? nodeById.get(focusId) : null;
       return safeExternalUrl(
         focusNode && focusNode.links && focusNode.links.semantic_scholar
@@ -2002,6 +2089,10 @@
 
     function renderList() {
       const listNodes = filteredNodes();
+      const focusedButton = document.activeElement?.closest(".paper-select, .star-btn");
+      const focusedId = focusedButton?.parentElement.getAttribute("data-node-id");
+      const focusedStar = focusedButton?.classList.contains("star-btn");
+      let focusTarget;
       listPreviewArmed = false;
       syncSemanticScholarButton();
       controls.count.textContent = `${listNodes.length.toLocaleString()} ${listNodes.length === 1 ? "paper" : "papers"}`;
@@ -2013,9 +2104,14 @@
 
       if (!listNodes.length) {
         const empty = document.createElement("li");
-        empty.className = "paper-row";
-        empty.innerHTML = '<div class="paper-title">No papers match current filters.</div>';
+        empty.className = "paper-list-empty";
+        empty.textContent = state.savedOnly && !state.savedIds.size
+          ? "Star a paper to add it to your reading list."
+          : "No papers match the current filters.";
         controls.list.appendChild(empty);
+        if (focusedId) {
+          controls.list.focus();
+        }
         syncHighlights();
         return;
       }
@@ -2026,34 +2122,42 @@
         row.setAttribute("data-node-id", node.id);
 
         const yearText = hasYear(node) ? String(node.year) : "n.d.";
-        const authors = Array.isArray(node.authors) && node.authors.length
-          ? node.authors.slice(0, 4).join(", ")
-          : "Unknown authors";
-        const provenance = relationBadgeLabel(node);
-        const provenanceClass = node.is_seed ? "meta-origin" : "";
-        const provenanceLabel = provenance;
-
+        const title = node.title || node.id;
+        const relation = relationBadgeLabel(node) || paperSourceLabel(node);
+        const rank = Number.isInteger(node.discovery_rank)
+          ? `<span class="paper-rank">Rank #${node.discovery_rank}</span>`
+          : "";
         const saved = isSaved(node.id);
         row.innerHTML = `
-          <div class="paper-row-head">
-            <div class="paper-title">${escapeHtml(node.title || node.id)}</div>
-            <button class="star-btn${saved ? " saved" : ""}" type="button" title="${saved ? "Remove from reading list" : "Save to reading list"}" aria-label="${saved ? "Remove from reading list" : "Save to reading list"}" aria-pressed="${saved ? "true" : "false"}">${saved ? "&#9733;" : "&#9734;"}</button>
-            <div class="paper-year">${escapeHtml(yearText)}</div>
-          </div>
-          <div class="paper-subline">${escapeHtml(authors)}</div>
-          <div class="paper-meta">
-            <span>${Number(node.citation_count || 0).toLocaleString()} citations</span>
-            <span class="meta-dot"></span>
-            <span class="${provenanceClass}">${escapeHtml(provenanceLabel)}</span>
-          </div>
+          <button class="paper-select" type="button" aria-current="${node.id === state.selectedId}" aria-controls="detail-content">
+            <span class="paper-title">${escapeHtml(title)}</span>
+            <span class="paper-subline">
+              <span class="paper-year">${yearText}</span>
+              <span class="paper-authors">${escapeHtml(paperAuthorText(node, 2))}</span>
+            </span>
+            <span class="paper-meta">
+              ${rank}
+              <span>${Number(node.citation_count || 0).toLocaleString()} citations</span>
+              ${relation ? `<span${node.is_focal ? ' class="meta-origin"' : ""}>${escapeHtml(relation)}</span>` : ""}
+            </span>
+          </button>
+          <button class="star-btn${saved ? " saved" : ""}" type="button" title="${saved ? "Remove from reading list" : "Save to reading list"}" aria-label="Save ${escapeHtml(title)} to reading list" aria-pressed="${saved}">${saved ? "&#9733;" : "&#9734;"}</button>
         `;
 
+        const selectBtn = row.querySelector(".paper-select");
+        selectBtn?.addEventListener("click", () => {
+          state.selectedId = node.id;
+          state.hoverId = null;
+          renderDetail(node.id, false);
+          renderList();
+          showPane("detail", true);
+        });
         const starBtn = row.querySelector(".star-btn");
-        if (starBtn) {
-          starBtn.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleSaved(node.id);
-          });
+        starBtn?.addEventListener("click", () => {
+          toggleSaved(node.id);
+        });
+        if (node.id === focusedId) {
+          focusTarget = focusedStar ? starBtn : selectBtn;
         }
 
         row.addEventListener("mouseenter", () => {
@@ -2068,21 +2172,36 @@
           }
           syncHighlights();
         });
-        row.addEventListener("click", () => {
-          state.selectedId = node.id;
-          renderDetail(node.id, false);
-          syncHighlights();
-          renderList();
-        });
         controls.list.appendChild(row);
       });
 
+      if (focusTarget) {
+        focusTarget.focus({ preventScroll: true });
+      } else if (focusedId) {
+        controls.list.querySelector(".paper-select")?.focus();
+      }
       syncHighlights();
     }
 
     function setControlsCollapsed(collapsed) {
       controls.toolbar.classList.toggle("collapsed", collapsed);
       controls.filtersToggle.classList.toggle("active", !collapsed);
+      controls.filtersToggle.setAttribute("aria-expanded", String(!collapsed));
+    }
+
+    function syncScopeButtons() {
+      controls.scopeButtons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.scope === state.scopeMode));
+      });
+    }
+
+    function showPane(pane, focusTitle = false) {
+      if (!window.matchMedia("(max-width: 1100px)").matches) return;
+      controls.root.dataset.pane = pane;
+      controls.paneButtons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.pane === pane));
+      });
+      if (focusTitle && pane === "detail") controls.detailTitle.focus();
     }
 
     function setupControls() {
@@ -2091,6 +2210,7 @@
       controls.list.addEventListener("mousemove", armListPreview);
       controls.search.addEventListener("input", (event) => {
         state.searchText = String(event.target.value || "").trim().toLowerCase();
+        showPane("paper-list");
         renderList();
       });
       controls.sort.addEventListener("change", (event) => {
@@ -2128,6 +2248,7 @@
           }
           state.filters[filterKey] = !state.filters[filterKey];
           chip.classList.toggle("active", state.filters[filterKey]);
+          chip.setAttribute("aria-pressed", String(state.filters[filterKey]));
           renderList();
         });
       });
@@ -2139,10 +2260,10 @@
             return;
           }
           state.scopeMode = state.scopeMode === scope ? "all" : scope;
-          controls.scopeButtons.forEach((entry) => {
-            const entryScope = entry.getAttribute("data-scope");
-            entry.classList.toggle("active", !!entryScope && entryScope === state.scopeMode);
-          });
+          syncScopeButtons();
+          if (controls.root.dataset.pane === "detail") {
+            showPane("paper-list");
+          }
           renderList();
         });
       });
@@ -2150,12 +2271,12 @@
       controls.filtersToggle.addEventListener("click", () => {
         const collapsed = !controls.toolbar.classList.contains("collapsed");
         setControlsCollapsed(collapsed);
-      });
-      controls.listViewBtn.addEventListener("click", () => {
-        const listPane = document.getElementById("paper-list-pane");
-        if (listPane) {
-          listPane.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (!collapsed && controls.root.dataset.pane === "detail") {
+          showPane("paper-list");
         }
+      });
+      controls.paneButtons.forEach((button) => {
+        button.addEventListener("click", () => showPane(button.dataset.pane));
       });
       controls.moreBtn.addEventListener("click", () => {
         const target = semanticScholarTarget();
@@ -2163,6 +2284,12 @@
           window.open(target, "_blank", "noopener,noreferrer");
         }
       });
+      controls.morePapersBtn.addEventListener("click", () => {
+        if (!controls.morePapersBtn.hidden) {
+          controls.morePapersDialog.showModal();
+        }
+      });
+      syncDiscoveryLeads();
       syncSemanticScholarButton();
 
       function downloadBlob(content, filename, mime) {
@@ -2176,10 +2303,10 @@
         URL.revokeObjectURL(anchor.href);
       }
 
-      function seedSlug() {
-        const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
-        const slug = seedNode && seedNode.title
-          ? seedNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase()
+      function focalSlug() {
+        const focalNode = nodeById.get((payload.meta && payload.meta.focal_id) || "");
+        const slug = focalNode && focalNode.title
+          ? focalNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase()
           : "";
         // Titles without ASCII alphanumerics slug to "", which would name the
         // download ".json" and give the browser no stem to disambiguate.
@@ -2188,7 +2315,7 @@
 
       document.getElementById("export-json-btn").addEventListener("click", () => {
         const exportPayload = buildPortableJsonPayload();
-        downloadBlob(JSON.stringify(exportPayload, null, 2), seedSlug() + ".json", "application/json");
+        downloadBlob(JSON.stringify(exportPayload, null, 2), focalSlug() + ".json", "application/json");
       });
 
       document.getElementById("export-collection-btn").addEventListener("click", () => {
@@ -2205,7 +2332,7 @@
       });
 
       document.getElementById("export-csv-btn").addEventListener("click", () => {
-        const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_seed","provenance","seed_relation","seed_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
+        const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_focal","provenance","focal_relation","focal_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
         // Mirror the CLI CSV writer: neutralize formula-leading cells (CWE-1236).
         function csvGuard(v) { const s = String(v == null ? "" : v); return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; }
         function csvEscape(v) { const s = csvGuard(v); return s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r") ? '"' + s.replace(/"/g, '""') + '"' : s; }
@@ -2214,16 +2341,16 @@
           const links = n.links || {};
           rows.push([
             n.id, n.title, n.year, (n.authors||[]).join("; "), n.citation_count, n.venue||"", n.arxiv_id||"", n.doi||"",
-            (n.categories||[]).join("; "), (n.is_seed ? "true" : "false"), n.provenance||"", n.seed_relation||"",
-            Number(n.seed_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
+            (n.categories||[]).join("; "), (n.is_focal ? "true" : "false"), n.provenance||"", n.focal_relation||"",
+            Number(n.focal_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
           ].map(csvEscape).join(","));
         }
-        downloadBlob(rows.join("\n"), seedSlug() + ".csv", "text/csv;charset=utf-8");
+        downloadBlob(rows.join("\n"), focalSlug() + ".csv", "text/csv;charset=utf-8");
       });
 
       document.getElementById("export-bib-btn").addEventListener("click", () => {
         const entries = (payload.nodes || []).map((n) => (n.bibtex || "").trim()).filter(Boolean);
-        downloadBlob(entries.join("\n\n") + "\n", seedSlug() + ".bib", "text/plain;charset=utf-8");
+        downloadBlob(entries.join("\n\n") + "\n", focalSlug() + ".bib", "text/plain;charset=utf-8");
       });
 
       controls.savedBibBtn.addEventListener("click", () => {
@@ -2231,7 +2358,7 @@
         if (!entries.length) {
           return;
         }
-        downloadBlob(entries.join("\n\n") + "\n", seedSlug() + "-saved.bib", "text/plain;charset=utf-8");
+        downloadBlob(entries.join("\n\n") + "\n", focalSlug() + "-saved.bib", "text/plain;charset=utf-8");
       });
 
       controls.copySavedBtn.addEventListener("click", () => {
@@ -2260,6 +2387,7 @@
       controls.savedChip.addEventListener("click", () => {
         state.savedOnly = !state.savedOnly;
         updateSavedUi();
+        showPane("paper-list");
         renderList();
       });
 
@@ -2325,6 +2453,7 @@
         if (!files.length) {
           return;
         }
+        document.getElementById("graph-tools").hidePopover();
         addResultFiles(files).catch((err) => {
           setDashboardStatus("Failed to add results: " + err.message, "warning");
         });
@@ -2334,12 +2463,14 @@
         if (!resultId) {
           return;
         }
+        document.getElementById("graph-tools").hidePopover();
         loadCollectionResult(resultId).catch((err) => {
           setDashboardStatus("Failed to switch graphs: " + err.message, "warning");
         });
       });
 
       setControlsCollapsed(true);
+      renderGraphHeading();
       populateCollectionSelector();
       updateYearPlaceholders();
       updateSavedUi();
@@ -2392,9 +2523,11 @@
           return;
         }
         state.selectedId = nodeId;
+        state.hoverId = null;
         renderDetail(nodeId, false);
         syncHighlights();
         renderList();
+        showPane("detail", true);
       });
     }
 
@@ -2417,11 +2550,13 @@
       syncDiscoverySortOption();
       controls.sort.value = state.sortKey;
       // Toolbar changes resize the pane without triggering a window resize.
-      const graphResizeObserver = new ResizeObserver(() => Plotly.Plots.resize(graphDiv));
+      const graphResizeObserver = new ResizeObserver(() => {
+        if (graphDiv.clientWidth && graphDiv.clientHeight) Plotly.Plots.resize(graphDiv);
+      });
       graphResizeObserver.observe(graphDiv);
       renderTimeline();
       // Result IDs survive rebuilds, so the saved payload can be newer than the
-      // initial graph even when both identify the same seed and strategy.
+      // initial graph even when both identify the same focal paper and strategy.
       if (
         collectionResultId
         && !bootstrapStatusMessage

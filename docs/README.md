@@ -6,7 +6,7 @@ New here: [install and build a first graph](../README.md#quick-start), then pick
 
 - [CLI usage](guides/cli.md): commands, flags, and troubleshooting
 - [Strategies](guides/strategies.md): choosing a discovery method
-- [How CiteMesh builds a graph](guides/how-it-works.md): the pipeline from seed to export
+- [How CiteMesh builds a graph](guides/how-it-works.md): the pipeline from focal paper to export
 - [User configuration](guides/configuration.md): persistent defaults and credentials
 - [Caching and data](guides/caching.md): reuse, hydration, portable corpus indexes, and maintenance
 - [Python API](guides/python-api.md): builders, installed indexes, and exporters for scripts and notebooks

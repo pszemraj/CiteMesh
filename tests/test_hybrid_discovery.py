@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from urllib.parse import unquote
 
@@ -24,6 +25,7 @@ from citemesh.services.semantic_scholar.endpoints import (
 )
 from citemesh.strategies import hybrid as hybrid_module
 from citemesh.strategies.candidates import CandidateAcquisitionError
+from citemesh.strategies.discovery_pool import DiscoveryPool
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.embedding import corpus_source as corpus_source_module
 from citemesh.strategies.hybrid import HybridGraphBuilder
@@ -39,11 +41,71 @@ pytestmark = pytest.mark.usefixtures("arxiv_unavailable")
 
 _DATASET_SOURCE = "fixture/hybrid-discovery-corpus"
 _FINGERPRINT = "artifact-hybrid-discovery"
-_SEED_ARXIV = "2401.00000"
-_SEED_ID = f"arxiv:{_SEED_ARXIV}"
+_FOCAL_ARXIV = "2401.00000"
+_FOCAL_ID = f"arxiv:{_FOCAL_ARXIV}"
 _MODES = ("candidates", "arxiv-corpus", "both")
 
 CorpusRow = dict[str, object]
+
+
+@pytest.mark.parametrize("fail_second", [False, True])
+def test_corpus_progress_counts_completed_queries_and_closes_on_failure(
+    monkeypatch: pytest.MonkeyPatch, fail_second: bool
+) -> None:
+    """Each retrieval role advances only after its search completes."""
+    counts: list[int] = []
+    closed: list[bool] = []
+    queries: list[NDArray[np.float32]] = []
+
+    @contextmanager
+    def progress(**kwargs: object) -> Iterator[SimpleNamespace]:
+        assert kwargs["total"] == 2
+        assert kwargs["unit"] == "queries"
+        try:
+            yield SimpleNamespace(update=lambda: counts.append(1))
+        finally:
+            closed.append(True)
+
+    def search(query: NDArray[np.float32], _top_k: int) -> list[Paper]:
+        assert len(counts) == len(queries)
+        queries.append(query)
+        if fail_second and len(queries) == 2:
+            raise RuntimeError("corpus read failed")
+        return []
+
+    monkeypatch.setattr(hybrid_module, "progress_task", progress)
+    builder = object.__new__(HybridGraphBuilder)
+    builder.embedding_builder = SimpleNamespace(search_prepared_corpus=search)
+    focal_query = np.asarray([1.0, 0.0], dtype=np.float32)
+    focal_document = np.asarray([0.0, 1.0], dtype=np.float32)
+    if fail_second:
+        with pytest.raises(RuntimeError, match="Semantic enrichment failed"):
+            builder._search_corpus(MagicMock(), focal_query, focal_document)
+    else:
+        builder._search_corpus(MagicMock(), focal_query, focal_document)
+
+    assert queries[0] is focal_query
+    assert queries[1] is focal_document
+    assert counts == [1] * (1 if fail_second else 2)
+    assert closed == [True]
+
+
+def test_corpus_leads_retain_native_query_positions() -> None:
+    """Focal exclusion and a second retrieval role must not renumber query ranks."""
+    focal = Paper(paper_id="focal", title="Focal", year=2024, is_focal=True)
+    query_hit = Paper(paper_id="query-hit", title="Query hit", year=2023)
+    document_hit = Paper(paper_id="document-hit", title="Document hit", year=2023)
+    pool = DiscoveryPool(focal)
+    search = MagicMock(side_effect=[[focal, query_hit], [query_hit, document_hit]])
+    builder = object.__new__(HybridGraphBuilder)
+    builder.embedding_builder = SimpleNamespace(search_prepared_corpus=search)
+    focal_query = np.asarray([1.0, 0.0], dtype=np.float32)
+    focal_document = np.asarray([0.0, 1.0], dtype=np.float32)
+
+    builder._search_corpus(pool, focal_query, focal_document)
+
+    assert set(pool.papers) == {"query-hit", "document-hit"}
+    assert pool.query_corpus_ranks == {"query-hit": 2}
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +173,7 @@ def _not_found() -> MagicMock:
 
 @dataclass
 class FakeSemanticScholar:
-    """In-memory provider serving one seed's relations and every paper's references.
+    """In-memory provider serving one focal paper's relations and every paper's references.
 
     ``requests`` counts every HTTP call by kind: ``paper``, ``references`` and
     ``citations`` (inline relation listings), ``reference_ids`` (ID-only
@@ -121,6 +183,7 @@ class FakeSemanticScholar:
 
     papers: dict[str, dict[str, object]] = field(default_factory=dict)
     references: dict[str, list[str]] = field(default_factory=dict)
+    reference_evidence: dict[str, dict[str, object]] = field(default_factory=dict)
     citations: dict[str, list[str]] = field(default_factory=dict)
     recommendations: list[str] = field(default_factory=list)
     aliases: dict[str, str] = field(default_factory=dict)
@@ -188,8 +251,14 @@ class FakeSemanticScholar:
         offset = int(str(params.get("offset", 0)))
         limit = int(str(params.get("limit", 1000)))
         window = ids[offset : offset + limit]
+        data: list[dict[str, object]] = [
+            {key: self.papers[paper_id]} for paper_id in window
+        ]
+        if key == "citedPaper" and "contexts" in str(params.get("fields", "")):
+            for record, paper_id in zip(data, window, strict=True):
+                record.update(self.reference_evidence.get(paper_id, {}))
         return {
-            "data": [{key: self.papers[paper_id]} for paper_id in window],
+            "data": data,
             "next": offset + limit if offset + limit < len(ids) else None,
         }
 
@@ -272,7 +341,7 @@ def fake_client(world: FakeSemanticScholar) -> Iterator[SemanticScholarClient]:
 
 @dataclass
 class Scenario:
-    """A seed's provider world, its corpus, and the S2 IDs of each source list."""
+    """A focal paper's provider world, its corpus, and the S2 IDs of each source list."""
 
     world: FakeSemanticScholar
     corpus: list[CorpusRow]
@@ -283,15 +352,16 @@ class Scenario:
 
 
 def _scenario(*, citers: int = 60) -> Scenario:
-    """Build a seed with indexed references, unindexed citers and mixed recommendations.
+    """Build a focal paper with indexed references, unindexed citers and mixed recommendations.
 
-    :param int citers: Number of papers citing the seed.
+    :param int citers: Number of papers citing the focal paper.
     :return Scenario: Provider world and corpus rows.
     """
     world = FakeSemanticScholar()
-    seed_title = "learning rate schedules seed"
-    seed_s2 = world.add("f" * 40, seed_title, arxiv_id=_SEED_ARXIV, year=2024)
-    corpus = [_corpus_row(_SEED_ARXIV, seed_title, year=2024)]
+    # Keep fixture text stable because the hash encoder derives geometry from it.
+    focal_title = "learning rate schedules seed"
+    focal_s2 = world.add("f" * 40, focal_title, arxiv_id=_FOCAL_ARXIV, year=2024)
+    corpus = [_corpus_row(_FOCAL_ARXIV, focal_title, year=2024)]
     references = []
     for index in range(30):
         arxiv_id = f"2301.{index:05d}"
@@ -316,8 +386,8 @@ def _scenario(*, citers: int = 60) -> Scenario:
         arxiv_id = f"2303.{index:05d}"
         corpus.append(_corpus_row(arxiv_id, f"corpus only neighbour learning {index}"))
         corpus_only.append(f"arxiv:{arxiv_id}")
-    world.references[seed_s2] = references
-    world.citations[seed_s2] = citing
+    world.references[focal_s2] = references
+    world.citations[focal_s2] = citing
     world.recommendations = recommendations
     for paper_id in [*references, *citing, *recommendations]:
         world.references[paper_id] = references[:3]
@@ -382,7 +452,7 @@ def test_pool_holds_every_list_of_its_mode(
             WordHashEncodeModel(),
             scenario.corpus,
         )
-        papers = builder.collect_papers(_SEED_ID)
+        papers = builder.collect_papers(_FOCAL_ID)
 
     pool = builder.discovery_pool
     assert pool is not None
@@ -413,6 +483,50 @@ def test_pool_holds_every_list_of_its_mode(
         ]
 
 
+@pytest.mark.parametrize(
+    ("mode", "provider_subjects", "corpus_subjects", "expected_pool"),
+    [
+        ("candidates", ["Medicine", "Physics"], "", "recent"),
+        ("candidates", ["Geology", "Medicine"], "", "recent"),
+        ("candidates", ["Mathematics", "Computer Science"], "", "all-cs"),
+        ("candidates", ["CS", "Physics"], "", "all-cs"),
+        ("candidates", [], "", "all-cs"),
+        ("candidates", ["Unknown"], "", "all-cs"),
+        ("both", ["Computer Science"], "astro-ph.HE astro-ph.CO", "recent"),
+        ("both", ["Physics"], "astro-ph.HE cs.AI", "all-cs"),
+        ("both", ["Physics"], "stat.ML math.ST", "all-cs"),
+        ("both", ["Physics"], "cmp-lg", "all-cs"),
+        ("both", ["Physics"], "", "all-cs"),
+    ],
+)
+def test_recommendation_pool_uses_the_resolved_focal_subjects(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    provider_subjects: list[str],
+    corpus_subjects: str,
+    expected_pool: str,
+) -> None:
+    """Hybrid selects a recommendation pool without additional focal lookups."""
+    scenario = _scenario(citers=1)
+    scenario.world.papers["f" * 40]["fieldsOfStudy"] = provider_subjects
+    scenario.corpus[0]["categories"] = corpus_subjects
+    with fake_client(scenario.world) as client:
+        builder = _builder(client, scenario, mode, max_papers=4, fetch_references=False)
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        builder.collect_papers(_FOCAL_ID)
+
+    assert scenario.world.requests["paper"] == int(mode == "candidates")
+    assert scenario.world.requests["recommendations"] == 1
+    assert (
+        scenario.world.recommendation_params[0].get("from", "recent") == expected_pool
+    )
+
+
 @pytest.mark.parametrize("mode", ["arxiv-corpus", "both"])
 def test_indexed_provider_records_use_their_corpus_rows(
     monkeypatch: pytest.MonkeyPatch, mode: str
@@ -441,7 +555,7 @@ def test_indexed_provider_records_use_their_corpus_rows(
             return embed_documents(papers)
 
         monkeypatch.setattr(builder, "_embed_documents", record_encoding)
-        builder.collect_papers(_SEED_ID)
+        builder.collect_papers(_FOCAL_ID)
 
     pool = builder.discovery_pool
     assert pool is not None
@@ -468,7 +582,7 @@ def test_candidates_mode_outage_fails_before_the_model_loads(
     """With no corpus to search, a total provider outage stops collection early."""
     client = MagicMock()
     client.get_paper.return_value = Paper(
-        paper_id="f" * 40, title="Seed", year=2024, arxiv_id=_SEED_ARXIV
+        paper_id="f" * 40, title="Focal", year=2024, arxiv_id=_FOCAL_ARXIV
     )
     for method in ("get_paper_references", "get_paper_citations"):
         getattr(client, method).side_effect = SemanticScholarUnavailableError("down")
@@ -478,7 +592,7 @@ def test_candidates_mode_outage_fails_before_the_model_loads(
     monkeypatch.setattr(builder.embedding_builder, "_load_model", load_model)
 
     with pytest.raises(CandidateAcquisitionError, match="hybrid candidate"):
-        builder.collect_papers(_SEED_ID)
+        builder.collect_papers(_FOCAL_ID)
 
     load_model.assert_not_called()
     assert set(builder.candidate_source_status.values()) == {"unavailable"}
@@ -492,7 +606,7 @@ def test_citers_are_ranked_without_truncation(
     with fake_client(scenario.world) as client:
         builder = _builder(client, scenario, "candidates", max_papers=10)
         install_runtime(monkeypatch, builder.embedding_builder, WordHashEncodeModel())
-        papers = builder.collect_papers(_SEED_ID)
+        papers = builder.collect_papers(_FOCAL_ID)
 
     ranked = {item.paper_id for item in builder.discovery_ranking}
     assert ranked >= set(scenario.citers[:1000])
@@ -521,14 +635,14 @@ def test_publication_version_takes_one_slot(monkeypatch: pytest.MonkeyPatch) -> 
             WordHashEncodeModel(),
             scenario.corpus,
         )
-        papers = builder.collect_papers(_SEED_ID)
+        papers = builder.collect_papers(_FOCAL_ID)
 
     pool = builder.discovery_pool
     assert pool is not None
     assert pool.provider_aliases[publication] == preprint
     assert publication not in pool.papers
     assert pool.sources[preprint] == {"citation", "semantic"}
-    assert builder.seed_relations[preprint] == "cites_seed"
+    assert builder.focal_relations[preprint] == "cites_focal"
     ranked_ids = [item.paper_id for item in builder.discovery_ranking]
     assert ranked_ids[0] == preprint
     assert list(papers)[1:] == ranked_ids[:3]
@@ -555,13 +669,13 @@ def test_publication_version_without_a_corpus_row_takes_one_slot(
             WordHashEncodeModel(),
             scenario.corpus,
         )
-        papers = builder.collect_papers(_SEED_ID)
+        papers = builder.collect_papers(_FOCAL_ID)
 
     pool = builder.discovery_pool
     assert pool is not None
     assert pool.provider_aliases[publication] == preprint
     assert publication not in pool.papers
-    assert builder.seed_relations[preprint] == "cites_seed"
+    assert builder.focal_relations[preprint] == "cites_focal"
     ranked_ids = [item.paper_id for item in builder.discovery_ranking]
     assert preprint in ranked_ids and publication not in ranked_ids
     # The pair takes one of the three slots; the publication takes none.
@@ -595,15 +709,103 @@ def test_builds_are_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
             install_runtime(
                 monkeypatch, builder.embedding_builder, model, scenario.corpus
             )
-            graph, seed_id = builder.build_graph(_SEED_ID)
+            graph, focal_id = builder.build_graph(_FOCAL_ID)
             ranking = [
                 (item.paper_id, round(item.score, 12))
                 for item in builder.discovery_ranking
             ]
-            outcomes.append((seed_id, ranking, _graph_signature(graph)))
+            outcomes.append((focal_id, ranking, _graph_signature(graph)))
 
     assert outcomes[0] == outcomes[1]
-    assert outcomes[0][0] == _SEED_ID
+    assert outcomes[0][0] == _FOCAL_ID
+
+
+def test_focal_reference_evidence_tracks_canonical_work_and_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both provider aliases annotate the canonical corpus node for this build."""
+    scenario = _scenario(citers=0)
+    scenario.corpus = scenario.corpus[:2]
+    provider_id = scenario.references[0]
+    arxiv = "2301.00000"
+    alias = scenario.world.add("e" * 40, "Alias of the reference", arxiv_id=arxiv)
+    scenario.world.references["f" * 40] = [provider_id, alias]
+    scenario.world.reference_evidence = {
+        provider_id: {"contexts": ["First excerpt"], "isInfluential": False},
+        alias: {"contexts": ["First excerpt", "Second excerpt"], "isInfluential": True},
+    }
+    with fake_client(scenario.world) as client:
+        builder = _builder(
+            client,
+            scenario,
+            "arxiv-corpus",
+            max_papers=2,
+            max_citations=0,
+            fetch_references=False,
+        )
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        graph, focal_id = builder.build_graph(_FOCAL_ID)
+        related = f"arxiv:{arxiv}"
+        assert set(graph) == {focal_id, related}
+        assert "focal_reference_evidence" not in graph.nodes[focal_id]
+        assert graph.nodes[related]["focal_reference_evidence"] == {
+            "context_count": 2,
+            "excerpt": "First excerpt",
+            "is_influential": True,
+        }
+        assert graph.graph["discovery_ranker"]["weights"] == {"focal_reference": 0.5}
+        active = graph.graph["discovery_ranking"][related]
+        assert active["discovery_list_ranks"]["focal_reference"] == 1
+
+        scenario.world.reference_evidence.clear()
+        rebuilt, _focal_id = builder.build_graph(_FOCAL_ID)
+        assert "focal_reference_evidence" not in rebuilt.nodes[related]
+        assert set(rebuilt) == set(graph)
+        assert "weights" not in rebuilt.graph["discovery_ranker"]
+        inactive = rebuilt.graph["discovery_ranking"][related]
+        assert "focal_reference" not in inactive["discovery_list_ranks"]
+        assert active["discovery_score"] == pytest.approx(
+            inactive["discovery_score"] + 0.5 / 61
+        )
+        assert scenario.world.requests["references"] == 2
+        assert scenario.world.requests["reference_ids"] == 0
+
+
+def test_build_caps_additional_reading_and_excludes_graph_papers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public build exports two omitted-paper lists within the related budget."""
+    scenario = _scenario()
+    scenario.world.reference_evidence = {
+        paper_id: {"contexts": ["First excerpt", "Second excerpt"]}
+        for paper_id in scenario.references
+    }
+    with fake_client(scenario.world) as client:
+        builder = _builder(client, scenario, "both", max_papers=4)
+        install_runtime(
+            monkeypatch,
+            builder.embedding_builder,
+            WordHashEncodeModel(),
+            scenario.corpus,
+        )
+        graph, focal_id = builder.build_graph(_FOCAL_ID)
+
+    payload = GraphExporter(graph, focal_id).graph_payload()
+    leads = payload["meta"]["discovery_leads"]
+    assert payload["dashboard"]["meta"]["discovery_leads"] == leads
+    assert len(graph) == 4
+    assert any("focal_reference_evidence" in data for _, data in graph.nodes(data=True))
+    for reading_list in leads.values():
+        assert len(reading_list) == 3
+        assert {row["paper_id"] for row in reading_list}.isdisjoint(graph)
+    assert [row["rank"] for row in leads["references"]] == sorted(
+        row["rank"] for row in leads["references"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -611,7 +813,7 @@ def test_builds_are_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     [
         (
             "candidates",
-            # The seed lookup, its three lists (each carrying its metadata), and
+            # The focal lookup, its three lists (each carrying its metadata), and
             # the reference lists of the selected citation-sourced papers.
             {
                 "citations": 1,
@@ -649,7 +851,7 @@ def test_provider_requests_per_build(
 ) -> None:
     """Pin the provider requests of a cold build and of a warm rebuild.
 
-    Warm rebuilds reuse the paper and reference caches, so only the seed's own
+    Warm rebuilds reuse the paper and reference caches, so only the focal paper's own
     lists are requested again.
     """
     scenario = _scenario()
@@ -664,7 +866,7 @@ def test_provider_requests_per_build(
             install_runtime(
                 monkeypatch, builder.embedding_builder, model, scenario.corpus
             )
-            builder.build_graph(_SEED_ID)
+            builder.build_graph(_FOCAL_ID)
             counts.append(dict(scenario.world.requests))
             encoded.append(dict(Counter(map(_encoding_role, model.texts))))
 
@@ -672,9 +874,9 @@ def test_provider_requests_per_build(
     assert encoded == _ENCODED_TEXTS[mode]
 
 
-# Texts encoded per build by role: the seed query, retrieval documents and the
+# Texts encoded per build by role: the focal paper query, retrieval documents and the
 # graph-similarity vectors of the 45 selected papers, which are cached. Candidates
-# mode keeps the seed's and its 130 members' documents in the candidate cache, so
+# mode keeps the focal paper's and its 130 members' documents in the candidate cache, so
 # a rebuild encodes only the query. Corpus modes hydrate the 111-row corpus once
 # and encode the members without a corpus row (60 citers, plus 20 unindexed
 # recommendations in both mode) in memory on every build.
@@ -718,11 +920,11 @@ def test_json_export_carries_each_related_papers_discovery_evidence(
             WordHashEncodeModel(),
             scenario.corpus,
         )
-        graph, seed_id = builder.build_graph(_SEED_ID)
-    payload = GraphExporter(graph, seed_id).graph_payload()
+        graph, focal_id = builder.build_graph(_FOCAL_ID)
+    payload = GraphExporter(graph, focal_id).graph_payload()
     json.dumps(payload, allow_nan=False)
 
-    # Corpus-only mode fetches no recommendations, so it fuses three lists.
+    # The fixture supplies no focal evidence. Corpus-only also has no recommendations.
     lists = ["semantic", "reference_context", "direct"]
     if mode == "both":
         lists.append("recommended")
@@ -730,15 +932,15 @@ def test_json_export_carries_each_related_papers_discovery_evidence(
     assert payload["meta"]["discovery_ranker"] == ranker
     assert payload["dashboard"]["meta"]["discovery_ranker"] == ranker
     ranking = {item.paper_id: item for item in builder.discovery_ranking}
-    seed, *related = sorted(payload["nodes"], key=lambda node: not node["is_seed"])
-    assert "discovery_rank" not in seed
+    focal, *related = sorted(payload["nodes"], key=lambda node: not node["is_focal"])
+    assert "discovery_rank" not in focal
     assert sorted(node["discovery_rank"] for node in related) == list(range(1, 45))
     for node in related:
         item = ranking[node["id"]]
         assert node["discovery_rank"] == item.rank
         assert node["discovery_score"] == item.score
         assert node["discovery_features"] == {
-            "seed_similarity": item.features.cos_dd,
+            "focal_similarity": item.features.cos_dd,
             "bibliography_similarity": item.features.ctx_ref_top5,
             "direct_citation": item.features.direct,
             "recommendation_rank": item.features.recommendation_rank,

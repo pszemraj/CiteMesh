@@ -2,14 +2,13 @@
 
 Owns the ``dashboard.citemesh.json`` collection package — its filenames and
 lock, the staged-artifact commit protocol, schema validation for graph payloads
-and result entries, legacy manifest migration, and the viewer snapshot rendered
+and result entries, and the viewer snapshot rendered
 from the latest collection state.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import math
 import os
 import tempfile
@@ -39,9 +38,6 @@ from .contracts import (
 if TYPE_CHECKING:
     from citemesh.core.models import PaperGraph
     from citemesh.visualization.export import GraphExporter
-
-logger = logging.getLogger(__name__)
-
 
 DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS = 60.0
 
@@ -191,7 +187,7 @@ def _validated_non_negative_count(raw: object, *, field: str) -> int:
 def _validated_dashboard_token(raw: object, *, field: str) -> str:
     """Validate a non-empty dashboard identity token without hidden whitespace.
 
-    :param object raw: Candidate seed, strategy, node, or edge token.
+    :param object raw: Candidate focal, strategy, node, or edge token.
     :param str field: Field label for validation errors.
     :return str: Canonical token.
     :raises DashboardPackageError: If the token is empty or padded with whitespace.
@@ -226,10 +222,11 @@ def _validate_dashboard_graph_payload(
     if type(graph_schema) is not int or graph_schema != GRAPH_PAYLOAD_SCHEMA_VERSION:
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} has unsupported graph schema "
-            f"version {graph_schema!r}."
+            f"version {graph_schema!r}. Rebuild with this CiteMesh version "
+            "before importing the graph."
         )
-    seed_id = _validated_dashboard_token(
-        raw_payload.get("seed_id"), field=f"result {result_id!r} payload seed_id"
+    focal_id = _validated_dashboard_token(
+        raw_payload.get("focal_id"), field=f"result {result_id!r} payload focal_id"
     )
     meta = raw_payload.get("meta")
     summary = raw_payload.get("summary")
@@ -268,10 +265,10 @@ def _validate_dashboard_graph_payload(
         )
         node_ids.append(node_id)
     node_id_set = set(node_ids)
-    if len(node_id_set) != len(node_ids) or seed_id not in node_id_set:
+    if len(node_id_set) != len(node_ids) or focal_id not in node_id_set:
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} requires unique node IDs "
-            "including its seed."
+            "including its focal paper."
         )
     for edge in edges:
         if not _is_object_dict(edge):
@@ -296,9 +293,9 @@ def _validate_dashboard_graph_payload(
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} is missing dashboard geometry."
         )
-    dashboard_seed_id = _validated_dashboard_token(
-        dashboard_meta.get("seed_id"),
-        field=f"result {result_id!r} dashboard seed_id",
+    dashboard_focal_id = _validated_dashboard_token(
+        dashboard_meta.get("focal_id"),
+        field=f"result {result_id!r} dashboard focal_id",
     )
     dashboard_strategy = _validated_dashboard_token(
         dashboard_meta.get("strategy"),
@@ -318,7 +315,7 @@ def _validate_dashboard_graph_payload(
         dashboard_node_count = None
         dashboard_edge_count = None
     if (
-        dashboard_seed_id != seed_id
+        dashboard_focal_id != focal_id
         or dashboard_strategy != payload_strategy
         or dashboard_node_count != node_count
         or dashboard_edge_count != edge_count
@@ -393,16 +390,16 @@ def _validate_dashboard_result_entry(raw_entry: object) -> DashboardResultEntry:
     if not _is_object_dict(raw_entry):
         raise DashboardPackageError("Dashboard package result entries must be objects.")
     result_id = str(raw_entry.get("result_id") or "").strip()
-    seed_id = str(raw_entry.get("seed_id") or "").strip()
+    focal_id = str(raw_entry.get("focal_id") or "").strip()
     strategy = str(raw_entry.get("strategy") or "").strip()
     title = str(raw_entry.get("title") or "").strip()
     updated_at = str(raw_entry.get("updated_at") or "").strip()
-    if not all((result_id, seed_id, strategy, title, updated_at)):
+    if not all((result_id, focal_id, strategy, title, updated_at)):
         raise DashboardPackageError(
-            "Dashboard package result entries require result_id, seed_id, title, "
+            "Dashboard package result entries require result_id, focal_id, title, "
             "strategy, and updated_at."
         )
-    expected_result_id = f"{strategy}:{seed_id}"
+    expected_result_id = f"{strategy}:{focal_id}"
     if result_id != expected_result_id:
         raise DashboardPackageError(
             f"Dashboard package result_id {result_id!r} does not match "
@@ -428,7 +425,7 @@ def _validate_dashboard_result_entry(raw_entry: object) -> DashboardResultEntry:
     payload_meta = payload["meta"]
     payload_summary = payload["summary"]
     if (
-        str(payload.get("seed_id") or "").strip() != seed_id
+        str(payload.get("focal_id") or "").strip() != focal_id
         or str(payload_meta.get("strategy") or "").strip() != strategy
     ):
         raise DashboardPackageError(
@@ -448,7 +445,7 @@ def _validate_dashboard_result_entry(raw_entry: object) -> DashboardResultEntry:
         )
     return {
         "result_id": result_id,
-        "seed_id": seed_id,
+        "focal_id": focal_id,
         "title": title,
         "strategy": strategy,
         "summary": normalized_summary,
@@ -487,7 +484,8 @@ def _validate_dashboard_package(raw_package: object) -> DashboardCollectionPacka
         or schema_version != DASHBOARD_COLLECTION_SCHEMA_VERSION
     ):
         raise DashboardPackageError(
-            f"Unsupported dashboard package schema version {schema_version!r}."
+            f"Unsupported dashboard package schema version {schema_version!r}. "
+            "Rebuild with this CiteMesh version into a new output directory."
         )
     raw_results = raw_package.get("results")
     if not isinstance(raw_results, list):
@@ -535,117 +533,29 @@ def load_dashboard_package(package_path: Path) -> DashboardCollectionPackage:
     )
 
 
-def _resolve_collection_artifact_path(
-    collection_root: Path, relative_path: object
-) -> Path | None:
-    """Resolve a legacy manifest artifact path confined to its collection root.
+def load_existing_dashboard_collection(
+    package_path: Path,
+) -> DashboardCollectionPackage | None:
+    """Load current collections and refuse legacy output before a build writes.
 
-    :param Path collection_root: Legacy collection directory.
-    :param object relative_path: Manifest-provided relative artifact path.
-    :return Optional[Path]: Confined resolved path, or ``None`` when unsafe.
+    :param Path package_path: Destination collection package path.
+    :raises DashboardPackageError: If existing output needs rebuilding elsewhere.
     """
-    candidate = Path(str(relative_path or "").strip())
-    if not str(candidate) or candidate.is_absolute():
-        return None
-    resolved_root = collection_root.resolve()
-    resolved_candidate = (resolved_root / candidate).resolve()
-    try:
-        resolved_candidate.relative_to(resolved_root)
-    except ValueError:
-        return None
-    return resolved_candidate
-
-
-def _load_legacy_dashboard_results(collection_root: Path) -> list[DashboardResultEntry]:
-    """Load valid entries from a legacy manifest without modifying legacy files.
-
-    Invalid legacy entries are reported and skipped. Their source files remain
-    untouched, allowing manual recovery while safe entries migrate forward.
-
-    :param Path collection_root: Collection directory containing a legacy manifest.
-    :return list[DashboardResultEntry]: Valid entries in manifest order.
-    """
-    manifest_path = collection_root / LEGACY_DASHBOARD_MANIFEST_FILENAME
-    if not path_exists(manifest_path):
-        return []
-    try:
-        manifest = _load_package_object(
-            manifest_path, label="legacy dashboard manifest"
+    if path_exists(package_path):
+        return load_dashboard_package(package_path)
+    if path_exists(package_path.parent / LEGACY_DASHBOARD_MANIFEST_FILENAME):
+        raise DashboardPackageError(
+            "This output directory contains a legacy dashboard manifest. "
+            "Rebuild with this CiteMesh version into a new output directory."
         )
-    except DashboardPackageError as exc:
-        logger.warning("Skipping invalid legacy dashboard manifest: %s", exc)
-        return []
-    raw_results = manifest.get("results")
-    if manifest.get("schema_version") != 1 or not isinstance(raw_results, list):
-        logger.warning(
-            "Skipping unsupported legacy dashboard manifest at %s.", manifest_path
-        )
-        return []
-
-    results: list[DashboardResultEntry] = []
-    seen_result_ids: set[str] = set()
-    for index, raw_entry in enumerate(raw_results):
-        if not isinstance(raw_entry, dict):
-            logger.warning(
-                "Skipping invalid legacy dashboard result at index %d.", index
-            )
-            continue
-        json_path = _resolve_collection_artifact_path(
-            collection_root, raw_entry.get("json_path")
-        )
-        config_path = _resolve_collection_artifact_path(
-            collection_root, raw_entry.get("config_path")
-        )
-        if json_path is None or config_path is None:
-            logger.warning(
-                "Skipping legacy dashboard result %r with an unsafe artifact path.",
-                raw_entry.get("result_id"),
-            )
-            continue
-        try:
-            graph_payload = _load_package_object(
-                json_path, label="legacy graph payload"
-            )
-            config_payload = _load_package_object(
-                config_path, label="legacy graph config"
-            )
-            graph_payload = dict(graph_payload)
-            graph_payload.setdefault("kind", GRAPH_PAYLOAD_KIND)
-            graph_payload.setdefault("schema_version", GRAPH_PAYLOAD_SCHEMA_VERSION)
-            build = config_payload.get("build", {})
-            summary = graph_payload.get("summary", raw_entry.get("summary"))
-            candidate = _validate_dashboard_result_entry(
-                {
-                    "result_id": raw_entry.get("result_id"),
-                    "seed_id": raw_entry.get("seed_id"),
-                    "title": raw_entry.get("title"),
-                    "strategy": raw_entry.get("strategy"),
-                    "summary": summary,
-                    "updated_at": raw_entry.get("updated_at"),
-                    "payload": graph_payload,
-                    "build": build,
-                }
-            )
-        except DashboardPackageError as exc:
-            logger.warning(
-                "Skipping invalid legacy dashboard result %r: %s",
-                raw_entry.get("result_id"),
-                exc,
-            )
-            continue
-        result_id = candidate["result_id"]
-        if result_id in seen_result_ids:
-            continue
-        seen_result_ids.add(result_id)
-        results.append(candidate)
-    return results
+    return None
 
 
 def update_dashboard_package(
     package_path: Path,
     *,
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
     strategy: str,
     payload: GraphPayload,
     build: BuildConfig,
@@ -654,15 +564,15 @@ def update_dashboard_package(
 ) -> DashboardCollectionPackage:
     """Atomically create or update a portable dashboard collection package.
 
-    One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
-    existing-package validation, optional legacy migration, merge, and atomic
+    One slot is retained per ``(strategy, focal_id)`` pair. The package lock covers
+    existing-package validation, merge, and atomic
     replacement. Complete per-result exports may be staged before locking and
     published with rollback here, so concurrent or failed builds cannot leave a
     mixed successful result bundle.
 
     :param Path package_path: Portable collection package path.
-    :param PaperGraph graph: Built graph used for seed metadata.
-    :param str seed_id: Seed node identifier.
+    :param PaperGraph graph: Built graph used for focal metadata.
+    :param str focal_id: Focal node identifier.
     :param str strategy: Active strategy name.
     :param GraphPayload payload: Canonical graph payload from the exporter.
     :param BuildConfig build: Portable resolved build settings.
@@ -673,19 +583,19 @@ def update_dashboard_package(
     :return DashboardCollectionPackage: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
-    result_id = f"{strategy}:{seed_id}"
+    result_id = f"{strategy}:{focal_id}"
     validated_payload = _validate_dashboard_graph_payload(payload, result_id=result_id)
     payload_summary = validated_payload["summary"]
-    seed_payload = next(
+    focal_payload = next(
         node
         for node in validated_payload["nodes"]
-        if str(node.get("id")) == str(validated_payload["seed_id"])
+        if str(node.get("id")) == str(validated_payload["focal_id"])
     )
-    seed_title = str(seed_payload.get("title") or seed_id)
+    focal_title = str(focal_payload.get("title") or focal_id)
     entry_candidate: dict[str, object] = {
         "result_id": result_id,
-        "seed_id": seed_id,
-        "title": seed_title,
+        "focal_id": focal_id,
+        "title": focal_title,
         "strategy": strategy,
         "summary": {
             "nodes": payload_summary["nodes"],
@@ -701,11 +611,8 @@ def update_dashboard_package(
     lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
     try:
         with lock:
-            if path_exists(package_path):
-                existing_package = load_dashboard_package(package_path)
-                existing_results = existing_package["results"]
-            else:
-                existing_results = _load_legacy_dashboard_results(package_path.parent)
+            existing_package = load_existing_dashboard_collection(package_path)
+            existing_results = existing_package["results"] if existing_package else []
             filtered = [
                 item for item in existing_results if item.get("result_id") != result_id
             ]

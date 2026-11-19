@@ -246,8 +246,15 @@ def test_refresh_preserves_encoder_batching_capabilities(
     model = builder.model
     calls = []
 
-    def encode_prefetched(texts, *, batch_size):
+    callbacks = []
+
+    def encode_prefetched(texts, *, batch_size, on_progress=None):
         calls.append((list(texts), batch_size))
+        callbacks.append(on_progress)
+        if on_progress is not None:
+            on_progress(0)
+            for completed in range(1, len(texts) + 1):
+                on_progress(completed)
         return model.encode(texts)
 
     model.prefetch_batches = prefetch
@@ -262,6 +269,16 @@ def test_refresh_preserves_encoder_batching_capabilities(
     if prefetch:
         assert len(calls) == 1
         assert calls[0][1] == 1
+        assert len(callbacks) == 1 and callable(callbacks[0])
+        completed = []
+        callback = completed.append
+        lazy_encoder = refresh._LazyEncoder(builder)
+        lazy_encoder.encode_prefetched(
+            ["one", "two"], batch_size=1, on_progress=callback
+        )
+        assert callbacks[-1] is callback
+        assert completed == [0, 1, 2]
+        assert lazy_encoder.encoded_count == 2
     else:
         assert not calls
         assert "truncate 3 of 3 inputs" in caplog.text

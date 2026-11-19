@@ -49,6 +49,8 @@ from . import corpus_source, deps
 from .config import (
     CALIBRATION_RESERVOIR_SEED,
     CANDIDATE_MULTIPLIER,
+    PUBLIC_ARXIV_INDEX_IMPORT,
+    matches_public_arxiv_index,
 )
 from .records import (
     _DATASET_PAPER_ID_FIELDS,
@@ -251,6 +253,8 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
     ``_embedding_runtime_metadata`` and ``_format_retrieval_document_metadata``.
     """
 
+    _public_index_reminder_shown: bool = False
+
     def _single_revision_remedy(self) -> str:
         """Name the cheapest way to bring this corpus cache onto one source revision.
 
@@ -281,11 +285,11 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         )
 
     def _search_cache_candidates(
-        self, seed_embedding: NDArray[np.float32], top_k: int | None = None
+        self, focal_embedding: NDArray[np.float32], top_k: int | None = None
     ) -> list[tuple[str, CachedPaperMetadata, NDArray[np.float32]]]:
         """Run cache-native retrieval and map results to candidate tuples.
 
-        :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
+        :param NDArray[np.float32] focal_embedding: Normalized focal paper embedding vector.
         :param int | None top_k: Rows to return; defaults to a multiple of
             ``max_papers``.
         :return List[Tuple[str, CachedPaperMetadata, NDArray[np.float32]]]: Candidates by score.
@@ -293,15 +297,11 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if top_k is None:
             top_k = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         search_results = self.embedding_cache.search(
-            query_embedding=np.asarray(seed_embedding, dtype=np.float32),
+            query_embedding=np.asarray(focal_embedding, dtype=np.float32),
             top_k=top_k,
             binary_prefilter=self.binary_prefilter,
             binary_rescore_multiplier=self.binary_rescore_multiplier,
-            corpus_size=(
-                self.corpus_size
-                if getattr(self, "_cache_selection", None) is not None
-                else None
-            ),
+            corpus_size=self.corpus_size,
         )
         self._last_search_used_binary_prefilter = (
             self.embedding_cache.last_search_used_binary_prefilter
@@ -425,6 +425,20 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 revision=self.embedding_cache.get_hydration_source_revision(),
             )
             return
+
+        if (
+            not self._public_index_reminder_shown
+            and matches_public_arxiv_index(self)
+            and self._cached_payload_row_count() == 0
+        ):
+            self._public_index_reminder_shown = True
+            import_command = " \\\n    ".join(PUBLIC_ARXIV_INDEX_IMPORT)
+            logger.info(
+                "Starting a new arXiv corpus cache.\n"
+                "Skip corpus encoding with the public precomputed index:\n"
+                f"  {import_command}\n"
+                "After import, rerun your original build command."
+            )
 
         dataset_source, revision, dataset = self._resolve_hydration_dataset(
             cached_dataset_source, use_streaming
@@ -1146,12 +1160,10 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
         if coverage == "covers":
             # Re-stamping the smaller request would make the token lie about the
             # rows the namespace holds, so the cap stays where the vectors are.
-            logger.warning(
+            logger.debug(
                 "Embedding cache for %s/%s holds %s, which already covers the "
-                "requested %s, so it is being reused as-is and results are drawn "
-                "from the larger cached corpus (%d rows). Run `citemesh cache "
-                "clear` or --force-rebuild-cache to rebuild at exactly the "
-                "requested size.",
+                "requested %s; searching the requested view while retaining "
+                "all %d stored rows.",
                 source,
                 self.dataset_split,
                 stats.hydration_corpus_size,
@@ -1331,10 +1343,9 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             )
         else:
             if updated_rows > self.corpus_size:
-                logger.warning(
-                    "Extended corpus has %d cached rows, exceeding --corpus-size "
-                    "%d after the source selection changed. Retained existing "
-                    "vectors; rebuild the corpus to apply the cap exactly.",
+                logger.debug(
+                    "Extended corpus retained %d stored rows after the source "
+                    "selection changed; search remains bounded to newest:%d.",
                     updated_rows,
                     self.corpus_size,
                 )
@@ -1437,13 +1448,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return False
         updated_rows = self._cached_payload_row_count()
         if resumed_corpus_size is not None and updated_rows > resumed_corpus_size:
-            logger.warning(
-                "Resumed capped corpus has %d cached rows, exceeding "
-                "--corpus-size %d after the source selection changed. "
-                "Retained existing vectors; rebuild the corpus to apply "
-                "the cap exactly.",
+            logger.debug(
+                "Resumed capped corpus retained %d stored rows for recorded "
+                "newest:%d coverage; search uses the requested %s view.",
                 updated_rows,
                 resumed_corpus_size,
+                _corpus_size_token(self.corpus_size),
             )
         if unlisted_paper_ids:
             for alias, paper_ids in legacy_aliases.items():
@@ -1810,9 +1820,6 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                         sampled_records[replace_idx] = metadata
                 progress.update(1)
 
-            if progress_total is None:
-                progress.set_postfix_str(f"processed {progress.n}")
-
         return sampled_records
 
     def _ensure_int8_calibration_ranges(
@@ -1974,9 +1981,6 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
                 if pending_write is not None:
                     hydrated_records += pending_write.result()
                     progress.update(pending_batch_size)
-
-            if progress_total is None:
-                progress.set_postfix_str(f"processed {progress.n}")
 
         return hydrated_records
 
@@ -2469,12 +2473,12 @@ class _CorpusHydrationMixin(_EmbeddingBuilderHostBase):
             return
 
         if updated_rows > corpus_size:
-            logger.warning(
-                "Refreshed capped corpus has %d cached rows, exceeding "
-                "--corpus-size %d after the source selection changed. Retained "
-                "existing vectors; rebuild the corpus to apply the cap exactly.",
+            logger.debug(
+                "Refreshed capped corpus retained %d stored rows for recorded "
+                "newest:%d coverage; search uses the requested %s view.",
                 updated_rows,
                 corpus_size,
+                _corpus_size_token(self.corpus_size),
             )
         if upstream_rows is not None:
             self.embedding_cache.set_hydration_rowcount_reconciliation(

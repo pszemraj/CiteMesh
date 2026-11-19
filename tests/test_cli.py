@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import (
     closing,
@@ -31,8 +31,10 @@ from unittest.mock import MagicMock
 
 import networkx as nx
 import pytest
+from rich.console import Console
 
 from citemesh import cli as cli_module
+from citemesh import progress as progress_module
 from citemesh.cli import (
     DASHBOARD_COLLECTION_KIND,
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
@@ -58,10 +60,10 @@ from citemesh.cli.commands import config as config_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
 from citemesh.core import API_CONFIG, Author, Paper
-from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, get_cache_dir
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
-from citemesh.data.user_config import UserConfig
+from citemesh.data.user_config import ConfigValue, UserConfig
 from citemesh.services import SemanticScholarClient
 from citemesh.services import semantic_scholar as s2
 from citemesh.strategies.candidates import CandidateAcquisitionError
@@ -71,6 +73,7 @@ from citemesh.strategies.embedding import (
     EmbeddingCacheFingerprintMismatchError,
     EmbeddingGraphBuilder,
 )
+from citemesh.strategies.embedding import builder as builder_module
 from citemesh.strategies.hybrid import (
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
@@ -81,8 +84,10 @@ from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
     BlockingEncodeModel,
+    ConstantEncodeModel,
     PausedFirstWrite,
-    build_seed_graph,
+    build_focal_graph,
+    disable_embedding_dep_checks,
     fail_stat_for,
     get_paper_id_normalization_cases,
     run_captured_cli,
@@ -135,8 +140,8 @@ def run_cli_command_via_sys_argv(
 def flatten_console_text(text: str) -> str:
     """Collapse Rich's soft line wrapping so phrase assertions survive re-wrapping.
 
-    Log records render through ``RichHandler`` at a fixed 140-column width, so a
-    long interpolated path pushes later words onto the next line and splits
+    Rich tables and explicitly sized logs wrap long lines, so a long
+    interpolated path pushes later words onto the next line and splits
     asserted phrases. Collapsing every whitespace run makes those assertions
     independent of how much of the line the path consumed.
 
@@ -164,14 +169,14 @@ def _make_builder_stub(
     captured_kwargs: dict[str, object],
     *,
     graph: nx.Graph | None = None,
-    seed_id: str = "seed",
+    focal_id: str = "focal",
 ) -> Any:
     """Create a lightweight strategy-builder stub for CLI dispatch tests."""
-    base_graph = graph if graph is not None else build_seed_graph(seed_id)
+    base_graph = graph if graph is not None else build_focal_graph(focal_id)
 
     def _factory(**kwargs: object) -> SimpleNamespace:
         captured_kwargs.update(kwargs)
-        return SimpleNamespace(build_graph=lambda _paper_id: (base_graph, seed_id))
+        return SimpleNamespace(build_graph=lambda _paper_id: (base_graph, focal_id))
 
     return _factory
 
@@ -196,7 +201,7 @@ def _make_exporter_stub(
         captured_data["metadata"] = kwargs.get("metadata")
         captured_data["layout"] = kwargs.get("layout")
         graph = factory_args[0]
-        seed_id = str(factory_args[1])
+        focal_id = str(factory_args[1])
         assert isinstance(graph, nx.Graph)
 
         def _write_payload(
@@ -222,7 +227,7 @@ def _make_exporter_stub(
                 if isinstance(metadata, dict)
                 else ""
             )
-            return _dashboard_graph_payload(graph, seed_id, strategy)
+            return _dashboard_graph_payload(graph, focal_id, strategy)
 
         namespace = {
             **{
@@ -244,12 +249,12 @@ def _make_exporter_stub(
 
 
 def _dashboard_graph_payload(
-    graph: nx.Graph, seed_id: str, strategy: str
+    graph: nx.Graph, focal_id: str, strategy: str
 ) -> dict[str, object]:
     """Build a canonical graph payload for package-focused CLI tests.
 
     :param nx.Graph graph: Source graph.
-    :param str seed_id: Seed node identifier.
+    :param str focal_id: Focal node identifier.
     :param str strategy: Strategy descriptor.
     :return dict[str, object]: Canonical graph payload accepted by package helpers.
     """
@@ -259,7 +264,7 @@ def _dashboard_graph_payload(
     }
     return ProductionGraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": strategy},
         layout=layout,
     ).graph_payload()
@@ -268,7 +273,7 @@ def _dashboard_graph_payload(
 def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     """Build argparse namespace fixture for strategy dispatch tests."""
     values = {
-        "paper_id": "seed",
+        "paper_id": "focal",
         "strategy": "embedding",
         "max_papers": 11,
         "max_citations": 25,
@@ -307,33 +312,28 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def _reset_cli_logging_state() -> tuple[list[logging.Handler], int, bool]:
-    """Reset root/CLI logging state for direct logging configuration tests."""
-    root_logger = logging.getLogger()
-    saved_handlers = list(root_logger.handlers)
-    saved_level = int(root_logger.level)
-    saved_configured = bool(console_module._LOGGING_CONFIGURED)
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
-    console_module._LOGGING_CONFIGURED = False
-    return saved_handlers, saved_level, saved_configured
-
-
-def _restore_cli_logging_state(
-    saved_handlers: list[logging.Handler], saved_level: int, saved_configured: bool
-) -> None:
-    """Restore root/CLI logging state after direct logging configuration tests."""
-    root_logger = logging.getLogger()
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
+@contextmanager
+def _isolated_cli_logging(console: Console | None = None) -> Iterator[None]:
+    """Isolate each real CLI logging configuration from pytest and other tests."""
+    root = logging.getLogger()
+    levels = {root: root.level}
+    for name in console_module._THIRD_PARTY_LOGGERS:
+        logger = logging.getLogger(name)
+        levels[logger] = logger.level
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(root, "handlers", [])
+        patch.setattr(console_module, "_LOGGING_CONFIGURED", False)
+        patch.setattr(console_module, "log_console", console or Console(stderr=True))
+        patch.setattr(console_module, "output_console", Console())
+        patch.setattr(progress_module, "_progress_console", None)
+        patch.setattr(progress_module, "_progress_enabled", True)
         try:
-            handler.close()
-        except Exception:
-            pass
-    for handler in saved_handlers:
-        root_logger.addHandler(handler)
-    root_logger.setLevel(saved_level)
-    console_module._LOGGING_CONFIGURED = saved_configured
+            yield
+        finally:
+            for handler in root.handlers:
+                handler.close()
+            for logger, level in levels.items():
+                logger.setLevel(level)
 
 
 def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -612,10 +612,10 @@ def test_cache_clear_refuses_active_s2_paper_write(
     monkeypatch.setattr(s2.disk_cache, "_persist_paper", blocked_persist)
     with SemanticScholarClient(api_key="") as client:
         client._request_json = MagicMock(
-            return_value={"paperId": "seed", "title": "Seed"}
+            return_value={"paperId": "focal", "title": "Focal"}
         )
         with ThreadPoolExecutor(max_workers=1) as executor:
-            write = executor.submit(client.get_paper, "seed")
+            write = executor.submit(client.get_paper, "focal")
             assert write_started.wait(timeout=5), "paper write never started"
             assert (
                 cache_ops_module._clear_cache_directory(
@@ -624,9 +624,9 @@ def test_cache_clear_refuses_active_s2_paper_write(
                 == 1
             )
             release_write.set()
-            assert write.result(timeout=5).paper_id == "seed"
+            assert write.result(timeout=5).paper_id == "focal"
 
-    paper_path = s2.disk_cache._paper_cache_path("seed")
+    paper_path = s2.disk_cache._paper_cache_path("focal")
     assert paper_path.is_file()
     assert (
         cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
@@ -642,11 +642,11 @@ def test_cache_clear_refuses_active_reference_cache_normalization(
     :param pytest.MonkeyPatch monkeypatch: Pauses normalized reference persistence.
     :return None: Checks clear reports busy until the reference lookup completes.
     """
-    cache_path = s2.disk_cache._reference_cache_path("seed")
+    cache_path = s2.disk_cache._reference_cache_path("focal")
     cache_path.write_text(
         json.dumps(
             {
-                "paper_id": "seed",
+                "paper_id": "focal",
                 "references": ["ref", "ref"],
                 "version": s2.disk_cache.REFERENCE_CACHE_VERSION,
             }
@@ -674,7 +674,7 @@ def test_cache_clear_refuses_active_reference_cache_normalization(
 
         monkeypatch.setattr(client, "_persist_reference_cache_entry", blocked_persist)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            lookup = executor.submit(client.get_cached_reference_ids, "seed")
+            lookup = executor.submit(client.get_cached_reference_ids, "focal")
             assert write_started.wait(timeout=5), "reference write never started"
             assert (
                 cache_ops_module._clear_cache_directory(
@@ -803,9 +803,9 @@ def test_force_rebuild_cache_confirmation_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Force-rebuild should require explicit confirmation or overwrite acknowledgement."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
 
-    build_graph_mock = MagicMock(return_value=(graph, "seed"))
+    build_graph_mock = MagicMock(return_value=(graph, "focal"))
     monkeypatch.setattr(build_module, "_build_strategy_graph", build_graph_mock)
     monkeypatch.setattr(
         build_module,
@@ -888,7 +888,7 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
         ["build", "arxiv:1706.03762", "--log-width", "0"],
         ["--log-file", "run.log", "build", "arxiv:1706.03762"],
         ["build", "arxiv:1706.03762", "--log-file", "run.log"],
-        ["--log-level", "debug", "build", "seed", "--strategy", "hybrid"],
+        ["--log-level", "debug", "build", "focal", "--strategy", "hybrid"],
         ["--log-level", "debug", "cache", "--log-width", "0", "clear", "--yes"],
     ]
 
@@ -974,25 +974,107 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
     [("debug", True), ("info", True), ("warning", False), ("error", False)],
 )
 def test_configure_logging_sets_progress_policy_from_severity(
-    monkeypatch: pytest.MonkeyPatch,
     log_level: str,
     expected_progress: bool,
 ) -> None:
     """Progress bars should appear only for normal and verbose CLI output."""
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
-    progress_policy: list[bool] = []
-    monkeypatch.setattr(
-        console_module,
-        "set_progress_enabled",
-        lambda enabled: progress_policy.append(enabled),
+    with _isolated_cli_logging():
+        progress_module.set_progress_enabled(not expected_progress)
+        console_module._configure_logging(log_level=log_level)
+        assert progress_module.progress_enabled() is expected_progress
+
+
+@pytest.mark.parametrize("log_level", ["info", "debug", "warning", "error"])
+def test_http_clients_do_not_crowd_cli_output(log_level: str) -> None:
+    """Real HTTP clients stay quiet while project status and warnings remain visible."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib
+import logging
+import sys
+
+from citemesh.cli.console import _configure_logging
+
+_configure_logging(log_level=sys.argv[1])
+logging.getLogger("citemesh.cli").info("Collecting related papers...")
+logging.getLogger("citemesh.cli").debug("Provider diagnostics")
+for client_name, core_name in (("httpx", "httpcore"), ("httpx2", "httpcore2")):
+    http = importlib.import_module(client_name)
+    transport = http.MockTransport(lambda request: http.Response(200))
+    with http.Client(transport=transport) as client:
+        client.get("https://huggingface.co/api/models/unsloth/embeddinggemma-300m")
+    logging.getLogger(client_name).warning("Transport warning from %s", client_name)
+    logging.getLogger(core_name + ".connection").debug("Transport internals")
+""",
+            log_level,
+        ],
+        capture_output=True,
+        text=True,
     )
 
-    try:
-        console_module._configure_logging(log_level=log_level)
-    finally:
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert "HTTP Request" not in result.stderr
+    assert "Transport internals" not in result.stderr
+    assert ("Collecting related papers..." in result.stderr) == (
+        log_level in {"info", "debug"}
+    )
+    assert ("Provider diagnostics" in result.stderr) == (log_level == "debug")
+    for name in ("httpx", "httpx2"):
+        assert (f"Transport warning from {name}" in result.stderr) == (
+            log_level != "error"
+        )
 
-    assert progress_policy == [expected_progress]
+
+def test_redirected_logs_preserve_long_lines_without_terminal_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Piped diagnostics retain literal paths without display wrapping or spaces."""
+    stderr = io.StringIO()
+    later_stderr = io.StringIO()
+    message = "Saved output to /" + "long-directory-name/" * 12 + "[draft].html"
+    monkeypatch.setattr(console_module, "stderr_isatty", lambda: False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    with _isolated_cli_logging(Console(stderr=True, force_terminal=False)):
+        with redirect_stderr(stderr):
+            console_module._configure_logging()
+            cli_module.logger.info(message)
+            cli_module.logger.warning("Results are incomplete.")
+        with redirect_stderr(later_stderr):
+            cli_module.logger.info("A later invocation.")
+
+    timestamp = r"\d{2}:\d{2}:\d{2}"
+    assert re.fullmatch(
+        rf"{timestamp} INFO: {re.escape(message)}\n"
+        rf"{timestamp} WARNING: Results are incomplete\.\n",
+        stderr.getvalue(),
+    )
+    assert re.fullmatch(
+        rf"{timestamp} INFO: A later invocation\.\n", later_stderr.getvalue()
+    )
+
+
+def test_console_logs_repeat_compact_timestamps_for_each_record() -> None:
+    """Two phases in the same second both retain their clock timestamp."""
+    stderr = io.StringIO()
+    with _isolated_cli_logging(Console(file=stderr, color_system=None)):
+        console_module._configure_logging(log_width=80)
+        for message in ("First phase", "Second phase"):
+            record = logging.LogRecord(
+                "citemesh.cli", logging.INFO, __file__, 1, message, (), None
+            )
+            record.created = 0.0
+            cli_module.logger.handle(record)
+
+    output = stderr.getvalue()
+    timestamps = re.findall(r"^(\d{2}:\d{2}:\d{2})", output, re.MULTILINE)
+    assert len(timestamps) == 2
+    assert timestamps[0] == timestamps[1]
+    assert "First phase" in output
+    assert "Second phase" in output
 
 
 @pytest.mark.parametrize("preconfigured", [False, True])
@@ -1006,15 +1088,10 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     :param bool preconfigured: Whether a library already installed a root handler.
     :return None: Assertions verify both logging sinks honor the requested level.
     """
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
     stderr = io.StringIO()
-    noisy_logger_names = ("filelock", "matplotlib", "urllib3")
-    saved_logger_levels = {
-        name: logging.getLogger(name).level for name in noisy_logger_names
-    }
 
-    try:
+    with _isolated_cli_logging():
         if preconfigured:
             logging.getLogger().addHandler(logging.NullHandler())
         with redirect_stderr(stderr):
@@ -1031,10 +1108,6 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
             assert logging.getLogger("filelock").level == logging.WARNING
             assert logging.getLogger("matplotlib").level == logging.WARNING
             assert logging.getLogger("urllib3").level == logging.WARNING
-    finally:
-        for name, level in saved_logger_levels.items():
-            logging.getLogger(name).setLevel(level)
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     assert log_path.exists()
     content = log_path.read_text(encoding="utf-8")
@@ -1053,19 +1126,16 @@ def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> Non
     :param Path tmp_path: Pytest temporary directory.
     :return None: Assertions verify Rich markup does not consume the table name.
     """
-    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     config_path = tmp_path / "config.toml"
     config_path.write_text("[plugin_settings]\nenabled = true\n", encoding="utf-8")
     stderr = io.StringIO()
 
-    try:
+    with _isolated_cli_logging():
         with redirect_stderr(stderr):
             console_module._configure_logging(log_level="info", log_width=0)
             cli_module.load_user_config(config_path)
             for handler in logging.getLogger().handlers:
                 handler.flush()
-    finally:
-        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     warning = stderr.getvalue()
     assert "Ignoring unknown config table" in warning
@@ -1117,6 +1187,43 @@ def test_search_command_prints_results_to_stdout(
     for name in author_names[2:]:
         assert name not in plain_stdout
     assert plain_stdout.index("12,345") < plain_stdout.index("Full paper IDs:")
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_search_results_keep_full_metadata_at_narrow_widths(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """Compact results keep titles, authors, counts, and copyable IDs intact."""
+    output = io.StringIO()
+    monkeypatch.setattr(
+        console_module,
+        "output_console",
+        cli_module.Console(file=output, width=width, color_system=None),
+    )
+    paper_id = "316931b899014bd69c0f50f7e773f724f813748f"
+    title = "Efficient\nAttention and Long-Context Language Models [bold]Study[/bold]"
+    author = "Researcher_[bold]Name[/bold]_With_A_Long_Unbroken_Name"
+    search_module._print_search_results(
+        "Search results for '[bold]attention[/bold]'",
+        [(paper_id, title, [author, "Another Researcher"], 2026, "9,876,543")],
+        metric="Citations",
+    )
+
+    rendered = output.getvalue()
+    full_text = unwrapped_console_token(rendered)
+    assert all(word in full_text for word in title.split())
+    assert author in full_text
+    assert "AnotherResearcher" in full_text
+    assert "[bold]attention[/bold]" in full_text
+    assert "2026" in full_text
+    assert "9,876,543" in full_text
+    assert "…" not in rendered
+    assert f"1. {paper_id}" in rendered.splitlines()
+    assert all(
+        len(line) <= width
+        for line in rendered.splitlines()
+        if not line.startswith("1. ")
+    )
 
 
 def test_s2_search_forwards_result_count_and_retry_budget(
@@ -1314,7 +1421,7 @@ def test_build_rejects_empty_option_values(option: str, prefix: list[str]) -> No
     :param list[str] prefix: Arguments needed to put the option in scope.
     :return None: Assertions verify an argparse usage failure before execution.
     """
-    result = run_cli_command(["build", "seed", *prefix, option, ""])
+    result = run_cli_command(["build", "focal", *prefix, option, ""])
 
     assert result.returncode == 2
     assert option in result.stderr
@@ -1331,8 +1438,10 @@ def test_search_mode_local_prints_cached_results(
     builder_factory = MagicMock(return_value=fake_builder)
     monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
 
+    monkeypatch.setenv("S2_API_KEY", "unused-by-local-search")
     result = run_cli_command(["search", "cached topic", "--mode", "local", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Semantic Scholar:" not in result.stderr
     # Rich folds table cells at console width; compare on whitespace-normalized text.
     plain_stdout = flatten_console_text(result.stdout)
     assert "Local semantic search for 'cached topic'" in plain_stdout
@@ -1712,113 +1821,58 @@ def test_search_local_build_footer_uses_active_fallback_model(
     assert generated.calibration_sample_size == searched["calibration_sample_size"]
 
 
-def test_search_semantic_source_flag_selects_corpus_namespace(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        pytest.param(
+            ["--mode", "local", "--semantic-source", "arxiv-corpus"],
+            {"dataset_source": DEFAULT_DATASET_SOURCE},
+            id="explicit-corpus",
+        ),
+        pytest.param(
+            ["--mode", "local", "--dataset-source", "research/arxiv-snapshot"],
+            {"dataset_source": "research/arxiv-snapshot"},
+            id="dataset-implies-corpus",
+        ),
+        pytest.param(
+            [
+                "--model-revision",
+                "frozen-release",
+                "--semantic-source",
+                "arxiv-corpus",
+                "--truncate-dim",
+                "256",
+                "--storage-precision",
+                "int8",
+                "--calibration-sample-size",
+                "4000",
+            ],
+            {
+                "model_revision": "frozen-release",
+                "truncate_dim": 256,
+                "calibration_sample_size": 4000,
+            },
+            id="one-off-model-settings",
+        ),
+    ],
+)
+def test_search_flags_select_corpus_namespace(
+    monkeypatch: pytest.MonkeyPatch, flags: list[str], expected: dict[str, object]
 ) -> None:
-    """--semantic-source arxiv-corpus must reach the corpus cache namespace.
-
-    Storage precision is part of the namespace and the build contract coerces
-    ``int8`` to ``float32`` outside corpus mode, so the override has to land
-    before validation or the search targets a namespace no corpus build wrote.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
-    :return None: Assertions pin the corpus namespace the builder receives.
-    """
+    """Resolve the corpus source before validation chooses its storage precision."""
     fake_builder = _fake_local_search_builder(
-        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+        cached_count=1, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
     monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
 
-    result = run_cli_command(
-        [
-            "search",
-            "cached topic",
-            "--mode",
-            "local",
-            "--semantic-source",
-            "arxiv-corpus",
-        ]
-    )
+    result = run_cli_command(["search", "cached topic", *flags])
 
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert result.returncode == 0, result.stderr
     builder_kwargs = builder_factory.call_args.kwargs
     assert builder_kwargs["semantic_source"] == "arxiv-corpus"
     assert builder_kwargs["storage_precision"] == "int8"
-    assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
-
-
-def test_search_identity_flags_select_one_off_build_namespace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Local search should accept every user-selectable cache identity field.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
-    :return None: Assertions verify one-off build selectors reach the builder.
-    """
-    fake_builder = _fake_local_search_builder(
-        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
-    )
-    builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
-
-    result = run_cli_command(
-        [
-            "search",
-            "cached topic",
-            "--model-revision",
-            "frozen-release",
-            "--semantic-source",
-            "arxiv-corpus",
-            "--truncate-dim",
-            "256",
-            "--storage-precision",
-            "int8",
-            "--calibration-sample-size",
-            "4000",
-        ]
-    )
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    builder_kwargs = builder_factory.call_args.kwargs
-    assert builder_kwargs["model_revision"] == "frozen-release"
-    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
-    assert builder_kwargs["truncate_dim"] == 256
-    assert builder_kwargs["storage_precision"] == "int8"
-    assert builder_kwargs["calibration_sample_size"] == 4000
-
-
-def test_search_dataset_source_flag_implies_corpus_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--dataset-source alone implies arxiv-corpus, mirroring the build contract.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
-    :return None: Assertions verify the implied corpus namespace.
-    """
-    fake_builder = _fake_local_search_builder(
-        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
-    )
-    builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
-    dataset_source = "research/arxiv-snapshot"
-
-    result = run_cli_command(
-        [
-            "search",
-            "cached topic",
-            "--mode",
-            "local",
-            "--dataset-source",
-            dataset_source,
-        ]
-    )
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    builder_kwargs = builder_factory.call_args.kwargs
-    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
-    assert builder_kwargs["dataset_source"] == dataset_source
-    assert builder_kwargs["storage_precision"] == "int8"
+    assert {key: builder_kwargs[key] for key in expected} == expected
 
 
 def test_configured_local_corpus_hybrid_build_uses_full_split(
@@ -1832,7 +1886,7 @@ def test_configured_local_corpus_hybrid_build_uses_full_split(
     :return None: Assertions verify the builder and generated sidecar contracts.
     """
     captured_builder: dict[str, object] = {}
-    graph = build_seed_graph("arxiv:2609.03430")
+    graph = build_focal_graph("arxiv:2609.03430")
     monkeypatch.setattr(
         cli_module,
         "load_user_config",
@@ -1850,7 +1904,7 @@ def test_configured_local_corpus_hybrid_build_uses_full_split(
         _make_builder_stub(
             captured_builder,
             graph=graph,
-            seed_id="arxiv:2609.03430",
+            focal_id="arxiv:2609.03430",
         ),
     )
     monkeypatch.setattr(
@@ -2240,6 +2294,128 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
     s2_search.assert_called_once_with(args)
 
 
+@pytest.mark.parametrize("mode", ["auto", "local"])
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        {"truncate_dim": 4},
+        {"model": "org/different-model"},
+        {"model_revision": "another-revision"},
+    ],
+)
+def test_search_skips_unselected_ordinary_namespace(
+    monkeypatch: pytest.MonkeyPatch, mode: str, defaults: dict[str, ConfigValue]
+) -> None:
+    """A populated candidate cache for other selectors cannot trigger model load."""
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setattr(builder_module, "resolve_embedding_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
+    )
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", lambda _: None)
+    revision = "a" * 40
+    producer = EmbeddingGraphBuilder(
+        model_name="org/example", model_revision=revision, truncate_dim=2
+    )
+    cache = producer.prepare_embedding_cache()
+    cache.upsert_embeddings({"paper": {"title": "Paper"}}, ConstantEncodeModel())
+    destination = get_cache_dir("embeddings")
+    before = sorted(path.name for path in destination.iterdir())
+
+    def unexpected_model_load(_: EmbeddingGraphBuilder) -> None:
+        pytest.fail("an unselected namespace loaded an embedding model")
+
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", unexpected_model_load)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    config = UserConfig(
+        path=Path("config.toml"),
+        defaults={
+            "model": "org/example",
+            "model_revision": revision,
+            "truncate_dim": 2,
+            **defaults,
+        },
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    command = ["search", "attention"]
+    if mode == "local":
+        command.extend(["--mode", mode])
+    exit_code = cli_module.main(command)
+
+    assert sorted(path.name for path in destination.iterdir()) == before
+    if mode == "auto":
+        assert exit_code == 0
+        s2_search.assert_called_once()
+    else:
+        assert exit_code == 1
+        s2_search.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changed_selectors",
+    [{}, {"truncate_dim": 4}, {"storage_precision": "int8"}],
+    ids=["fingerprint-mismatch", "different-dimension", "different-storage"],
+)
+def test_search_preflights_legacy_corpus_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_selectors: dict[str, ConfigValue],
+) -> None:
+    """Skip known different layouts and keep matching-corpus fingerprint refusals."""
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setattr(builder_module, "resolve_embedding_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_resolve_source_dtype_hint", lambda _: "float32"
+    )
+    load_model = MagicMock()
+    resolve_fingerprint = MagicMock(return_value=f"hf::org/example::{'a' * 40}")
+    monkeypatch.setattr(EmbeddingGraphBuilder, "_load_model", load_model)
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder, "_fingerprint_for_model", resolve_fingerprint
+    )
+    producer = EmbeddingGraphBuilder(
+        model_name="org/example",
+        truncate_dim=2,
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+    )
+    cache = producer.prepare_embedding_cache()
+    cache.upsert_embeddings({"paper": {"title": "Paper"}}, ConstantEncodeModel())
+    cache.mark_hydrated(DEFAULT_DATASET_SOURCE, "train", None, complete=True)
+    if not changed_selectors:
+        cache.set_model_fingerprint(f"hf::org/example::{'b' * 40}")
+    load_model.reset_mock()
+    resolve_fingerprint.reset_mock()
+    before = sorted(path.name for path in cache.db_path.parent.iterdir())
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+
+    config = UserConfig(
+        path=Path("config.toml"),
+        defaults={
+            "model": "org/example",
+            "truncate_dim": 2,
+            "semantic_source": "arxiv-corpus",
+            "storage_precision": "float32",
+            **changed_selectors,
+        },
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    result = run_cli_command(["search", "attention"])
+
+    if changed_selectors:
+        assert result.returncode == 0
+        load_model.assert_not_called()
+        resolve_fingerprint.assert_not_called()
+        s2_search.assert_called_once()
+    else:
+        assert result.returncode == 1
+        assert "CiteMesh refused to delete it" in " ".join(result.stderr.split())
+        s2_search.assert_not_called()
+    assert sorted(path.name for path in cache.db_path.parent.iterdir()) == before
+    assert cache.embedding_count() == 1
+
+
 def test_search_auto_treats_missing_embedding_dependencies_as_expected(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -2527,7 +2703,7 @@ def test_invalid_paper_id_fails_cleanly(
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        MagicMock(side_effect=ValueError("Seed paper not found")),
+        MagicMock(side_effect=ValueError("Focal paper not found")),
     )
 
     result = run_cli_command(
@@ -2535,7 +2711,7 @@ def test_invalid_paper_id_fails_cleanly(
     )
     assert result.returncode != 0
     assert error_mock.call_count == 1
-    assert "Seed paper not found" in str(error_mock.call_args)
+    assert "Focal paper not found" in str(error_mock.call_args)
     assert "Traceback" not in result.stderr
 
     output = tmp_path / "unavailable.json"
@@ -2640,9 +2816,9 @@ def test_cli_argument_validation_contracts() -> None:
             ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
             "must be a finite float",
         ),
-        (["build", "seed", "--similarity-threshold", "banana"], "must be a float"),
+        (["build", "focal", "--similarity-threshold", "banana"], "must be a float"),
         (["build", "   "], "must be a non-empty string"),
-        (["build", "seed", "--strategy", "unknown"], "invalid choice"),
+        (["build", "focal", "--strategy", "unknown"], "invalid choice"),
         (["search", "attention", "--limit", "0"], "must be at least 1"),
         (["search", ""], "must be a non-empty string"),
         (["build", "", "--strategy", "citation"], "must be a non-empty string"),
@@ -2650,18 +2826,18 @@ def test_cli_argument_validation_contracts() -> None:
     for args, expected_error in numeric_cases:
         result = run_cli_command(args)
         assert result.returncode != 0
-        assert expected_error in result.stderr
+        assert expected_error in flatten_console_text(result.stderr)
 
 
 @pytest.mark.parametrize(
     ("args", "message"),
     [
         (
-            ["build", "seed", "--strategy", "embedding", "--semantic-source", "both"],
+            ["build", "focal", "--strategy", "embedding", "--semantic-source", "both"],
             "--semantic-source both requires --strategy hybrid",
         ),
         (
-            ["build", "seed", "--strategy", "hybrid", "--max-semantic", "0"],
+            ["build", "focal", "--strategy", "hybrid", "--max-semantic", "0"],
             "unrecognized arguments: --max-semantic",
         ),
         (
@@ -2682,11 +2858,11 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
     """Build should reject unsupported options for each strategy and argv shape."""
     cases = [
         (
-            ["build", "seed", "--strategy", "citation", "--batch-size", "128"],
+            ["build", "focal", "--strategy", "citation", "--batch-size", "128"],
             "--batch-size",
         ),
         (
-            ["build", "seed", "--strategy", "citation", "-bs", "128"],
+            ["build", "focal", "--strategy", "citation", "-bs", "128"],
             "--batch-size",
         ),
         (
@@ -2968,7 +3144,7 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
     for args, token in cases:
         result = run_cli_command(args)
         assert result.returncode != 0
-        assert token in result.stderr
+        assert token in flatten_console_text(result.stderr)
 
 
 def test_cli_rejects_float16_persistent_storage_precision() -> None:
@@ -3030,19 +3206,19 @@ def test_main_without_argv_preserves_explicit_default_valued_flags(
 
     assert result.returncode != 0
     for token in expected_tokens:
-        assert token in result.stderr
+        assert token in flatten_console_text(result.stderr)
 
 
 def test_hybrid_accepts_embedding_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid always ranks with embeddings, so it accepts embedding options."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
 
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -3072,7 +3248,7 @@ def test_embedding_lzf_compression_level_normalization_contract() -> None:
     """Embedding validation should normalize implicit lzf compression level to 0."""
     _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
+        ["focal", "--strategy", "embedding", "--cache-compression", "lzf"]
     )
     build_contract_module._validate_build_cli_contract(
         args, build_parser, provided={"cache_compression"}
@@ -3084,7 +3260,7 @@ def test_embedding_lzf_compression_level_normalization_contract() -> None:
 def test_hybrid_implicit_budget_defaults_contract() -> None:
     """Hybrid should apply tuned defaults only when budget knobs are omitted."""
     _, build_parser, _, _ = parser_module._create_parser()
-    hybrid_defaults = build_parser.parse_args(["seed", "--strategy", "hybrid"])
+    hybrid_defaults = build_parser.parse_args(["focal", "--strategy", "hybrid"])
     build_contract_module._validate_build_cli_contract(
         hybrid_defaults, build_parser, provided=set()
     )
@@ -3095,7 +3271,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
 
     explicit_hybrid = build_parser.parse_args(
         [
-            "seed",
+            "focal",
             "--strategy",
             "hybrid",
             "--max-papers",
@@ -3125,14 +3301,14 @@ def test_hybrid_sidecar_records_provider_limits_without_semantic_cap(
     monkeypatch.setattr(
         build_options_module,
         "HybridGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
+        _make_builder_stub(captured, graph=build_focal_graph("focal")),
     )
     output = tmp_path / "hybrid.json"
 
     result = run_cli_command(
         [
             "build",
-            "seed",
+            "focal",
             "--strategy",
             "hybrid",
             "--export",
@@ -3156,15 +3332,15 @@ def test_hybrid_sidecar_records_provider_limits_without_semantic_cap(
 
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share one seeded layout across PNG and JSON exports."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
 
-    shared_layout = {"seed": (0.0, 0.0)}
+    shared_layout = {"focal": (0.0, 0.0)}
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
 
     def _fake_compute_layout(
@@ -3212,7 +3388,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
 
     # JSON embeds dashboard geometry, so a JSON-only build computes the same
     # shared layout (with the run's parameters) instead of skipping it.
-    json_layout = {"seed": (0.5, 0.5)}
+    json_layout = {"focal": (0.5, 0.5)}
     json_layout_params: dict[str, object] = {}
 
     def _fake_json_compute_layout(
@@ -3260,12 +3436,12 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dashboard collections should retain the shared viewer and per-seed graph."""
-    graph = build_seed_graph("seed")
+    """Dashboard collections should retain the shared viewer and per-focal graph."""
+    graph = build_focal_graph("focal")
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
 
     captured: dict[str, object] = {}
@@ -3293,7 +3469,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
             ],
         )
         run_dir = generate_output_path(
-            graph, "seed", output_dir=output, strategy="recommendation"
+            graph, "focal", output_dir=output, strategy="recommendation"
         ).parent
         assert {path.name for path in output.iterdir()} - {
             f".{DASHBOARD_PACKAGE_FILENAME}.lock"
@@ -3305,12 +3481,12 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
         assert package["kind"] == DASHBOARD_COLLECTION_KIND
         assert package["schema_version"] == DASHBOARD_COLLECTION_SCHEMA_VERSION
-        assert package["current_result_id"] == "recommendation:seed"
+        assert package["current_result_id"] == "recommendation:focal"
         assert [entry["result_id"] for entry in package["results"]] == [
-            "recommendation:seed"
+            "recommendation:focal"
         ]
         entry = package["results"][0]
-        assert entry["payload"]["seed_id"] == "seed"
+        assert entry["payload"]["focal_id"] == "focal"
         assert entry["build"]["strategy"] == "recommendation"
         assert (
             json.loads((run_dir / "recommendation.json").read_text())
@@ -3355,7 +3531,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         run_dir = generate_output_path(
             graph,
-            seed_id="seed",
+            focal_id="focal",
             output_dir=output_dir,
             strategy="recommendation",
         ).parent
@@ -3378,16 +3554,16 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
-def test_dashboard_default_collection_retains_seed_directory(
+def test_dashboard_default_collection_retains_focal_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The default output root should retain a graph JSON and sidecar per seed."""
-    graph = build_seed_graph("seed")
+    """The default output root should retain a graph JSON and sidecar per focal."""
+    graph = build_focal_graph("focal")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     monkeypatch.setattr(
         build_module,
@@ -3409,7 +3585,7 @@ def test_dashboard_default_collection_retains_seed_directory(
     output_root = tmp_path / "out"
     assert result.returncode == 0, result.stderr
     run_dir = generate_output_path(
-        graph, "seed", output_dir=output_root, strategy="recommendation"
+        graph, "focal", output_dir=output_root, strategy="recommendation"
     ).parent
     assert {path.name for path in output_root.iterdir()} - {
         f".{DASHBOARD_PACKAGE_FILENAME}.lock"
@@ -3428,12 +3604,12 @@ def test_dashboard_package_tracks_multiple_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One portable dashboard package should retain multiple result payloads."""
-    first_graph = build_seed_graph("seed-a")
-    first_graph.nodes["seed-a"]["title"] = "First Seed"
-    second_graph = build_seed_graph("seed-b")
-    second_graph.nodes["seed-b"]["title"] = "Second Seed"
+    first_graph = build_focal_graph("focal-a")
+    first_graph.nodes["focal-a"]["title"] = "First Focal"
+    second_graph = build_focal_graph("focal-b")
+    second_graph.nodes["focal-b"]["title"] = "Second Focal"
     captured: dict[str, object] = {}
-    build_results = iter([(first_graph, "seed-a"), (second_graph, "seed-b")])
+    build_results = iter([(first_graph, "focal-a"), (second_graph, "focal-b")])
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
@@ -3463,7 +3639,7 @@ def test_dashboard_package_tracks_multiple_runs(
             ],
         )
         first_json = generate_output_path(
-            first_graph, "seed-a", output_dir=output_dir, strategy="recommendation"
+            first_graph, "focal-a", output_dir=output_dir, strategy="recommendation"
         ).with_suffix(".json")
         first_bytes = first_json.read_bytes()
         second_result = run_cli_command(
@@ -3482,40 +3658,43 @@ def test_dashboard_package_tracks_multiple_runs(
         package = load_dashboard_package(output_dir / DASHBOARD_PACKAGE_FILENAME)
         assert first_json.read_bytes() == first_bytes
         assert (output_dir / "dashboard.html").exists()
-        assert package["current_result_id"] == "recommendation:seed-b"
+        assert package["current_result_id"] == "recommendation:focal-b"
         assert [entry["result_id"] for entry in package["results"]] == [
-            "recommendation:seed-b",
-            "recommendation:seed-a",
+            "recommendation:focal-b",
+            "recommendation:focal-a",
         ]
-        for seed_graph, seed_id in ((first_graph, "seed-a"), (second_graph, "seed-b")):
+        for focal_graph, focal_id in (
+            (first_graph, "focal-a"),
+            (second_graph, "focal-b"),
+        ):
             run_dir = generate_output_path(
-                seed_graph, seed_id, output_dir=output_dir, strategy="recommendation"
+                focal_graph, focal_id, output_dir=output_dir, strategy="recommendation"
             ).parent
             saved = json.loads((run_dir / "recommendation.json").read_text())
             entry = next(
-                item for item in package["results"] if item["seed_id"] == seed_id
+                item for item in package["results"] if item["focal_id"] == focal_id
             )
             assert saved == entry["payload"]
         collection_bundle = captured["metadata"]["dashboard_collection"]
-        assert collection_bundle["current_result_id"] == "recommendation:seed-b"
+        assert collection_bundle["current_result_id"] == "recommendation:focal-b"
         assert len(collection_bundle["results"]) == 2
         assert {entry["result_id"] for entry in collection_bundle["results"]} == {
-            "recommendation:seed-a",
-            "recommendation:seed-b",
+            "recommendation:focal-a",
+            "recommendation:focal-b",
         }
 
     assert first_result.returncode == 0
     assert second_result.returncode == 0
 
 
-def test_dashboard_package_refreshes_same_seed_strategy_slot(
+def test_dashboard_package_refreshes_same_focal_strategy_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Refresh one stable result slot and remove its obsolete export formats."""
-    seed_graph = build_seed_graph("seed")
-    seed_graph.nodes["seed"]["title"] = "Original Seed Title"
-    updated_graph = build_seed_graph("seed")
-    updated_graph.nodes["seed"]["title"] = "Corrected Seed Title"
+    focal_graph = build_focal_graph("focal")
+    focal_graph.nodes["focal"]["title"] = "Original Focal Title"
+    updated_graph = build_focal_graph("focal")
+    updated_graph.nodes["focal"]["title"] = "Corrected Focal Title"
     updated_graph.add_node(
         "extra",
         title="Extra Paper",
@@ -3523,10 +3702,10 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
         authors=["Author B"],
         citation_count=1,
     )
-    updated_graph.add_edge("seed", "extra", weight=0.4)
+    updated_graph.add_edge("focal", "extra", weight=0.4)
 
     captured: dict[str, object] = {}
-    build_results = iter([(seed_graph, "seed"), (updated_graph, "seed")])
+    build_results = iter([(focal_graph, "focal"), (updated_graph, "focal")])
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
@@ -3573,14 +3752,14 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
             ],
         )
         first_run_dir = generate_output_path(
-            seed_graph, "seed", output_dir=output_dir, strategy="recommendation"
+            focal_graph, "focal", output_dir=output_dir, strategy="recommendation"
         ).parent
         optional_suffixes = (".html", ".plotly.html", ".csv", ".bib", ".graphml")
         for suffix in optional_suffixes:
             assert (first_run_dir / f"recommendation{suffix}").exists()
         sentinel_path = first_run_dir / "notes.txt"
         sentinel_path.write_text("keep user file", encoding="utf-8")
-        citation_payload = _dashboard_graph_payload(seed_graph, "seed", "citation")
+        citation_payload = _dashboard_graph_payload(focal_graph, "focal", "citation")
         citation_paths = {
             first_run_dir / "citation.json": json.dumps(citation_payload),
             first_run_dir / "citation.config.json": '{"strategy": "citation"}',
@@ -3590,8 +3769,8 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
             path.write_text(content, encoding="utf-8")
         update_dashboard_package(
             output_dir / DASHBOARD_PACKAGE_FILENAME,
-            graph=seed_graph,
-            seed_id="seed",
+            graph=focal_graph,
+            focal_id="focal",
             strategy="citation",
             payload=citation_payload,
             build={"strategy": "citation"},
@@ -3612,12 +3791,12 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
         package = load_dashboard_package(output_dir / DASHBOARD_PACKAGE_FILENAME)
         assert len(package["results"]) == 2
         entry = package["results"][0]
-        assert entry["result_id"] == "recommendation:seed"
-        assert package["results"][1]["result_id"] == "citation:seed"
+        assert entry["result_id"] == "recommendation:focal"
+        assert package["results"][1]["result_id"] == "citation:focal"
         assert entry["summary"] == {"nodes": 2, "edges": 1}
         assert entry["payload"]["summary"] == {"nodes": 2, "edges": 1}
         run_dir = generate_output_path(
-            updated_graph, "seed", output_dir=output_dir, strategy="recommendation"
+            updated_graph, "focal", output_dir=output_dir, strategy="recommendation"
         ).parent
         assert run_dir == first_run_dir
         assert (
@@ -3631,7 +3810,7 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
             path: path.read_text(encoding="utf-8") for path in citation_paths
         } == citation_paths
         collection_bundle = captured["metadata"]["dashboard_collection"]
-        assert collection_bundle["current_result_id"] == "recommendation:seed"
+        assert collection_bundle["current_result_id"] == "recommendation:focal"
         assert len(collection_bundle["results"]) == 2
 
     assert first_result.returncode == 0
@@ -3647,16 +3826,16 @@ def test_dashboard_build_serializes_all_result_artifacts_with_package(
     :param Path tmp_path: Temporary collection root.
     :return None: Assertions verify every artifact matches the winning entry.
     """
-    first_graph = build_seed_graph("seed")
+    first_graph = build_focal_graph("focal")
     second_graph = first_graph.copy()
     second_graph.add_node("extra", title="Second Run Paper")
-    second_graph.add_edge("seed", "extra", weight=0.4)
+    second_graph.add_edge("focal", "extra", weight=0.4)
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
         lambda args, strategy, **kwargs: (
             first_graph if args.max_papers == 1 else second_graph,
-            "seed",
+            "focal",
         ),
     )
     exporter_factory = _make_exporter_stub({}, methods=("to_dashboard_html", "to_csv"))
@@ -3755,7 +3934,7 @@ def test_dashboard_build_serializes_all_result_artifacts_with_package(
     assert entry["summary"] == {"nodes": 1, "edges": 0}
     assert entry["build"]["max_papers"] == 1
     run_dir = generate_output_path(
-        first_graph, "seed", output_dir=tmp_path, strategy="recommendation"
+        first_graph, "focal", output_dir=tmp_path, strategy="recommendation"
     ).parent
     assert (
         json.loads((run_dir / "recommendation.json").read_text(encoding="utf-8"))
@@ -3777,11 +3956,11 @@ def test_dashboard_export_failure_preserves_previous_result_bundle(
     :param Path tmp_path: Isolated dashboard collection root.
     :return None: Checks prior artifacts and package bytes after a failed refresh.
     """
-    first_graph = build_seed_graph("seed")
+    first_graph = build_focal_graph("focal")
     second_graph = first_graph.copy()
     second_graph.add_node("extra", title="Uncommitted Paper")
-    second_graph.add_edge("seed", "extra", weight=0.4)
-    build_results = iter([(first_graph, "seed"), (second_graph, "seed")])
+    second_graph.add_edge("focal", "extra", weight=0.4)
+    build_results = iter([(first_graph, "focal"), (second_graph, "focal")])
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
@@ -3830,7 +4009,7 @@ def test_dashboard_export_failure_preserves_previous_result_bundle(
         ]
     )
     run_dir = generate_output_path(
-        first_graph, "seed", output_dir=tmp_path, strategy="recommendation"
+        first_graph, "focal", output_dir=tmp_path, strategy="recommendation"
     ).parent
     completed_paths = (
         tmp_path / DASHBOARD_PACKAGE_FILENAME,
@@ -3954,14 +4133,14 @@ def test_dashboard_package_deduplicates_existing_slots_deterministically(
 ) -> None:
     """The first existing duplicate should win when a later result is upserted."""
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
-    first_graph = build_seed_graph("seed-a")
-    first_graph.nodes["seed-a"]["title"] = "First Copy"
+    first_graph = build_focal_graph("focal-a")
+    first_graph.nodes["focal-a"]["title"] = "First Copy"
     initial = update_dashboard_package(
         package_path,
         graph=first_graph,
-        seed_id="seed-a",
+        focal_id="focal-a",
         strategy="recommendation",
-        payload=_dashboard_graph_payload(first_graph, "seed-a", "recommendation"),
+        payload=_dashboard_graph_payload(first_graph, "focal-a", "recommendation"),
         build={"strategy": "recommendation"},
     )
     duplicate = dict(initial["results"][0])
@@ -3970,20 +4149,20 @@ def test_dashboard_package_deduplicates_existing_slots_deterministically(
         json.dumps({**initial, "results": [initial["results"][0], duplicate]}),
         encoding="utf-8",
     )
-    second_graph = build_seed_graph("seed-b")
+    second_graph = build_focal_graph("focal-b")
 
     updated = update_dashboard_package(
         package_path,
         graph=second_graph,
-        seed_id="seed-b",
+        focal_id="focal-b",
         strategy="recommendation",
-        payload=_dashboard_graph_payload(second_graph, "seed-b", "recommendation"),
+        payload=_dashboard_graph_payload(second_graph, "focal-b", "recommendation"),
         build={"strategy": "recommendation"},
     )
 
     assert [entry["result_id"] for entry in updated["results"]] == [
-        "recommendation:seed-b",
-        "recommendation:seed-a",
+        "recommendation:focal-b",
+        "recommendation:focal-a",
     ]
     assert updated["results"][1]["title"] == "First Copy"
 
@@ -4001,10 +4180,10 @@ def test_dashboard_package_serializes_concurrent_updates(
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-a"))
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
-    first_graph = build_seed_graph("seed-a")
-    second_graph = build_seed_graph("seed-b")
-    first_graph.nodes["seed-a"]["title"] = "First Seed"
-    second_graph.nodes["seed-b"]["title"] = "Second Seed"
+    first_graph = build_focal_graph("focal-a")
+    second_graph = build_focal_graph("focal-b")
+    first_graph.nodes["focal-a"]["title"] = "First Focal"
+    second_graph.nodes["focal-b"]["title"] = "Second Focal"
 
     delayed_atomic_write = PausedFirstWrite(dashboard_package_module.atomic_write_json)
 
@@ -4014,27 +4193,27 @@ def test_dashboard_package_serializes_concurrent_updates(
 
     errors: list[BaseException] = []
 
-    def worker(graph: nx.Graph, seed_id: str) -> None:
+    def worker(graph: nx.Graph, focal_id: str) -> None:
         """Update one graph while recording thread failures for the test.
 
         :param nx.Graph graph: Graph to add to the collection.
-        :param str seed_id: Seed identifying the graph result.
+        :param str focal_id: Focal identifying the graph result.
         :return None: Stores the result or records its exception.
         """
         try:
             update_dashboard_package(
                 package_path,
                 graph=graph,
-                seed_id=seed_id,
+                focal_id=focal_id,
                 strategy="recommendation",
-                payload=_dashboard_graph_payload(graph, seed_id, "recommendation"),
+                payload=_dashboard_graph_payload(graph, focal_id, "recommendation"),
                 build={"strategy": "recommendation"},
             )
         except BaseException as exc:  # pragma: no cover - surfaced below
             errors.append(exc)
 
-    first_thread = threading.Thread(target=worker, args=(first_graph, "seed-a"))
-    second_thread = threading.Thread(target=worker, args=(second_graph, "seed-b"))
+    first_thread = threading.Thread(target=worker, args=(first_graph, "focal-a"))
+    second_thread = threading.Thread(target=worker, args=(second_graph, "focal-b"))
 
     first_thread.start()
     assert delayed_atomic_write.first_started.wait(timeout=5), (
@@ -4059,8 +4238,8 @@ def test_dashboard_package_serializes_concurrent_updates(
 
     package = load_dashboard_package(package_path)
     assert {entry["result_id"] for entry in package["results"]} == {
-        "recommendation:seed-a",
-        "recommendation:seed-b",
+        "recommendation:focal-a",
+        "recommendation:focal-b",
     }
 
 
@@ -4084,12 +4263,12 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     expects_config: bool,
 ) -> None:
     """Explicit dashboard filenames should bypass collection mode."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     monkeypatch.setattr(
         build_module,
@@ -4135,14 +4314,14 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
     tmp_path: Path,
     directory_name: str,
 ) -> None:
-    """A collection directory should receive the viewer and per-seed JSON.
+    """A collection directory should receive the viewer and per-focal JSON.
 
     :param Path tmp_path: Temporary parent for the collection directory.
     :param str directory_name: Directory name, including export-like suffixes.
     :return None: Assertions verify directory routing and implicit graph JSON.
     """
     graph = nx.Graph()
-    graph.add_node("seed", title="Seed Title")
+    graph.add_node("focal", title="Focal Title")
     assert _is_standalone_dashboard_output(
         Path("reports/example.dashboard.html"), ["dashboard"], True
     )
@@ -4163,7 +4342,7 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
         explicit_output=True,
         strategy="recommendation",
         graph=graph,
-        seed_id="seed",
+        focal_id="focal",
     )
     assert set(output_paths) == {"dashboard", "json"}
     assert output_paths["dashboard"] == root / "dashboard.html"
@@ -4176,10 +4355,10 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
         explicit_output=True,
         strategy="recommendation",
         graph=graph,
-        seed_id="seed",
+        focal_id="focal",
     )
     assert output_paths["json"].parent.parent == root
-    assert output_paths["json"].parent.name.startswith("seed-title-")
+    assert output_paths["json"].parent.name.startswith("focal-title-")
     assert output_paths["json"].name == "recommendation.json"
     assert output_paths["json"] == implicit_json
     assert package_path == root / DASHBOARD_PACKAGE_FILENAME
@@ -4218,7 +4397,7 @@ def test_dashboard_package_existing_errors_fail_closed(
     """
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
     package_path.write_bytes(existing_bytes)
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
 
     original_exists = Path.exists
 
@@ -4238,9 +4417,9 @@ def test_dashboard_package_existing_errors_fail_closed(
             update_dashboard_package(
                 package_path,
                 graph=graph,
-                seed_id="seed",
+                focal_id="focal",
                 strategy="recommendation",
-                payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+                payload=_dashboard_graph_payload(graph, "focal", "recommendation"),
                 build={"strategy": "recommendation"},
             )
 
@@ -4305,13 +4484,13 @@ def test_dashboard_build_preflights_invalid_package_before_writing(
 def test_dashboard_package_rejects_graph_summary_drift(tmp_path: Path) -> None:
     """Package summaries must describe the arrays they accompany."""
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     package = update_dashboard_package(
         package_path,
         graph=graph,
-        seed_id="seed",
+        focal_id="focal",
         strategy="recommendation",
-        payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+        payload=_dashboard_graph_payload(graph, "focal", "recommendation"),
         build={"strategy": "recommendation"},
     )
     package["results"][0]["payload"]["summary"]["nodes"] = 999
@@ -4328,7 +4507,7 @@ def test_dashboard_package_rejects_non_finite_payload_values(tmp_path: Path) -> 
     :return None: Checks strict numeric validation during package loading.
     """
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     graph.add_node(
         "other",
         title="Other",
@@ -4336,13 +4515,13 @@ def test_dashboard_package_rejects_non_finite_payload_values(tmp_path: Path) -> 
         authors=[],
         citation_count=0,
     )
-    graph.add_edge("seed", "other", weight=0.5)
+    graph.add_edge("focal", "other", weight=0.5)
     package = update_dashboard_package(
         package_path,
         graph=graph,
-        seed_id="seed",
+        focal_id="focal",
         strategy="recommendation",
-        payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+        payload=_dashboard_graph_payload(graph, "focal", "recommendation"),
         build={"strategy": "recommendation"},
     )
     package["results"][0]["payload"]["edges"][0]["weight"] = float("nan")
@@ -4380,15 +4559,15 @@ def test_dashboard_package_rejects_unrenderable_geometry(
     error_match: str,
 ) -> None:
     """Collection payloads must contain complete, finite render geometry."""
-    graph = build_seed_graph("seed")
-    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+    graph = build_focal_graph("focal")
+    payload = _dashboard_graph_payload(graph, "focal", "recommendation")
     mutate_payload(payload)
 
     with pytest.raises(DashboardPackageError, match=error_match):
         update_dashboard_package(
             tmp_path / DASHBOARD_PACKAGE_FILENAME,
             graph=graph,
-            seed_id="seed",
+            focal_id="focal",
             strategy="recommendation",
             payload=payload,
             build={"strategy": "recommendation"},
@@ -4397,15 +4576,15 @@ def test_dashboard_package_rejects_unrenderable_geometry(
 
 def test_dashboard_package_rejects_padded_identity_tokens(tmp_path: Path) -> None:
     """Versioned graph identities must not rely on reader-specific trimming."""
-    graph = build_seed_graph("seed")
-    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
-    payload["seed_id"] = " seed "
+    graph = build_focal_graph("focal")
+    payload = _dashboard_graph_payload(graph, "focal", "recommendation")
+    payload["focal_id"] = " focal "
 
     with pytest.raises(DashboardPackageError, match="canonical token"):
         update_dashboard_package(
             tmp_path / DASHBOARD_PACKAGE_FILENAME,
             graph=graph,
-            seed_id="seed",
+            focal_id="focal",
             strategy="recommendation",
             payload=payload,
             build={"strategy": "recommendation"},
@@ -4416,37 +4595,37 @@ def test_dashboard_package_rejects_mismatched_dashboard_metadata(
     tmp_path: Path,
 ) -> None:
     """Duplicated dashboard identity metadata must agree with canonical fields."""
-    graph = build_seed_graph("seed")
-    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+    graph = build_focal_graph("focal")
+    payload = _dashboard_graph_payload(graph, "focal", "recommendation")
     payload["dashboard"]["meta"]["strategy"] = "embedding"
 
     with pytest.raises(DashboardPackageError, match="inconsistent dashboard metadata"):
         update_dashboard_package(
             tmp_path / DASHBOARD_PACKAGE_FILENAME,
             graph=graph,
-            seed_id="seed",
+            focal_id="focal",
             strategy="recommendation",
             payload=payload,
             build={"strategy": "recommendation"},
         )
 
 
-def test_dashboard_package_rejects_descriptor_payload_seed_mismatch(
+def test_dashboard_package_rejects_descriptor_payload_focal_mismatch(
     tmp_path: Path,
 ) -> None:
-    """The package boundary should report mismatched seed identities cleanly.
+    """The package boundary should report mismatched focal identities cleanly.
 
     :param Path tmp_path: Isolated dashboard package directory.
     :return None: Checks the descriptor-to-payload identity validation.
     """
-    graph = build_seed_graph("seed")
-    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+    graph = build_focal_graph("focal")
+    payload = _dashboard_graph_payload(graph, "focal", "recommendation")
 
     with pytest.raises(DashboardPackageError, match="descriptor does not match"):
         update_dashboard_package(
             tmp_path / DASHBOARD_PACKAGE_FILENAME,
             graph=graph,
-            seed_id="other-seed",
+            focal_id="other-focal",
             strategy="recommendation",
             payload=payload,
             build={"strategy": "recommendation"},
@@ -4458,22 +4637,22 @@ def test_dashboard_snapshot_rereads_latest_package_under_shared_lock(
 ) -> None:
     """HTML refresh should embed the latest package, not an earlier upsert result."""
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
-    first_graph = build_seed_graph("seed-a")
+    first_graph = build_focal_graph("focal-a")
     first_package = update_dashboard_package(
         package_path,
         graph=first_graph,
-        seed_id="seed-a",
+        focal_id="focal-a",
         strategy="recommendation",
-        payload=_dashboard_graph_payload(first_graph, "seed-a", "recommendation"),
+        payload=_dashboard_graph_payload(first_graph, "focal-a", "recommendation"),
         build={"strategy": "recommendation"},
     )
-    second_graph = build_seed_graph("seed-b")
+    second_graph = build_focal_graph("focal-b")
     update_dashboard_package(
         package_path,
         graph=second_graph,
-        seed_id="seed-b",
+        focal_id="focal-b",
         strategy="recommendation",
-        payload=_dashboard_graph_payload(second_graph, "seed-b", "recommendation"),
+        payload=_dashboard_graph_payload(second_graph, "focal-b", "recommendation"),
         build={"strategy": "recommendation"},
     )
     metadata: dict[str, object] = {"dashboard_collection": first_package}
@@ -4508,11 +4687,11 @@ def test_dashboard_render_failure_preserves_package_and_reports_recovery(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A viewer failure must not imply that the completed graph build was lost."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     base_factory = _make_exporter_stub({}, methods=("to_dashboard_html",))
 
@@ -4570,91 +4749,96 @@ def test_dashboard_render_failure_preserves_package_and_reports_recovery(
     assert any("Add Results" in message for message in messages)
 
 
-def test_dashboard_package_migrates_safe_legacy_results_non_destructively(
-    tmp_path: Path,
+@pytest.mark.parametrize("operation", ["package", "build"])
+def test_dashboard_legacy_collection_requires_a_fresh_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
-    """A valid legacy manifest should migrate confined payload/config artifacts."""
+    """Refuse legacy collection writes before provider work or artifact changes."""
     root = tmp_path / "collection"
     legacy_dir = root / "legacy-seed"
     legacy_dir.mkdir(parents=True)
-    legacy_graph = build_seed_graph("legacy")
     legacy_payload_path = legacy_dir / "recommendation.json"
     legacy_config_path = legacy_dir / "recommendation.config.json"
-    legacy_payload = _dashboard_graph_payload(legacy_graph, "legacy", "recommendation")
-    legacy_payload.pop("kind")
-    legacy_payload.pop("schema_version")
+    legacy_payload = {
+        "seed_id": "legacy",
+        "nodes": [{"id": "legacy", "title": "Legacy Seed", "is_seed": True}],
+        "links": [],
+        "summary": {"total_papers": 1, "total_connections": 0},
+    }
     legacy_payload_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
     legacy_config_path.write_text(
-        json.dumps({"schema_version": 1, "build": {"max_papers": 17}}),
+        json.dumps({"schema_version": 1, "build": {"seed_id": "legacy"}}),
         encoding="utf-8",
     )
-    outside_payload = tmp_path / "outside.json"
-    outside_config = tmp_path / "outside.config.json"
-    outside_payload.write_text(json.dumps(legacy_payload), encoding="utf-8")
-    outside_config.write_text(json.dumps({"build": {}}), encoding="utf-8")
     manifest_path = root / "dashboard.manifest.json"
-    manifest_payload = {
-        "schema_version": 1,
-        "results": [
+    manifest_path.write_text(
+        json.dumps(
             {
-                "result_id": "recommendation:legacy",
-                "seed_id": "legacy",
-                "title": "Legacy Seed",
-                "strategy": "recommendation",
-                "summary": legacy_payload["summary"],
-                "json_path": "legacy-seed/recommendation.json",
-                "config_path": "legacy-seed/recommendation.config.json",
-                "updated_at": "2026-01-01T00:00:00",
-            },
-            {
-                "result_id": "recommendation:outside",
-                "seed_id": "outside",
-                "title": "Unsafe Result",
-                "strategy": "recommendation",
-                "summary": legacy_payload["summary"],
-                "json_path": "../outside.json",
-                "config_path": "../outside.config.json",
-                "updated_at": "2026-01-01T00:00:00",
-            },
-        ],
-    }
-    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
-    original_manifest = manifest_path.read_bytes()
-    original_graph = legacy_payload_path.read_bytes()
-    current_graph = build_seed_graph("current")
-
-    package = update_dashboard_package(
-        root / DASHBOARD_PACKAGE_FILENAME,
-        graph=current_graph,
-        seed_id="current",
-        strategy="hybrid",
-        payload=_dashboard_graph_payload(current_graph, "current", "hybrid"),
-        build={"strategy": "hybrid"},
+                "schema_version": 1,
+                "results": [
+                    {
+                        "result_id": "recommendation:legacy",
+                        "seed_id": "legacy",
+                        "title": "Legacy Seed",
+                        "strategy": "recommendation",
+                        "summary": legacy_payload["summary"],
+                        "json_path": "legacy-seed/recommendation.json",
+                        "config_path": "legacy-seed/recommendation.config.json",
+                        "updated_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
+    dashboard_path = root / "dashboard.html"
+    dashboard_path.write_text("<html>Legacy dashboard</html>", encoding="utf-8")
+    originals = {
+        path: path.read_bytes()
+        for path in (
+            manifest_path,
+            legacy_payload_path,
+            legacy_config_path,
+            dashboard_path,
+        )
+    }
+    package_path = root / DASHBOARD_PACKAGE_FILENAME
+    if operation == "package":
+        current_graph = build_focal_graph("current")
+        with pytest.raises(DashboardPackageError, match="new output directory"):
+            update_dashboard_package(
+                package_path,
+                graph=current_graph,
+                focal_id="current",
+                strategy="hybrid",
+                payload=_dashboard_graph_payload(current_graph, "current", "hybrid"),
+                build={"strategy": "hybrid"},
+            )
+    else:
+        build = MagicMock()
+        monkeypatch.setattr(build_module, "_build_strategy_graph", build)
+        result = run_cli_command(
+            ["build", "current", "--export", "dashboard", "--output", str(root)]
+        )
+        assert result.returncode == 1
+        assert "new output directory" in flatten_console_text(result.stderr)
+        build.assert_not_called()
 
-    assert [entry["result_id"] for entry in package["results"]] == [
-        "hybrid:current",
-        "recommendation:legacy",
-    ]
-    migrated = package["results"][1]
-    assert migrated["payload"]["kind"] == "citemesh-graph"
-    assert migrated["payload"]["schema_version"] == 1
-    assert migrated["build"] == {"max_papers": 17}
-    assert manifest_path.read_bytes() == original_manifest
-    assert legacy_payload_path.read_bytes() == original_graph
+    assert not package_path.exists()
+    assert {path: path.read_bytes() for path in originals} == originals
 
 
 def test_dashboard_collection_mode_logs_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Collection-mode dashboard exports should debug-log planning details."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     debug_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     monkeypatch.setattr(
         build_module,
@@ -4687,54 +4871,60 @@ def test_dashboard_collection_mode_logs_side_effects(
     assert any("Dashboard collection mode:" in msg for msg in debug_messages)
 
 
+@pytest.mark.parametrize(
+    ("elapsed_seconds", "runtime"),
+    [(0.42, "0.4s"), (59.96, "1m00s"), (527.6, "8m48s"), (3661.2, "1h01m01s")],
+)
 def test_build_run_summary_reports_requested_outputs_once(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    elapsed_seconds: float,
+    runtime: str,
 ) -> None:
-    """The closing INFO record should contain graph counts and requested paths."""
-    info_mock = MagicMock()
-    debug_mock = MagicMock()
-    monkeypatch.setattr(build_module.logger, "info", info_mock)
-    monkeypatch.setattr(build_module.logger, "debug", debug_mock)
-    graph = build_seed_graph("seed")
+    """At 80 columns each output stays copyable, including in the log file."""
+    stderr = io.StringIO()
+    graph = build_focal_graph("focal")
     output_paths = {
-        "dashboard": tmp_path / "dashboard.html",
-        "json": tmp_path / "graph.json",
+        "dashboard": Path("out/dashboard.html"),
+        "json": tmp_path / ("long-directory-" * 8) / "[draft] result.json",
     }
+    log_file = tmp_path / "build.log"
+    with _isolated_cli_logging(Console(file=stderr, color_system=None)):
+        console_module._configure_logging(log_width=80, log_file=str(log_file))
+        build_module._log_run_summary(
+            graph,
+            output_paths=output_paths,
+            graph_config_path=tmp_path / "graph.config.json",
+            dashboard_package_path=tmp_path / "dashboard.citemesh.json",
+            elapsed_seconds=elapsed_seconds,
+        )
 
-    build_module._log_run_summary(
-        graph,
-        output_paths=output_paths,
-        graph_config_path=tmp_path / "graph.config.json",
-        dashboard_package_path=tmp_path / "dashboard.citemesh.json",
-    )
-
-    info_mock.assert_called_once_with(
-        "Build complete: nodes=%d, edges=%d; outputs: %s",
-        1,
-        0,
-        f"dashboard={output_paths['dashboard']}, json={output_paths['json']}",
-    )
-    debug_mock.assert_called_once_with(
-        "Build auxiliary artifacts: %s",
-        "config="
-        f"{tmp_path / 'graph.config.json'}, dashboard_package="
-        f"{tmp_path / 'dashboard.citemesh.json'}",
-    )
+    for output in (stderr.getvalue(), log_file.read_text(encoding="utf-8")):
+        assert f"Build complete: 1 paper, 0 edges in {runtime}." in output
+        for fmt, path in output_paths.items():
+            assert output.count(f"Saved {fmt}: {path}\n") == 1
+        assert "graph.config.json" not in output
+        assert "dashboard.citemesh.json" not in output
 
 
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI should pass compact PNG metadata and emit one export summary line."""
-    graph = build_seed_graph("seed")
+    """CLI should pass compact PNG metadata and report every exported format."""
+    graph = build_focal_graph("focal")
 
     captured: dict[str, object] = {}
     logged: list[str] = []
+    clock = [0.0]
+
+    def _fake_build(*_args: object, **_kwargs: object) -> tuple[nx.Graph, str]:
+        clock[0] += 100.0
+        return graph, "focal"
+
+    monkeypatch.setattr(build_module, "perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        _fake_build,
     )
     monkeypatch.setattr(
         build_module,
@@ -4754,6 +4944,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     )
 
     def _fake_visualize(*args: Any, **kwargs: Any) -> None:
+        clock[0] += 35.4
         captured["plot_metadata"] = kwargs.get("metadata")
         Path(args[2]).write_bytes(b"png")
 
@@ -4792,11 +4983,10 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "edges": 0,
         "theme": "dark",
     }
-    assert any(
-        "Build complete: nodes=1, edges=0; "
-        f"{len(build_module.EXPORT_FORMATS)} artifacts saved" in message
-        for message in logged
-    )
+    summaries = [message for message in logged if message.startswith("Build complete:")]
+    assert summaries == ["Build complete: 1 paper, 0 edges in 2m15s."]
+    for format_name in build_module.EXPORT_FORMATS:
+        assert sum(line.startswith(f"Saved {format_name}: ") for line in logged) == 1
     assert all("outputs: bibtex=" not in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)
@@ -4819,14 +5009,14 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         graph: nx.Graph | None = None,
     ) -> dict[str, Any]:
         local_graph = graph if graph is not None else nx.Graph()
-        if "seed" not in local_graph:
+        if "focal" not in local_graph:
             local_graph.add_node(
-                "seed",
-                title="Seed",
+                "focal",
+                title="Focal",
                 year=2020,
                 authors=[],
                 citation_count=0,
-                is_seed=True,
+                is_focal=True,
             )
 
         graph = local_graph.copy()
@@ -4834,7 +5024,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             build_module,
             "_build_strategy_graph",
-            lambda args, _strategy_name, **_kwargs: (graph, "seed"),
+            lambda args, _strategy_name, **_kwargs: (graph, "focal"),
         )
         monkeypatch.setattr(
             build_module,
@@ -4921,12 +5111,12 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime_graph = nx.Graph()
     runtime_graph.graph["embedding_runtime"] = {"binary_prefilter_used": False}
     runtime_graph.add_node(
-        "seed",
-        title="Seed",
+        "focal",
+        title="Focal",
         year=2020,
         authors=[],
         citation_count=0,
-        is_seed=True,
+        is_focal=True,
     )
     metadata = _capture_metadata(
         strategy="embedding",
@@ -4949,7 +5139,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
     _, build_parser, _, _ = parser_module._create_parser()
     cli_args = build_parser.parse_args(
         [
-            "seed",
+            "focal",
             "--strategy",
             "recommendation",
             "--no-references",
@@ -4959,7 +5149,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
 
     payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
@@ -4984,7 +5174,7 @@ def test_embedding_build_logs_side_effect_contract(
     :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
     :return None: Assertions verify routine configuration does not fill info logs.
     """
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
 
     debug_mock = MagicMock()
     info_mock = MagicMock()
@@ -4995,7 +5185,7 @@ def test_embedding_build_logs_side_effect_contract(
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     monkeypatch.setattr(
         build_module,
@@ -5178,7 +5368,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         output = tmp_path / f"{strategy}.json"
         argv = [
             "build",
-            "seed",
+            "focal",
             "--strategy",
             strategy,
             "--max-papers",
@@ -5202,7 +5392,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.setattr(
             build_options_module,
             builder_name,
-            _make_builder_stub(captured, graph=build_seed_graph("seed")),
+            _make_builder_stub(captured, graph=build_focal_graph("focal")),
         )
         result = run_cli_command(argv)
         assert result.returncode == 0, result.stderr
@@ -5252,14 +5442,14 @@ def test_build_s2_retry_budget_routes_explicit_override(
     """
     monkeypatch.delenv("S2_API_KEY", raising=False)
     _, build_parser, _, _ = parser_module._create_parser()
-    default_args = build_parser.parse_args(["seed"])
+    default_args = build_parser.parse_args(["focal"])
     factory = MagicMock()
     monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
 
     assert build_options_module._configured_client_kwargs(default_args) == {}
     factory.assert_not_called()
 
-    args = build_parser.parse_args(["seed", "--s2-retry-budget", token])
+    args = build_parser.parse_args(["focal", "--s2-retry-budget", token])
     configured = build_options_module._configured_client_kwargs(args)
 
     factory.assert_called_once_with(
@@ -5278,7 +5468,7 @@ def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
     :param str token: Invalid CLI retry-budget token.
     :return None: Assertions verify clean usage failure.
     """
-    result = run_cli_command(["build", "seed", "--s2-retry-budget", token])
+    result = run_cli_command(["build", "focal", "--s2-retry-budget", token])
 
     assert result.returncode == 2
     assert "--s2-retry-budget" in result.stderr
@@ -5304,7 +5494,7 @@ def test_graph_config_payload_records_effective_s2_retry_budget(
     :return None: Checks the sidecar does not recalculate client policy.
     """
     _, build_parser, _, _ = parser_module._create_parser()
-    argv = ["seed"]
+    argv = ["focal"]
     if token is not None:
         argv.extend(["--s2-retry-budget", token])
     cli_args = build_parser.parse_args(argv)
@@ -5312,7 +5502,7 @@ def test_graph_config_payload_records_effective_s2_retry_budget(
 
     payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
@@ -5344,12 +5534,12 @@ def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
             """Capture the client selected by normal recommendation dispatch.
 
             :param object kwargs: Recommendation builder keyword arguments.
-            :return SimpleNamespace: Builder stub returning a seed-only graph.
+            :return SimpleNamespace: Builder stub returning a focal-only graph.
             """
             client = kwargs.get("client") or s2.get_client()
             captured["client"] = client
             return SimpleNamespace(
-                build_graph=lambda _paper_id: (build_seed_graph("seed"), "seed")
+                build_graph=lambda _paper_id: (build_focal_graph("focal"), "focal")
             )
 
         monkeypatch.setattr(
@@ -5363,7 +5553,7 @@ def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
         output = tmp_path / "graph.json"
 
         result = run_cli_command(
-            ["build", "seed", "--export", "json", "--output", str(output)]
+            ["build", "focal", "--export", "json", "--output", str(output)]
         )
 
         assert result.returncode == 0, result.stderr
@@ -5405,6 +5595,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "S2_API_KEY",
                 "CITEMESH_CACHE_DIR",
                 "--version",
+                'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
             ],
         ),
         (
@@ -5429,15 +5620,33 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "dashboard.html",
                 DASHBOARD_PACKAGE_FILENAME,
                 ".dashboard.html",
+                'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard',
+                'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
+                "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both --export dashboard",
             ],
         ),
         (
             ["view", "--help"],
             ["view [PATH]", "out/dashboard.html", "--browser NAME", "system browser"],
         ),
-        (["search", "--help"], ["search", "--limit"]),
+        (
+            ["search", "--help"],
+            [
+                "search",
+                "--limit",
+                "citemesh search 'long-context language models' --semantic-source arxiv-corpus",
+            ],
+        ),
         (["cache", "--help"], ["clear", "scan", "Examples"]),
         (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
+        (
+            ["cache", "import", "--help"],
+            [
+                "--path PATH Local portable snapshot directory",
+                "citemesh cache import --bucket pszemraj/citemesh-arxiv-indexes "
+                "--config embeddinggemma-512-int8",
+            ],
+        ),
         (
             ["cache", "clear", "--help"],
             ["cache clear", "--yes", "config.toml", "cached papers"],
@@ -5455,7 +5664,9 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         assert result.stderr == ""
         assert "\x1b[" not in result.stdout
         assert max(map(len, result.stdout.splitlines())) <= width
-        lowered = flatten_console_text(result.stdout).lower()
+        # Long example commands continue on the next line after " \".
+        joined = result.stdout.replace(" \\\n", " ")
+        lowered = flatten_console_text(joined).lower()
         for token in expected_tokens:
             assert token.lower() in lowered
 
@@ -5479,6 +5690,29 @@ def test_cli_help_survives_unusable_terminal_width(
     assert "usage: citemesh COMMAND [options]" in help_text
     assert "CiteMesh" in help_text
     assert "Options:" in help_text
+
+
+@pytest.mark.parametrize(
+    ("option", "option_type", "metavar", "expected"),
+    [
+        ("archive", Path, None, "PATH"),
+        ("model", Path, None, "PATH"),
+        ("path", Path, "DIRECTORY", "DIRECTORY"),
+        ("model", str, None, "MODEL"),
+        ("model", str, "CHECKPOINT", "CHECKPOINT"),
+    ],
+)
+def test_help_metavars_follow_types_and_preserve_explicit_labels(
+    option: str,
+    option_type: type[Path] | type[str],
+    metavar: str | None,
+    expected: str,
+) -> None:
+    """Use a common path placeholder while honoring option-specific labels."""
+    parser = argparse.ArgumentParser()
+    action = parser.add_argument(f"--{option}", type=option_type, metavar=metavar)
+    parser_module._normalize_action_metavars(parser)
+    assert action.metavar == expected
 
 
 def test_cli_options_with_defaults_document_them_in_help() -> None:
@@ -5586,7 +5820,7 @@ def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
     """Output path resolver and auto-output slug generation should stay stable.
 
     :param Path tmp_path: Isolated directory for output-name collision checks.
-    :return None: Verifies artifact paths, sidecar paths, and stable seed slugs.
+    :return None: Verifies artifact paths, sidecar paths, and stable focal slugs.
     """
     path_cases = [
         (
@@ -5638,8 +5872,8 @@ def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
 
     config_cases = [
         (
-            {"png": Path("out/seed/hybrid.png")},
-            Path("out/seed/hybrid.config.json"),
+            {"png": Path("out/focal/hybrid.png")},
+            Path("out/focal/hybrid.config.json"),
         ),
         (
             {"json": Path("reports/example.json")},
@@ -5660,14 +5894,14 @@ def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
             assert canonicalize_paper_id_for_metadata(raw_id) == expected
 
     graph = nx.Graph()
-    graph.add_node("seed-a", title="A Survey of Transformers")
-    graph.add_node("seed-b", title="A Survey of Transformers")
+    graph.add_node("focal-a", title="A Survey of Transformers")
+    graph.add_node("focal-b", title="A Survey of Transformers")
     output_dir = tmp_path / "out"
-    path_a = generate_output_path(graph, seed_id="seed-a", output_dir=output_dir)
-    path_b = generate_output_path(graph, seed_id="seed-b", output_dir=output_dir)
-    graph.nodes["seed-a"]["title"] = "A Corrected Transformer Survey Title"
+    path_a = generate_output_path(graph, focal_id="focal-a", output_dir=output_dir)
+    path_b = generate_output_path(graph, focal_id="focal-b", output_dir=output_dir)
+    graph.nodes["focal-a"]["title"] = "A Corrected Transformer Survey Title"
     corrected_path_a = generate_output_path(
-        graph, seed_id="seed-a", output_dir=output_dir
+        graph, focal_id="focal-a", output_dir=output_dir
     )
     assert path_a != path_b
     assert path_a.parent.name != path_b.parent.name
@@ -5679,10 +5913,10 @@ def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
 
     graph = nx.Graph()
     graph.add_node(
-        "seed",
+        "focal",
         title="This title should definitely exceed forty characters for the slug",
     )
-    output_path = generate_output_path(graph, seed_id="seed", output_dir=output_dir)
+    output_path = generate_output_path(graph, focal_id="focal", output_dir=output_dir)
     assert output_path.parent.name.startswith("this-title-should-")
     assert re.search(r"-[0-9a-f]{8}$", output_path.parent.name)
     assert len(output_path.parent.name) <= 40
@@ -5719,13 +5953,13 @@ def test_output_writes_into_an_existing_directory(
 
 def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Repeating --export should produce exactly the requested formats."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     monkeypatch.setattr(
         build_module,
@@ -5764,7 +5998,7 @@ def test_multi_export_deduplicates_repeated_formats(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repeating the same --export value should not produce duplicate work."""
-    graph = build_seed_graph("seed")
+    graph = build_focal_graph("focal")
     call_counts: dict[str, int] = {}
 
     class _CountingExporter:
@@ -5778,7 +6012,7 @@ def test_multi_export_deduplicates_repeated_formats(
     monkeypatch.setattr(
         build_module,
         "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "focal"),
     )
     monkeypatch.setattr(build_module, "GraphExporter", _CountingExporter)
 
@@ -5818,7 +6052,7 @@ def test_builder_defaults_match_cli_defaults() -> None:
     from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
     _, build_parser, _, _ = parser_module._create_parser()
-    defaults = build_parser.parse_args(["seed", "--strategy", "citation"])
+    defaults = build_parser.parse_args(["focal", "--strategy", "citation"])
 
     assert CitationGraphBuilder.__init__.__defaults__ is not None
     import inspect
@@ -5878,25 +6112,28 @@ def test_graph_config_payload_records_device() -> None:
     """Embedding sidecar config should persist the requested device token."""
     _, build_parser, _, _ = parser_module._create_parser()
     cli_args = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--device", "cpu"]
+        ["focal", "--strategy", "embedding", "--device", "cpu"]
     )
 
     payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
         s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
 
+    assert payload["schema_version"] == 2
+    assert payload["build"]["focal_id"] == "focal"
+    assert "seed_id" not in payload["build"]
     assert payload["build"]["embedding"]["device"] == "cpu"
 
 
 def test_export_metadata_records_effective_embedding_runtime() -> None:
     """Export metadata should surface the active model, dimension, and device."""
     _, build_parser, _, _ = parser_module._create_parser()
-    namespace = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    namespace = build_parser.parse_args(["focal", "--strategy", "embedding"])
     active_model = "google/embeddinggemma-300m"
     resolved_revision = "0123456789abcdef0123456789abcdef01234567"
     fingerprint = f"hf::{active_model}::{resolved_revision}"
@@ -5921,7 +6158,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
 
     sidecar = graph_config_module._build_graph_config_payload(
         cli_args=namespace,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "embedding", "embedding": metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
@@ -5951,7 +6188,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
     ) == replay_builder._embedding_cache_namespace(artifact_identity=fingerprint)
 
     selector_namespace = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--model-revision", "main"]
+        ["focal", "--strategy", "embedding", "--model-revision", "main"]
     )
     selector_fingerprint = f"hf::{selector_namespace.model}::{resolved_revision}"
     selector_metadata = build_options_module._embedding_export_metadata(
@@ -5964,7 +6201,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
     )
     selector_sidecar = graph_config_module._build_graph_config_payload(
         cli_args=selector_namespace,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "embedding", "embedding": selector_metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
@@ -5980,7 +6217,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
     ]:
         corpus_namespace = build_parser.parse_args(
             [
-                "seed",
+                "focal",
                 "--strategy",
                 "embedding",
                 "--semantic-source",
@@ -5997,7 +6234,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         )
         corpus_sidecar = graph_config_module._build_graph_config_payload(
             cli_args=corpus_namespace,
-            seed_id="seed",
+            focal_id="focal",
             metadata={"strategy": "embedding", "embedding": corpus_metadata},
             selected_formats=["json"],
             output_paths={"json": Path("out/embedding.json")},
@@ -6037,13 +6274,13 @@ def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     """Corpus-only flags without --semantic-source should imply arxiv-corpus."""
     _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--corpus-size", "1234"]
+        ["focal", "--strategy", "embedding", "--corpus-size", "1234"]
     )
     provided = parser_module._pop_tracked_option_dests(args)
     build_contract_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "arxiv-corpus"
 
-    args = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    args = build_parser.parse_args(["focal", "--strategy", "embedding"])
     provided = parser_module._pop_tracked_option_dests(args)
     build_contract_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "candidates"
@@ -6060,7 +6297,7 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
     _, build_parser, _, _ = parser_module._create_parser()
     dataset_source = "research/arxiv-snapshot"
     args = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--dataset-source", dataset_source]
+        ["focal", "--strategy", "embedding", "--dataset-source", dataset_source]
     )
     provided = parser_module._pop_tracked_option_dests(args)
     build_contract_module._validate_build_cli_contract(args, build_parser, provided)
@@ -6068,7 +6305,7 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
     assert args.semantic_source == "arxiv-corpus"
     payload = graph_config_module._build_graph_config_payload(
         cli_args=args,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
@@ -6076,14 +6313,14 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
     )
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
-    candidate_args = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    candidate_args = build_parser.parse_args(["focal", "--strategy", "embedding"])
     candidate_provided = parser_module._pop_tracked_option_dests(candidate_args)
     build_contract_module._validate_build_cli_contract(
         candidate_args, build_parser, candidate_provided
     )
     candidate_payload = graph_config_module._build_graph_config_payload(
         cli_args=candidate_args,
-        seed_id="seed",
+        focal_id="focal",
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},

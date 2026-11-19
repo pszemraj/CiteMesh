@@ -12,15 +12,37 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.text import Text
 
 from citemesh._runtime import stderr_isatty, stdout_isatty
-from citemesh.progress import set_progress_console, set_progress_enabled
+from citemesh.progress import (
+    CONSOLE_TIME_FORMAT,
+    set_progress_console,
+    set_progress_enabled,
+)
 
 DEFAULT_LOG_WIDTH = 0
 
 REDIRECTED_LOG_WIDTH = 140
 
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
+
+_THIRD_PARTY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "httpx2",
+    "httpcore2",
+    "urllib3",
+    "filelock",
+    "matplotlib",
+    "PIL",
+    "h5py",
+    "fsspec",
+    "asyncio",
+    "sentence_transformers",
+    "transformers",
+    "datasets",
+)
 
 
 def _resolve_console_width(log_width: int, *, interactive: bool) -> int | None:
@@ -69,6 +91,31 @@ _LOGGING_CONFIGURED = False
 logger = logging.getLogger("citemesh.cli")
 
 
+class _PlainLogHandler(logging.Handler):
+    """Write unwrapped, literal log lines through the shared stderr console."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        log_console.print(
+            self.format(record), markup=False, highlight=False, soft_wrap=True
+        )
+
+
+class _RichLogHandler(RichHandler):
+    """Let the terminal wrap records containing copyable output paths."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not getattr(record, "soft_wrap", False):
+            super().emit(record)
+            return
+        assert self.formatter is not None
+        self.console.print(
+            Text(self.formatter.formatTime(record, CONSOLE_TIME_FORMAT), "log.time"),
+            self.get_level_text(record),
+            Text(self.format(record)),
+            soft_wrap=True,
+        )
+
+
 def _configure_logging(
     *,
     log_level: str = "info",
@@ -90,18 +137,29 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
-    _size_console(log_console, log_width, interactive=stderr_isatty())
+    interactive = stderr_isatty()
+    _size_console(log_console, log_width, interactive=interactive)
     _size_console(output_console, log_width, interactive=stdout_isatty())
     # Progress bars share the logging console so records render above a live bar.
     set_progress_console(log_console)
     set_progress_enabled(resolved_level <= logging.INFO)
-    console_handler = RichHandler(
-        console=log_console,
-        show_time=False,
-        show_path=False,
-        rich_tracebacks=False,
-        markup=False,
-    )
+    console_handler: logging.Handler
+    if interactive or log_console.is_terminal or log_width > 0:
+        console_handler = _RichLogHandler(
+            console=log_console,
+            show_time=True,
+            omit_repeated_times=False,
+            show_path=False,
+            rich_tracebacks=False,
+            markup=False,
+        )
+    else:
+        console_handler = _PlainLogHandler()
+        console_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s: %(message)s", datefmt=CONSOLE_TIME_FORMAT
+            )
+        )
     console_handler.setLevel(resolved_level)
     handlers: list[logging.Handler] = [console_handler]
     if log_file is not None:
@@ -124,21 +182,10 @@ def _configure_logging(
     logging.basicConfig(
         level=resolved_level,
         format="%(message)s",
-        datefmt="[%X]",
+        datefmt=CONSOLE_TIME_FORMAT,
         handlers=handlers,
         force=True,
     )
-    # Keep third-party HTTP logs concise without import-time side effects.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("filelock").setLevel(logging.WARNING)
-    logging.getLogger("matplotlib").setLevel(logging.WARNING)
-    logging.getLogger("PIL").setLevel(logging.WARNING)
-    logging.getLogger("h5py").setLevel(logging.WARNING)
-    logging.getLogger("fsspec").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-    logging.getLogger("transformers").setLevel(logging.WARNING)
-    logging.getLogger("datasets").setLevel(logging.WARNING)
+    for name in _THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     _LOGGING_CONFIGURED = True

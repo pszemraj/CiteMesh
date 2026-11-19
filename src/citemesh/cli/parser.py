@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import argparse
 import math
+import shlex
 import shutil
 import sys
-from collections.abc import Sequence
+import textwrap
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NoReturn, cast
 
 from rich import box
-from rich.console import Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.table import Table
 from rich.text import Text
 from rich_argparse import RichHelpFormatter
@@ -46,11 +48,13 @@ from citemesh.core.validation import (
     parse_unit_interval_float,
 )
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data.user_config import known_config_keys
 from citemesh.strategies.candidates import DEFAULT_CANDIDATE_POOL_SIZE
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
 )
+from citemesh.strategies.embedding.config import PUBLIC_ARXIV_INDEX_IMPORT
 from citemesh.strategies.hybrid import (
     HYBRID_DEFAULT_MAX_CITATIONS,
     HYBRID_DEFAULT_MAX_PAPERS,
@@ -64,6 +68,37 @@ from .console import DEFAULT_LOG_WIDTH, LOG_LEVEL_CHOICES
 
 _TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
 _TRACKED_ACTION_CACHE: dict[type[argparse.Action], type[argparse.Action]] = {}
+
+
+_HYBRID_DASHBOARD_EXAMPLE = (
+    'citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard'
+)
+
+
+def corpus_build_example(namespace: str | None = None) -> str:
+    """Return the hybrid build command that uses an installed corpus.
+
+    :param str | None namespace: Installed namespace to select explicitly.
+    :return str: Copyable build command.
+    """
+    selector = f" --cache-namespace {namespace}" if namespace else ""
+    return (
+        "citemesh build arxiv:2404.08801 --strategy hybrid --semantic-source both"
+        f"{selector} --export dashboard"
+    )
+
+
+def corpus_search_example(namespace: str | None = None) -> str:
+    """Return the corpus search command for an installed corpus.
+
+    :param str | None namespace: Installed namespace to select explicitly.
+    :return str: Copyable search command.
+    """
+    selector = f" --cache-namespace {namespace}" if namespace else ""
+    return (
+        "citemesh search 'long-context language models' "
+        f"--semantic-source arxiv-corpus{selector}"
+    )
 
 
 class _HelpFormatter(RichHelpFormatter):
@@ -86,10 +121,32 @@ class _HelpFormatter(RichHelpFormatter):
         :param str prog: Command name supplied by argparse.
         :return None: Initialize the help renderer.
         """
+        width = max(40, min(110, shutil.get_terminal_size().columns - 2))
         super().__init__(
             prog,
-            max_help_position=32,
-            width=max(40, min(110, shutil.get_terminal_size().columns - 2)),
+            max_help_position=min(32, width // 3),
+            width=width,
+        )
+
+    def _format_usage(
+        self,
+        usage: str | None,
+        actions: Iterable[argparse.Action],
+        groups: Iterable[argparse._MutuallyExclusiveGroup],
+        prefix: str | None,
+    ) -> str:
+        rendered = super()._format_usage(usage, actions, groups, prefix)
+        if not usage:
+            return rendered
+        return (
+            textwrap.fill(
+                rendered.strip(),
+                width=self._width,
+                subsequent_indent=" " * len(prefix or "usage: "),
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            + "\n\n"
         )
 
 
@@ -115,7 +172,7 @@ class _ArgumentParser(argparse.ArgumentParser):
                 ("error: ", "bold red"),
                 (message, "red"),
             ),
-            soft_wrap=True,
+            width=shutil.get_terminal_size().columns,
         )
         self.exit(2)
 
@@ -133,24 +190,85 @@ def _missing_command(parser: argparse.ArgumentParser) -> int:
     return 2
 
 
-def _help_examples(*examples: tuple[str, str]) -> Table:
-    """Render labeled command examples that wrap with the help's terminal width.
+_EXAMPLE_PADDING = 2
+_EXAMPLE_CONTINUATION = "    "
+
+
+def _wrap_command(command: str, width: int) -> str:
+    """Break a shell command at option boundaries so every line stays pasteable.
+
+    An option and its values stay together, so a line never ends between a flag
+    and its value or inside a quoted argument. Continuation lines end with a
+    backslash and are indented; a single option longer than ``width`` is kept
+    whole.
+
+    :param str command: Single-line shell command.
+    :param int width: Widest line to emit, including a trailing ``" \\"``.
+    :return str: The command, wrapped when it exceeds ``width``.
+    """
+    chunks: list[str] = []
+    for token in shlex.split(command, posix=False):
+        if token.startswith("-") or not chunks:
+            chunks.append(token)
+        else:
+            chunks[-1] += " " + token
+    lines = [chunks[0]]
+    for index, chunk in enumerate(chunks[1:], start=1):
+        reserved = 0 if index == len(chunks) - 1 else len(" \\")
+        if len(lines[-1]) + 1 + len(chunk) + reserved <= width:
+            lines[-1] += " " + chunk
+        else:
+            lines.append(_EXAMPLE_CONTINUATION + chunk)
+    return " \\\n".join(lines)
+
+
+class _HelpExamples:
+    """Labeled command examples wrapped to the width help is rendered at."""
+
+    def __init__(self, examples: Sequence[tuple[str, str]]) -> None:
+        """Keep the examples until the formatter supplies the render width.
+
+        :param Sequence[tuple[str, str]] examples: Description and command pairs.
+        :return None: Store the examples.
+        """
+        self._examples = examples
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        """Render a borderless table whose commands fit its cell width.
+
+        :param Console console: Console rendering the help.
+        :param ConsoleOptions options: Render options carrying the help width.
+        :return RenderResult: The example table.
+        """
+        table = Table(
+            box=None,
+            show_header=False,
+            padding=(0, _EXAMPLE_PADDING),
+            leading=1,
+            title="Examples:",
+            title_style="bold",
+            title_justify="left",
+        )
+        width = options.max_width - 2 * _EXAMPLE_PADDING
+        for label, command in self._examples:
+            table.add_row(
+                Text.assemble(
+                    (label + "\n", "dim"),
+                    (_wrap_command(command, width) + "\n", "cyan"),
+                )
+            )
+        yield table
+
+
+def _help_examples(*examples: tuple[str, str]) -> _HelpExamples:
+    """Describe labeled command examples that wrap with the help's width.
 
     :param tuple[str, str] examples: Description and command pairs.
-    :return Table: Borderless, single-column example block.
+    :return _HelpExamples: Renderable that wraps long commands at option boundaries.
     """
-    table = Table(
-        box=None,
-        show_header=False,
-        padding=(0, 2),
-        leading=1,
-        title="Examples:",
-        title_style="bold",
-        title_justify="left",
-    )
-    for label, command in examples:
-        table.add_row(Text.assemble((label + "\n", "dim"), (command + "\n", "cyan")))
-    return table
+    return _HelpExamples(examples)
 
 
 def _rich_epilog(renderable: RenderableType) -> str:
@@ -429,10 +547,10 @@ def _create_root_parser() -> tuple[
             Group(
                 _help_examples(
                     (
-                        "Build a graph from a known paper",
-                        'citemesh build "arxiv:1706.03762" --strategy hybrid',
+                        "Build a hybrid graph with local embeddings (recommended extra)",
+                        _HYBRID_DASHBOARD_EXAMPLE,
                     ),
-                    ("Find a seed paper", 'citemesh search "attention mechanisms"'),
+                    ("Find a focal paper", 'citemesh search "attention mechanisms"'),
                     ("Open saved results", "citemesh view"),
                     ("Inspect local storage", "citemesh cache scan"),
                 ),
@@ -491,7 +609,7 @@ def _add_build_graph_arguments(
         default=None,
         help=(
             "File or directory (default: out/ with automatic names). Dashboard collections share "
-            "dashboard.html + dashboard.citemesh.json and save each seed's JSON "
+            "dashboard.html + dashboard.citemesh.json and save each focal paper's JSON "
             "under <title-slug>-<hash>/; use *.dashboard.html for a standalone file."
         ),
     )
@@ -524,7 +642,7 @@ def _add_build_graph_arguments(
         metavar="N",
         default=DEFAULT_MAX_PAPERS,
         help=(
-            f"Maximum papers including the seed (default: {DEFAULT_MAX_PAPERS}; "
+            f"Maximum papers including the focal paper (default: {DEFAULT_MAX_PAPERS}; "
             f"hybrid: {HYBRID_DEFAULT_MAX_PAPERS})"
         ),
     )
@@ -553,14 +671,14 @@ def _add_build_graph_arguments(
         metavar="N",
         default=None,
         help=(
-            "Seed for deterministic layout generation in layout-based exports "
+            "Random seed for deterministic layout generation in layout-based exports "
             "(default: deterministic built-in seed)"
         ),
     )
     export_group.add_argument(
         "--include-timestamp",
         action="store_true",
-        help="Include generation timestamp in output metadata annotations",
+        help="Include the generation time in output metadata",
     )
 
 
@@ -612,7 +730,7 @@ def _add_build_citation_arguments(
     citation_group.add_argument(
         "--no-references",
         action="store_true",
-        help="Disable fetching reference lists (faster but no real bibliographic coupling)",
+        help="Skip fetching selected papers’ reference lists for edge scoring. Hybrid still ranks the focal paper’s references.",
     )
     citation_group.add_argument(
         "--refresh-reference-cache",
@@ -667,10 +785,7 @@ def _add_build_corpus_arguments(
         "--model-revision",
         type=_non_empty_str,
         default=None,
-        help=(
-            "Optional model revision token (branch/tag/commit) for hub-backed "
-            "embedding models."
-        ),
+        help=("Hub model branch, tag, or commit for embedding models."),
     )
 
     corpus_group.add_argument(
@@ -747,13 +862,13 @@ def _add_build_corpus_arguments(
         "--streaming",
         dest="streaming",
         action="store_true",
-        help="Stream HuggingFace dataset instead of loading it into memory (requires non-sliced --dataset-split)",
+        help="Stream the dataset (requires unsliced --dataset-split)",
     )
     streaming_group.add_argument(
         "--no-streaming",
         dest="streaming",
         action="store_false",
-        help="Load cached HuggingFace dataset shards instead of streaming them.",
+        help="Read downloaded dataset shards (the default).",
     )
     build_parser.set_defaults(streaming=False)
 
@@ -772,13 +887,13 @@ def _add_build_cache_arguments(
     storage_group.add_argument(
         "--force-rebuild-cache",
         action="store_true",
-        help="Forcefully clear and rebuild embedding cache for this model before running.",
+        help="Clear and rebuild this model's embedding cache.",
     )
     storage_group.add_argument(
         "--overwrite-cache",
         action="store_true",
         help=(
-            "Acknowledge destructive cache overwrite for --force-rebuild-cache and "
+            "Confirm destructive --force-rebuild-cache and "
             "skip interactive confirmation."
         ),
     )
@@ -786,10 +901,7 @@ def _add_build_cache_arguments(
         "--cache-overwrite-reason",
         type=str,
         default=None,
-        help=(
-            "Optional rationale string logged when --force-rebuild-cache clears "
-            "embedding cache state."
-        ),
+        help=("Log a reason when --force-rebuild-cache clears embedding cache state."),
     )
 
     storage_group.add_argument(
@@ -879,10 +991,7 @@ def _add_build_runtime_arguments(
         type=_positive_int,
         metavar="N",
         default=ENCODE_BATCH_SIZE,
-        help=(
-            "Batch size for embedding model encode passes during hydration/search "
-            "(default: %(default)s)"
-        ),
+        help=("Texts per embedding batch (default: %(default)s)"),
     )
 
     torch_compile_group = embedding_group.add_mutually_exclusive_group()
@@ -890,16 +999,13 @@ def _add_build_runtime_arguments(
         "--torch-compile",
         dest="torch_compile",
         action="store_true",
-        help=(
-            "Enable best-effort torch.compile for supported embedding profiles "
-            "(default: disabled)."
-        ),
+        help=("Try torch.compile for supported models (default: disabled)."),
     )
     torch_compile_group.add_argument(
         "--no-torch-compile",
         dest="torch_compile",
         action="store_false",
-        help="Disable torch.compile and keep eager runtime for embedding models.",
+        help="Use eager embedding inference.",
     )
     build_parser.set_defaults(torch_compile=False)
 
@@ -910,7 +1016,7 @@ def _add_build_runtime_arguments(
         choices=HYBRID_SEMANTIC_SOURCE_CHOICES,
         default="candidates",
         help=(
-            "candidates uses S2 seed neighbors (hybrid: with S2 recommendations); "
+            "candidates uses S2 neighbors of the focal paper (hybrid: with S2 recommendations); "
             "arxiv-corpus searches a local corpus; both combines the two "
             "(hybrid only). Default: %(default)s. Corpus flags imply arxiv-corpus."
         ),
@@ -961,12 +1067,16 @@ def _add_build_arguments(
         epilog=_rich_epilog(
             _help_examples(
                 (
-                    "Create or extend the dashboard collection in out/",
-                    'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
+                    "Build a hybrid dashboard with local embeddings (recommended extra)",
+                    _HYBRID_DASHBOARD_EXAMPLE,
                 ),
                 (
-                    "Search 10,000 recent papers by topic",
-                    'citemesh build "long-context models" -s embedding --corpus-size 10000',
+                    "Build a recommendation dashboard without an embedding model (viz extra)",
+                    'citemesh build "arxiv:1706.03762" --strategy recommendation --export dashboard',
+                ),
+                (
+                    "Build with the installed arXiv corpus (recommended extra)",
+                    corpus_build_example(),
                 ),
             ),
         ),
@@ -1083,8 +1193,7 @@ def _add_search_arguments(
                 ),
                 (
                     "Search an arXiv-corpus build",
-                    'citemesh search "long-context attention" '
-                    "--semantic-source arxiv-corpus",
+                    corpus_search_example(),
                 ),
                 (
                     "Search Semantic Scholar by keyword",
@@ -1291,7 +1400,17 @@ def _add_cache_arguments(
     )
 
     export_parser = cache_subparsers.add_parser(
-        "export", help="Export a certified corpus without loading its model"
+        "export",
+        help="Export a certified corpus without loading its model",
+        description="Export an installed corpus for transfer to another machine. No model is loaded.",
+        epilog=_rich_epilog(
+            _help_examples(
+                (
+                    "Export a namespace from cache scan",
+                    "citemesh cache export --namespace NAMESPACE --output out/corpus",
+                )
+            )
+        ),
     )
     export_parser.add_argument(
         "--namespace",
@@ -1306,7 +1425,18 @@ def _add_cache_arguments(
         help="New directory for the portable manifest and Parquet shards",
     )
     import_parser = cache_subparsers.add_parser(
-        "import", help="Install a portable corpus from local files or Hugging Face"
+        "import",
+        help="Install a portable corpus from local files or Hugging Face",
+        description="Install a corpus for local search and graph discovery. Choose a local snapshot or a Hugging Face bucket.",
+        epilog=_rich_epilog(
+            _help_examples(
+                ("Install a local export", "citemesh cache import --path out/corpus"),
+                (
+                    "Install a published corpus",
+                    " ".join(PUBLIC_ARXIV_INDEX_IMPORT),
+                ),
+            )
+        ),
     )
     source = import_parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--path", type=Path, help="Local portable snapshot directory")
@@ -1324,7 +1454,9 @@ def _add_cache_arguments(
         help="Published snapshot ID (default: configuration's current snapshot)",
     )
     refresh_parser = cache_subparsers.add_parser(
-        "refresh", help="Reconcile an installed corpus with a pinned source revision"
+        "refresh",
+        help="Reconcile an installed corpus with a pinned source revision",
+        description="Update an installed corpus from its source dataset. Use --adopt to certify a legacy cache using its original settings.",
     )
     refresh_parser.add_argument(
         "--namespace",
@@ -1343,26 +1475,54 @@ def _add_cache_arguments(
         action="store_true",
         help="Explicitly certify a legacy corpus after proving its model and namespace",
     )
-    adoption = refresh_parser.add_argument_group("Legacy adoption selectors (--adopt)")
-    for option in ("model", "model-revision", "dataset-source", "dataset-split"):
-        adoption.add_argument(f"--{option}", type=_non_empty_str, default=None)
+    adoption = refresh_parser.add_argument_group(
+        "Legacy adoption (--adopt)", "Match the original cache settings."
+    )
+    for option, help_text in (
+        ("model", "Original model name or local checkpoint path"),
+        ("model-revision", "Original model branch, tag, or commit"),
+        ("dataset-source", "Original corpus dataset"),
+        ("dataset-split", "Original dataset split, including any slice"),
+    ):
+        adoption.add_argument(
+            f"--{option}", type=_non_empty_str, default=None, help=help_text
+        )
     adoption.add_argument(
-        "--model-profile", choices=list(MODEL_PROFILE_CHOICES), default=None
+        "--model-profile",
+        metavar="PROFILE",
+        choices=list(MODEL_PROFILE_CHOICES),
+        default=None,
+        help="Original model profile: auto, default, embeddinggemma",
     )
     adoption.add_argument(
-        "--storage-precision", choices=list(STORAGE_PRECISION_CHOICES), default=None
+        "--storage-precision",
+        metavar="PRECISION",
+        choices=list(STORAGE_PRECISION_CHOICES),
+        default=None,
+        help="Original stored vector dtype: int8 or float32",
     )
-    for option in ("truncate-dim", "calibration-sample-size", "corpus-size"):
-        adoption.add_argument(f"--{option}", type=_positive_int, default=None)
-    adoption.add_argument("--all-corpus", action="store_true", default=None)
+    for option, help_text in (
+        ("truncate-dim", "Original embedding dimension"),
+        ("calibration-sample-size", "Original int8 calibration sample count"),
+        ("corpus-size", "Original cap on corpus papers"),
+    ):
+        adoption.add_argument(
+            f"--{option}", metavar="N", type=_positive_int, default=None, help=help_text
+        )
+    adoption.add_argument(
+        "--all-corpus",
+        action="store_true",
+        default=None,
+        help="Original corpus used the full selected split",
+    )
 
     return cache_parser, [
         (cache_parser, "COMMAND [options]"),
         (cache_clear_parser, "[options]"),
         (cache_scan_parser, "[options]"),
-        (export_parser, "[options]"),
-        (import_parser, "[options]"),
-        (refresh_parser, "[options]"),
+        (export_parser, "--namespace NAMESPACE --output PATH [options]"),
+        (import_parser, "(--path PATH | --bucket BUCKET) [options]"),
+        (refresh_parser, "--namespace NAMESPACE [options]"),
     ]
 
 
@@ -1442,6 +1602,21 @@ def _add_config_arguments(
         "path",
         help="Print the config file path",
     )
+    keys = Table(
+        box=None,
+        show_header=False,
+        padding=(0, 2),
+        title="Config keys:",
+        title_style="bold",
+        title_justify="left",
+    )
+    sections: dict[str, list[str]] = {}
+    for key in known_config_keys():
+        sections.setdefault(key.partition(".")[0], []).append(key)
+    for section, names in sections.items():
+        keys.add_row(Text(section, style="bold"), Text("\n".join(names), style="cyan"))
+    for key_parser in (config_get_parser, config_set_parser, config_unset_parser):
+        key_parser.epilog = _rich_epilog(keys)
 
     return config_parser, [
         (config_parser, "COMMAND [options]"),
@@ -1472,24 +1647,28 @@ def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
             )
         elif (
             action.option_strings
-            and action.type in (str, _non_empty_str)
+            and action.type in (str, _non_empty_str, Path)
             and action.choices is None
+            and action.metavar is None
         ):
-            action.metavar = {
-                "output": "PATH",
-                "log_file": "PATH",
-                "model": "MODEL",
-                "model_revision": "REV",
-                "dataset_source": "DATASET",
-                "dataset_split": "SPLIT",
-                "namespace": "NAMESPACE",
-                "cache_namespace": "NAMESPACE",
-                "dataset_revision": "REV",
-                "snapshot": "ID",
-                "bucket": "BUCKET",
-                "config": "NAME",
-                "browser": "NAME",
-            }.get(action.dest, "TEXT")
+            if action.type is Path:
+                action.metavar = "PATH"
+            else:
+                action.metavar = {
+                    "output": "PATH",
+                    "log_file": "PATH",
+                    "model": "MODEL",
+                    "model_revision": "REV",
+                    "dataset_source": "DATASET",
+                    "dataset_split": "SPLIT",
+                    "namespace": "NAMESPACE",
+                    "cache_namespace": "NAMESPACE",
+                    "dataset_revision": "REV",
+                    "snapshot": "ID",
+                    "bucket": "BUCKET",
+                    "config": "NAME",
+                    "browser": "NAME",
+                }.get(action.dest, "TEXT")
 
 
 def _finalize_command_parser(
@@ -1509,7 +1688,11 @@ def _finalize_command_parser(
     command_parser._optionals.title = "Options"
     _add_logging_arguments(command_parser, suppress_defaults=not is_root)
     command_parser._action_groups.sort(
-        key=lambda group: {"Options": 1, "Logging": 2}.get(group.title or "", 0)
+        key=lambda group: {
+            "Options": 1,
+            "Legacy adoption (--adopt)": 2,
+            "Logging": 3,
+        }.get(group.title or "", 0)
     )
     _normalize_action_metavars(command_parser)
 

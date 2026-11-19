@@ -287,30 +287,71 @@ def read_installed_corpus_summary(db_path: Path) -> InstalledCorpusSummary:
         raise CorpusRecoveryPendingError(str(exc)) from exc
 
 
-def embedding_namespace_has_corpus_state(db_path: Path) -> bool | None:
-    """Probe whether a namespace records managed corpus state, read-only.
+@dataclass(frozen=True)
+class EmbeddingNamespaceProbe:
+    """Read-only search preflight data from a native metadata snapshot."""
+
+    corpus_state: CorpusState
+    metadata: dict[str, str]
+    has_papers: bool | None
+
+
+def probe_embedding_namespace(db_path: Path) -> EmbeddingNamespaceProbe | None:
+    """Read a native namespace's corpus state, metadata, and paper presence.
 
     Unlike :func:`read_installed_corpus_summary` this takes no locks and never
     recovers a hot journal, so it creates and modifies nothing. An import
     interrupted before its first batch commits leaves this state with no papers.
 
     :param Path db_path: Metadata database belonging to one embedding namespace.
-    :return bool | None: ``True`` when corpus state is recorded, ``False`` when
-        the metadata is readable and records none, or ``None`` when inspection fails.
+    :return EmbeddingNamespaceProbe | None: Existing metadata, or ``None`` when unreadable.
     """
     try:
         with closing(
             sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
         ) as conn:
-            return bool(_read_state(conn))
+            conn.execute("BEGIN")
+            metadata: dict[str, str] = dict(
+                conn.execute("SELECT key, value FROM cache_metadata")
+            )
+            state = json.loads(metadata.pop(CORPUS_STATE_KEY, "{}"))
+            if not isinstance(state, dict):
+                return None
+            has_papers = None
+            if not state:
+                try:
+                    has_papers = (
+                        conn.execute("SELECT 1 FROM papers LIMIT 1").fetchone()
+                        is not None
+                    )
+                except sqlite3.DatabaseError:
+                    # Unreadable rows do not imply an empty namespace.
+                    pass
+            return EmbeddingNamespaceProbe(
+                cast(CorpusState, state), metadata, has_papers
+            )
     except (OSError, ValueError, sqlite3.DatabaseError):
         return None
+
+
+def probe_embedding_dimension(h5_path: Path) -> int | None:
+    """Read the stored vector width without accessing vector rows."""
+    try:
+        with h5py.File(h5_path, "r") as handle:
+            dataset = handle.get(constants.EMBEDDINGS_DATASET_NAME)
+            if isinstance(dataset, h5py.Dataset):
+                shape = dataset.shape
+                if shape is not None and len(shape) == 2:
+                    return int(shape[1])
+    except OSError:
+        pass
+    return None
 
 
 def installed_corpus_namespaces(cache_dir: Path) -> list[str]:
     """List the managed corpus namespaces present in an embedding cache directory.
 
-    Read-only like :func:`embedding_namespace_has_corpus_state`: it takes no locks,
+    Read-only like :func:`probe_embedding_namespace`: it takes no locks,
     never recovers a hot journal and creates nothing. Interrupted installs are
     listed alongside completed ones.
 
@@ -320,7 +361,8 @@ def installed_corpus_namespaces(cache_dir: Path) -> list[str]:
     return sorted(
         db_path.name.removeprefix("metadata_").removesuffix(".db")
         for db_path in cache_dir.glob("metadata_*.db")
-        if embedding_namespace_has_corpus_state(db_path)
+        if (probe := probe_embedding_namespace(db_path)) is not None
+        and probe.corpus_state
     )
 
 
@@ -563,7 +605,7 @@ class _LifecycleMixin(_EmbeddingCacheHost):
     def _require_corpus_view_locked(
         self, conn: sqlite3.Connection, corpus_size: int | None
     ) -> CorpusState:
-        """Require a ready corpus whose certified coverage contains the view.
+        """Require ready state and a valid view within any certified coverage.
 
         :param sqlite3.Connection conn: Open cache database connection.
         :param int | None corpus_size: Optional newest-N limit within installed coverage.
@@ -573,20 +615,17 @@ class _LifecycleMixin(_EmbeddingCacheHost):
         """
         state = self._require_ready_locked(conn)
         if corpus_size is not None:
-            if not state.get("membership_complete"):
-                raise RuntimeError(
-                    "Exact corpus views require certified source membership"
-                )
             if corpus_size < 1:
                 raise ValueError("corpus_size must be positive")
-            source = state["source"]
-            if source["selection"] == "newest" and corpus_size > cast(
-                int, source["limit"]
-            ):
-                raise ValueError(
-                    f"Requested corpus view {corpus_size} exceeds installed coverage "
-                    f"{source['limit']}"
-                )
+            if state.get("membership_complete"):
+                source = state["source"]
+                if source["selection"] == "newest" and corpus_size > cast(
+                    int, source["limit"]
+                ):
+                    raise ValueError(
+                        f"Requested corpus view {corpus_size} exceeds installed coverage "
+                        f"{source['limit']}"
+                    )
         return state
 
     def _corpus_view_query_locked(
@@ -594,16 +633,23 @@ class _LifecycleMixin(_EmbeddingCacheHost):
     ) -> tuple[str, tuple[int, ...]] | None:
         """Build SQL for the active corpus view.
 
-        Whole-coverage requests use unordered membership; smaller views rank
-        members by newest submission.
+        Certified requests use source membership. Ordinary hydrated caches rank
+        all stored rows by submission, with insertion order for undated fillers.
 
         :param sqlite3.Connection conn: Open cache database connection.
         :param int | None corpus_size: Optional newest-N limit within installed coverage.
-        :return tuple[str, tuple[int, ...]] | None: Row query and bindings, or ``None`` for unmanaged caches.
+        :return tuple[str, tuple[int, ...]] | None: Row query and bindings, or ``None`` for an unbounded unmanaged cache.
         """
         state = self._require_corpus_view_locked(conn, corpus_size)
         if not state.get("membership_complete"):
-            return None
+            if corpus_size is None:
+                return None
+            return (
+                "SELECT p.row_idx FROM papers p ORDER BY "
+                + newest_corpus_order_sql("p.chronology_key", "p.row_idx")
+                + " LIMIT ?",
+                (corpus_size,),
+            )
         query = (
             "SELECT p.row_idx FROM corpus_membership m "
             "JOIN papers p ON p.paper_id=m.paper_id"

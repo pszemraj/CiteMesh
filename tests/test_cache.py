@@ -18,6 +18,10 @@ from citemesh.data.embedding_cache.constants import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     SCHEMA_VERSION_KEY,
 )
+from citemesh.data.embedding_cache.lifecycle import (
+    CORPUS_STATE_KEY,
+    probe_embedding_namespace,
+)
 from tests._helpers import fail_stat_for
 
 
@@ -49,15 +53,26 @@ def test_embedding_namespace_paper_probe_distinguishes_empty_and_unreadable(
     metadata_path = tmp_path / "metadata.db"
     with sqlite3.connect(metadata_path) as connection:
         connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT)"
+        )
 
-    assert cache_module.embedding_namespace_has_papers(metadata_path) is False
+    probe = probe_embedding_namespace(metadata_path)
+    assert probe is not None and probe.has_papers is False
     with sqlite3.connect(metadata_path) as connection:
         connection.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
-    assert cache_module.embedding_namespace_has_papers(metadata_path) is True
+    probe = probe_embedding_namespace(metadata_path)
+    assert probe is not None and probe.has_papers is True
+
+    with sqlite3.connect(metadata_path) as connection:
+        connection.execute(
+            "INSERT INTO cache_metadata VALUES (?, ?)", (CORPUS_STATE_KEY, "[1]")
+        )
+    assert probe_embedding_namespace(metadata_path) is None
 
     corrupt_path = tmp_path / "corrupt.db"
     corrupt_path.write_bytes(b"not SQLite")
-    assert cache_module.embedding_namespace_has_papers(corrupt_path) is None
+    assert probe_embedding_namespace(corrupt_path) is None
 
 
 def test_default_cache_root_honors_override_before_platform(
@@ -217,10 +232,10 @@ def test_atomic_writes_without_fchmod(
     json_path = tmp_path / "paper.json"
 
     cache_module.atomic_write_text(text_path, 'theme = "dark"\n', mode=0o600)
-    cache_module.atomic_write_json(json_path, {"paper_id": "seed"})
+    cache_module.atomic_write_json(json_path, {"paper_id": "focal"})
 
     assert text_path.read_text(encoding="utf-8") == 'theme = "dark"\n'
-    assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "seed"}
+    assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "focal"}
 
 
 def test_atomic_output_path_replaces_existing_writable_file(tmp_path: Path) -> None:

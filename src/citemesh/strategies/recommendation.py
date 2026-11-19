@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,6 +15,7 @@ from citemesh.core import (
     DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
     Paper,
 )
+from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
 from citemesh.strategies.base import (
@@ -57,7 +57,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         """Initialize recommendation graph builder.
 
         :param int max_papers: Maximum papers to include in graph.
-        :param bool fetch_references: Whether to fetch references for seed and recommended papers.
+        :param bool fetch_references: Whether to fetch references for focal and recommended papers.
         :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
         :param float similarity_threshold: Threshold for edge creation (default matches CLI).
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
@@ -75,11 +75,11 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
     @scope_candidate_collection
     def collect_papers(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> dict[str, Paper]:
-        """Collect recommendations for a seed paper.
+        """Collect recommendations for a focal paper.
 
-        :param str seed_id: Seed paper identifier.
+        :param str focal_id: Focal paper identifier.
         :param kwargs: Extra options are ignored.
         :return Dict[str, Paper]: Papers included in graph.
         """
@@ -87,27 +87,15 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {}
         self.reference_hydrator.reset()
 
-        logger.debug("Fetching seed paper: %s", seed_id)
-        seed = self.client.get_paper(
-            seed_id,
-            raise_on_unavailable=True,
-        )
-        if not seed:
-            raise ValueError(
-                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
-                "know this identifier; check the DOI/arXiv/S2 ID)."
-            )
-
-        # Seed role belongs to this build, not the client-owned metadata record.
-        seed = replace(seed, is_seed=True)
-        papers[seed.paper_id] = seed
+        focal = self._resolve_focal_paper(focal_id, client=self.client)
+        papers[focal.paper_id] = focal
 
         logger.info("Collecting recommendations...")
-        logger.debug("Recommendation seed: %s", seed.paper_id)
+        logger.debug("Recommendation focal paper: %s", focal.paper_id)
         recommendation_result = fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(
-                seed.paper_id,
+                focal.paper_id,
                 limit=min(RECOMMENDATION_MAX_RESULTS, self.max_papers * 2),
                 raise_on_unavailable=True,
             ),
@@ -117,17 +105,30 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         }
         require_available_candidate_source(
             [recommendation_result],
-            context=f"recommendation acquisition for {seed.paper_id}",
+            context=f"recommendation acquisition for {focal.paper_id}",
         )
 
-        # Discovery is the primary acquisition path. Do it before optional seed
-        # enrichment, whose retries share the collection's S2 recovery budget.
-        self.reference_hydrator.ensure(seed)
+        # Discovery is the primary acquisition path. Do it before optionally
+        # enriching the focal paper, whose retries share the S2 recovery budget.
+        recommendations = recommendation_result.papers
+        reference_progress = (
+            bool(recommendations) and self.reference_hydrator.fetch_references
+        )
+        if reference_progress:
+            logger.info(
+                "Checking reference lists for the focal paper and its recommendations..."
+            )
+        self.reference_hydrator.ensure(focal)
 
-        # The pool merges records of one work, including records of the seed,
-        # which enrich the original seed object so the graph keeps its seed node.
-        pool = DiscoveryPool(seed)
-        for paper in recommendation_result.papers:
+        # The pool merges records of one work, including records of the focal paper,
+        # which enrich the original focal paper object so the graph keeps its focal paper node.
+        pool = DiscoveryPool(focal)
+        for paper in progress_iterator(
+            recommendations,
+            description="Checking recommendations",
+            unit="papers",
+            enabled=None if reference_progress else False,
+        ):
             if not str(paper.paper_id).strip():
                 continue
             target_id = pool.resolve(paper)
@@ -138,7 +139,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                 if len(pool.papers) + 1 >= self.max_papers:
                     continue
                 self.reference_hydrator.ensure(paper)
-            elif target_id != seed.paper_id and not pool.papers[target_id].references:
+            elif target_id != focal.paper_id and not pool.papers[target_id].references:
                 self.reference_hydrator.ensure(paper)
             pool.add(paper, source="recommendation", relation="semantic_only")
         papers.update(pool.papers)
@@ -150,27 +151,27 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         return papers
 
     def build_graph(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> tuple[PaperGraph, str]:
         """Build a recommendation graph with candidate-source status metadata.
 
-        :param str seed_id: Seed paper identifier.
+        :param str focal_id: Focal paper identifier.
         :param kwargs: Extra options are ignored by collection.
-        :return tuple[PaperGraph, str]: Built graph and canonical seed identifier.
+        :return tuple[PaperGraph, str]: Built graph and canonical focal paper identifier.
         """
-        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph, actual_focal_id = super().build_graph(focal_id, **kwargs)
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
         filtered_graph = build_capped_undirected_graph(
-            graph, RELATIONSHIP_DEGREE_CAP, seed_id=actual_seed_id
+            graph, RELATIONSHIP_DEGREE_CAP, focal_id=actual_focal_id
         )
         logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),
         )
-        return filtered_graph, actual_seed_id
+        return filtered_graph, actual_focal_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

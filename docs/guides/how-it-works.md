@@ -1,23 +1,23 @@
 # How CiteMesh builds a graph
 
-A build resolves its seed, collects candidates, scores papers and edges, computes a layout, and exports the graph. The [strategy](strategies.md) determines candidate sources and scoring; the [CLI guide](cli.md#option-reference) points to the current controls.
+A build resolves its focal paper, collects candidates, scores papers and edges, computes a layout, and exports the graph. The [strategy](strategies.md) determines candidate sources and scoring; the [CLI guide](cli.md#option-reference) points to the current controls.
 
 ```text
-  seed ID, or free text with --strategy embedding
+  focal paper ID, or free text with --strategy embedding
         │
         ▼
-  1. Seed resolution → 2. Candidate acquisition → 3. Embedding → 4. Cache
-                                                                     │
-  8. Export ← 7. Layout ← 6. Edge scoring ← 5. Ranking & selection ◄──┘
+  1. Focal paper resolution → 2. Candidate acquisition → 3. Embedding → 4. Cache
+                                                                           │
+  8. Export ← 7. Layout ← 6. Edge scoring ← 5. Ranking & selection ◄───────┘
 ```
 
 The embedding and vector-cache stages run for `--strategy embedding` and `--strategy hybrid`. Recommendation and citation use TF-IDF scoring. All strategies can reuse paper metadata.
 
-## 1. Seed resolution
+## 1. Focal paper resolution
 
 `normalize_paper_id` normalizes the [accepted identifiers](cli.md#accepted-identifiers) before lookup. S2-backed records use the returned S2 `paperId` throughout collection and graph construction. Input arXiv IDs and DOIs resolve to that record in the metadata cache. Local corpus records retain their source IDs, including when S2 supplies supplemental metadata.
 
-The embedding strategy is the only one with a free-text path. A genuine HTTP 404 means S2 has no such paper, so the builder synthesizes a seed whose ID is `query:` plus the first 8 hex of `sha1(query_text)`. An *unavailable* endpoint (retries exhausted) raises instead - an outage is never silently reinterpreted as a search.
+The embedding strategy is the only one with a free-text path. A genuine HTTP 404 means S2 has no such paper, so the builder synthesizes a focal record whose ID is `query:` plus the first 8 hex of `sha1(query_text)`. An *unavailable* endpoint (retries exhausted) raises instead - an outage is never silently reinterpreted as a search.
 
 Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
@@ -26,16 +26,18 @@ Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. What each strategy collects:
 
 - **Embedding, `candidates` mode**: allocates `min(100, max(1, candidate_pool_size // 4))` recommendations, then `min(100, ceil(remaining / 3))` references; citations get the remainder.
-- **Hybrid** takes no pool size. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests 200 of S2's `all-cs` recommendations, and in `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the seed in each of two roles: the seed encoded as a retrieval query and as a retrieval document.
+- **Hybrid** takes no pool size. It requests up to `--max-references` references and `--max-citations` citers (1000 each by default) and keeps every record the provider returns with usable metadata. In `candidates` and `both` modes it also requests up to 200 Semantic Scholar recommendations. In `arxiv-corpus` and `both` modes it searches the corpus for the 180 nearest rows to the focal paper in each of two roles: the focal paper encoded as a retrieval query and as a retrieval document.
 - **Provenance**: each paper joins the pool once and carries a citation tag (references, citers), a semantic tag (recommendations, corpus neighbors), or both; the tags set its provenance and its edge-scoring weights.
 
-When S2 returns no usable seed references for an arXiv seed, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references). Recovered references enter the pool like provider references, with the same seed relation, up to the reference limit; a bibliography that recovers more references than the limit is cut by title and abstract similarity to the seed, then citation count.
+Hybrid chooses the recommendation pool using the subject labels already recorded on the focal paper. Any computing label (`Computer Science`, `cs`, `cs.*`, `stat.ML`, or legacy `cmp-lg`) selects `all-cs`, including on a paper with multiple subjects. Missing subjects or a sole `Unknown` label also select `all-cs`. A paper with another recorded subject and no computing label uses `recent` first.
 
-A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
+When S2 returns no usable references for an arXiv focal paper, the build can use the [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references). Recovered references enter the pool like provider references, with the same relation to the focal paper, up to the reference limit; a bibliography that recovers more references than the limit is cut by title and abstract similarity to the focal paper, then citation count.
+
+A free-text input starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
 During candidate collection, S2 records reconcile by exact paper ID or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record uses the same explicit identifier agreement, and the corpus ID remains stable. The bibliography fallback separately resolves identifier-free entries against a prepared corpus using the exact normalized title, full first author, and publication-year rules described in the [CLI guide](cli.md#missing-semantic-scholar-references).
 
-Before hybrid ranking, a preprint and a DOI publication of one work also reconcile by exact normalized title and full first-author name, with publication in the same or following year. The preprint is the corpus row when one of the two is, and otherwise the record with an arXiv ID. Both directions must match uniquely across the whole pool, and conflicting identifiers prevent reconciliation. The preprint's ID survives with merged metadata, merged source tags and seed relation, and the earlier recommendation position. Because this happens before ranking, a reconciled pair never takes a second slot; versions with different titles or first-author names stay separate.
+Before hybrid ranking, a preprint and a DOI publication of one work also reconcile by exact normalized title and full first-author name, with publication in the same or following year. When the publication abbreviates the first author's given names to initials, those must agree in order and the remaining surname tokens must match, including particles and suffixes. Both records must also have the same normalized abstract of at least 20 words. The preprint is the corpus row when one of the two is, and otherwise the record with an arXiv ID. Both directions must match uniquely across the whole pool, and conflicting identifiers prevent reconciliation. The preprint's ID survives with merged metadata, source tags, relation to the focal paper, and the earlier recommendation position.
 
 The pool retains reconciled S2 IDs as aliases, so a later list with sparser metadata still joins its existing member. Only the recommendation order is kept as a position, because it is the one source order that feeds the ranking. What the ranker saw for each selected paper is exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson), not as source positions.
 
@@ -47,7 +49,7 @@ Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py) and
 
 CiteMesh ranks candidates in a retrieval space and scores selected pairs in a symmetric space, using [task-specific prompts](../reference/embedding-runtime.md#task-specific-vector-spaces). Every title, abstract, and free-text query is normalized before any role formats it: invisible characters are removed, typographic punctuation is folded, and line breaks and whitespace runs collapse, so arXiv's hard-wrapped metadata and a provider's clean copy of the same paper encode identically.
 
-Hybrid ranks every pool member by a retrieval-document vector: the stored corpus vector when the member is a corpus row, otherwise an encoding of its title and abstract. In `candidates` mode those encodings are stored in the embedding cache, so a warm rebuild encodes no candidate again. In the corpus modes the cache is the corpus itself, which takes no provider rows, so each build encodes the provider candidates that are not corpus rows in memory. The seed also gets a retrieval-query vector, which is encoded on every build.
+Hybrid ranks every pool member by a retrieval-document vector: the stored corpus vector when the member is a corpus row, otherwise an encoding of its title and abstract. In `candidates` mode those encodings are stored in the embedding cache, so a warm rebuild encodes no candidate again. In the corpus modes the cache is the corpus itself, which takes no provider rows, so each build encodes the provider candidates that are not corpus rows in memory. The focal paper also gets a retrieval-query vector, which is encoded on every build.
 
 Implementation: [precision.py](../../src/citemesh/strategies/embedding/precision.py) and [model_runtime.py](../../src/citemesh/strategies/embedding/model_runtime.py).
 
@@ -59,22 +61,23 @@ Implementation: [embedding_cache](../../src/citemesh/data/embedding_cache/) and 
 
 ## 5. Ranking and selection
 
-Selection cuts the pool to `--max-papers`, seed included.
+Selection cuts the pool to `--max-papers`, focal paper included.
 
-The embedding strategy encodes the seed as a retrieval query and ranks by raw cosine - over the encoded pool in candidates mode, through the cache's top-k search in corpus mode - admitting candidates in order until the budget is full. Ties break on `(-score, paper_id, insertion_index)`, so the same inputs always produce the same graph.
+The embedding strategy encodes the focal paper as a retrieval query and ranks by raw cosine - over the encoded pool in candidates mode, through the cache's top-k search in corpus mode - admitting candidates in order until the budget is full. Ties break on `(-score, paper_id, insertion_index)`, so the same inputs always produce the same graph.
 
-Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each candidate has a document-role vector, and up to four ranked lists are built from it:
+Hybrid ranks the whole deduplicated pool by reciprocal rank fusion (RRF). Each candidate has a document-role vector. The available evidence determines which of five ranked lists contribute.
 
-- **similarity to the seed**: every candidate, by the cosine between its vector and the seed's document vector, with ties broken on the cosine with the seed's query vector, then paper ID
-- **similarity to the seed's bibliography**: candidates with at least five seed references other than themselves, by the mean of their five highest cosines to those references, with the same tie-breaks
-- **direct links**: candidates the seed cites or that cite the seed, by the same cosine as the first list
-- **recommendations**: the provider's recommended candidates in provider order, present only in `candidates` and `both` modes
+- **similarity to the focal paper**: every candidate, by the cosine between its vector and the focal paper's document vector, with ties broken on the cosine with the focal paper's query vector, then paper ID
+- **similarity to the focal paper's bibliography**: candidates with at least five references from the focal paper other than themselves, by the mean of their five highest cosines to those references, with ties broken by query cosine, then paper ID
+- **direct links**: candidates the focal paper cites or that cite the focal paper, by document cosine to the focal paper, then paper ID
+- **recommendations**: the provider's recommended candidates in provider order after deduplication, present only in `candidates` and `both` modes
+- **focal reference evidence**: references cited in two or more distinct passages of the focal paper or marked influential by Semantic Scholar. Higher passage counts come first, followed by the influence flag and the focal similarity order. This list has weight `0.5`.
 
 ```text
-score = Σ 1 / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
+score = Σ weight / (60 + rank)   over the lists that contain the candidate, ranks starting at 1
 ```
 
-Candidates sort by score, then paper ID, and the first `max_papers - 1` join the seed. Nothing is fitted: there is no year term and no citation-count term, every candidate competes on the same fused score whatever its source, and a candidate absent from a list simply adds nothing for it. Ranking uses only embedding cosines, seed links and recommendation order, so it runs before any selected paper's reference list is fetched; those lists come afterwards, for the selected citation-sourced papers only, and feed the bibliographic-coupling term of [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and rank in every list are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson); it is separate from `seed_relevance`, which is computed later over the final graph.
+The other lists have weight `1`. Candidates sort by score, then paper ID, and the first `max_papers - 1` join the focal paper. A list contributes only for candidates it contains. With no qualifying focal reference evidence, hybrid fuses the other available lists. Ranking runs before optional reference hydration for selected citation-sourced papers, which supplies bibliographic coupling during [edge scoring](#6-edge-scoring). Each kept paper's rank, fused score, features, and list ranks are exported as [discovery evidence](../reference/output-artifacts.md#graph-json-strategyjson). The `focal_relevance` value is computed later over the final graph.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
@@ -99,11 +102,11 @@ Hybrid has provenance the embedding strategy lacks, so it scores differently:
 
 - **Gate**: a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar.
 - **Weights** adapt over `(embedding, temporal, citation, bibliographic)`: `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed.
-- **Floors** are asymmetric: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
+- **Floors** are asymmetric: below `0.2` rejected, a pair incident to the focal paper needs `> 0.4`, everything else `> 0.5`. The focal paper gets the lower bar because an isolated focal paper is useless, while a weak peripheral edge is noise.
 
-Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's edges are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
+Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts edges incident to the focal paper ahead of everything else regardless of weight, so the focal paper's edges are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
 
-In hybrid the seed's slots alternate between its direct references and citers and its other neighbors, strongest first within each group and starting with a direct link, so the seed keeps both its cited neighborhood and its closest discoveries. Both groups compete only among edges that cleared the gate and the seed floor, and a group with nothing left to offer yields its turns to the other.
+In hybrid the focal paper's slots alternate between its direct references and citers and its other neighbors, strongest first within each group and starting with a direct link, so the focal paper keeps both its cited neighborhood and its closest discoveries. Both groups compete only among edges that cleared the gate and the floor for the focal paper, and a group with nothing left to offer yields its turns to the other.
 
 Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py); the reference lists that bibliographic coupling compares come from `ReferenceHydrator` in [reference_hydration.py](../../src/citemesh/strategies/reference_hydration.py), shared by the citation, recommendation, and hybrid strategies.
 
@@ -121,7 +124,7 @@ Implementation: [render.py](../../src/citemesh/visualization/render.py); node an
 
 ## 8. Exports and the dashboard collection
 
-Exports enrich nodes with external links, provenance, seed relation, and personalized PageRank (`alpha=0.85`, weighted). PageRank measures relevance within the final graph; it is separate from the candidate-ranking score.
+Exports enrich nodes with external links, provenance, relation to the focal paper, and personalized PageRank (`alpha=0.85`, weighted). PageRank measures relevance within the final graph; it is separate from the candidate-ranking score.
 
 The dashboard embeds graph data and rebuilds its figure in the browser. The [Python/JavaScript boundary](../internals/architecture.md#python--javascript-duplication) explains how both implementations are tested; [Output Artifacts](../reference/output-artifacts.md#dashboard-html) describes dashboard behavior.
 

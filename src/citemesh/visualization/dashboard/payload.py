@@ -8,7 +8,6 @@ from collections.abc import Hashable
 from functools import lru_cache
 from importlib import resources
 
-from citemesh.core.values import parse_float
 from citemesh.visualization.export.geometry import (
     _UI_PALETTES,
     DASHBOARD_AXIS_MIN_PADDING,
@@ -24,7 +23,6 @@ from citemesh.visualization.export.geometry import (
 )
 from citemesh.visualization.export.nodes import (
     _discovery_ranker,
-    _sorted_edges,
     _strategy,
 )
 
@@ -39,10 +37,10 @@ from .contracts import (
     DashboardCollectionBundle,
     DashboardCollectionResult,
     DashboardMetadata,
-    DashboardPayload,
     EnrichedNodePayload,
     YearRange,
 )
+from .package import _validate_dashboard_graph_payload
 
 _DASHBOARD_ASSET_PACKAGE = "citemesh.visualization.dashboard"
 _DASHBOARD_CSS_SLOT = "__DASHBOARD_CSS__\n"
@@ -117,7 +115,7 @@ def _dashboard_template(
         "__GRAPH_BG__": theme_obj.background,
         "__NODE_COLOR_OLD__": _rgb_tuple_to_hex(theme_obj.node_color_old),
         "__NODE_COLOR_NEW__": _rgb_tuple_to_hex(theme_obj.node_color_new),
-        "__SEED_RING__": _rgb_tuple_to_hex(theme_obj.seed_color),
+        "__FOCAL_RING__": _rgb_tuple_to_hex(theme_obj.focal_color),
         "__DASHBOARD_EDGE_COLOR__": _rgb_tuple_to_hex(theme_obj.edge_color),
         "__DASHBOARD_AXIS_MIN_PADDING__": str(DASHBOARD_AXIS_MIN_PADDING),
         "__DASHBOARD_AXIS_X_PADDING__": str(DASHBOARD_AXIS_X_PADDING),
@@ -156,7 +154,6 @@ class DashboardPayloadMixin:
         node_ids: list[Hashable],
         node_payloads: list[EnrichedNodePayload],
         sorted_edges: list[tuple[Hashable, Hashable, dict[str, object]]],
-        include_plotly_geometry: bool,
     ) -> DashboardMetadata:
         """Build dashboard metadata shared by dashboard HTML and JSON exports.
 
@@ -165,8 +162,6 @@ class DashboardPayloadMixin:
         :param list[EnrichedNodePayload] node_payloads: Enriched node payloads.
         :param list[tuple[Hashable, Hashable, dict[str, object]]] sorted_edges:
             Deterministically ordered edge payloads.
-        :param bool include_plotly_geometry: Whether layout-backed Plotly geometry
-            should be embedded in the metadata.
         :return DashboardMetadata: Dashboard metadata payload.
         """
         # The dashboard import contract requires a non-empty strategy token;
@@ -182,7 +177,7 @@ class DashboardPayloadMixin:
         )
 
         meta: DashboardMetadata = {
-            "seed_id": str(self.seed_id),
+            "focal_id": str(self.focal_id),
             "strategy": strategy,
             "theme": theme_obj.name,
             "summary": {
@@ -204,48 +199,19 @@ class DashboardPayloadMixin:
         ranker = _discovery_ranker(self.graph)
         if ranker is not None:
             meta["discovery_ranker"] = ranker
-        if include_plotly_geometry:
-            positions = self._get_layout()
-            meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]
-            meta["plotly_positions"] = [
-                [float(positions[node_id][0]), float(positions[node_id][1])]
-                for node_id in node_ids
-            ]
-            meta["plotly_node_sizes"] = [
-                max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids
-            ]
+        leads = self.graph.graph.get("discovery_leads")
+        if isinstance(leads, dict) and leads:
+            meta["discovery_leads"] = leads
+        positions = self._get_layout()
+        meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]
+        meta["plotly_positions"] = [
+            [float(positions[node_id][0]), float(positions[node_id][1])]
+            for node_id in node_ids
+        ]
+        meta["plotly_node_sizes"] = [
+            max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids
+        ]
         return meta
-
-    def _dashboard_payload(
-        self: _ExporterHost, *, theme_obj: Theme, node_ids: list[Hashable]
-    ) -> DashboardPayload:
-        """Build deterministic dashboard payload from graph metadata.
-
-        :param Theme theme_obj: Active visualization theme.
-        :param list[Hashable] node_ids: Node order used by Plotly points.
-        :return DashboardPayload: Payload consumed by dashboard JS.
-        """
-        node_payloads = self._enriched_nodes()
-        sorted_edges = _sorted_edges(self.graph)
-        payload: DashboardPayload = {
-            "meta": self._dashboard_meta(
-                theme_obj=theme_obj,
-                node_ids=node_ids,
-                node_payloads=node_payloads,
-                sorted_edges=sorted_edges,
-                include_plotly_geometry=True,
-            ),
-            "nodes": node_payloads,
-            "edges": [
-                {
-                    "source": str(left),
-                    "target": str(right),
-                    "weight": parse_float(data.get("weight", 0.0)),
-                }
-                for left, right, data in sorted_edges
-            ],
-        }
-        return payload
 
     def _dashboard_collection_bundle(
         self: _ExporterHost,
@@ -254,7 +220,7 @@ class DashboardPayloadMixin:
 
         :return DashboardCollectionBundle: Collection result descriptors and payloads.
         """
-        empty_bundle: DashboardCollectionBundle = {
+        bundle: DashboardCollectionBundle = {
             "kind": DASHBOARD_COLLECTION_KIND,
             "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
             "current_result_id": None,
@@ -262,12 +228,18 @@ class DashboardPayloadMixin:
         }
         raw_bundle = self.metadata.get("dashboard_collection")
         if not isinstance(raw_bundle, dict):
-            return empty_bundle
+            return bundle
 
         declared_kind = str(raw_bundle.get("kind") or "").strip()
+        if (
+            declared_kind != DASHBOARD_COLLECTION_KIND
+            or raw_bundle.get("schema_version") != DASHBOARD_COLLECTION_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Unsupported dashboard collection metadata kind or schema version. "
+                "Rebuild with this CiteMesh version before importing the collection."
+            )
         raw_results = raw_bundle.get("results")
-        raw_payloads = raw_bundle.get("payloads")
-        legacy_payloads = raw_payloads if isinstance(raw_payloads, dict) else {}
         results: list[DashboardCollectionResult] = []
         if isinstance(raw_results, list):
             for raw_entry in raw_results:
@@ -275,16 +247,15 @@ class DashboardPayloadMixin:
                     continue
                 result_id = str(raw_entry.get("result_id") or "").strip()
                 payload = raw_entry.get("payload")
-                if not isinstance(payload, dict):
-                    payload = legacy_payloads.get(result_id)
                 if not result_id or not isinstance(payload, dict):
                     continue
+                _validate_dashboard_graph_payload(payload, result_id=result_id)
                 entry: DashboardCollectionResult = {
                     "result_id": result_id,
                     "payload": payload,
                 }
                 for key in (
-                    "seed_id",
+                    "focal_id",
                     "title",
                     "strategy",
                     "summary",
@@ -293,12 +264,7 @@ class DashboardPayloadMixin:
                     if key in raw_entry:
                         entry[key] = raw_entry[key]
                 build = raw_entry.get("build")
-                if isinstance(build, dict):
-                    entry["build"] = build
-                elif declared_kind == DASHBOARD_COLLECTION_KIND:
-                    # Versioned entries must carry build metadata; the viewer
-                    # rejects the whole bundle when the key is missing.
-                    entry["build"] = {}
+                entry["build"] = build if isinstance(build, dict) else {}
                 results.append(entry)
         raw_current_result_id = raw_bundle.get("current_result_id")
         current_result_id = (
@@ -310,23 +276,6 @@ class DashboardPayloadMixin:
             # Malformed entries are dropped above, and the viewer rejects a bundle
             # whose current_result_id names no included result.
             current_result_id = results[0]["result_id"] if results else None
-        bundle: DashboardCollectionBundle = {
-            "current_result_id": current_result_id,
-            "results": results,
-        }
-        if declared_kind:
-            if (
-                declared_kind != DASHBOARD_COLLECTION_KIND
-                or raw_bundle.get("schema_version")
-                != DASHBOARD_COLLECTION_SCHEMA_VERSION
-            ):
-                raise ValueError(
-                    "Unsupported dashboard collection metadata kind or schema version."
-                )
-            bundle.update(
-                {
-                    "kind": DASHBOARD_COLLECTION_KIND,
-                    "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
-                }
-            )
+        bundle["current_result_id"] = current_result_id
+        bundle["results"] = results
         return bundle

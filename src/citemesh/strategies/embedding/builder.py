@@ -27,7 +27,6 @@ from typing import (
 import numpy as np
 from numpy.typing import NDArray
 
-from citemesh._runtime import stderr_isatty
 from citemesh.core import (
     DEFAULT_MAX_PAPERS,
     EMBEDDING_CONFIG,
@@ -48,16 +47,23 @@ from citemesh.data import (
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
-from citemesh.data.cache import (
-    embedding_namespace_has_papers,
-    path_exists,
-    read_embedding_namespace_schema,
-)
-from citemesh.data.embedding_cache import (
+from citemesh.data.cache import path_exists
+from citemesh.data.embedding_cache import CacheSearchResult
+from citemesh.data.embedding_cache.constants import (
+    CALIBRATION_SAMPLE_SIZE_KEY,
     EMBEDDING_CACHE_SCHEMA_VERSION,
-    CacheSearchResult,
+    HYDRATION_DATASET_SOURCE_KEY,
+    MODEL_FINGERPRINT_KEY,
+    SCHEMA_VERSION_KEY,
+    STORAGE_PRECISION_KEY,
+    TEXT_FORMATTER_FINGERPRINT_KEY,
 )
-from citemesh.data.embedding_cache.lifecycle import embedding_namespace_has_corpus_state
+from citemesh.data.embedding_cache.lifecycle import (
+    open_existing_cache,
+    probe_embedding_dimension,
+    probe_embedding_namespace,
+    select_existing_cache,
+)
 from citemesh.data.embedding_cache.models import (
     CachedPaperMetadata,
     CacheInputMetadata,
@@ -69,6 +75,8 @@ from citemesh.data.embedding_contract import (
     ExistingCacheSelection,
     InstalledCorpusError,
     NamespaceSelectors,
+    embedding_namespace_id,
+    serialize_embedding_namespace,
 )
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
@@ -101,7 +109,7 @@ from .config import (
 from .fingerprint import _FingerprintMixin
 from .hydration import _CorpusHydrationMixin
 from .model_runtime import _ModelRuntimeMixin
-from .records import _query_seed_id
+from .records import _query_focal_id
 from .runtime import resolve_embedding_device
 from .text import (
     _GRAPH_SIMILARITY_REPRESENTATION,
@@ -200,9 +208,8 @@ logger = logging.getLogger(__name__)
 def _cache_scan_progress(values: Sequence[_T], description: str) -> Iterable[_T]:
     """Render a progress bar over an embedding-cache scan.
 
-    Injected into :class:`EmbeddingCache` so the storage layer stays free of UI
-    imports: the TTY gate and the bar's presentation options live here, with the
-    rest of this module's progress handling.
+    Injected into :class:`EmbeddingCache` so cache scans use the strategy's
+    TTY policy and the same progress presentation as embedding work.
 
     :param Sequence[_T] values: Items the cache is about to iterate.
     :param str description: Label shown ahead of the bar.
@@ -212,7 +219,6 @@ def _cache_scan_progress(values: Sequence[_T], description: str) -> Iterable[_T]
         values,
         description=description,
         unit="papers",
-        enabled=stderr_isatty(),
     )
 
 
@@ -299,7 +305,7 @@ class EmbeddingGraphBuilder(
             (``auto``/``cuda``/``mps``/``cpu``). ``None`` means ``auto``
             (cuda, then mps, then cpu). Explicit unavailable devices raise.
         :param str semantic_source: Candidate sourcing mode: ``candidates``
-            (default; embed S2 seed neighbors only) or ``arxiv-corpus``
+            (default; embed S2 focal paper neighbors only) or ``arxiv-corpus``
             (hydrate a local arXiv corpus).
         :param int candidate_pool_size: Maximum S2 candidate pool size fetched
             in ``candidates`` mode.
@@ -996,8 +1002,6 @@ class EmbeddingGraphBuilder(
         :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return str: Namespace key used for embedding cache partitioning.
         """
-        from citemesh.data.embedding_contract import serialize_embedding_namespace
-
         return serialize_embedding_namespace(
             **self._namespace_selectors(
                 representation=representation,
@@ -1054,39 +1058,39 @@ class EmbeddingGraphBuilder(
     @scope_candidate_collection
     def collect_papers(
         self,
-        seed_id: str,
+        focal_id: str,
         *,
-        seed_paper: Paper | None = None,
+        focal_paper: Paper | None = None,
         _corpus_prepared: bool = False,
     ) -> dict[str, Paper]:
         """Collect papers while excluding corpus replacement between stages.
 
-        :param str seed_id: Seed paper identifier (ArXiv ID or text query).
-        :param Optional[Paper] seed_paper: Optional pre-fetched seed metadata.
+        :param str focal_id: Focal paper identifier (ArXiv ID or text query).
+        :param Optional[Paper] focal_paper: Optional pre-fetched focal paper metadata.
         :param bool _corpus_prepared: Whether a parent prepared the corpus while
             retaining this same reentrant operation lock.
         :return Dict[str, Paper]: Dictionary of paper ID to paper metadata.
         """
         with self._corpus_operation_lock():
             return self._collect_papers_under_operation_lock(
-                seed_id,
-                seed_paper=seed_paper,
+                focal_id,
+                focal_paper=focal_paper,
                 _corpus_prepared=_corpus_prepared,
             )
 
     def _collect_papers_under_operation_lock(
         self,
-        seed_id: str,
+        focal_id: str,
         *,
-        seed_paper: Paper | None = None,
+        focal_paper: Paper | None = None,
         _corpus_prepared: bool = False,
     ) -> dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
 
-        :param str seed_id: Seed paper identifier (ArXiv ID or text query)
-        :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
-            reuse instead of fetching the seed from Semantic Scholar again.
+        :param str focal_id: Focal paper identifier (ArXiv ID or text query)
+        :param Optional[Paper] focal_paper: Optional pre-fetched focal paper metadata to
+            reuse instead of fetching the focal paper from Semantic Scholar again.
         :param bool _corpus_prepared: Whether a parent prepared this corpus
             under the operation lock that remains held by the caller.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
@@ -1101,46 +1105,46 @@ class EmbeddingGraphBuilder(
             self._prepare_corpus_for_build()
             corpus_prepared = True
 
-        resolved_seed_paper = self.resolve_seed_paper(
-            seed_id,
-            seed_paper,
+        resolved_focal_paper = self.resolve_focal_paper(
+            focal_id,
+            focal_paper,
             _corpus_prepared=corpus_prepared,
         )
-        papers[resolved_seed_paper.paper_id] = resolved_seed_paper
+        papers[resolved_focal_paper.paper_id] = resolved_focal_paper
 
-        seed_embedding = self._encode_seed_embedding(resolved_seed_paper)
+        focal_embedding = self._encode_focal_embedding(resolved_focal_paper)
 
         if self.semantic_source != "arxiv-corpus":
             self._collect_candidate_pool_papers(
-                papers, seed_embedding, resolved_seed_paper, seed_identifier=seed_id
+                papers, focal_embedding, resolved_focal_paper, focal_identifier=focal_id
             )
             return papers
 
         self._collect_corpus_cache_papers(
             papers,
-            seed_embedding,
-            resolved_seed_paper,
+            focal_embedding,
+            resolved_focal_paper,
             corpus_prepared=corpus_prepared,
         )
         return papers
 
-    def resolve_seed_paper(
+    def resolve_focal_paper(
         self,
-        seed_id: str,
-        seed_paper: Paper | None = None,
+        focal_id: str,
+        focal_paper: Paper | None = None,
         *,
         _corpus_prepared: bool = False,
     ) -> Paper:
-        """Resolve a build seed only after making its corpus namespace current.
+        """Resolve a focal paper after making its corpus namespace current.
 
-        Corpus migration, recovery, and refresh can change both the seed metadata
+        Corpus migration, recovery, and refresh can change both the focal paper metadata
         and which primary ID represents it. They must finish before final lookup.
 
-        :param str seed_id: Seed paper identifier or free-text query.
-        :param Optional[Paper] seed_paper: Caller-provided bibliographic metadata.
+        :param str focal_id: Focal paper identifier or free-text query.
+        :param Optional[Paper] focal_paper: Caller-provided bibliographic metadata.
         :param bool _corpus_prepared: Whether the current collection operation
             already completed corpus preparation.
-        :return Paper: Resolved seed carrying the seed role for this build.
+        :return Paper: Resolved focal paper carrying the focal paper role for this build.
         """
         with self._corpus_operation_lock():
             if self.semantic_source == "arxiv-corpus":
@@ -1148,20 +1152,21 @@ class EmbeddingGraphBuilder(
                     self._prepare_corpus_for_build()
             else:
                 self._load_model()
-            resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
-            if seed_paper is None and resolved_seed.is_local_corpus:
-                self.enrich_cached_corpus_seed(resolved_seed)
-            return resolved_seed
+            resolved_focal = self._resolve_focal_input(focal_id, focal_paper)
+            self._log_focal_paper(resolved_focal)
+            if focal_paper is None and resolved_focal.is_local_corpus:
+                self.enrich_cached_corpus_focal(resolved_focal)
+            return resolved_focal
 
-    def resolve_cached_corpus_seed(
-        self, seed_id: str, *, _corpus_prepared: bool = False
+    def resolve_cached_corpus_focal(
+        self, focal_id: str, *, _corpus_prepared: bool = False
     ) -> Paper | None:
-        """Resolve a seed from the selected corpus cache without provider calls.
+        """Resolve a focal paper from the selected corpus cache without provider calls.
 
-        :param str seed_id: Cached current, legacy, or source-primary identifier.
+        :param str focal_id: Cached current, legacy, or source-primary identifier.
         :param bool _corpus_prepared: Whether the current hybrid operation already
             completed corpus preparation.
-        :return Optional[Paper]: Cached seed metadata, or ``None`` for a cache miss.
+        :return Optional[Paper]: Cached focal paper metadata, or ``None`` for a cache miss.
         :raises ValueError: If a recognized local-only ID is absent or incompatible.
         """
         with self._corpus_operation_lock():
@@ -1169,10 +1174,10 @@ class EmbeddingGraphBuilder(
                 return None
             if not _corpus_prepared:
                 self._prepare_corpus_for_build()
-            return self._resolve_cached_corpus_seed(seed_id)
+            return self._resolve_cached_corpus_focal(focal_id)
 
     def _prepare_corpus_for_build(self) -> None:
-        """Complete corpus lifecycle work before resolving a build seed.
+        """Complete corpus lifecycle work before resolving the focal paper.
 
         :return None: Makes the artifact-bound corpus current for this operation.
         """
@@ -1181,13 +1186,13 @@ class EmbeddingGraphBuilder(
             return
         self._ensure_cache_hydrated(use_streaming=self.use_streaming)
 
-    def enrich_cached_corpus_seed(self, seed: Paper) -> None:
-        """Merge optional provider evidence without replacing a local seed ID.
+    def enrich_cached_corpus_focal(self, focal: Paper) -> None:
+        """Merge optional provider evidence without replacing a local focal paper ID.
 
-        :param Paper seed: Cache-primary seed record to enrich in place.
+        :param Paper focal: Cache-primary focal paper record to enrich in place.
         :return None: Preserves local metadata when no safe alias or provider row exists.
         """
-        lookup_id = provider_lookup_identifier(seed.paper_id, seed)
+        lookup_id = provider_lookup_identifier(focal.paper_id, focal)
         if lookup_id is None:
             return
 
@@ -1197,25 +1202,25 @@ class EmbeddingGraphBuilder(
             provider_papers = self.client.get_papers([lookup_id])
         except SemanticScholarRequestError as exc:
             logger.warning(
-                "Seed citation enrichment was rejected; keeping corpus metadata: %s",
+                "Citation enrichment for the focal paper was rejected; keeping corpus metadata: %s",
                 exc,
             )
             return
 
-        provider_seed = provider_papers.get(normalize_paper_id(lookup_id))
-        if provider_seed is not None and not candidate_identifiers_conflict(
-            seed, provider_seed
+        provider_focal = provider_papers.get(normalize_paper_id(lookup_id))
+        if provider_focal is not None and not candidate_identifiers_conflict(
+            focal, provider_focal
         ):
-            merge_paper_metadata(seed, provider_seed)
+            merge_paper_metadata(focal, provider_focal)
 
-    def _resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
-        """Read one seed from the prepared corpus namespace.
+    def _resolve_cached_corpus_focal(self, focal_id: str) -> Paper | None:
+        """Read one focal paper from the prepared corpus namespace.
 
-        :param str seed_id: Cache-primary identifier to resolve.
-        :return Optional[Paper]: Cached seed carrying the build seed role, if found.
+        :param str focal_id: Cache-primary identifier to resolve.
+        :return Optional[Paper]: Cached focal paper carrying the build focal paper role, if found.
         :raises ValueError: If a recognized local-only ID cannot use this namespace.
         """
-        local_only_id = _is_local_corpus_paper_id(seed_id)
+        local_only_id = _is_local_corpus_paper_id(focal_id)
         cache = self.embedding_cache
         with cache.hydration_operation_lock():
             cached_source = cache.get_hydrated_dataset_source()
@@ -1223,70 +1228,70 @@ class EmbeddingGraphBuilder(
             if local_only_id and not source_matches:
                 self._validate_cached_corpus_source(cache)
             metadata = (
-                cache.get_paper_metadata_batch([seed_id]).get(seed_id)
+                cache.get_paper_metadata_batch([focal_id]).get(focal_id)
                 if source_matches
                 else None
             )
         if metadata is not None:
             return replace(
-                self._paper_from_cached_metadata(seed_id, metadata), is_seed=True
+                self._paper_from_cached_metadata(focal_id, metadata), is_focal=True
             )
         if local_only_id:
             raise ValueError(
-                f"Local corpus seed ID '{seed_id}' was not found in the selected "
+                f"Local corpus focal paper ID '{focal_id}' was not found in the selected "
                 "embedding cache namespace. Re-run local search with the same "
                 "model, profile, revision, dimensions, and cache settings, then "
                 "build that result again."
             )
         return None
 
-    def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
-        """Resolve a seed from caller metadata, the corpus cache, S2, or query text.
+    def _resolve_focal_input(self, focal_id: str, focal_paper: Paper | None) -> Paper:
+        """Resolve a focal paper from caller metadata, the corpus cache, S2, or query text.
 
         Generated corpus identifiers have no meaning to Semantic Scholar, so a
         matching cached metadata row is reopened before external resolution. An
         unresolved identifier is treated as a free-text query, which gets a
-        synthetic seed node so the graph still has a root.
+        synthetic focal paper node so the graph still has a root.
 
-        :param str seed_id: Seed paper identifier or free-text query.
-        :param Optional[Paper] seed_paper: Pre-fetched seed metadata to reuse.
-        :return Paper: Seed paper flagged as the graph seed.
+        :param str focal_id: Focal paper identifier or free-text query.
+        :param Optional[Paper] focal_paper: Pre-fetched focal paper metadata to reuse.
+        :return Paper: Paper with its focal flag set.
         """
-        # Reuse caller-provided seed metadata when available to avoid redundant
+        # Reuse caller-provided focal paper metadata when available to avoid redundant
         # Semantic Scholar fetches in hybrid mode.
-        resolved_seed_paper = seed_paper
-        local_only_id = _is_local_corpus_paper_id(seed_id)
+        resolved_focal_paper = focal_paper
+        local_only_id = _is_local_corpus_paper_id(focal_id)
         if (
-            resolved_seed_paper is None
+            resolved_focal_paper is None
             and local_only_id
             and self.semantic_source != "arxiv-corpus"
         ):
             raise ValueError(
-                f"Local corpus seed ID '{seed_id}' requires "
+                f"Local corpus focal paper ID '{focal_id}' requires "
                 "semantic_source='arxiv-corpus'. Re-run the build with "
                 "--semantic-source arxiv-corpus and the same embedding settings "
                 "used for local search."
             )
-        if resolved_seed_paper is None and self.semantic_source == "arxiv-corpus":
-            resolved_seed_paper = self._resolve_cached_corpus_seed(seed_id)
-        if resolved_seed_paper is None:
-            resolved_seed_paper = self.client.get_paper(
-                seed_id, raise_on_unavailable=True
+        if resolved_focal_paper is None and self.semantic_source == "arxiv-corpus":
+            resolved_focal_paper = self._resolve_cached_corpus_focal(focal_id)
+        if resolved_focal_paper is None:
+            resolved_focal_paper = self.client.get_paper(
+                focal_id, raise_on_unavailable=True
             )
 
-        if resolved_seed_paper:
-            # Seed role belongs to this build, including caller-provided metadata.
-            return replace(resolved_seed_paper, is_seed=True)
+        if resolved_focal_paper:
+            # Focal paper role belongs to this build, including caller-provided metadata.
+            return replace(resolved_focal_paper, is_focal=True)
 
         # Treat as text query
-        logger.info("Using text query as seed.")
-        logger.debug("Text-query seed: %s", seed_id)
-        # Create dummy seed paper
+        logger.info("Using text query as focal paper input.")
+        logger.debug("Focal text query: %s", focal_id)
+        # Create dummy focal paper
         return Paper(
-            paper_id=_query_seed_id(seed_id),
-            title=seed_id,
+            paper_id=_query_focal_id(focal_id),
+            title=focal_id,
             year=None,
-            is_seed=True,
+            is_focal=True,
         )
 
     def _validate_cached_corpus_source(self, cache: EmbeddingCache) -> None:
@@ -1305,43 +1310,43 @@ class EmbeddingGraphBuilder(
                 f"--dataset-source {self.dataset_source!r} first."
             )
 
-    def _encode_seed_embedding(self, seed_paper: Paper) -> NDArray[np.float32]:
-        """Encode the seed in the model's query prompt space and record it.
+    def _encode_focal_embedding(self, focal_paper: Paper) -> NDArray[np.float32]:
+        """Encode the focal paper in the model's query prompt space and record it.
 
-        :param Paper seed_paper: Resolved seed paper.
-        :return NDArray[np.float32]: Normalized seed embedding stored for graph export.
+        :param Paper focal_paper: Resolved focal paper.
+        :return NDArray[np.float32]: Normalized focal paper embedding stored for graph export.
         """
-        logger.debug("Computing seed embedding...")
-        formatted_seed_text = format_paper_for_embedding(
+        logger.debug("Computing focal paper embedding...")
+        formatted_focal_text = format_paper_for_embedding(
             profile=self.model_profile,
-            paper=seed_paper,
+            paper=focal_paper,
             task=EmbeddingTask.RETRIEVAL_QUERY,
         )
-        seed_embedding = self._encode_texts(
-            [formatted_seed_text], show_progress_bar=False
+        focal_embedding = self._encode_texts(
+            [formatted_focal_text], show_progress_bar=False
         )[0]
-        self.retrieval_embeddings[seed_paper.paper_id] = seed_embedding
-        return seed_embedding
+        self.retrieval_embeddings[focal_paper.paper_id] = focal_embedding
+        return focal_embedding
 
     def _collect_candidate_pool_papers(
         self,
         papers: dict[str, Paper],
-        seed_embedding: NDArray[np.float32],
-        seed_paper: Paper,
+        focal_embedding: NDArray[np.float32],
+        focal_paper: Paper,
         *,
-        seed_identifier: str | None = None,
+        focal_identifier: str | None = None,
     ) -> None:
         """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
-        :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
-        :param Paper seed_paper: Resolved seed paper used to fetch the pool.
-        :param str | None seed_identifier: Original arXiv input including version.
+        :param Dict[str, Paper] papers: Accumulating selection, initialized with the focal paper.
+        :param NDArray[np.float32] focal_embedding: Normalized focal paper embedding.
+        :param Paper focal_paper: Resolved focal paper used to fetch the pool.
+        :param str | None focal_identifier: Original arXiv input including version.
         :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
         """
         logger.debug("Using candidate-pool semantic search...")
         pool_candidates = self._select_candidates_from_pool(
-            seed_embedding, seed_paper, seed_identifier=seed_identifier
+            focal_embedding, focal_paper, focal_identifier=focal_identifier
         )
         for paper_id, paper, embedding in pool_candidates:
             if len(papers) >= self.max_papers:
@@ -1354,17 +1359,17 @@ class EmbeddingGraphBuilder(
     def _collect_corpus_cache_papers(
         self,
         papers: dict[str, Paper],
-        seed_embedding: NDArray[np.float32],
-        seed_paper: Paper,
+        focal_embedding: NDArray[np.float32],
+        focal_paper: Paper,
         *,
         corpus_prepared: bool,
     ) -> None:
         """Search the hydrated corpus cache and admit the closest papers.
 
-        :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param NDArray[np.float32] seed_embedding: Normalized seed embedding.
-        :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
-        :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
+        :param Dict[str, Paper] papers: Accumulating selection, initialized with the focal paper.
+        :param NDArray[np.float32] focal_embedding: Normalized focal paper embedding.
+        :param Paper focal_paper: Canonical focal paper that always survives reconciliation.
+        :param bool corpus_prepared: Whether lifecycle work finished before focal lookup.
         :return None: Extends ``papers`` in place and fills missing provider metadata.
         """
         use_streaming = self.use_streaming
@@ -1375,18 +1380,20 @@ class EmbeddingGraphBuilder(
         else:
             logger.debug("Using cache-native semantic search...")
         candidates = self._select_candidates(
-            seed_embedding,
+            focal_embedding,
             use_streaming=use_streaming,
             corpus_prepared=corpus_prepared,
         )
 
         for paper_id, metadata, embedding in candidates:
             paper = self._paper_from_cached_metadata(paper_id, metadata)
-            if paper_id == seed_paper.paper_id:
-                merge_paper_metadata(seed_paper, paper)
+            if paper_id == focal_paper.paper_id:
+                merge_paper_metadata(focal_paper, paper)
                 continue
-            if not seed_paper.is_local_corpus and corpus_matches_s2(paper, seed_paper):
-                merge_paper_metadata(seed_paper, paper)
+            if not focal_paper.is_local_corpus and corpus_matches_s2(
+                paper, focal_paper
+            ):
+                merge_paper_metadata(focal_paper, paper)
                 continue
             if paper_id in papers:
                 merge_paper_metadata(papers[paper_id], paper)
@@ -1419,7 +1426,7 @@ class EmbeddingGraphBuilder(
             doi=metadata.get("doi", ""),
             categories=metadata.get("categories", []),
             citation_count=0,  # ArXiv data lacks citation counts
-            is_seed=False,
+            is_focal=False,
             is_local_corpus=True,
         )
 
@@ -1531,17 +1538,17 @@ class EmbeddingGraphBuilder(
 
     def _select_recovered_references_by_embedding(
         self,
-        seed: Paper,
+        focal: Paper,
         recovered: Sequence[Paper],
         limit: int,
     ) -> list[Paper]:
         """Select recovered references by retrieval-space cosine similarity.
 
-        The seed uses the profile's retrieval-query prompt and references use its
+        The focal paper uses the profile's retrieval-query prompt and references use its
         retrieval-document prompt. Citation count and bibliography position are
         deterministic tie-breakers after semantic relevance.
 
-        :param Paper seed: Seed paper used as the retrieval query.
+        :param Paper focal: Focal paper used as the retrieval query.
         :param Sequence[Paper] recovered: Materialized bibliography records.
         :param int limit: Maximum references to retain.
         :return list[Paper]: Semantically ranked, capped reference records.
@@ -1549,12 +1556,12 @@ class EmbeddingGraphBuilder(
         if len(recovered) <= limit:
             return list(recovered)
 
-        seed_embedding = self.retrieval_embeddings.get(seed.paper_id)
-        if seed_embedding is None:
-            seed_embedding = self._encode_seed_embedding(seed)
+        focal_embedding = self.retrieval_embeddings.get(focal.paper_id)
+        if focal_embedding is None:
+            focal_embedding = self._encode_focal_embedding(focal)
         candidates = {paper.paper_id: paper for paper in recovered}
         embeddings = self.embed_papers(candidates)
-        query = l2_normalize_embeddings(seed_embedding)
+        query = l2_normalize_embeddings(focal_embedding)
         return select_recovered_references_by_score(
             recovered,
             limit,
@@ -1563,16 +1570,16 @@ class EmbeddingGraphBuilder(
 
     def _select_candidates_from_pool(
         self,
-        seed_embedding: NDArray[np.float32],
-        seed_paper: Paper,
+        focal_embedding: NDArray[np.float32],
+        focal_paper: Paper,
         *,
-        seed_identifier: str | None = None,
+        focal_identifier: str | None = None,
     ) -> list[tuple[str, Paper, NDArray[np.float32]]]:
-        """Rank S2 candidate-pool papers by cosine similarity to the seed.
+        """Rank S2 candidate-pool papers by cosine similarity to the focal paper.
 
-        :param NDArray[np.float32] seed_embedding: Normalized seed vector.
-        :param Paper seed_paper: Resolved seed paper (S2-backed or query seed).
-        :param str | None seed_identifier: Original arXiv input including version.
+        :param NDArray[np.float32] focal_embedding: Normalized focal paper vector.
+        :param Paper focal_paper: Focal paper backed by S2 or generated from a query.
+        :param str | None focal_identifier: Original arXiv input including version.
         :return List[Tuple[str, Paper, NDArray[np.float32]]]: Ranked candidates.
         """
         max_references, max_citations, max_recommendations = (
@@ -1580,23 +1587,23 @@ class EmbeddingGraphBuilder(
         )
         pool = fetch_candidate_pool(
             self.client,
-            seed_paper,
+            focal_paper,
             max_references=max_references,
             max_citations=max_citations,
             max_recommendations=max_recommendations,
-            seed_identifier=seed_identifier,
+            focal_identifier=focal_identifier,
             reference_selector=self._select_recovered_references_by_embedding,
         )
         self.candidate_source_status = dict(pool.source_status)
         if not pool.papers:
             logger.warning(
-                "Candidate pool for %s is empty; graph will only contain the seed.",
-                seed_paper.paper_id,
+                "Candidate pool for %s is empty; graph will only contain the focal paper.",
+                focal_paper.paper_id,
             )
             return []
 
         embeddings = self.embed_papers(pool.papers)
-        query = l2_normalize_embeddings(seed_embedding)
+        query = l2_normalize_embeddings(focal_embedding)
         scored: list[tuple[float, str, Paper, NDArray[np.float32], int]] = []
         for idx, (paper_id, paper) in enumerate(pool.papers.items()):
             embedding = embeddings.get(paper_id)
@@ -1672,6 +1679,7 @@ class EmbeddingGraphBuilder(
                         for paper_id in missing
                     ],
                     batch_size=self.encode_batch_size,
+                    show_progress_bar=True,
                 )
                 embeddings.update(zip(missing, vectors, strict=True))
             return embeddings
@@ -1679,7 +1687,7 @@ class EmbeddingGraphBuilder(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
-            show_progress=False,
+            show_progress=True,
             text_builder=self._format_retrieval_document_metadata,
         )
 
@@ -1737,7 +1745,7 @@ class EmbeddingGraphBuilder(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
-            show_progress=False,
+            show_progress=True,
             text_builder=self._format_graph_similarity_metadata,
         )
         self.embeddings = validate_embedding_vectors(
@@ -1835,58 +1843,179 @@ class EmbeddingGraphBuilder(
         return get_cache_dir("embeddings", create=False)
 
     def has_persistent_embedding_artifacts(self) -> bool:
-        """Return whether a potentially searchable vector cache exists.
-
-        This cheap probe lets auto local-search avoid loading a model when the
-        user has never built an embedding cache. Exact namespace selection still
-        occurs before any vector is searched.
-
-        Managed corpora are always ``arxiv-corpus`` namespaces, so outside that
-        source they are never searchable here and are skipped.
-
-        :return bool: Whether at least one namespace carries managed corpus state
-            (``arxiv-corpus`` only) or a non-empty HDF5/metadata pair that may
-            contain searchable papers.
-        """
+        """Check whether the requested settings could select a searchable cache."""
+        if self._cache_selection is not None:
+            return True
         cache_directory = self.embedding_cache_directory()
+        model_candidates = self._model_load_candidates()
+        legacy_corpus_namespaces = set()
         for db_path in cache_directory.glob("metadata_*.db"):
-            if embedding_namespace_has_corpus_state(db_path):
-                # The namespace contract rejects non-corpus sources for managed
-                # state, so a candidates builder can never address this namespace.
+            namespace_id = db_path.stem.removeprefix("metadata_")
+            probe = probe_embedding_namespace(db_path)
+            if probe is not None and probe.corpus_state:
                 if self.semantic_source != "arxiv-corpus":
                     continue
-                # An import interrupted before its first batch commits holds corpus
-                # state but no papers, and its HDF5 file may be absent or empty. It
-                # is an installed corpus awaiting resume, not an empty cache.
-                return True
-            namespace_id = db_path.name.removeprefix("metadata_").removesuffix(".db")
+                # Pending imports may have no fingerprint, rows or HDF5 file yet.
+                selectors = probe.corpus_state.get("namespace_selectors")
+                artifact = (
+                    selectors.get("artifact_identity")
+                    if isinstance(selectors, dict)
+                    else None
+                )
+                if not isinstance(artifact, str) or not artifact:
+                    return True
+                if self._may_select_namespace(namespace_id, artifact, model_candidates):
+                    return True
+                continue
             h5_path = cache_directory / f"embeddings_{namespace_id}.h5"
             if not path_exists(h5_path) or h5_path.stat().st_size == 0:
                 continue
-            has_papers = embedding_namespace_has_papers(db_path)
-            if has_papers is False:
+            if probe is None:
+                return True
+            if probe.has_papers is False:
                 continue
-            schema_version = read_embedding_namespace_schema(db_path)
+            metadata = probe.metadata
+            schema_version = metadata.get(SCHEMA_VERSION_KEY, "").strip()
             if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
                 continue
-            # Unreadable metadata or a non-empty malformed HDF5 file is not an
-            # empty-cache signal. Let full cache preparation surface that error.
+            fingerprint = metadata.get(MODEL_FINGERPRINT_KEY)
+            if not fingerprint or self._may_select_namespace(
+                namespace_id, fingerprint, model_candidates
+            ):
+                return True
+            if (
+                metadata.get(HYDRATION_DATASET_SOURCE_KEY)
+                and self.semantic_source == "arxiv-corpus"
+                and not self._matches_recorded_legacy_address(
+                    namespace_id, h5_path, fingerprint, metadata, model_candidates
+                )
+            ):
+                legacy_corpus_namespaces.add(namespace_id)
+        if legacy_corpus_namespaces:
+            # A legacy corpus may have a fingerprint mismatch. Independently
+            # check the active artifact address so the existing refusal can run.
+            for model in model_candidates:
+                try:
+                    artifact = self._fingerprint_for_model(model)
+                except (OSError, RuntimeError):
+                    return True
+                if any(
+                    self._may_select_namespace(namespace_id, artifact, (model,))
+                    for namespace_id in legacy_corpus_namespaces
+                ):
+                    return True
+        return False
+
+    def selects_installed_corpus(self, namespace_id: str) -> bool:
+        """Check whether these settings bind an installed corpus.
+
+        Without an explicit selection, cache preparation binds the namespace that
+        the loaded checkpoint and its artifact address, then requires the
+        installed source and a corpus view within its coverage. This applies
+        those rules to the requested checkpoint at the corpus's recorded artifact,
+        so it loads no model and uses no network. A fallback checkpoint loads
+        only when the requested one fails, so its address does not count.
+
+        :param str namespace_id: Installed native namespace ID.
+        :return bool: Whether a build or search with these settings uses the
+            corpus, which without a selection means no ``--cache-namespace``.
+        :raises ValueError: If the namespace is not an installed, ready corpus.
+        :raises RuntimeError: If the namespace has no certified contract.
+        """
+        if self._cache_selection is not None:
+            return self._cache_selection.namespace_id == namespace_id
+        if self.semantic_source != "arxiv-corpus":
+            return False
+        selection = select_existing_cache(namespace_id)
+        if (selection.source_repo_id, selection.source_split) != (
+            self.dataset_source,
+            self.dataset_split,
+        ):
+            return False
+        if not self._may_select_namespace(
+            namespace_id,
+            selection.contract.model_artifact_identity,
+            self._model_load_candidates()[:1],
+        ):
+            return False
+        if self.corpus_size is None:
             return True
+        try:
+            open_existing_cache(selection).require_complete_certified_corpus(
+                corpus_size=self.corpus_size
+            )
+        except ValueError:
+            return False
+        return True
+
+    def _matches_recorded_legacy_address(
+        self,
+        namespace_id: str,
+        h5_path: Path,
+        artifact: str,
+        metadata: dict[str, str],
+        model_candidates: Sequence[str],
+    ) -> bool:
+        """Confirm a different address from the stored legacy layout selectors."""
+        storage = metadata.get(STORAGE_PRECISION_KEY)
+        formatter = metadata.get(TEXT_FORMATTER_FINGERPRINT_KEY)
+        if not storage or not formatter:
+            return False
+        selectors = self._namespace_selectors(
+            artifact_identity=artifact,
+            storage_precision=storage,
+            formatter_identity=formatter,
+        )
+        if storage == "int8":
+            try:
+                selectors["calibration_sample_size"] = int(
+                    metadata.get(CALIBRATION_SAMPLE_SIZE_KEY, "")
+                )
+            except ValueError:
+                return False
+        # Both an explicit truncation and native width can produce the same
+        # matrix shape. Verify a reconstructed address before excluding it.
+        dimensions = {None, self.truncate_dim, probe_embedding_dimension(h5_path)}
+        for model in model_candidates:
+            selectors["model_identity"] = model
+            for dimension in dimensions:
+                selectors["dimension"] = dimension
+                if namespace_id == embedding_namespace_id(
+                    serialize_embedding_namespace(**selectors)
+                ):
+                    return True
+        return False
+
+    def _may_select_namespace(
+        self, namespace_id: str, artifact: str, model_candidates: Sequence[str]
+    ) -> bool:
+        for model in model_candidates:
+            if (
+                resolve_embedding_model_profile(model, self.requested_model_profile)
+                != self.model_profile
+            ):
+                return True
+            selectors = self._namespace_selectors(artifact_identity=artifact)
+            selectors["model_identity"] = model
+            if namespace_id == embedding_namespace_id(
+                serialize_embedding_namespace(**selectors)
+            ):
+                return True
         return False
 
     def _select_candidates(
         self,
-        seed_embedding: NDArray[np.float32],
+        focal_embedding: NDArray[np.float32],
         use_streaming: bool,
         *,
         corpus_prepared: bool = False,
     ) -> list[tuple[str, CachedPaperMetadata, NDArray[np.float32]]]:
         """Select candidates from a cache current for this collection operation.
 
-        :param NDArray[np.float32] seed_embedding: Normalized seed embedding vector.
+        :param NDArray[np.float32] focal_embedding: Normalized focal paper embedding vector.
         :param bool use_streaming: Whether hydration should stream the dataset.
         :param bool corpus_prepared: Whether the caller completed lifecycle work before
-            encoding the seed while retaining the operation lock. The default preserves
+            encoding the focal paper while retaining the operation lock. The default preserves
             safe standalone helper behavior.
         :return List[Tuple[str, CachedPaperMetadata, NDArray[np.float32]]]: Candidates by similarity.
         """
@@ -1894,7 +2023,7 @@ class EmbeddingGraphBuilder(
         with self.embedding_cache.hydration_operation_lock():
             if not corpus_prepared:
                 self._ensure_cache_hydrated(use_streaming=use_streaming)
-            return self._search_cache_candidates(seed_embedding)
+            return self._search_cache_candidates(focal_embedding)
 
     def _enrich_corpus_papers(self, papers: dict[str, Paper]) -> None:
         """Enrich collected corpus papers with cached or batched provider metadata.
@@ -1902,13 +2031,13 @@ class EmbeddingGraphBuilder(
         Conflicting identifiers leave a record unchanged. Rejected batches retain
         metadata already reused or fetched during the current request.
 
-        :param Dict[str, Paper] papers: Collected papers, including the skipped seed.
+        :param Dict[str, Paper] papers: Collected papers, including the focal paper, which is skipped.
         :return None: Fills missing metadata and updates citation counts in place,
             preserving corpus identifiers and existing title/abstract text.
         """
         targets: list[tuple[Paper, str]] = []
         for paper_id, paper in papers.items():
-            if paper.is_seed:
+            if paper.is_focal:
                 continue
             lookup_id = provider_lookup_identifier(paper_id, paper)
             if lookup_id is None:
@@ -2005,24 +2134,24 @@ class EmbeddingGraphBuilder(
         return similarity > 0.1
 
     def build_graph(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> tuple[PaperGraph, str]:
         """
         Build graph with top-k edge selection.
 
-        :param str seed_id: Seed paper identifier
+        :param str focal_id: Focal paper identifier
         :param kwargs: Embedding collection options passed to collection.
-        :return Tuple[PaperGraph, str]: Tuple of (NetworkX graph, seed paper ID)
+        :return Tuple[PaperGraph, str]: Tuple of (NetworkX graph, focal paper ID)
         """
         # Use base class to collect papers and create nodes
-        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph, actual_focal_id = super().build_graph(focal_id, **kwargs)
         graph.graph["embedding_runtime"] = self._embedding_runtime_metadata()
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
         filtered_graph = build_capped_undirected_graph(
-            graph, self.top_k, seed_id=actual_seed_id
+            graph, self.top_k, focal_id=actual_focal_id
         )
 
         logger.debug(
@@ -2031,4 +2160,4 @@ class EmbeddingGraphBuilder(
             filtered_graph.number_of_edges(),
         )
 
-        return filtered_graph, actual_seed_id
+        return filtered_graph, actual_focal_id

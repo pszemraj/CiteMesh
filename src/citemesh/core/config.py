@@ -65,6 +65,9 @@ class EmbeddingStorageConfig:
     storage_precision: str = "int8"
     binary_prefilter: bool = True
     binary_rescore_multiplier: int = 8
+    # Floor on the Hamming prefilter pool, so a small ``top_k`` still rescores
+    # enough rows for the result not to depend on how many were requested.
+    binary_rescore_min_candidates: int = 512
     calibration_sample_size: int = 2000
     compression: str = "gzip"
     compression_level: int = 1
@@ -77,6 +80,8 @@ class EmbeddingStorageConfig:
             )
         if self.binary_rescore_multiplier < 1:
             raise ValueError("binary_rescore_multiplier must be at least 1")
+        if self.binary_rescore_min_candidates < 1:
+            raise ValueError("binary_rescore_min_candidates must be at least 1")
         if self.calibration_sample_size < 1:
             raise ValueError("calibration_sample_size must be at least 1")
         if self.compression_level < 0:
@@ -105,8 +110,8 @@ class VisualizationConfig:
     dpi: int = 150
 
     # Node area caps and minimum (in square points for static scatter plots)
-    seed_size: int = 2500
-    max_non_seed_size: int = 2200
+    focal_size: int = 2500
+    max_non_focal_size: int = 2200
     min_size: int = 100
 
     # Node size tiers (rank: (base, increment))

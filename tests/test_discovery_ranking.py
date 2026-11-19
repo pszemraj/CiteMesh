@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -18,8 +19,8 @@ from citemesh.strategies.discovery_ranking import (
     reciprocal_rank_fusion,
 )
 
-SEED_DOCUMENT = np.array([1.0, 0.0, 0.0])
-SEED_QUERY = np.array([0.0, 1.0, 0.0])
+FOCAL_DOCUMENT = np.array([1.0, 0.0, 0.0])
+FOCAL_QUERY = np.array([0.0, 1.0, 0.0])
 
 
 def _unit(*values: float) -> np.ndarray:
@@ -44,13 +45,14 @@ def _rrf(*ranks: int) -> float:
     return score
 
 
-def test_fused_lists_are_the_four_evaluated_lists_in_summation_order() -> None:
+def test_fused_lists_are_in_summation_order() -> None:
     """The ranker fuses exactly the evaluated lists, in a fixed order."""
     assert [name for name, _key in FUSED_LISTS] == [
         "semantic",
         "reference_context",
         "direct",
         "recommended",
+        "focal_reference",
     ]
 
 
@@ -88,16 +90,16 @@ def test_equal_rank_multisets_tie_exactly_in_any_list_order(
     assert fused.index("a") < fused.index("z")
 
 
-def test_features_are_cosines_to_both_seed_roles() -> None:
-    """cos_dd uses the seed document vector and cos_q its query vector."""
+def test_features_are_cosines_to_both_focal_roles() -> None:
+    """cos_dd uses the focal paper document vector and cos_q its query vector."""
     features = compute_features(
         [
             DiscoveryCandidate("a", _unit(1.0, 1.0, 0.0), is_reference=True),
-            DiscoveryCandidate("b", np.array([0.0, 0.0, 2.0]), cites_seed=True),
+            DiscoveryCandidate("b", np.array([0.0, 0.0, 2.0]), cites_focal=True),
             DiscoveryCandidate("c", np.array([3.0, 0.0, 4.0]), recommendation_rank=7),
         ],
-        seed_document=SEED_DOCUMENT,
-        seed_query=SEED_QUERY,
+        focal_document=FOCAL_DOCUMENT,
+        focal_query=FOCAL_QUERY,
     )
 
     assert list(features) == ["a", "b", "c"]
@@ -122,7 +124,7 @@ def test_reference_context_excludes_the_candidate_and_needs_five_references() ->
     outsider = DiscoveryCandidate("x", _unit(1.0, 0.0, 1.0))
 
     five = compute_features(
-        [*references, outsider], seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY
+        [*references, outsider], focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY
     )
     # With exactly five references, a reference sees only four others.
     assert all(five[f"r{index}"].ctx_ref_top5 is None for index in range(5))
@@ -132,8 +134,8 @@ def test_reference_context_excludes_the_candidate_and_needs_five_references() ->
     sixth = DiscoveryCandidate("r5", _unit(1.0, 5.0, 0.0), is_reference=True)
     six = compute_features(
         [*references, sixth, outsider],
-        seed_document=SEED_DOCUMENT,
-        seed_query=SEED_QUERY,
+        focal_document=FOCAL_DOCUMENT,
+        focal_query=FOCAL_QUERY,
     )
     # r0 compares with r1..r5, never with its own cosine of 1.0.
     others = [ref.vector for ref in [*references[1:], sixth]]
@@ -156,7 +158,9 @@ def test_fewer_than_five_references_leave_the_context_list_empty() -> None:
         for index in range(4)
     ] + [DiscoveryCandidate("x", _unit(1.0, 0.0, 1.0))]
     lists = fused_lists(
-        compute_features(candidates, seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY)
+        compute_features(
+            candidates, focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY
+        )
     )
     assert lists["reference_context"] == []
     assert lists["direct"] == ["r0", "r1", "r2", "r3"]
@@ -166,13 +170,13 @@ def test_rank_candidates_matches_hand_computed_scores() -> None:
     """Each score is the ordered sum over the lists holding the candidate."""
     candidates = [
         DiscoveryCandidate("cited", _unit(0.9, 0.1, 0.4), is_reference=True),
-        DiscoveryCandidate("citer", _unit(0.6, 0.0, 0.8), cites_seed=True),
+        DiscoveryCandidate("citer", _unit(0.6, 0.0, 0.8), cites_focal=True),
         DiscoveryCandidate("close", _unit(0.95, 0.0, 0.3)),
         DiscoveryCandidate("recommended", _unit(0.1, 0.0, 1.0), recommendation_rank=3),
     ]
 
     ranked = rank_candidates(
-        candidates, seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY
+        candidates, focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY
     )
 
     # semantic: close (0.95), cited (0.9), citer (0.6), recommended (0.1)
@@ -197,6 +201,104 @@ def test_rank_candidates_matches_hand_computed_scores() -> None:
     assert by_id["close"].list_ranks == {"semantic": 1}
 
 
+def test_focal_reference_passage_count_influence_and_semantic_order() -> None:
+    """Only qualifying focal paper references receive the exact half-weight contribution."""
+    candidates = [
+        DiscoveryCandidate(
+            "many", FOCAL_QUERY, is_reference=True, focal_reference_context_count=4
+        ),
+        DiscoveryCandidate(
+            "influential",
+            FOCAL_QUERY,
+            is_reference=True,
+            focal_reference_context_count=2,
+            focal_reference_is_influential=True,
+        ),
+        DiscoveryCandidate(
+            "higher-query-cosine",
+            _unit(1.0, 1.0, 0.0),
+            is_reference=True,
+            focal_reference_context_count=2,
+        ),
+        DiscoveryCandidate(
+            "a-lower-query-cosine",
+            _unit(1.0, 0.0, 1.0),
+            is_reference=True,
+            focal_reference_context_count=2,
+        ),
+        DiscoveryCandidate(
+            "influence-only",
+            FOCAL_DOCUMENT,
+            is_reference=True,
+            focal_reference_is_influential=True,
+        ),
+        DiscoveryCandidate(
+            "single-passage",
+            FOCAL_DOCUMENT,
+            is_reference=True,
+            focal_reference_context_count=1,
+        ),
+        DiscoveryCandidate(
+            "citer-only",
+            FOCAL_DOCUMENT,
+            cites_focal=True,
+            focal_reference_context_count=10,
+            focal_reference_is_influential=True,
+        ),
+    ]
+    expected = [
+        "many",
+        "influential",
+        "higher-query-cosine",
+        "a-lower-query-cosine",
+        "influence-only",
+    ]
+    focal_vectors = {"focal_document": FOCAL_DOCUMENT, "focal_query": FOCAL_QUERY}
+    lists = fused_lists(compute_features(candidates, **focal_vectors))
+    assert lists["focal_reference"] == expected
+    prior = dict(
+        reciprocal_rank_fusion(
+            {
+                name: papers
+                for name, papers in lists.items()
+                if name != "focal_reference"
+            }
+        )
+    )
+    result = rank_candidates(candidates, **focal_vectors)
+    assert result == rank_candidates(list(reversed(candidates)), **focal_vectors)
+    for item in result:
+        ordinary_terms = [
+            1.0 / (60 + rank)
+            for name, rank in item.list_ranks.items()
+            if name != "focal_reference"
+        ]
+        if item.paper_id in expected:
+            rank = expected.index(item.paper_id) + 1
+            assert item.list_ranks["focal_reference"] == rank
+            assert item.score == math.fsum([*ordinary_terms, 0.5 / (60 + rank)])
+        else:
+            assert "focal_reference" not in item.list_ranks
+            assert item.score == prior[item.paper_id]
+
+
+def test_ineligible_focal_reference_evidence_preserves_the_original_ranking() -> None:
+    """One passage, zero passages and unavailable evidence leave fusion identical."""
+    original = [
+        DiscoveryCandidate(paper_id, FOCAL_DOCUMENT, is_reference=True)
+        for paper_id in ("one", "zero", "unavailable")
+    ]
+    ineligible = [
+        replace(original[0], focal_reference_context_count=1),
+        replace(original[1], focal_reference_context_count=0),
+        original[2],
+    ]
+    focal_vectors = {"focal_document": FOCAL_DOCUMENT, "focal_query": FOCAL_QUERY}
+    assert rank_candidates(original, **focal_vectors) == rank_candidates(
+        ineligible, **focal_vectors
+    )
+
+
 def test_ties_break_by_query_cosine_then_paper_id() -> None:
     """semantic ties use cos_q then ID; direct and fused ties use ID only."""
     candidates = [
@@ -205,7 +307,9 @@ def test_ties_break_by_query_cosine_then_paper_id() -> None:
         DiscoveryCandidate("c", _unit(1.0, 0.5, 0.0)),
     ]
     lists = fused_lists(
-        compute_features(candidates, seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY)
+        compute_features(
+            candidates, focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY
+        )
     )
     # Equal cos_dd for all three: b and c beat a on cos_q; b beats c on ID.
     assert lists["semantic"] == ["b", "c", "a"]
@@ -214,11 +318,11 @@ def test_ties_break_by_query_cosine_then_paper_id() -> None:
 
     twins = rank_candidates(
         [
-            DiscoveryCandidate("y", SEED_DOCUMENT),
-            DiscoveryCandidate("x", SEED_DOCUMENT),
+            DiscoveryCandidate("y", FOCAL_DOCUMENT),
+            DiscoveryCandidate("x", FOCAL_DOCUMENT),
         ],
-        seed_document=SEED_DOCUMENT,
-        seed_query=SEED_QUERY,
+        focal_document=FOCAL_DOCUMENT,
+        focal_query=FOCAL_QUERY,
     )
     assert [item.paper_id for item in twins] == ["x", "y"]
 
@@ -231,8 +335,8 @@ def test_a_recommended_paper_outranks_an_identical_unrecommended_one() -> None:
             DiscoveryCandidate("a-not-recommended", vector),
             DiscoveryCandidate("b-recommended", vector, recommendation_rank=40),
         ],
-        seed_document=SEED_DOCUMENT,
-        seed_query=SEED_QUERY,
+        focal_document=FOCAL_DOCUMENT,
+        focal_query=FOCAL_QUERY,
     )
     assert [item.paper_id for item in ranked] == [
         "b-recommended",
@@ -243,25 +347,25 @@ def test_a_recommended_paper_outranks_an_identical_unrecommended_one() -> None:
 
 
 def test_without_recommendations_the_fusion_is_the_three_other_lists() -> None:
-    """arxiv-corpus pools carry no recommendation ranks, so only three lists fuse."""
+    """Three lists fuse when recommendations and focal evidence are unavailable."""
     rng = np.random.default_rng(7)
     candidates = [
         DiscoveryCandidate(
             f"p{index:02d}",
             rng.normal(size=3),
             is_reference=index % 3 == 0,
-            cites_seed=index % 5 == 0,
+            cites_focal=index % 5 == 0,
         )
         for index in range(30)
     ]
     features = compute_features(
-        candidates, seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY
+        candidates, focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY
     )
     lists = fused_lists(features)
     assert lists["recommended"] == []
     three = {name: lists[name] for name in ("semantic", "reference_context", "direct")}
     ranked = rank_candidates(
-        candidates, seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY
+        candidates, focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY
     )
     assert [(item.paper_id, item.score) for item in ranked] == (
         reciprocal_rank_fusion(three)
@@ -276,22 +380,24 @@ def test_ranking_ignores_input_order_and_vector_scale() -> None:
             f"p{index:03d}",
             rng.normal(size=8),
             is_reference=index % 4 == 0,
-            cites_seed=index % 7 == 0,
+            cites_focal=index % 7 == 0,
             recommendation_rank=index if index % 3 == 0 else None,
         )
         for index in range(120)
     ]
-    seed_document = rng.normal(size=8)
-    seed_query = rng.normal(size=8)
+    focal_document = rng.normal(size=8)
+    focal_query = rng.normal(size=8)
     baseline = rank_candidates(
-        candidates, seed_document=seed_document, seed_query=seed_query
+        candidates, focal_document=focal_document, focal_query=focal_query
     )
     assert baseline[0].features.ctx_ref_top5 is not None
 
     shuffled = list(candidates)
     random.Random(3).shuffle(shuffled)
     assert (
-        rank_candidates(shuffled, seed_document=seed_document, seed_query=seed_query)
+        rank_candidates(
+            shuffled, focal_document=focal_document, focal_query=focal_query
+        )
         == baseline
     )
 
@@ -300,13 +406,13 @@ def test_ranking_ignores_input_order_and_vector_scale() -> None:
             item.paper_id,
             item.vector * (0.01 + index),
             is_reference=item.is_reference,
-            cites_seed=item.cites_seed,
+            cites_focal=item.cites_focal,
             recommendation_rank=item.recommendation_rank,
         )
         for index, item in enumerate(candidates)
     ]
     scaled = rank_candidates(
-        rescaled, seed_document=seed_document * 9.0, seed_query=seed_query * 0.5
+        rescaled, focal_document=focal_document * 9.0, focal_query=focal_query * 0.5
     )
     assert [item.paper_id for item in scaled] == [item.paper_id for item in baseline]
     assert [item.features.cos_dd for item in scaled] == pytest.approx(
@@ -316,4 +422,7 @@ def test_ranking_ignores_input_order_and_vector_scale() -> None:
 
 def test_an_empty_pool_ranks_nothing() -> None:
     """No candidates means no ranked output."""
-    assert rank_candidates([], seed_document=SEED_DOCUMENT, seed_query=SEED_QUERY) == []
+    assert (
+        rank_candidates([], focal_document=FOCAL_DOCUMENT, focal_query=FOCAL_QUERY)
+        == []
+    )

@@ -58,7 +58,6 @@ class _PaperOptionalFields(TypedDict, total=False):
     doi: str
     categories: list[str]
     references: list[str]
-    is_seed: bool
     is_local_corpus: bool
 
 
@@ -110,7 +109,6 @@ def _is_cached_paper(value: JSONValue) -> TypeGuard[_CachedPaper]:
         ("venue", str),
         ("arxiv_id", str),
         ("doi", str),
-        ("is_seed", bool),
         ("is_local_corpus", bool),
     )
     if any(
@@ -214,6 +212,10 @@ def _load_cached_paper(paper_id: str) -> Paper | None:
                 cached = canonical
 
         data = cached.get("paper")
+        if isinstance(data, dict):
+            # Older v2 records persisted a neutral graph-role flag. Paper
+            # metadata is shared across builds, so discard that transient role.
+            data.pop("is_seed", None)
         if not _is_cached_paper(data):
             return None
         if data["paper_id"] != canonical_paper_id:
@@ -236,7 +238,7 @@ def _persist_paper(paper: Paper, requested_id: str) -> None:
     """
     data = asdict(paper)
     data["references"] = []
-    data["is_seed"] = False
+    data.pop("is_focal")
     canonical_paper_id = paper.paper_id
     try:
         atomic_write_json(

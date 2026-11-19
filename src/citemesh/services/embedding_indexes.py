@@ -130,19 +130,6 @@ class ResolvedPublication:
         }
 
 
-def _load_json(path: Path) -> dict[str, object]:
-    """Read a JSON object from a UTF-8 file.
-
-    :param Path path: File to read.
-    :return dict[str, object]: Decoded JSON object with unvalidated values.
-    :raises ValueError: If the JSON value is not an object.
-    """
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"Expected a JSON object: {path}")
-    return value
-
-
 def _manifest_bucket_path(config_name: str, snapshot_id: str) -> str:
     """Build the catalog path for one configuration snapshot.
 

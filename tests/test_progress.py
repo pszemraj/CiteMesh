@@ -21,6 +21,7 @@ def progress_console(monkeypatch: pytest.MonkeyPatch) -> Console:
     :param pytest.MonkeyPatch monkeypatch: Fixture used to restore the global.
     :return Console: Console recording rendered output, including live redraws.
     """
+    monkeypatch.setenv("TERM", "xterm-256color")
     console = Console(
         file=io.StringIO(),
         force_terminal=True,
@@ -92,18 +93,15 @@ def test_progress_iterator_with_zero_total_renders_a_bounded_bar(
     assert "0/0" in progress_console.export_text()
 
 
-def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_dataset_progress_keeps_total_and_eta_visible(
     monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
     recorded_displays: list[Progress],
+    width: int,
 ) -> None:
-    """Dataset counts and a measured ETA should fit a standard terminal width.
-
-    :param pytest.MonkeyPatch monkeypatch: Supplies a deterministic progress clock.
-    :param Console progress_console: Recording console with an 80-column width.
-    :param list[Progress] recorded_displays: Captures the final progress display.
-    :return None: Checks the rendered count and ETA share an untruncated line.
-    """
+    """Full dataset counts and ETA survive narrow terminals."""
+    progress_console.width = width
     clock = [0.0]
     monkeypatch.setattr(
         progress_module,
@@ -127,20 +125,81 @@ def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
     progress_console.export_text(clear=True)
     progress_console.print(recorded_displays[0].get_renderable())
     lines = progress_console.export_text().splitlines()
-    assert any(
-        "Calibrating dataset" in line
-        and "2000/3156800 papers" in line
-        and "ETA 0:52:35" in line
-        and len(line) <= 80
-        for line in lines
-    )
+    line = next(line for line in lines if "2000/3156800" in line)
+    assert "ETA 0:52:35" in line
+    assert len(line) <= width
+    if width >= 60:
+        assert "Calibrating dataset" in line
+    if width >= 80:
+        assert "2000/3156800 papers" in line
 
 
-def test_progress_iterator_without_a_total_renders_indeterminate_counts(
+def test_progress_timestamp_changes_only_when_work_advances(
+    monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
     recorded_displays: list[Progress],
 ) -> None:
-    """An unsized source should keep the total unknown and count against ``?``."""
+    """Redraws and zero-count updates must not look like productive work."""
+    clock = [0.0]
+    wall_clock = ["12:00:00"]
+    monkeypatch.setattr(progress_module, "strftime", lambda _format: wall_clock[0])
+    monkeypatch.setattr(
+        progress_module,
+        "Progress",
+        partial(
+            progress_module.Progress, get_time=lambda: clock[0], auto_refresh=False
+        ),
+    )
+    with progress_module.progress_task(
+        total=2, description="Encoding papers", unit="papers", enabled=True
+    ) as task:
+        display = recorded_displays[0]
+        assert display.tasks[0].fields["updated"] == "12:00:00"
+        clock[0], wall_clock[0] = 10.0, "12:00:10"
+        task.update(1)
+        assert display.tasks[0].fields["updated"] == "12:00:10"
+        clock[0], wall_clock[0] = 20.0, "12:00:20"
+        task.update(0)
+        display.refresh()
+        assert display.tasks[0].fields["updated"] == "12:00:10"
+        task.update(-1)
+        assert display.tasks[0].fields["updated"] == "12:00:10"
+        clock[0], wall_clock[0] = 30.0, "12:00:30"
+        task.update(2)
+
+    progress_console.export_text(clear=True)
+    progress_console.print(display.get_renderable())
+    assert "12:00:30" in progress_console.export_text()
+
+
+def test_progress_labels_preserve_brackets_as_literal_text(
+    progress_console: Console,
+    recorded_displays: list[Progress],
+) -> None:
+    """Labels containing Rich-style tags must not silently lose their brackets."""
+    with progress_module.progress_task(
+        total=2,
+        description="Encoding [bold]data[/bold]",
+        unit="[red]rows[/red]",
+        enabled=True,
+    ) as task:
+        task.update(1)
+
+    progress_console.export_text(clear=True)
+    progress_console.print(recorded_displays[0].get_renderable())
+    output = progress_console.export_text()
+    assert "Encoding [bold]data[/bold]" in output
+    assert "[red]rows[/red]" in output
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_progress_iterator_without_a_total_renders_indeterminate_counts(
+    progress_console: Console,
+    recorded_displays: list[Progress],
+    width: int,
+) -> None:
+    """Unsized sources show elapsed time and a count, without an empty ETA label."""
+    progress_console.width = width
     items = list(
         progress_module.progress_iterator(
             _unsized_letters(),
@@ -152,7 +211,10 @@ def test_progress_iterator_without_a_total_renders_indeterminate_counts(
     task = recorded_displays[0].tasks[0]
     assert items == ["a", "b"]
     assert task.total is None
-    assert "2/?" in progress_console.export_text()
+    output = progress_console.export_text()
+    assert "2/?" in output
+    assert "ETA" not in output
+    assert "0:00:" in output
 
 
 def test_progress_eta_retains_slow_work_after_a_fast_update_burst(
@@ -190,41 +252,46 @@ def test_progress_eta_retains_slow_work_after_a_fast_update_burst(
     assert display.tasks[0].completed == 7003
 
 
-def test_progress_iterator_disabled_yields_items_without_rendering(
+@pytest.mark.parametrize(
+    ("interactive", "allowed", "enabled", "expected"),
+    [
+        (False, True, True, True),
+        (True, True, False, False),
+        (True, True, None, True),
+        (False, True, None, False),
+        (True, False, True, False),
+        (True, False, None, False),
+    ],
+)
+def test_progress_display_policy_preserves_items_and_counts(
+    monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
     recorded_displays: list[Progress],
+    interactive: bool,
+    allowed: bool,
+    enabled: bool | None,
+    expected: bool,
 ) -> None:
-    """A disabled bar should emit nothing while still yielding every item."""
+    """Verbosity gates every display while automatic display also requires a TTY."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: interactive)
+    progress_module.set_progress_enabled(allowed)
+
+    assert progress_module.progress_enabled() is allowed
+    assert progress_module.progress_enabled(require_tty=True) is (
+        allowed and interactive
+    )
+
     items = list(
         progress_module.progress_iterator(
-            [1, 2, 3],
-            description="scan",
-            enabled=False,
+            [1, 2, 3], description="scan", enabled=enabled
         )
     )
 
     display = recorded_displays[0]
     assert items == [1, 2, 3]
-    assert progress_console.export_text() == ""
+    assert bool(progress_console.export_text()) is expected
     assert display.live.is_started is False
     assert display.tasks[0].completed == 3
-
-
-def test_progress_severity_policy_suppresses_explicitly_enabled_bars(
-    progress_console: Console,
-    recorded_displays: list[Progress],
-) -> None:
-    """Warning and error output must not leave dependency-style bars live."""
-    progress_module.set_progress_enabled(False)
-
-    items = list(
-        progress_module.progress_iterator([1, 2, 3], description="scan", enabled=True)
-    )
-
-    display = recorded_displays[0]
-    assert items == [1, 2, 3]
-    assert progress_console.export_text() == ""
-    assert display.live.is_started is False
 
 
 def test_progress_iterator_close_after_break_stops_display(

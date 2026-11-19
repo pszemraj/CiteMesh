@@ -183,12 +183,12 @@ def resolve_dashboard_collection_outputs(
     explicit_output: bool,
     strategy: str,
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
 ) -> tuple[dict[str, Path], Path]:
-    """Resolve shared dashboard files and per-seed result artifacts.
+    """Resolve shared dashboard files and artifacts for each focal paper.
 
-    Dashboard state lives in one collection package at the collection root. A
-    seed-specific result directory always retains the graph JSON and its build
+    Dashboard state lives in one collection package at the collection root. Each
+    focal paper's result directory retains the graph JSON and its build
     sidecar, alongside any additional requested formats.
 
     :param Path base_output_path: User-provided or generated base output path.
@@ -196,7 +196,7 @@ def resolve_dashboard_collection_outputs(
     :param bool explicit_output: Whether ``--output`` was provided.
     :param str strategy: Active strategy name.
     :param PaperGraph graph: Built graph used for run-specific output naming.
-    :param str seed_id: Seed node identifier.
+    :param str focal_id: Focal node identifier.
     :return tuple[Dict[str, Path], Path]: Resolved output paths and package path.
     """
     collection_root = _resolve_dashboard_collection_root(
@@ -210,7 +210,7 @@ def resolve_dashboard_collection_outputs(
     )
     run_base_output_path = generate_output_path(
         graph,
-        seed_id,
+        focal_id,
         output_dir=collection_root,
         strategy=strategy,
     )

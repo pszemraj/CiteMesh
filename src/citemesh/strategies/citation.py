@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator, Iterable
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,15 +27,14 @@ from citemesh.strategies.base import (
     RELATIONSHIP_DEGREE_CAP,
     GraphBuilderStrategy,
     GraphCollectionOptions,
-    _CorpusPreparedOption,
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
     CandidateSourceState,
     fetch_candidate_source,
-    fetch_seed_references,
-    merge_seed_relation,
+    fetch_focal_references,
+    merge_focal_relation,
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
@@ -95,7 +93,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             fetch_references=fetch_references,
             refresh_reference_cache=refresh_reference_cache,
         )
-        self.seed_relations: dict[str, str] = {}
+        self.focal_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self._abstract_index = AbstractSimilarityIndex()
 
@@ -108,10 +106,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
     ) -> list[str]:
         """Add related papers while respecting graph limits.
 
-        Records of the seed enrich it, records of a collected paper merge into
+        Records of the focal paper enrich it, records of a collected paper merge into
         it, and a new paper joins while the graph has a free slot.
 
-        :param DiscoveryPool pool: Collected papers other than the seed.
+        :param DiscoveryPool pool: Collected papers other than the focal paper.
         :param list[Paper] relation_records: Reference/citation papers from the API.
         :param bool progress_enabled: Whether to wrap records with a progress bar.
         :param str progress_description: Progress-bar description label.
@@ -135,7 +133,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         for paper in relation_iterator:
             if not str(paper.paper_id).strip():
                 continue
-            # A new work needs a free slot; the seed holds one of max_papers.
+            # A new work needs a free slot; the focal paper holds one of max_papers.
             if pool.resolve(paper) is None and len(pool.papers) + 1 >= self.max_papers:
                 continue
             member_id = pool.add(paper, source="citation", relation="")
@@ -147,71 +145,56 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         return processed_ids
 
-    def _record_seed_relations(self, paper_ids: list[str], relation: str) -> None:
-        """Merge relation-to-seed labels for a paper batch.
+    def _record_focal_relations(self, paper_ids: list[str], relation: str) -> None:
+        """Merge labels describing each paper's relation to the focal paper.
 
         :param list[str] paper_ids: Relation batch paper IDs.
         :param str relation: Relation label.
-        :return None: Updates ``self.seed_relations`` in place.
+        :return None: Updates ``self.focal_relations`` in place.
         """
         for paper_id in paper_ids:
             normalized_id = str(paper_id).strip()
             if not normalized_id:
                 continue
-            merged_relation = merge_seed_relation(
-                self.seed_relations.get(normalized_id, ""), relation
+            merged_relation = merge_focal_relation(
+                self.focal_relations.get(normalized_id, ""), relation
             )
             if merged_relation:
-                self.seed_relations[normalized_id] = merged_relation
+                self.focal_relations[normalized_id] = merged_relation
 
     @scope_candidate_collection
     def collect_papers(
         self,
-        seed_id: str,
+        focal_id: str,
         *,
-        seed_paper: Paper | None = None,
-        **kwargs: Unpack[_CorpusPreparedOption],
+        focal_paper: Paper | None = None,
+        _corpus_prepared: bool = False,
     ) -> dict[str, Paper]:
         """
         Collect papers via citations and references.
 
-        :param str seed_id: Seed paper identifier
-        :param Optional[Paper] seed_paper: Pre-resolved seed metadata. When its
+        :param str focal_id: Focal paper identifier
+        :param Optional[Paper] focal_paper: Pre-resolved focal paper metadata. When its
             primary identifier is local, only an external alias is sent upstream.
-        :param kwargs: Corpus-preparation option accepted by the shared interface.
+        :param bool _corpus_prepared: Corpus-preparation option accepted by the
+            shared interface.
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         # Scope in-memory references to one collection request so stale entries do
         # not leak across caller boundaries when builders are reused.
         self.reference_hydrator.reset()
-        self.seed_relations = {}
+        self.focal_relations = {}
         self.candidate_source_status = {}
         papers = {}
         source_results: list[CandidateSourceResult] = []
 
-        # Step 1: Fetch seed paper
-        seed = seed_paper
-        if seed is None:
-            logger.debug("Fetching seed paper: %s", seed_id)
-            seed = self.client.get_paper(
-                seed_id,
-                raise_on_unavailable=True,
-            )
-
-        if not seed:
-            raise ValueError(
-                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
-                "know this identifier; check the DOI/arXiv/S2 ID)."
-            )
-
-        # Seed role belongs to this build, not the client-owned metadata record.
-        seed = replace(seed, is_seed=True)
-        provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
-        papers[seed.paper_id] = seed
-        self.seed_relations[seed.paper_id] = "seed"
-        pool = DiscoveryPool(seed)
-
-        logger.debug("Seed: %s", seed.title)
+        focal = self._resolve_focal_paper(
+            focal_id, client=self.client, focal_paper=focal_paper
+        )
+        provider_focal_id = provider_lookup_identifier(focal.paper_id, focal)
+        papers[focal.paper_id] = focal
+        self.focal_relations[focal.paper_id] = "focal"
+        pool = DiscoveryPool(focal)
 
         if self.max_papers > len(papers) and (
             self.max_references > 0 or self.max_citations > 0
@@ -232,11 +215,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             self.max_references,
         )
         if reference_limit > 0:
-            reference_results = fetch_seed_references(
+            reference_results = fetch_focal_references(
                 self.client,
-                seed,
+                focal,
                 reference_limit,
-                seed_identifier=seed_id,
+                focal_identifier=focal_id,
             )
             source_results.extend(reference_results)
             reference_ids = self._ingest_relation_batch(
@@ -245,7 +228,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 progress_enabled=show_progress,
                 progress_description="Downloading references",
             )
-            self._record_seed_relations(reference_ids, "referenced_by_seed")
+            self._record_focal_relations(reference_ids, "referenced_by_focal")
             s2_references_empty = any(
                 result.source == "references"
                 and result.state is CandidateSourceState.EMPTY
@@ -256,7 +239,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 # as the complete S2 bibliography or repeat the empty discovery.
                 # Candidate relations remain available, but this capped subset
                 # must not drive shared-reference coupling as a full bibliography.
-                self.reference_hydrator.withhold_seed_references(seed)
+                self.reference_hydrator.withhold_focal_references(focal)
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - 1 - len(pool.papers)
@@ -264,12 +247,12 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             remaining,
             self.max_citations,
         )
-        if citation_limit > 0 and provider_seed_id is not None:
+        if citation_limit > 0 and provider_focal_id is not None:
             logger.debug(f"Fetching up to {citation_limit} citations...")
             citation_result = fetch_candidate_source(
                 "citations",
                 lambda: self.client.get_paper_citations(
-                    provider_seed_id,
+                    provider_focal_id,
                     limit=citation_limit,
                     raise_on_unavailable=True,
                 ),
@@ -281,7 +264,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 progress_enabled=show_progress,
                 progress_description="Downloading citations",
             )
-            self._record_seed_relations(citation_ids, "cites_seed")
+            self._record_focal_relations(citation_ids, "cites_focal")
 
         papers.update(pool.papers)
         self.candidate_source_status = {
@@ -289,13 +272,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         }
         require_available_candidate_source(
             source_results,
-            context=f"citation acquisition for {seed.paper_id}",
+            context=f"citation acquisition for {focal.paper_id}",
         )
 
         # Candidate discovery is required acquisition. Complete every requested
         # source before optional reference enrichment can spend the shared S2
         # recovery budget.
-        self.reference_hydrator.hydrate(papers, seed)
+        self.reference_hydrator.hydrate(papers, focal)
 
         reference_lists = sum(bool(paper.references) for paper in papers.values())
         summary = f"Collected {len(papers)} papers"
@@ -310,19 +293,19 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         return papers
 
     def build_graph(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> tuple[PaperGraph, str]:
-        """Build citation graph and persist seed-relation metadata.
+        """Build a citation graph and persist relations to the focal paper.
 
-        :param str seed_id: Seed paper identifier.
+        :param str focal_id: Focal paper identifier.
         :param kwargs: Collection options forwarded to the parent build.
-        :return tuple[PaperGraph, str]: Built graph and canonical seed identifier.
+        :return tuple[PaperGraph, str]: Built graph and canonical focal paper identifier.
         """
-        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
-        graph.graph["seed_relations"] = {
+        graph, actual_focal_id = super().build_graph(focal_id, **kwargs)
+        graph.graph["focal_relations"] = {
             str(node_id): str(relation)
             for node_id, relation in sorted(
-                self.seed_relations.items(), key=lambda x: x[0]
+                self.focal_relations.items(), key=lambda x: x[0]
             )
             if str(node_id) in graph.nodes
         }
@@ -330,14 +313,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             sorted(self.candidate_source_status.items())
         )
         filtered_graph = build_capped_undirected_graph(
-            graph, RELATIONSHIP_DEGREE_CAP, seed_id=actual_seed_id
+            graph, RELATIONSHIP_DEGREE_CAP, focal_id=actual_focal_id
         )
         logger.debug(
             "Graph complete: %s nodes, %s edges",
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),
         )
-        return filtered_graph, actual_seed_id
+        return filtered_graph, actual_focal_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

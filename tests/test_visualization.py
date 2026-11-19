@@ -63,7 +63,7 @@ from citemesh.visualization.export import loaders as loaders_module
 from citemesh.visualization.export import nodes as nodes_module
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
-    MAX_STATIC_NON_SEED_LABELS,
+    MAX_STATIC_NON_FOCAL_LABELS,
     _layout_viewport_limits,
     _orient_layout_horizontally,
     _pack_disconnected_components,
@@ -178,16 +178,16 @@ def _canonicalize_graphml(path: Path) -> str:
 
 def _build_graph() -> tuple[nx.Graph, str]:
     """Create a small graph with one rich paper node and one fallback node."""
-    seed = Paper(
-        paper_id="seed",
-        title="Seed Paper",
+    focal = Paper(
+        paper_id="s001",
+        title="Focal Paper",
         year=2020,
         authors=[Author(name="Alice Smith")],
         citation_count=42,
-        abstract="Seed abstract",
+        abstract="Focal abstract",
         venue="TestConf",
         categories=["cs.AI"],
-        is_seed=True,
+        is_focal=True,
     )
     related = Paper(
         paper_id="related",
@@ -203,13 +203,13 @@ def _build_graph() -> tuple[nx.Graph, str]:
     graph = nx.Graph()
     graph.graph["strategy"] = "citation"
     graph.add_node(
-        seed.paper_id,
-        paper=seed,
-        title=seed.title,
-        year=seed.year,
-        authors=[author.name for author in seed.authors],
-        citation_count=seed.citation_count,
-        is_seed=True,
+        focal.paper_id,
+        paper=focal,
+        title=focal.title,
+        year=focal.year,
+        authors=[author.name for author in focal.authors],
+        citation_count=focal.citation_count,
+        is_focal=True,
     )
     graph.add_node(
         related.paper_id,
@@ -219,38 +219,38 @@ def _build_graph() -> tuple[nx.Graph, str]:
         authors=[author.name for author in related.authors],
         citation_count=related.citation_count,
         venue=related.venue,
-        is_seed=False,
+        is_focal=False,
     )
-    graph.add_edge(seed.paper_id, related.paper_id, weight=0.7)
-    return graph, seed.paper_id
+    graph.add_edge(focal.paper_id, related.paper_id, weight=0.7)
+    return graph, focal.paper_id
 
 
 def _build_hostile_graph(
     *,
     title: str,
-    abstract: str = "Seed abstract",
+    abstract: str = "Focal abstract",
     author: str = "Alice Smith",
 ) -> tuple[nx.Graph, str]:
-    """Create the standard graph with attacker-controlled seed metadata.
+    """Create the standard graph with attacker-controlled focal metadata.
 
     Keeps the exact node attribute shape of :func:`_build_graph` (including the
     ``paper`` object exporters read enriched fields from) so escaping tests
     exercise the real serialization path.
 
-    :param str title: Seed paper title.
-    :param str abstract: Seed paper abstract.
-    :param str author: Seed paper author name.
-    :return tuple[nx.Graph, str]: Graph and seed paper identifier.
+    :param str title: Focal paper title.
+    :param str abstract: Focal paper abstract.
+    :param str author: Focal paper author name.
+    :return tuple[nx.Graph, str]: Graph and focal paper identifier.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     hostile_paper = replace(
-        graph.nodes[seed_id]["paper"],
+        graph.nodes[focal_id]["paper"],
         title=title,
         abstract=abstract,
         authors=[Author(name=author)],
     )
-    graph.nodes[seed_id].update(paper=hostile_paper, title=title, authors=[author])
-    return graph, seed_id
+    graph.nodes[focal_id].update(paper=hostile_paper, title=title, authors=[author])
+    return graph, focal_id
 
 
 def test_exporter_serialization_contracts_and_determinism(
@@ -259,10 +259,10 @@ def test_exporter_serialization_contracts_and_determinism(
     plotly_figure: MagicMock,
 ) -> None:
     """Exporter outputs should preserve metadata, ordering, and determinism."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={
             "strategy": "citation",
             "candidate_source_status": {
@@ -270,7 +270,7 @@ def test_exporter_serialization_contracts_and_determinism(
                 "citations": "complete",
             },
         },
-        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 0.0)},
     )
 
     json_path = tmp_path / "graph.json"
@@ -284,9 +284,9 @@ def test_exporter_serialization_contracts_and_determinism(
 
     payload = json.loads(json_path.read_text())
     assert payload["kind"] == "citemesh-graph"
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == GRAPH_PAYLOAD_SCHEMA_VERSION
     assert exporter.graph_payload() == payload
-    assert payload["seed_id"] == seed_id
+    assert payload["focal_id"] == focal_id
     assert payload["meta"]["candidate_source_status"] == {
         "citations": "complete",
         "references": "unavailable",
@@ -294,7 +294,7 @@ def test_exporter_serialization_contracts_and_determinism(
     assert "metadata" not in payload
     assert payload["summary"] == {"nodes": 2, "edges": 1}
     assert "dashboard" in payload
-    assert payload["dashboard"]["meta"]["seed_id"] == seed_id
+    assert payload["dashboard"]["meta"]["focal_id"] == focal_id
     assert payload["dashboard"]["meta"]["candidate_source_status"] == {
         "citations": "complete",
         "references": "unavailable",
@@ -305,12 +305,12 @@ def test_exporter_serialization_contracts_and_determinism(
     assert len(payload["nodes"]) == 2
     assert payload["edges"][0]["weight"] == pytest.approx(0.7)
     assert payload["edges"][0]["source_title"] == "Related Paper"
-    assert payload["edges"][0]["target_title"] == "Seed Paper"
+    assert payload["edges"][0]["target_title"] == "Focal Paper"
 
     graphml = nx.read_graphml(graphml_path)
-    seed_node = graphml.nodes[seed_id]
-    assert seed_node["is_seed"] in {"1", 1}
-    assert "Alice Smith" in seed_node["authors"]
+    focal_node = graphml.nodes[focal_id]
+    assert focal_node["is_focal"] in {"1", 1}
+    assert "Alice Smith" in focal_node["authors"]
     assert graphml.graph["citemesh_meta_strategy"] == "citation"
     assert json.loads(graphml.graph["citemesh_meta_candidate_source_status"]) == {
         "citations": "complete",
@@ -338,15 +338,15 @@ def test_exporter_serialization_contracts_and_determinism(
 
     ordered_graph = nx.Graph()
     ordered_graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
-    ordered_graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
+    ordered_graph.add_node("s001", title="Focal", year=2020, authors=[], is_focal=True)
     ordered_graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
-    ordered_graph.add_edge("seed", "z", weight=0.7)
+    ordered_graph.add_edge("s001", "z", weight=0.7)
     ordered_graph.add_edge("z", "a", weight=0.5)
 
     ordered_exporter = GraphExporter(
         ordered_graph,
-        "seed",
-        layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
+        "s001",
+        layout={"a": (0.0, 0.0), "s001": (1.0, 0.0), "z": (2.0, 0.0)},
     )
     ordered_json_path = tmp_path / "ordered.json"
     ordered_graphml_path = tmp_path / "ordered.graphml"
@@ -356,8 +356,8 @@ def test_exporter_serialization_contracts_and_determinism(
     ordered_exporter.to_plotly_html(ordered_plotly_path)
 
     ordered_payload = json.loads(ordered_json_path.read_text())
-    assert [node["id"] for node in ordered_payload["nodes"]] == ["a", "seed", "z"]
-    assert [edge["source"] for edge in ordered_payload["edges"]] == ["a", "seed"]
+    assert [node["id"] for node in ordered_payload["nodes"]] == ["a", "s001", "z"]
+    assert [edge["source"] for edge in ordered_payload["edges"]] == ["a", "s001"]
     assert [edge["target"] for edge in ordered_payload["edges"]] == ["z", "z"]
     assert [edge["weight"] for edge in ordered_payload["edges"]] == [
         pytest.approx(0.5),
@@ -375,8 +375,8 @@ def test_exporter_serialization_contracts_and_determinism(
         (edge.attrib["source"], edge.attrib["target"])
         for edge in graph_element.findall("g:edge", ns)
     ]
-    assert node_ids == ["a", "seed", "z"]
-    assert edge_pairs == [("a", "z"), ("seed", "z")]
+    assert node_ids == ["a", "s001", "z"]
+    assert edge_pairs == [("a", "z"), ("s001", "z")]
 
     edge_trace = plotly_figure.call_args.kwargs["data"][0]
     normalized_layout = ordered_exporter._get_layout()
@@ -385,19 +385,19 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_x[5] is None
     assert edge_x[0] == pytest.approx(float(normalized_layout["a"][0]))
     assert edge_x[1] == pytest.approx(float(normalized_layout["z"][0]))
-    assert edge_x[3] == pytest.approx(float(normalized_layout["seed"][0]))
+    assert edge_x[3] == pytest.approx(float(normalized_layout["s001"][0]))
     assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
-def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> None:
+def test_exporter_uses_paper_metadata_and_graph_focal_role(tmp_path: Path) -> None:
     """Paper payloads should own metadata while graph attrs own an explicit role.
 
     :param Path tmp_path: Isolated GraphML destination.
     :return None: Checks Paper-only fallback, live metadata, and role precedence.
     """
-    seed = Paper(
-        paper_id="seed",
-        title="Original seed",
+    focal = Paper(
+        paper_id="s001",
+        title="Original focal",
         year=2020,
         authors=[Author(name="Alice Original")],
         citation_count=1,
@@ -406,19 +406,19 @@ def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> Non
         arxiv_id="2001.00001",
         doi="10.1000/original",
         categories=["cs.AI"],
-        is_seed=True,
+        is_focal=True,
         is_local_corpus=True,
     )
     related = Paper(
         paper_id="related",
         title="Related",
         year=2021,
-        is_seed=True,
+        is_focal=True,
     )
     graph = nx.Graph()
     graph.add_node(
-        "seed",
-        paper=seed,
+        "s001",
+        paper=focal,
         title="Stale scalar title",
         year=1999,
         authors=["Stale Author"],
@@ -430,43 +430,43 @@ def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> Non
         categories=["stale.category"],
         is_local_corpus=False,
     )
-    graph.add_node("related", paper=related, is_seed=False)
-    graph.add_edge("seed", "related", weight=0.5)
+    graph.add_node("related", paper=related, is_focal=False)
+    graph.add_edge("s001", "related", weight=0.5)
     exporter = GraphExporter(
         graph,
-        "seed",
+        "s001",
         metadata={"strategy": "citation"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 0.0)},
     )
 
-    seed.title = "Updated seed"
-    seed.year = 2025
-    seed.authors = [Author(name="Alice Updated")]
-    seed.citation_count = 42
-    seed.abstract = "Updated abstract"
-    seed.venue = "Updated venue"
-    seed.arxiv_id = "2501.00001"
-    seed.doi = "10.1000/updated"
-    seed.categories = ["cs.IR"]
+    focal.title = "Updated focal"
+    focal.year = 2025
+    focal.authors = [Author(name="Alice Updated")]
+    focal.citation_count = 42
+    focal.abstract = "Updated abstract"
+    focal.venue = "Updated venue"
+    focal.arxiv_id = "2501.00001"
+    focal.doi = "10.1000/updated"
+    focal.categories = ["cs.IR"]
 
     payload = exporter.graph_payload()
     payload_nodes = {node["id"]: node for node in payload["nodes"]}
-    seed_payload = payload_nodes["seed"]
-    assert seed_payload["title"] == "Updated seed"
-    assert seed_payload["year"] == 2025
-    assert seed_payload["authors"] == ["Alice Updated"]
-    assert seed_payload["citation_count"] == 42
-    assert seed_payload["abstract"] == "Updated abstract"
-    assert seed_payload["venue"] == "Updated venue"
-    assert seed_payload["arxiv_id"] == "2501.00001"
-    assert seed_payload["doi"] == "10.1000/updated"
-    assert seed_payload["categories"] == ["cs.IR"]
-    assert seed_payload["is_seed"] is True
-    assert seed_payload["is_local_corpus"] is True
-    assert payload_nodes["related"]["is_seed"] is False
+    focal_payload = payload_nodes["s001"]
+    assert focal_payload["title"] == "Updated focal"
+    assert focal_payload["year"] == 2025
+    assert focal_payload["authors"] == ["Alice Updated"]
+    assert focal_payload["citation_count"] == 42
+    assert focal_payload["abstract"] == "Updated abstract"
+    assert focal_payload["venue"] == "Updated venue"
+    assert focal_payload["arxiv_id"] == "2501.00001"
+    assert focal_payload["doi"] == "10.1000/updated"
+    assert focal_payload["categories"] == ["cs.IR"]
+    assert focal_payload["is_focal"] is True
+    assert focal_payload["is_local_corpus"] is True
+    assert payload_nodes["related"]["is_focal"] is False
     edge = payload["edges"][0]
     assert {edge["source_title"], edge["target_title"]} == {
-        "Updated seed",
+        "Updated focal",
         "Related",
     }
     assert {edge["source_label"], edge["target_label"]} == {
@@ -476,20 +476,20 @@ def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> Non
 
     graphml_path = tmp_path / "paper-metadata.graphml"
     exporter.to_graphml(graphml_path)
-    graphml_seed = nx.read_graphml(graphml_path).nodes["seed"]
-    assert graphml_seed["title"] == "Updated seed"
-    assert int(graphml_seed["citation_count"]) == 42
+    graphml_focal = nx.read_graphml(graphml_path).nodes["s001"]
+    assert graphml_focal["title"] == "Updated focal"
+    assert int(graphml_focal["citation_count"]) == 42
 
     package = update_dashboard_package(
         tmp_path / "dashboard.citemesh.json",
         graph=graph,
-        seed_id="seed",
+        focal_id="s001",
         strategy="citation",
         payload=payload,
         build={},
     )
-    assert package["results"][0]["title"] == "Updated seed"
-    assert graph.nodes["seed"]["title"] == "Stale scalar title"
+    assert package["results"][0]["title"] == "Updated focal"
+    assert graph.nodes["s001"]["title"] == "Stale scalar title"
 
 
 def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
@@ -498,12 +498,12 @@ def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
     :return None: Compares sizes and colors without mutating either source graph.
     """
     papers = {
-        "seed": Paper(
-            paper_id="seed",
-            title="Seed",
+        "s001": Paper(
+            paper_id="s001",
+            title="Focal",
             year=2024,
             citation_count=50,
-            is_seed=True,
+            is_focal=True,
         ),
         "related": Paper(
             paper_id="related",
@@ -522,12 +522,12 @@ def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
             year=paper.year,
             authors=[],
             citation_count=paper.citation_count,
-            is_seed=paper.is_seed,
+            is_focal=paper.is_focal,
         )
-    paper_graph.add_edge("seed", "related", weight=0.5)
-    scalar_graph.add_edge("seed", "related", weight=0.5)
-    paper_exporter = GraphExporter(paper_graph, "seed")
-    scalar_exporter = GraphExporter(scalar_graph, "seed")
+    paper_graph.add_edge("s001", "related", weight=0.5)
+    scalar_graph.add_edge("s001", "related", weight=0.5)
+    paper_exporter = GraphExporter(paper_graph, "s001")
+    scalar_exporter = GraphExporter(scalar_graph, "s001")
     theme = get_theme("dark")
 
     for node_id in papers:
@@ -536,7 +536,7 @@ def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
             node_id, theme
         ) == scalar_exporter._node_color_hex(node_id, theme)
 
-    assert set(paper_graph.nodes["seed"]) == {"paper"}
+    assert set(paper_graph.nodes["s001"]) == {"paper"}
 
 
 def test_json_export_embeds_geometry_computing_layout_lazily(
@@ -547,8 +547,8 @@ def test_json_export_embeds_geometry_computing_layout_lazily(
     Every ``kind``-stamped payload must be loadable through the dashboard's
     Add Results flow, so a JSON-only export may not omit the geometry arrays.
     """
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "citation"})
 
     layout_calls: list[object] = []
 
@@ -557,7 +557,7 @@ def test_json_export_embeds_geometry_computing_layout_lazily(
     ) -> dict[str, tuple[float, float]]:
         del args, kwargs
         layout_calls.append(graph_arg)
-        return {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        return {"s001": (0.0, 0.0), "related": (1.0, 1.0)}
 
     monkeypatch.setattr(nodes_module, "compute_layout", _counting_compute_layout)
 
@@ -570,7 +570,7 @@ def test_json_export_embeds_geometry_computing_layout_lazily(
     assert payload["summary"] == {"nodes": 2, "edges": 1}
     dashboard_meta = payload["dashboard"]["meta"]
     assert dashboard_meta["summary"] == {"nodes": 2, "edges": 1}
-    assert sorted(dashboard_meta["plotly_node_order"]) == ["related", "seed"]
+    assert sorted(dashboard_meta["plotly_node_order"]) == ["related", "s001"]
     assert len(dashboard_meta["plotly_positions"]) == 2
     assert len(dashboard_meta["plotly_node_sizes"]) == 2
     assert all(size > 0 for size in dashboard_meta["plotly_node_sizes"])
@@ -585,12 +585,12 @@ def test_json_payload_without_layout_passes_dashboard_import_contract() -> None:
     running it here locks the JSON -> Load Results round trip for exporters that
     were never handed a run layout.
     """
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "citation"})
 
     payload = exporter.graph_payload()
     validated = _validate_dashboard_graph_payload(
-        payload, result_id=f"citation:{seed_id}"
+        payload, result_id=f"citation:{focal_id}"
     )
 
     assert isinstance(validated, dict)
@@ -608,7 +608,7 @@ def test_graph_json_preserves_candidate_source_status(
     tmp_path: Path, override_status: bool
 ) -> None:
     """Portable JSON carries source status for direct Python exports."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     graph.graph["candidate_source_status"] = {
         "arxiv_corpus": "complete",
         "recommendations": "unavailable",
@@ -620,15 +620,15 @@ def test_graph_json_preserves_candidate_source_status(
     )
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"candidate_source_status": status} if override_status else None,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 0.0)},
     )
     output = tmp_path / "graph.json"
     exporter.to_json(output)
 
     payload = json.loads(output.read_text(encoding="utf-8"))
-    validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:seed")
+    validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:s001")
     assert validated["meta"]["candidate_source_status"] == status
     assert payload["dashboard"]["meta"]["candidate_source_status"] == status
 
@@ -637,13 +637,13 @@ def test_graph_json_carries_discovery_evidence_and_rejects_malformed_evidence(
     tmp_path: Path,
 ) -> None:
     """Hybrid discovery evidence reaches related nodes; a malformed entry fails."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     ranker = {"method": "reciprocal_rank_fusion", "k": 60, "lists": ["semantic"]}
     evidence = {
         "discovery_rank": 1,
         "discovery_score": 1 / 61,
         "discovery_features": {
-            "seed_similarity": 0.8,
+            "focal_similarity": 0.8,
             "bibliography_similarity": None,
             "direct_citation": False,
             "recommendation_rank": None,
@@ -653,28 +653,296 @@ def test_graph_json_carries_discovery_evidence_and_rejects_malformed_evidence(
     graph.graph["discovery_ranker"] = ranker
     graph.graph["discovery_ranking"] = {"related": evidence}
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 0.0)}
     )
     output = tmp_path / "graph.json"
     exporter.to_json(output)
 
     payload = json.loads(output.read_text(encoding="utf-8"))
-    validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:seed")
+    validated = _validate_dashboard_graph_payload(payload, result_id="hybrid:s001")
     assert validated["meta"]["discovery_ranker"] == ranker
     assert payload["dashboard"]["meta"]["discovery_ranker"] == ranker
     nodes = {node["id"]: node for node in payload["nodes"]}
     assert {key: nodes["related"][key] for key in evidence} == evidence
-    assert "discovery_rank" not in nodes["seed"]
+    assert "discovery_rank" not in nodes["s001"]
 
     graph.graph["discovery_ranking"] = {"related": {**evidence, "discovery_rank": "1"}}
     with pytest.raises(ValueError, match="Discovery evidence expects an integer"):
-        GraphExporter(graph, seed_id).graph_payload()
+        GraphExporter(graph, focal_id).graph_payload()
 
 
-def test_graph_payload_rejects_absent_seed_before_replacing_json(
+def test_graph_json_python_import_round_trips_analysis_and_exports(
     tmp_path: Path,
 ) -> None:
-    """Schema-stamped graph payloads must identify an included seed node.
+    """Reimport graph JSON with the graph-level maps used by Python exporters."""
+    graph = _build_focal_relation_graph()
+    graph.nodes["s001"]["paper"] = Paper(
+        paper_id="s001",
+        title="A paper about graphs",
+        year=2020,
+        authors=[Author("Alice Smith"), Author("Béatrice Jones")],
+        citation_count=42,
+        abstract="An abstract about papers and their relationships.",
+        venue="Graph Conference",
+        arxiv_id="2010.00001",
+        doi="10.1234/graph",
+        categories=["cs.AI", "cs.IR"],
+        is_focal=True,
+    )
+    graph.nodes["early-semantic"]["is_local_corpus"] = True
+    graph.nodes["late-reference"]["focal_reference_evidence"] = {
+        "context_count": 2,
+        "excerpt": "We use this reference to bound the approximation error.",
+        "is_influential": False,
+    }
+    graph.graph["discovery_leads"] = {
+        "references": [
+            {
+                "paper_id": "outside",
+                "title": "Estimates for the approximation",
+                "doi": "10.1234/outside",
+                "arxiv_id": "",
+                "context_count": 3,
+                "rank": 18,
+            }
+        ],
+    }
+    graph.graph["strategy"] = "hybrid"
+    graph.graph["paper_sources"] = {
+        "s001": "both",
+        "late-reference": "citation",
+        "early-citer": "citation",
+        "both-ways": "both",
+        "early-semantic": "semantic",
+        "same-year-semantic": "semantic",
+        "late-semantic": "semantic",
+        "undated-semantic": "semantic",
+    }
+    graph.graph["candidate_source_status"] = {
+        "references": "complete",
+        "citations": "empty",
+        "recommendations": "unavailable",
+    }
+    graph.graph["discovery_ranker"] = {
+        "method": "reciprocal_rank_fusion",
+        "k": 60,
+        "lists": ["semantic", "direct", "focal_reference"],
+        "weights": {"focal_reference": 0.5},
+    }
+    graph.graph["discovery_ranking"] = {
+        "early-semantic": {
+            "discovery_rank": 1,
+            "discovery_score": 1 / 61,
+            "discovery_features": {
+                "focal_similarity": 0.8,
+                "bibliography_similarity": None,
+                "direct_citation": False,
+                "recommendation_rank": None,
+            },
+            "discovery_list_ranks": {
+                "semantic": 1,
+                "direct": None,
+                "focal_reference": None,
+            },
+        }
+    }
+    layout = {
+        node_id: (float(index), float(index % 3))
+        for index, node_id in enumerate(sorted(graph))
+    }
+    exporter = GraphExporter(graph, "s001", theme_name="light", layout=layout)
+    source = tmp_path / "graph.json"
+    exporter.to_json(source)
+    original_payload = json.loads(source.read_text(encoding="utf-8"))
+
+    imported = GraphExporter.from_json(source)
+
+    assert isinstance(imported.graph, nx.Graph)
+    assert imported.focal_id == "s001"
+    assert imported.theme.name == "light"
+    assert imported.graph.graph["focal_id"] == "s001"
+    for key in (
+        "strategy",
+        "paper_sources",
+        "focal_relations",
+        "candidate_source_status",
+        "discovery_ranker",
+        "discovery_ranking",
+        "discovery_leads",
+    ):
+        assert imported.graph.graph[key] == graph.graph[key]
+    assert {
+        node_id
+        for node_id, attrs in imported.graph.nodes(data=True)
+        if attrs["is_focal"]
+    } == {"s001"}
+    assert imported.graph.nodes["s001"]["title"] == "A paper about graphs"
+    assert imported.graph.nodes["s001"]["authors"] == ["Alice Smith", "Béatrice Jones"]
+    assert imported.graph.nodes["early-semantic"]["is_local_corpus"] is True
+    assert (
+        imported.graph.nodes["late-reference"]["focal_reference_evidence"]
+        == graph.nodes["late-reference"]["focal_reference_evidence"]
+    )
+    assert imported.graph.nodes["undated-semantic"]["year"] == 0
+    assert imported.graph.nodes["undated-semantic"]["paper"].year is None
+    assert imported.graph["s001"]["early-citer"]["weight"] == 0.6
+    assert nx.shortest_path(imported.graph, "late-reference", "early-citer") == [
+        "late-reference",
+        "s001",
+        "early-citer",
+    ]
+    # Re-enrichment reads the reconstructed graph maps, not per-node copies of
+    # fields such as provenance and focal_relation.
+    assert imported.graph_payload() == original_payload
+
+    original_csv, imported_csv = tmp_path / "original.csv", tmp_path / "imported.csv"
+    original_bib, imported_bib = tmp_path / "original.bib", tmp_path / "imported.bib"
+    exporter.to_csv(original_csv)
+    imported.to_csv(imported_csv)
+    exporter.to_bibtex(original_bib)
+    imported.to_bibtex(imported_bib)
+    assert imported_csv.read_text(encoding="utf-8") == original_csv.read_text(
+        encoding="utf-8"
+    )
+    assert imported_bib.read_text(encoding="utf-8") == original_bib.read_text(
+        encoding="utf-8"
+    )
+    # Imported state remains an ordinary, editable NetworkX graph.
+    imported.graph.graph["paper_sources"]["early-citer"] = "semantic"
+    modified = {node["id"]: node for node in imported.graph_payload()["nodes"]}
+    assert modified["early-citer"]["provenance"] == "semantic"
+
+
+@pytest.mark.parametrize("writer", ["to_plotly_html", "to_dashboard_html"])
+def test_graph_json_python_import_preserves_plotly_labels_and_hover_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """Imported builder graphs retain compact labels and bibliographic hover facts."""
+    figure = MagicMock(side_effect=_JsonFakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=figure)
+    graph, focal_id = _build_graph()
+    graph.graph["paper_sources"] = {"s001": "citation", "related": "citation"}
+    graph.graph["focal_relations"] = {"s001": "focal", "related": "cites_focal"}
+    original = GraphExporter(
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    source = tmp_path / "graph.json"
+    original.to_json(source)
+    imported = GraphExporter.from_json(source)
+
+    getattr(original, writer)(tmp_path / "original.html")
+    original_figure = figure.call_args.kwargs
+    getattr(imported, writer)(tmp_path / "imported.html")
+    imported_figure = figure.call_args.kwargs
+
+    assert imported_figure == original_figure
+    node_trace = next(
+        trace for trace in imported_figure["data"] if trace.get("name") == "nodes"
+    )
+    assert node_trace["text"] == ["Jones, 2021", "Smith, 2020"]
+    assert "Bob Jones" in node_trace["hovertext"][0]
+    assert "2021 | 10 citations | Related Journal" in node_trace["hovertext"][0]
+    assert "Alice Smith" in node_trace["hovertext"][1]
+    assert "2020 | 42 citations | TestConf" in node_trace["hovertext"][1]
+    assert "focal paper" in node_trace["hovertext"][1]
+    assert isinstance(imported.graph.nodes[focal_id]["paper"], Paper)
+
+
+def test_graph_json_python_import_preserves_pyvis_hover_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Pyvis writer retains author, year, citation, and category facts after import."""
+    network = MagicMock()
+    network.save_graph.side_effect = lambda path: Path(path).write_text(
+        "<html>network</html>", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        loaders_module,
+        "_load_pyvis_network_class",
+        lambda: MagicMock(return_value=network),
+    )
+    graph, focal_id = _build_graph()
+    original = GraphExporter(
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    source = tmp_path / "graph.json"
+    original.to_json(source)
+    imported = GraphExporter.from_json(source)
+
+    original.to_interactive_html(tmp_path / "original.html")
+    original_nodes = list(network.add_node.call_args_list)
+    network.reset_mock()
+    imported.to_interactive_html(tmp_path / "imported.html")
+
+    assert network.add_node.call_args_list == original_nodes
+    node = network.add_node.call_args_list[1].kwargs
+    assert node["label"] == "Smith, 2020"
+    assert "Smith et al., 2020" in node["title"]
+    assert "Citations: 42" in node["title"]
+    assert "Categories: cs.AI" in node["title"]
+
+
+def test_graph_json_python_import_preserves_static_labels_and_unknown_year(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Static reexports keep compact labels and show unknown years as n.d., not zero."""
+    graph, focal_id = _build_graph()
+    graph.nodes["related"]["paper"].year = None
+    layout = {"s001": (0.0, 0.0), "related": (1.0, 1.0)}
+    original = GraphExporter(graph, focal_id, layout=layout)
+    source = tmp_path / "graph.json"
+    original.to_json(source)
+    imported = GraphExporter.from_json(source)
+    closed = MagicMock(wraps=render_module.plt.close)
+    monkeypatch.setattr(render_module.plt, "close", closed)
+
+    visualize_graph(graph, focal_id, tmp_path / "original.png", layout=layout, dpi=40)
+    original_axes = closed.call_args.args[0].axes[0]
+    original_labels = [text.get_text() for text in original_axes.texts]
+    visualize_graph(
+        imported.graph,
+        imported.focal_id,
+        tmp_path / "imported.png",
+        layout=imported._get_layout(),
+        dpi=40,
+    )
+    imported_axes = closed.call_args.args[0].axes[0]
+
+    assert imported_axes.get_title() == original_axes.get_title()
+    assert [text.get_text() for text in imported_axes.texts] == original_labels
+    assert "Jones, n.d." in original_labels
+
+
+@pytest.mark.parametrize(
+    "invalid_case", ["collection", "schema", "schema_v1", "endpoint"]
+)
+def test_graph_json_python_import_uses_existing_payload_contract(
+    tmp_path: Path, invalid_case: str
+) -> None:
+    """Reject other JSON formats and invalid graph identities before reconstruction."""
+    graph, focal_id = _build_graph()
+    payload = GraphExporter(
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 0.0)}
+    ).graph_payload()
+    if invalid_case == "collection":
+        payload["kind"] = "citemesh-dashboard-collection"  # type: ignore[typeddict-item]
+        expected = "unsupported graph kind"
+    elif invalid_case in {"schema", "schema_v1"}:
+        payload["schema_version"] = 1 if invalid_case == "schema_v1" else 999  # type: ignore[typeddict-item]
+        expected = "unsupported graph schema version"
+    else:
+        payload["edges"][0]["target"] = "absent"
+        expected = "unknown endpoint"
+    source = tmp_path / "invalid.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=expected):
+        GraphExporter.from_json(source)
+
+
+def test_graph_payload_rejects_absent_focal_before_replacing_json(
+    tmp_path: Path,
+) -> None:
+    """Schema-stamped graph payloads must identify an included focal node.
 
     :param Path tmp_path: Isolated output directory.
     :return None: Checks direct payload validation and atomic JSON preservation.
@@ -683,12 +951,12 @@ def test_graph_payload_rejects_absent_seed_before_replacing_json(
     graph.add_node("other", title="Other paper")
     exporter = GraphExporter(graph, "missing", layout={"other": (0.0, 0.0)})
 
-    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+    with pytest.raises(ValueError, match="focal node 'missing'.*not present"):
         exporter.graph_payload()
 
     json_path = tmp_path / "existing.json"
     json_path.write_text("previous valid output", encoding="utf-8")
-    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+    with pytest.raises(ValueError, match="focal node 'missing'.*not present"):
         exporter.to_json(json_path)
     assert json_path.read_text(encoding="utf-8") == "previous valid output"
 
@@ -697,8 +965,8 @@ def test_exporter_interactive_html_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Interactive HTML should fail clearly without pyvis and succeed with a stub."""
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id)
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id)
 
     monkeypatch.setattr(loaders_module, "_load_pyvis_network_class", raise_import_error)
     with pytest.raises(RuntimeError, match="pyvis is required"):
@@ -730,15 +998,15 @@ def test_exporter_interactive_html_contracts(
         loaders_module, "_load_pyvis_network_class", lambda: FakeNetwork
     )
 
-    seed_paper = graph.nodes[seed_id]["paper"]
-    assert isinstance(seed_paper, Paper)
-    seed_paper.authors = [Author(name="   ")]
-    seed_paper.year = None
+    focal_paper = graph.nodes[focal_id]["paper"]
+    assert isinstance(focal_paper, Paper)
+    focal_paper.authors = [Author(name="   ")]
+    focal_paper.year = None
 
     out_path = tmp_path / "graph.html"
     out_path.write_text("previous", encoding="utf-8")
     out_path.chmod(0o640)
-    exporter = GraphExporter(graph, seed_id, theme_name="dark")
+    exporter = GraphExporter(graph, focal_id, theme_name="dark")
     exporter.to_interactive_html(out_path, physics=True)
 
     instance = FakeNetwork.instances[-1]
@@ -749,9 +1017,9 @@ def test_exporter_interactive_html_contracts(
     assert instance.kwargs["cdn_resources"] == "in_line"
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
-    assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
+    assert [node_id for node_id, _ in instance.nodes] == ["related", "s001"]
     node_payloads = dict(instance.nodes)
-    assert "Unknown et al., n.d." in node_payloads[seed_id]["title"]
+    assert "Unknown et al., n.d." in node_payloads[focal_id]["title"]
 
 
 def test_interactive_html_is_self_contained(
@@ -765,19 +1033,19 @@ def test_interactive_html_is_self_contained(
     """
     pytest.importorskip("pyvis")
 
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     monkeypatch.chdir(tmp_path)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     out_path = out_dir / "hybrid.html"
-    GraphExporter(graph, seed_id, theme_name="dark").to_interactive_html(out_path)
+    GraphExporter(graph, focal_id, theme_name="dark").to_interactive_html(out_path)
 
     rendered = out_path.read_text(encoding="utf-8")
     assert "new vis.Network(" in rendered
     assert not re.search(
         r"<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=", rendered
     )
-    assert "<title>CiteMesh: Seed Paper</title>" in rendered
+    assert "<title>CiteMesh: Focal Paper</title>" in rendered
     assert '<meta name="color-scheme" content="dark" />' in rendered
     assert f"background:{get_theme('dark').background};" in rendered
     # Pyvis writes its CDN fallbacks into a lib/ folder in the process working
@@ -791,8 +1059,8 @@ def test_exporter_plotly_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plotly_figure: MagicMock
 ) -> None:
     """Plotly export should cover missing dependency, div-id handling, and labels."""
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id)
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id)
 
     with monkeypatch.context() as missing_plotly:
         missing_plotly.setattr(
@@ -802,7 +1070,7 @@ def test_exporter_plotly_contracts(
             exporter.to_plotly_html(tmp_path / "missing.plotly.html")
 
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     out_path = tmp_path / "graph.plotly.html"
     out_path.write_text("previous", encoding="utf-8")
@@ -821,7 +1089,7 @@ def test_exporter_plotly_contracts(
     node_trace = plotly_figure.call_args.kwargs["data"][1]
     assert list(node_trace["text"]) == ["Jones, 2021", "Smith, 2020"]
     layout = plotly_figure.call_args.kwargs["layout"]
-    assert layout["title"] == "CiteMesh: Seed Paper"
+    assert layout["title"] == "CiteMesh: Focal Paper"
     kwargs = write_html.call_args.kwargs
     assert isinstance(kwargs, dict)
     assert kwargs["div_id"] == exporter._plotly_div_id()
@@ -838,7 +1106,7 @@ def test_exporter_plotly_contracts(
 
     _install_fake_plotly(monkeypatch, figure_cls=NoDivIdFigure)
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     with pytest.raises(RuntimeError, match="Deterministic Plotly export requires"):
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
@@ -872,16 +1140,16 @@ def test_plotly_html_page_is_titled_and_themed(
             )
 
     _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
-    layout = {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
-    graph, seed_id = _build_graph()
+    layout = {"s001": (0.0, 0.0), "related": (1.0, 1.0)}
+    graph, focal_id = _build_graph()
     out_path = tmp_path / "graph.plotly.html"
-    GraphExporter(graph, seed_id, layout=layout, theme_name="dark").to_plotly_html(
+    GraphExporter(graph, focal_id, layout=layout, theme_name="dark").to_plotly_html(
         out_path
     )
 
     rendered = out_path.read_text(encoding="utf-8")
     background = get_theme("dark").background
-    assert "<title>CiteMesh: Seed Paper</title>" in rendered
+    assert "<title>CiteMesh: Focal Paper</title>" in rendered
     assert (
         f"<style>html,body{{margin:0;padding:0;background:{background};}}</style>"
         in rendered
@@ -891,11 +1159,11 @@ def test_plotly_html_page_is_titled_and_themed(
     assert kwargs["default_width"] == "100%"
     assert kwargs["default_height"] == "100vh"
 
-    hostile_graph, hostile_seed = _build_hostile_graph(
+    hostile_graph, hostile_focal = _build_hostile_graph(
         title="Pwned</title><script>alert(1)</script>"
     )
     hostile_path = tmp_path / "hostile.plotly.html"
-    GraphExporter(hostile_graph, hostile_seed, layout=layout).to_plotly_html(
+    GraphExporter(hostile_graph, hostile_focal, layout=layout).to_plotly_html(
         hostile_path
     )
     hostile_rendered = hostile_path.read_text(encoding="utf-8")
@@ -903,54 +1171,59 @@ def test_plotly_html_page_is_titled_and_themed(
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in hostile_rendered
 
 
-def test_plotly_html_survives_empty_and_seedless_graphs(
+def test_plotly_html_survives_empty_and_focalless_graphs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export and auto-naming must not KeyError on empty or seedless graphs."""
+    """Plotly export and auto-naming must not KeyError on empty or focalless graphs."""
     _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
 
     empty_path = tmp_path / "empty.plotly.html"
-    GraphExporter(nx.Graph(), "seed").to_plotly_html(empty_path)
+    GraphExporter(nx.Graph(), "s001").to_plotly_html(empty_path)
     assert empty_path.exists()
 
     graph, _ = _build_graph()
-    seedless_path = tmp_path / "seedless.plotly.html"
-    GraphExporter(graph, "absent-seed").to_plotly_html(seedless_path)
-    assert seedless_path.exists()
+    focalless_path = tmp_path / "focalless.plotly.html"
+    GraphExporter(graph, "absent-focal").to_plotly_html(focalless_path)
+    assert focalless_path.exists()
 
     output_path = render_module.generate_output_path(
-        graph, "absent-seed", tmp_path / "out"
+        graph, "absent-focal", tmp_path / "out"
     )
     assert output_path.suffix == ".png"
     assert output_path.parent.is_dir()
-    for name, candidate, candidate_seed, layout in (
-        ("empty", nx.Graph(), "seed", {}),
-        ("seedless", graph, "absent-seed", {"seed": (0.0, 0.0), "related": (1.0, 1.0)}),
+    for name, candidate, candidate_focal, layout in (
+        ("empty", nx.Graph(), "s001", {}),
+        (
+            "focalless",
+            graph,
+            "absent-focal",
+            {"s001": (0.0, 0.0), "related": (1.0, 1.0)},
+        ),
     ):
         png_path = tmp_path / f"{name}.png"
-        visualize_graph(candidate, candidate_seed, png_path, layout=layout, dpi=40)
+        visualize_graph(candidate, candidate_focal, png_path, layout=layout, dpi=40)
         assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
-@pytest.mark.parametrize("existing_label", ["Original Paper Title", "seed"])
-def test_output_path_reuses_existing_seed_directory(
+@pytest.mark.parametrize("existing_label", ["Original Paper Title", "s001"])
+def test_output_path_reuses_existing_focal_directory(
     tmp_path: Path, existing_label: str
 ) -> None:
     """Reuse prior title-based and ID-based directories when metadata changes.
 
     :param Path tmp_path: Isolated output directory.
-    :param str existing_label: Label used by a previous build of the same seed.
+    :param str existing_label: Label used by a previous build of the same focal.
     :return None: Checks that the next build preserves the existing artifact path.
     """
-    paper_dir = tmp_path / render_module._output_dir_name(existing_label, "seed")
+    paper_dir = tmp_path / render_module._output_dir_name(existing_label, "s001")
     paper_dir.mkdir()
     artifact = paper_dir / "hybrid.png"
     artifact.write_bytes(b"previous export")
     graph = nx.Graph()
-    graph.add_node("seed", title="Corrected Paper Title")
+    graph.add_node("s001", title="Corrected Paper Title")
 
     output_path = render_module.generate_output_path(
-        graph, "seed", tmp_path, strategy="hybrid"
+        graph, "s001", tmp_path, strategy="hybrid"
     )
 
     assert output_path == artifact
@@ -966,15 +1239,15 @@ def test_output_path_uses_paper_title_without_mutating_graph(tmp_path: Path) -> 
     """
     graph = nx.Graph()
     graph.add_node(
-        "seed",
-        paper=Paper(paper_id="seed", title="Current Paper Title", year=2025),
+        "s001",
+        paper=Paper(paper_id="s001", title="Current Paper Title", year=2025),
         title="Stale Scalar Title",
     )
 
-    output_path = render_module.generate_output_path(graph, "seed", tmp_path)
+    output_path = render_module.generate_output_path(graph, "s001", tmp_path)
 
     assert output_path.parent.name.startswith("current-paper-title-")
-    assert graph.nodes["seed"]["title"] == "Stale Scalar Title"
+    assert graph.nodes["s001"]["title"] == "Stale Scalar Title"
 
 
 def test_nullable_scalar_collections_export_as_empty_lists(tmp_path: Path) -> None:
@@ -985,14 +1258,14 @@ def test_nullable_scalar_collections_export_as_empty_lists(tmp_path: Path) -> No
     """
     graph = nx.Graph()
     graph.add_node(
-        "seed",
-        title="Seed",
+        "s001",
+        title="Focal",
         year=None,
         authors=None,
         categories=None,
-        is_seed=True,
+        is_focal=True,
     )
-    exporter = GraphExporter(graph, "seed", layout={"seed": (0.0, 0.0)})
+    exporter = GraphExporter(graph, "s001", layout={"s001": (0.0, 0.0)})
 
     payload = exporter.graph_payload()
     assert payload["nodes"][0]["authors"] == []
@@ -1035,31 +1308,31 @@ def test_graph_payload_normalizes_invalid_citation_metadata(
     """
     graph = nx.Graph()
     graph.add_node(
-        "seed",
-        title="Seed",
+        "s001",
+        title="Focal",
         citation_count=raw_citation_count,
-        is_seed=True,
+        is_focal=True,
     )
 
-    payload = GraphExporter(graph, "seed", layout={"seed": (0.0, 0.0)}).graph_payload()
+    payload = GraphExporter(graph, "s001", layout={"s001": (0.0, 0.0)}).graph_payload()
 
     assert payload["nodes"][0]["citation_count"] == expected
 
 
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     """GraphML should round-trip nullable metadata and XML-invalid text."""
-    graph, seed_id = _build_graph()
-    graph.nodes[seed_id]["title"] = "Bad\x08title￾"
-    graph.nodes[seed_id].pop("paper", None)
+    graph, focal_id = _build_graph()
+    graph.nodes[focal_id]["title"] = "Bad\x08title￾"
+    graph.nodes[focal_id].pop("paper", None)
     for field in ("venue", "doi", "arxiv_id", "abstract", "authors", "categories"):
-        graph.nodes[seed_id][field] = None
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+        graph.nodes[focal_id][field] = None
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "citation"})
 
     graphml_path = tmp_path / "invalid-chars.graphml"
     exporter.to_graphml(graphml_path)
 
     assert ET.parse(graphml_path) is not None
-    assert nx.read_graphml(graphml_path).nodes[seed_id]["title"] == "Badtitle"
+    assert nx.read_graphml(graphml_path).nodes[focal_id]["title"] == "Badtitle"
 
 
 @pytest.mark.parametrize("weight", [None, float("nan"), float("inf"), -float("inf")])
@@ -1097,16 +1370,16 @@ def test_exports_reject_nonfinite_weights_without_replacing_outputs(
             )
         ),
     )
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     )
-    graph.edges["seed", "related"]["weight"] = weight
+    graph.edges["s001", "related"]["weight"] = weight
     path = tmp_path / "existing-output"
     path.write_text("previous valid output")
     with pytest.raises(ValueError, match="non-finite edge weight"):
         if method == "png":
-            visualize_graph(graph, seed_id, path)
+            visualize_graph(graph, focal_id, path)
         else:
             getattr(exporter, method)(path)
     assert path.read_text() == "previous valid output"
@@ -1121,7 +1394,7 @@ def test_json_export_rejects_nonfinite_payload_without_replacing_output(
     :param pytest.MonkeyPatch monkeypatch: Supplies a non-finite export payload.
     :return None: Checks strict JSON encoding preserves the previous artifact.
     """
-    exporter = GraphExporter(nx.Graph(), "seed")
+    exporter = GraphExporter(nx.Graph(), "s001")
     monkeypatch.setattr(exporter, "graph_payload", lambda: {"value": float("nan")})
     path = tmp_path / "existing.json"
     path.write_text("previous valid output", encoding="utf-8")
@@ -1132,7 +1405,7 @@ def test_json_export_rejects_nonfinite_payload_without_replacing_output(
     assert path.read_text(encoding="utf-8") == "previous valid output"
 
 
-@pytest.mark.parametrize("node_id", ["", " ", " seed", "seed\t"])
+@pytest.mark.parametrize("node_id", ["", " ", " focal", "focal\t"])
 @pytest.mark.parametrize("method", ["to_json", "png"])
 def test_export_rejects_whitespace_ids_before_writing(
     tmp_path: Path, node_id: str, method: str
@@ -1145,7 +1418,7 @@ def test_export_rejects_whitespace_ids_before_writing(
     :return None: Checks a clear error preserves the prior artifact.
     """
     graph = nx.Graph()
-    graph.add_node(node_id, title="Seed", is_seed=True)
+    graph.add_node(node_id, title="Focal", is_focal=True)
     exporter = GraphExporter(graph, node_id, layout={node_id: (0.0, 0.0)})
     path = tmp_path / "existing.json"
     path.write_text("previous valid output")
@@ -1192,8 +1465,8 @@ def test_exports_reject_node_ids_that_collide_after_stringification(
         ),
     )
     graph = nx.Graph()
-    graph.add_node(1, title="Integer ID", is_seed=True)
-    graph.add_node("1", title="String ID", is_seed=False)
+    graph.add_node(1, title="Integer ID", is_focal=True)
+    graph.add_node("1", title="String ID", is_focal=False)
     graph.add_edge(1, "1", weight=0.5)
     exporter = GraphExporter(
         graph,
@@ -1230,16 +1503,16 @@ def test_plotly_marker_labels_escape_upstream_markup(
     :return None: Checks both author-derived and title-only labels.
     """
     _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
-    graph, seed_id = _build_graph()
-    graph.nodes[seed_id]["paper"] = replace(
-        graph.nodes[seed_id]["paper"], authors=[Author(name="A <b>Smith</b>")]
+    graph, focal_id = _build_graph()
+    graph.nodes[focal_id]["paper"] = replace(
+        graph.nodes[focal_id]["paper"], authors=[Author(name="A <b>Smith</b>")]
     )
     graph.nodes["related"].pop("paper")
     graph.nodes["related"]["title"] = "<i>Title & text</i>"
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     )
-    figure, _ = exporter._build_plotly_figure(
+    figure = exporter._build_plotly_figure(
         go=loaders_module._load_plotly_graph_objects(),
         theme_obj=get_theme("dark"),
         for_dashboard=for_dashboard,
@@ -1254,19 +1527,19 @@ def test_plotly_marker_labels_escape_upstream_markup(
 def test_plotly_figure_title_escapes_upstream_markup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Figure titles must render seed-title markup as literal text.
+    """Figure titles must render focal-title markup as literal text.
 
     :param pytest.MonkeyPatch monkeypatch: Installs a capture-only Plotly figure.
-    :return None: Checks the layout title of a markup-carrying seed.
+    :return None: Checks the layout title of a markup-carrying focal.
     """
     _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
     hostile_title = "<i>Deep</i> & </script> Wide"
-    graph, seed_id = _build_hostile_graph(title=hostile_title)
+    graph, focal_id = _build_hostile_graph(title=hostile_title)
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     )
 
-    figure, _ = exporter._build_plotly_figure(
+    figure = exporter._build_plotly_figure(
         go=loaders_module._load_plotly_graph_objects(),
         theme_obj=get_theme("light"),
         for_dashboard=False,
@@ -1380,7 +1653,7 @@ def test_interactive_html_failure_preserves_previous_output(
     :param str failure_stage: Export stage that raises after writing temporary data.
     :return None: Checks that the old destination and directory contents survive.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     destination = tmp_path / "graph.html"
     destination.write_text("previous export", encoding="utf-8")
 
@@ -1427,7 +1700,7 @@ def test_interactive_html_failure_preserves_previous_output(
         monkeypatch.setattr(geometry_module, "_inject_darkreader_lock", fail_injection)
 
     with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
-        GraphExporter(graph, seed_id).to_interactive_html(destination)
+        GraphExporter(graph, focal_id).to_interactive_html(destination)
 
     assert destination.read_text(encoding="utf-8") == "previous export"
     assert list(tmp_path.iterdir()) == [destination]
@@ -1444,7 +1717,7 @@ def test_plotly_html_failure_preserves_previous_output(
     :param str failure_stage: Export stage that raises after writing temporary data.
     :return None: Checks that the old destination and directory contents survive.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     destination = tmp_path / "graph.plotly.html"
     destination.write_text("previous export", encoding="utf-8")
 
@@ -1481,8 +1754,8 @@ def test_plotly_html_failure_preserves_previous_output(
     with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
         GraphExporter(
             graph,
-            seed_id,
-            layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+            focal_id,
+            layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
         ).to_plotly_html(destination)
 
     assert destination.read_text(encoding="utf-8") == "previous export"
@@ -1500,7 +1773,7 @@ def test_png_failure_preserves_previous_output(
     :param str failure_stage: Output operation that raises.
     :return None: Checks that the old destination and directory contents survive.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     destination = tmp_path / "graph.png"
     destination.write_bytes(b"previous png")
 
@@ -1537,9 +1810,9 @@ def test_png_failure_preserves_previous_output(
     with pytest.raises(error, match=f"{failure_stage} failed"):
         visualize_graph(
             graph,
-            seed_id,
+            focal_id,
             destination,
-            layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+            layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
             dpi=40,
         )
 
@@ -1558,8 +1831,8 @@ def test_bibtex_and_graphml_exports_are_atomic(
     :param str method: Export method to exercise.
     :return None: Checks that no partial replacement survives the failure.
     """
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "citation"})
     destination = tmp_path / f"graph.{method}"
     destination.write_text("previous export", encoding="utf-8")
 
@@ -1584,15 +1857,15 @@ def test_bibtex_and_graphml_exports_are_atomic(
 
 def test_dashboard_curve_direction_is_endpoint_order_independent() -> None:
     """Python and browser rerenders must curve an undirected edge identically."""
-    assert _stable_curve_direction("related", "seed") == 1.0
-    assert _stable_curve_direction("seed", "related") == 1.0
+    assert _stable_curve_direction("related", "s001") == -1.0
+    assert _stable_curve_direction("s001", "related") == -1.0
 
 
 def test_plotly_hover_text_wraps_long_titles(
     tmp_path: Path, plotly_figure: MagicMock
 ) -> None:
     """Long titles wrap across hover lines instead of one full-width banner."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     long_title = (
         "A Remarkably Verbose and Meandering Study of Attention Mechanisms "
         "Across Extremely Wide Tooltip Layouts"
@@ -1608,7 +1881,7 @@ def test_plotly_hover_text_wraps_long_titles(
     graph.nodes["related"]["title"] = long_title
 
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     exporter.to_plotly_html(tmp_path / "graph.plotly.html")
 
@@ -1625,24 +1898,24 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     """Dashboard export should render tri-pane shell and derived payload fields."""
     pytest.importorskip("plotly")
 
-    graph, seed_id = _build_graph()
-    graph.graph["paper_sources"] = {"related": "semantic", "seed": "citation"}
+    graph, focal_id = _build_graph()
+    graph.graph["paper_sources"] = {"related": "semantic", "s001": "citation"}
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": "hybrid"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     graph_payload = exporter.graph_payload()
     exporter.metadata["dashboard_collection"] = {
         "kind": "citemesh-dashboard-collection",
-        "schema_version": 1,
-        "current_result_id": "hybrid:seed",
+        "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+        "current_result_id": "hybrid:s001",
         "results": [
             {
-                "result_id": "hybrid:seed",
-                "seed_id": "seed",
-                "title": "Seed Paper",
+                "result_id": "hybrid:s001",
+                "focal_id": "s001",
+                "title": "Focal Paper",
                 "strategy": "hybrid",
                 "summary": {"nodes": 2, "edges": 1},
                 "updated_at": "2026-08-29T12:00:00",
@@ -1683,10 +1956,11 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="saved-filter"',
         'id="export-saved-bib-btn"',
         'id="copy-saved-links-btn"',
-        'id="list-view-btn" class="nav-btn" type="button">List view',
-        'title="Open the selected paper, or the seed, on Semantic Scholar"',
+        'id="pane-nav"',
+        'popovertarget="graph-tools"',
+        'title="Open the selected paper, or the focal paper, on Semantic Scholar"',
         "Semantic Scholar ↗",
-        "legend-gradient",
+        'id="timeline-bar"',
         "star-btn",
         "citemesh-saved:",
     ]:
@@ -1697,7 +1971,6 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "legend-marker citation",
         "legend-marker semantic",
         "legend-marker both",
-        # Nothing toggles "List view", so it must not ship pre-highlighted.
         'class="nav-btn active"',
     ]:
         assert stale_token not in rendered
@@ -1715,34 +1988,40 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         flags=re.DOTALL,
     )
     payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
-    assert payload["meta"]["seed_id"] == "seed"
+    assert payload == graph_payload
+    assert payload["kind"] == GRAPH_PAYLOAD_KIND
+    assert payload["schema_version"] == GRAPH_PAYLOAD_SCHEMA_VERSION
+    assert payload["focal_id"] == "s001"
+    dashboard_meta = payload["dashboard"]["meta"]
+    assert dashboard_meta["focal_id"] == "s001"
     assert payload["meta"]["strategy"] == "hybrid"
-    assert payload["meta"]["summary"] == {"nodes": 2, "edges": 1}
-    assert payload["meta"]["plotly_node_order"] == ["related", "seed"]
-    assert len(payload["meta"]["plotly_positions"]) == 2
-    assert len(payload["meta"]["plotly_node_sizes"]) == 2
-    seed_node = next(node for node in payload["nodes"] if node["id"] == "seed")
+    assert payload["summary"] == {"nodes": 2, "edges": 1}
+    assert dashboard_meta["summary"] == payload["summary"]
+    assert dashboard_meta["plotly_node_order"] == ["related", "s001"]
+    assert len(dashboard_meta["plotly_positions"]) == 2
+    assert len(dashboard_meta["plotly_node_sizes"]) == 2
+    focal_node = next(node for node in payload["nodes"] if node["id"] == "s001")
     related_node = next(node for node in payload["nodes"] if node["id"] == "related")
-    assert seed_node["provenance"] == "seed"
-    assert seed_node["provenance_base"] == "citation"
-    assert "arxiv_id" in seed_node
-    assert "doi" in seed_node
-    assert seed_node["venue"] == "TestConf"
+    assert focal_node["provenance"] == "focal"
+    assert focal_node["provenance_base"] == "citation"
+    assert "arxiv_id" in focal_node
+    assert "doi" in focal_node
+    assert focal_node["venue"] == "TestConf"
     assert related_node["provenance"] == "semantic"
     assert related_node["venue"] == "Related Journal"
-    assert related_node["seed_relation"] == "semantic_only"
-    assert "seed_relevance" in seed_node
-    assert isinstance(seed_node["seed_relevance"], float)
-    assert seed_node["links"]["semantic_scholar"] is not None
-    assert isinstance(seed_node["bibtex"], str)
+    assert related_node["focal_relation"] == "semantic_only"
+    assert "focal_relevance" in focal_node
+    assert isinstance(focal_node["focal_relevance"], float)
+    assert focal_node["links"]["semantic_scholar"] is not None
+    assert isinstance(focal_node["bibtex"], str)
 
     collection = _extract_dashboard_script_json(
         rendered, "citemesh-dashboard-collection"
     )
     assert collection["kind"] == "citemesh-dashboard-collection"
-    assert collection["schema_version"] == 1
-    assert collection["current_result_id"] == "hybrid:seed"
-    assert collection["results"][0]["title"] == "Seed Paper"
+    assert collection["schema_version"] == DASHBOARD_COLLECTION_SCHEMA_VERSION
+    assert collection["current_result_id"] == "hybrid:s001"
+    assert collection["results"][0]["title"] == "Focal Paper"
     assert collection["results"][0]["build"] == {"max_papers": 2}
     assert "payload" in collection["results"][0]
     assert "payloads" not in collection
@@ -1751,7 +2030,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert len(figure["data"]) == 3
     assert len(figure["layout"].get("shapes", [])) == 1
     assert figure["layout"]["uirevision"] == (
-        "citemesh-dashboard-static-layout-v1:hybrid:seed"
+        "citemesh-dashboard-static-layout-v1:hybrid:s001"
     )
     assert figure["layout"]["xaxis"]["autorange"] is False
     assert figure["layout"]["yaxis"]["autorange"] is False
@@ -1788,11 +2067,12 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert rendered_max_diameter == pytest.approx(DASHBOARD_MAX_NODE_DIAMETER)
     assert max(marker["line"]["width"]) >= 4
     assert min(marker["line"]["width"]) == 0
-    seed_index = payload["meta"]["plotly_node_order"].index("seed")
-    seed_ring_color = marker["line"]["color"][seed_index]
-    assert f"--seed-ring: {seed_ring_color};" in rendered
+    focal_index = dashboard_meta["plotly_node_order"].index("s001")
+    focal_ring_color = marker["line"]["color"][focal_index]
+    assert f"--focal-ring: {focal_ring_color};" in rendered
     assert (
-        "background: color-mix(in srgb, var(--seed-ring) 28%, transparent);" in rendered
+        "background: color-mix(in srgb, var(--focal-ring) 28%, transparent);"
+        in rendered
     )
     node_x = node_trace["x"]
     node_y = node_trace["y"]
@@ -1807,11 +2087,11 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         [min(node_y) - expected_y_pad, max(node_y) + expected_y_pad]
     )
     related_hover = node_trace["hovertext"][0]
-    seed_hover = node_trace["hovertext"][1]
+    focal_hover = node_trace["hovertext"][1]
     assert "Related Journal" in related_hover
     assert "semantic match" in related_hover
     assert "10 citations" in related_hover
-    assert "seed paper" in seed_hover
+    assert "focal paper" in focal_hover
     # Hover cards use the dashboard panel chrome, not the marker color.
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
 
@@ -1855,12 +2135,7 @@ def test_pages_demo_assets_and_graph_package_are_valid() -> None:
         for result in package["results"]
         if result["result_id"] == package["current_result_id"]
     )
-    assert {node["id"] for node in embedded_graph["nodes"]} == {
-        node["id"] for node in current_graph["nodes"]
-    }
-    assert {(edge["source"], edge["target"]) for edge in embedded_graph["edges"]} == {
-        (edge["source"], edge["target"]) for edge in current_graph["edges"]
-    }
+    assert embedded_graph == current_graph
     with (demo_dir / "favicon.ico").open("rb") as icon:
         assert icon.read(4) == b"\x00\x00\x01\x00"
     with (demo_dir / "og-image.png").open("rb") as social_image:
@@ -1874,18 +2149,20 @@ def test_dashboard_hover_label_is_shared_by_python_and_javascript(
     """Both figure builders must theme every hover card from one injected spec."""
     pytest.importorskip("plotly")
 
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": "hybrid"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / f"hover-{theme_name}.dashboard.html"
     exporter.to_dashboard_html(out_path, theme=theme_name)
     rendered = out_path.read_text(encoding="utf-8")
 
     expected = geometry_module.theme_hover_label(get_theme(theme_name))
+    embedded = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
+    assert embedded["dashboard"]["meta"]["theme"] == get_theme(theme_name).name
     figure = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
     hoverable = [trace for trace in figure["data"] if trace.get("hoverinfo") != "none"]
     assert hoverable
@@ -1923,37 +2200,46 @@ def test_dashboard_hover_label_is_shared_by_python_and_javascript(
     assert rebuilt["layout"] == expected
 
 
-def test_exporter_does_not_relabel_legacy_collection_metadata() -> None:
-    """Legacy descriptor/payload bundles must remain visibly unversioned."""
-    graph, seed_id = _build_graph()
+@pytest.mark.parametrize("schema_version", [None, 1])
+def test_exporter_refuses_legacy_collection_metadata(
+    schema_version: int | None,
+) -> None:
+    """Legacy descriptor/payload bundles require rebuilding before rendering."""
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": "hybrid"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     legacy_payload = exporter.graph_payload()
     legacy_payload.pop("kind")
     legacy_payload.pop("schema_version")
+    legacy_payload["seed_id"] = legacy_payload.pop("focal_id")
+    legacy_payload["dashboard"]["meta"]["seed_id"] = legacy_payload["dashboard"][
+        "meta"
+    ].pop("focal_id")
+    for node in legacy_payload["nodes"]:
+        node["is_seed"] = node.pop("is_focal")
     exporter.metadata["dashboard_collection"] = {
-        "current_result_id": "hybrid:seed",
+        "current_result_id": "hybrid:s001",
         "results": [
             {
-                "result_id": "hybrid:seed",
-                "seed_id": "seed",
-                "title": "Seed Paper",
+                "result_id": "hybrid:s001",
+                "seed_id": "s001",
+                "title": "Focal Paper",
                 "strategy": "hybrid",
                 "summary": {"nodes": 2, "edges": 1},
             }
         ],
-        "payloads": {"hybrid:seed": legacy_payload},
+        "payloads": {"hybrid:s001": legacy_payload},
     }
+    if schema_version is not None:
+        exporter.metadata["dashboard_collection"]["kind"] = DASHBOARD_COLLECTION_KIND
+        exporter.metadata["dashboard_collection"]["schema_version"] = schema_version
 
-    bundle = exporter._dashboard_collection_bundle()
-
-    assert "kind" not in bundle
-    assert "schema_version" not in bundle
-    assert bundle["results"][0]["payload"] == legacy_payload
+    with pytest.raises(ValueError, match="Rebuild with this CiteMesh version"):
+        exporter._dashboard_collection_bundle()
 
 
 def _collection_metadata(
@@ -1983,17 +2269,17 @@ def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
 
     :return None: Checks both a surviving result and an entirely empty bundle.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": "citation"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     payload = exporter.graph_payload()
     dropped_entry = {
         "result_id": "citation:dropped",
-        "seed_id": "dropped",
+        "focal_id": "dropped",
         "title": "Dropped",
         "strategy": "citation",
         "summary": {"nodes": 0, "edges": 0},
@@ -2001,9 +2287,9 @@ def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
         "payload": None,
     }
     kept_entry = {
-        "result_id": f"citation:{seed_id}",
-        "seed_id": seed_id,
-        "title": "Seed Paper",
+        "result_id": f"citation:{focal_id}",
+        "focal_id": focal_id,
+        "title": "Focal Paper",
         "strategy": "citation",
         "summary": {"nodes": 2, "edges": 1},
         "updated_at": "2026-09-01T12:00:00",
@@ -2017,9 +2303,9 @@ def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
     bundle = exporter._dashboard_collection_bundle()
 
     assert [entry["result_id"] for entry in bundle["results"]] == [
-        f"citation:{seed_id}"
+        f"citation:{focal_id}"
     ]
-    assert bundle["current_result_id"] == f"citation:{seed_id}"
+    assert bundle["current_result_id"] == f"citation:{focal_id}"
 
     exporter.metadata["dashboard_collection"] = _collection_metadata(
         current_result_id="citation:dropped",
@@ -2039,20 +2325,20 @@ def test_collection_bundle_normalizes_non_dict_build_metadata() -> None:
 
     :return None: Checks the emitted entry keeps the key the viewer requires.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": "citation"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     exporter.metadata["dashboard_collection"] = _collection_metadata(
-        current_result_id=f"citation:{seed_id}",
+        current_result_id=f"citation:{focal_id}",
         results=[
             {
-                "result_id": f"citation:{seed_id}",
-                "seed_id": seed_id,
-                "title": "Seed Paper",
+                "result_id": f"citation:{focal_id}",
+                "focal_id": focal_id,
+                "title": "Focal Paper",
                 "strategy": "citation",
                 "summary": {"nodes": 2, "edges": 1},
                 "updated_at": "2026-09-01T12:00:00",
@@ -2079,22 +2365,22 @@ class _JsonFakeFigure(_BaseFakeFigure):
 
 
 def _dashboard_exporter_with_collection(
-    graph: nx.Graph, seed_id: str, *, title: str
+    graph: nx.Graph, focal_id: str, *, title: str
 ) -> GraphExporter:
     """Build a dashboard exporter whose collection bundle embeds the same graph.
 
     :param nx.Graph graph: Graph to export.
-    :param str seed_id: Seed paper identifier.
+    :param str focal_id: Focal paper identifier.
     :param str title: Result descriptor title.
     :return GraphExporter: Exporter carrying a one-result collection bundle.
     """
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata={"strategy": "citation"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
-    result_id = f"citation:{seed_id}"
+    result_id = f"citation:{focal_id}"
     exporter.metadata["dashboard_collection"] = {
         "kind": DASHBOARD_COLLECTION_KIND,
         "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
@@ -2102,7 +2388,7 @@ def _dashboard_exporter_with_collection(
         "results": [
             {
                 "result_id": result_id,
-                "seed_id": seed_id,
+                "focal_id": focal_id,
                 "title": title,
                 "strategy": "citation",
                 "summary": {"nodes": 2, "edges": 1},
@@ -2127,10 +2413,10 @@ def test_dashboard_inline_json_contains_no_raw_angle_brackets(
 
     hostile_title = "Closing </script> tag"
     hostile_abstract = "<!--<script>alert(1)</script>-->"
-    graph, seed_id = _build_hostile_graph(
+    graph, focal_id = _build_hostile_graph(
         title=hostile_title, abstract=hostile_abstract
     )
-    exporter = _dashboard_exporter_with_collection(graph, seed_id, title=hostile_title)
+    exporter = _dashboard_exporter_with_collection(graph, focal_id, title=hostile_title)
 
     out_path = tmp_path / "hostile.dashboard.html"
     exporter.to_dashboard_html(out_path)
@@ -2148,11 +2434,11 @@ def test_dashboard_inline_json_contains_no_raw_angle_brackets(
     assert "\\u003c" in data_json
     assert json.loads(collection_json)["results"][0]["build"] == {}
 
-    seed_node = next(
-        node for node in json.loads(data_json)["nodes"] if node["id"] == seed_id
+    focal_node = next(
+        node for node in json.loads(data_json)["nodes"] if node["id"] == focal_id
     )
-    assert seed_node["abstract"] == hostile_abstract
-    assert seed_node["title"] == hostile_title
+    assert focal_node["abstract"] == hostile_abstract
+    assert focal_node["title"] == hostile_title
 
 
 def test_dashboard_template_tokens_in_metadata_survive_rendering(
@@ -2166,16 +2452,16 @@ def test_dashboard_template_tokens_in_metadata_survive_rendering(
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
 
     hostile_title = "Tokens __PLOTLY_DIV_ID__ and __COLLECTION_JSON__ inline"
-    graph, seed_id = _build_hostile_graph(title=hostile_title)
-    exporter = _dashboard_exporter_with_collection(graph, seed_id, title=hostile_title)
+    graph, focal_id = _build_hostile_graph(title=hostile_title)
+    exporter = _dashboard_exporter_with_collection(graph, focal_id, title=hostile_title)
 
     out_path = tmp_path / "tokens.dashboard.html"
     exporter.to_dashboard_html(out_path)
     rendered = out_path.read_text()
 
     payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
-    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
-    assert seed_node["title"] == hostile_title
+    focal_node = next(node for node in payload["nodes"] if node["id"] == focal_id)
+    assert focal_node["title"] == hostile_title
 
     div_id = exporter._plotly_div_id(prefix="citemesh-dashboard-plotly")
     assert div_id.startswith("citemesh-dashboard-plotly-")
@@ -2189,11 +2475,11 @@ def test_exporter_dashboard_runtime_script_contracts(
 
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
 
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        focal_id,
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "runtime.dashboard.html"
     exporter.to_dashboard_html(out_path)
@@ -2219,7 +2505,7 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert "function collectionEntryFromGraphPayload" in runtime_script
     assert "function isNonNegativeInteger" in runtime_script
     assert (
-        "Versioned graph results require canonical top-level seed_id" in runtime_script
+        "Versioned graph results require canonical top-level focal_id" in runtime_script
     )
     assert (
         "Versioned graph node IDs cannot contain surrounding whitespace"
@@ -2228,7 +2514,9 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert "Versioned graph dashboard metadata must match" in runtime_script
     assert "const positionsAreFinite = positions.every" in runtime_script
     assert "const sizesAreFinite = sizes.every" in runtime_script
-    assert "if (isVersionedCollection)" in runtime_script
+    assert (
+        "if (imported.schema_version !== COLLECTION_SCHEMA_VERSION)" in runtime_script
+    )
     assert "function upsertCollectionEntries" in runtime_script
     assert (
         "targetCollection.results = incomingUnique.concat(retained);" in runtime_script
@@ -2286,7 +2574,7 @@ def test_exporter_dashboard_runtime_script_contracts(
         in runtime_script
     )
     assert "return pruneSavedIdsForPayload(persistedSavedIds);" in runtime_script
-    assert "`citemesh-saved:${strategy}:${seedId}`" in runtime_script
+    assert "`citemesh-saved:${strategy}:${focalId}`" in runtime_script
     assert "`- [${markdownLinkText(title)}](${href})${yearText}`" in runtime_script
     assert '`Year: ${node.year || "n.d."}' not in runtime_script
     assert "setControlsCollapsed(true);" in runtime_script
@@ -2307,7 +2595,7 @@ def test_exporter_dashboard_runtime_script_contracts(
         assert match is not None
         functions.append(match.group(0))
     slug_match = re.search(
-        r"      function seedSlug\(\)[^\n]*\n.*?\n      \}", runtime_script, re.DOTALL
+        r"      function focalSlug\(\)[^\n]*\n.*?\n      \}", runtime_script, re.DOTALL
     )
     assert slug_match is not None
     functions.append(slug_match.group(0))
@@ -2318,14 +2606,14 @@ const nodeById = new Map([
   ["ascii", { title: "Deep Learning Survey" }],
   ["nonlatin", { title: "\u4e2d\u6587\u6807\u9898" }],
 ]);
-let payload = { meta: { seed_id: "ascii" } };
-const asciiSlug = seedSlug();
-payload = { meta: { seed_id: "nonlatin" } };
-const nonLatinSlug = seedSlug();
+let payload = { meta: { focal_id: "ascii" } };
+const asciiSlug = focalSlug();
+payload = { meta: { focal_id: "nonlatin" } };
+const nonLatinSlug = focalSlug();
 const value = "before\rafter";
 process.stdout.write(JSON.stringify({
   csv: csvEscape(value),
-  author: dashboardNodeLabel({authors: ["A <b>Smith</b>"], year: 2020}, "seed"),
+  author: dashboardNodeLabel({authors: ["A <b>Smith</b>"], year: 2020}, "s001"),
   title: dashboardNodeLabel({title: "<b>Title</b>"}, "other"),
   asciiSlug,
   nonLatinSlug,
@@ -2376,7 +2664,7 @@ const genericClasses = {
   add() {},
   contains() { return false; },
 };
-const fallbackElement = new Proxy({
+const makeElement = () => new Proxy({
   textContent: "",
   value: "",
   files: [],
@@ -2392,14 +2680,11 @@ const fallbackElement = new Proxy({
   get(target, property) {
     return property in target ? target[property] : noOp;
   },
-  set(target, property, value) {
-    target[property] = value;
-    return true;
-  },
 });
+const elements = new Map();
 global.document = {
   documentElement: {},
-  body: fallbackElement,
+  body: makeElement(),
   getElementById(id) {
     if (id === "citemesh-dashboard-data"
         || id === "citemesh-dashboard-figure"
@@ -2407,13 +2692,15 @@ global.document = {
       return { textContent: scriptText(id) };
     }
     if (id === "dashboard-status") return status;
-    return fallbackElement;
+    if (!elements.has(id)) elements.set(id, makeElement());
+    return elements.get(id);
   },
   querySelectorAll() { return []; },
-  createElement() { return fallbackElement; },
+  createElement: makeElement,
 };
 const savedStore = new Map(JSON.parse(process.env.CITEMESH_SAVED_STORE || "[]"));
 global.window = {
+  matchMedia() { return { matches: false }; },
   localStorage: {
     getItem(key) { return savedStore.has(key) ? savedStore.get(key) : null; },
     setItem(key, value) { savedStore.set(key, String(value)); },
@@ -2546,8 +2833,8 @@ def test_dashboard_edge_strength_normalization_matches_python(
     from citemesh.visualization.export import _edge_strength_scale
 
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
-    exporter = _dashboard_exporter_with_collection(graph, seed_id, title="Seed Paper")
+    graph, focal_id = _build_graph()
+    exporter = _dashboard_exporter_with_collection(graph, focal_id, title="Focal Paper")
     out_path = tmp_path / "edge-strength.dashboard.html"
     exporter.to_dashboard_html(out_path)
 
@@ -2577,12 +2864,12 @@ def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
     """
 
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     graph.graph.clear()
     exporter = GraphExporter(
         graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        focal_id,
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "invalid-bootstrap.dashboard.html"
     exporter.to_dashboard_html(out_path)
@@ -2601,7 +2888,7 @@ def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Graph results must identify the build strategy" in result.stdout
+    assert "canonical top-level focal_id and meta.strategy" in result.stdout
 
 
 def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
@@ -2611,11 +2898,11 @@ def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
     """A malformed embedded collection should warn while rendering the graph."""
 
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        focal_id,
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "invalid-collection.dashboard.html"
     exporter.to_dashboard_html(out_path)
@@ -2637,7 +2924,7 @@ def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Unsupported collection kind" in result.stdout
+    assert "Unsupported collection format" in result.stdout
 
 
 def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> None:
@@ -2647,26 +2934,41 @@ def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> 
     :return None: Checks the displayed payload and figure against the latest package.
     """
     pytest.importorskip("plotly")
-    first_graph, seed_id = _build_graph()
+    first_graph, focal_id = _build_graph()
     first_metadata = {"strategy": "citation"}
-    first_exporter = GraphExporter(first_graph, seed_id, metadata=first_metadata)
+    first_exporter = GraphExporter(first_graph, focal_id, metadata=first_metadata)
     package_path = tmp_path / "dashboard.citemesh.json"
     update_dashboard_package(
         package_path,
         graph=first_graph,
-        seed_id=seed_id,
+        focal_id=focal_id,
         strategy="citation",
         payload=first_exporter.graph_payload(),
         build={},
     )
 
+    other_graph = nx.Graph()
+    other_graph.add_node("s002", title="Other focal paper", year=2021, is_focal=True)
+    other_exporter = GraphExporter(
+        other_graph, "s002", metadata={"strategy": "citation"}
+    )
+    update_dashboard_package(
+        package_path,
+        graph=other_graph,
+        focal_id="s002",
+        strategy="citation",
+        payload=other_exporter.graph_payload(),
+        build={},
+    )
+
     latest_graph, _ = _build_graph()
+    latest_graph.graph["candidate_source_status"] = {"citations": "unavailable"}
     latest_graph.add_node("new-paper", title="New paper", year=2024)
-    latest_exporter = GraphExporter(latest_graph, seed_id)
+    latest_exporter = GraphExporter(latest_graph, focal_id)
     update_dashboard_package(
         package_path,
         graph=latest_graph,
-        seed_id=seed_id,
+        focal_id=focal_id,
         strategy="citation",
         payload=latest_exporter.graph_payload(),
         build={},
@@ -2682,18 +2984,34 @@ def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> 
     )
     displayed = _probe_dashboard_runtime_in_node(
         dashboard_path,
-        "({"
+        "(() => {"
+        " let validations = 0;"
+        " normalizeImportedDashboardPayload = () => {"
+        "   validations += 1; throw new Error('revalidated normalized graph');"
+        " };"
+        " loadCollectionResult('citation:s002');"
+        " const switchedId = collectionResultId;"
+        " loadCollectionResult('citation:s001');"
+        " return {"
+        " validations, switchedId,"
         " active: payload.nodes.map(node => node.id),"
         " stored: collectionBundle.results[0].payload.nodes.map(node => node.id),"
         " positions: figureSpec.data[nodeTraceIndex].x.length,"
+        " heading: document.getElementById('focal-title').textContent,"
+        " summary: document.getElementById('graph-summary').textContent,"
         " resultId: collectionResultId"
-        "})",
+        " };"
+        "})()",
     )
     assert displayed == {
-        "active": ["new-paper", "related", "seed"],
-        "stored": ["new-paper", "related", "seed"],
+        "validations": 0,
+        "switchedId": "citation:s002",
+        "active": ["new-paper", "related", "s001"],
+        "stored": ["new-paper", "related", "s001"],
         "positions": 3,
-        "resultId": "citation:seed",
+        "heading": "Focal Paper",
+        "summary": "Citation discovery · 3 papers · 1 link · Unavailable: citing papers",
+        "resultId": "citation:s001",
     }
 
 
@@ -2711,11 +3029,11 @@ def test_saved_reading_list_survives_a_rebuild_that_dropped_a_node(
     :return None: Checks the persisted superset and the pruned display set.
     """
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        focal_id,
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "saved.dashboard.html"
     exporter.to_dashboard_html(out_path)
@@ -2730,27 +3048,59 @@ def test_saved_reading_list_survives_a_rebuild_that_dropped_a_node(
         " };"
         "})()",
         saved_store={
-            "citemesh-saved:citation:seed": json.dumps(["seed", "dropped-by-rebuild"])
+            "citemesh-saved:citation:s001": json.dumps(["s001", "dropped-by-rebuild"])
         },
     )
 
-    assert sorted(probed["stored"]) == ["dropped-by-rebuild", "related", "seed"]
-    assert sorted(probed["displayed"]) == ["related", "seed"]
+    assert sorted(probed["stored"]) == ["dropped-by-rebuild", "related", "s001"]
+    assert sorted(probed["displayed"]) == ["related", "s001"]
 
 
 @pytest.fixture
 def two_node_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Export a two-paper dashboard for runtime probes."""
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     exporter = GraphExporter(
         graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        focal_id,
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "graph.dashboard.html"
     exporter.to_dashboard_html(out_path)
     return out_path
+
+
+@pytest.mark.parametrize("kind", ["graph", "collection"])
+def test_dashboard_refuses_previous_schema_results_in_node(
+    two_node_dashboard: Path, kind: str
+) -> None:
+    """Old graph and collection files require rebuilding before browser imports."""
+    message = _probe_dashboard_runtime_in_node(
+        two_node_dashboard,
+        "(() => {"
+        f" const kind = {json.dumps(kind)};"
+        " const oldGraph = buildPortableJsonPayload();"
+        " oldGraph.schema_version = 1;"
+        " oldGraph.seed_id = oldGraph.focal_id; delete oldGraph.focal_id;"
+        " oldGraph.dashboard.meta.seed_id = oldGraph.dashboard.meta.focal_id;"
+        " delete oldGraph.dashboard.meta.focal_id;"
+        " oldGraph.nodes.forEach(node => { node.is_seed = node.is_focal; delete node.is_focal; });"
+        " const oldCollection = portableCollectionPackage();"
+        " oldCollection.schema_version = 1;"
+        " oldCollection.results.forEach(entry => {"
+        "   entry.seed_id = entry.focal_id; delete entry.focal_id;"
+        "   entry.payload = oldGraph;"
+        " });"
+        " try {"
+        "   if (kind === 'graph') normalizeImportedDashboardPayload(oldGraph, 'old graph');"
+        "   else normalizeCollectionPackage(oldCollection, 'old collection');"
+        " } catch (error) { return error.message; }"
+        " return '';"
+        "})()",
+    )
+    assert "schema version: 1" in message
+    assert "Rebuild with this CiteMesh version" in message
 
 
 def test_copy_saved_links_escapes_bracketed_titles(two_node_dashboard: Path) -> None:
@@ -2763,21 +3113,140 @@ def test_copy_saved_links_escapes_bracketed_titles(two_node_dashboard: Path) -> 
     assert probed == ["Attention \\[Is\\] All You Need", "Plain"]
 
 
-def _build_seed_relation_graph() -> nx.Graph:
-    """Create a graph covering every seed-relation token the dashboard scopes on.
+def test_dashboard_discovery_leads_and_passages_roundtrip_in_node(
+    two_node_dashboard: Path,
+) -> None:
+    """Show safe leads and citation evidence, then clear both on an older import."""
+    completed = _run_dashboard_runtime_in_node(
+        two_node_dashboard,
+        r"""
+const button = document.getElementById("more-papers-btn");
+const dialog = document.getElementById("more-papers-dialog");
+let activate;
+let closes = 0;
+button.addEventListener = (name, callback) => {
+  if (name === "click") activate = callback;
+};
+dialog.open = false;
+dialog.showModal = () => { dialog.open = true; };
+dialog.close = () => { dialog.open = false; closes++; };
+eval(runtime + `
+(() => {
+  const old = portableGraphPayload(payload);
+  const withLeads = JSON.parse(JSON.stringify(old));
+  const originalHidden = button.hidden;
+  const passages = {
+    context_count: 3,
+    excerpt: '<img onerror="alert(1)"> & words',
+    is_influential: true,
+  };
+  const leads = {
+    references: [
+      {paper_id: "javascript:alert(1)", title: "<unsafe>", rank: 1, context_count: 1},
+      {paper_id: "s2:" + "a".repeat(40), title: "Provider paper", rank: 2, context_count: 3},
+    ],
+    corpus: [
+      {paper_id: "arxiv:math.GT/0309136", title: "arXiv paper", rank: 19},
+      {paper_id: "doi:10.5555/paper?part", title: "Publisher paper", rank: 27},
+    ],
+  };
+  const related = withLeads.nodes.find((node) => !node.is_focal);
+  related.focal_reference_evidence = passages;
+  related.discovery_rank = 1;
+  related.discovery_score = 0.022;
+  related.discovery_list_ranks = {focal_reference: 4};
+  withLeads.meta.discovery_leads = leads;
+  withLeads.meta.discovery_ranker = {
+    method: "reciprocal_rank_fusion", k: 60, weights: {focal_reference: 0.5},
+  };
+  applyDashboardPayload(normalizeImportedDashboardPayload(withLeads, "lead graph").payload);
+  const shown = !button.hidden;
+  activate();
+  const opened = dialog.open;
+  const references = document.getElementById("more-papers-references-list").innerHTML;
+  const corpus = document.getElementById("more-papers-corpus-list").innerHTML;
+  renderWhyLines(related.id);
+  const quote = controls.detailReference.innerHTML;
+  const breakdown = controls.detailRanking.innerHTML;
+  const saved = buildPortableJsonPayload();
+  const imported = normalizeImportedDashboardPayload(saved, "saved").payload;
+  const roundtrip = {
+    graph: saved.meta.discovery_leads,
+    dashboard: saved.dashboard.meta.discovery_leads,
+    imported: imported.meta.discovery_leads,
+    evidence: imported.nodes.find((node) => node.id === related.id).focal_reference_evidence,
+  };
+  applyDashboardPayload(normalizeImportedDashboardPayload(old, "older graph").payload);
+  renderWhyLines(related.id);
+  activate();
+  const result = {
+    originalHidden, shown, opened, references, corpus, quote, breakdown, roundtrip,
+    closes, oldHidden: button.hidden, oldOpen: dialog.open,
+    oldLeadList: document.getElementById("more-papers-references-list").innerHTML,
+    oldQuote: controls.detailReference.innerHTML,
+    emptyEvidence: focalReferenceEvidenceHtml({
+      focal_reference_evidence: {context_count: 0, excerpt: "", is_influential: false},
+    }),
+  };
+  process.stdout.write(JSON.stringify(result));
+})()
+`);
+""",
+        [],
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["originalHidden"] and result["shown"] and result["opened"]
+    assert result["closes"] == 1
+    assert result["oldHidden"] and not result["oldOpen"]
+    assert result["oldLeadList"] == result["oldQuote"] == result["emptyEvidence"] == ""
+
+    references = result["references"]
+    assert "&lt;unsafe&gt;" in references and "javascript:" not in references
+    assert "1 mention in the focal paper" in references
+    assert "3 mentions in the focal paper" in references
+    assert f"https://www.semanticscholar.org/paper/{'a' * 40}" in references
+    assert 'href="https://arxiv.org/abs/math.GT/0309136"' in result["corpus"]
+    assert 'href="https://doi.org/10.5555/paper%3Fpart"' in result["corpus"]
+    assert "arXiv index query rank #19" in result["corpus"]
+
+    quote = result["quote"]
+    assert "<details>" in quote and "<details open" not in quote
+    assert "<summary>3 citation passages in the focal paper</summary>" in quote
+    assert "&lt;img onerror=&quot;alert(1)&quot;&gt; &amp; words" in quote
+    assert "<img" not in quote
+    assert "Marked influential by Semantic Scholar" in quote
+    assert "<dt>Focal reference use</dt><dd>#4" in result["breakdown"]
+    assert (
+        "The focal reference list contributes half that amount." in result["breakdown"]
+    )
+    assert (
+        result["roundtrip"]["graph"]
+        == result["roundtrip"]["dashboard"]
+        == result["roundtrip"]["imported"]
+    )
+    assert result["roundtrip"]["evidence"] == {
+        "context_count": 3,
+        "excerpt": '<img onerror="alert(1)"> & words',
+        "is_influential": True,
+    }
+
+
+def _build_focal_relation_graph() -> nx.Graph:
+    """Create a graph covering every focal-relation token the dashboard scopes on.
 
     Citation direction is deliberately set against publication year (a reference
-    published after the seed, a citing paper published before it) so a year-only
+    published after the focal, a citing paper published before it) so a year-only
     scope filter cannot pass.
 
-    :return nx.Graph: Graph whose ``seed_relations`` span all exported tokens.
+    :return nx.Graph: Graph whose ``focal_relations`` span all exported tokens.
     """
     graph = nx.Graph()
     graph.graph["strategy"] = "citation"
-    graph.graph["seed_relations"] = {
-        "seed": "seed",
-        "late-reference": "referenced_by_seed",
-        "early-citer": "cites_seed",
+    graph.graph["focal_relations"] = {
+        "s001": "focal",
+        "late-reference": "referenced_by_focal",
+        "early-citer": "cites_focal",
         "both-ways": "overlap",
         "early-semantic": "semantic_only",
         "same-year-semantic": "semantic_only",
@@ -2785,7 +3254,7 @@ def _build_seed_relation_graph() -> nx.Graph:
         "undated-semantic": "semantic_only",
     }
     years: dict[str, int | None] = {
-        "seed": 2020,
+        "s001": 2020,
         "late-reference": 2023,
         "early-citer": 2018,
         "both-ways": 2019,
@@ -2801,34 +3270,34 @@ def _build_seed_relation_graph() -> nx.Graph:
             year=year,
             authors=["A Person"],
             citation_count=5,
-            is_seed=node_id == "seed",
+            is_focal=node_id == "s001",
         )
-        if node_id != "seed":
-            graph.add_edge("seed", node_id, weight=0.6)
+        if node_id != "s001":
+            graph.add_edge("s001", node_id, weight=0.6)
     return graph
 
 
-def test_dashboard_scope_filter_keys_on_seed_relation_before_year(
+def test_dashboard_scope_filter_keys_on_focal_relation_before_year(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Prior/derivative scope must follow citation direction, not publication year.
 
-    A referenced paper stays prior work even when it postdates the seed, and a
+    A referenced paper stays prior work even when it postdates the focal, and a
     citing paper stays derivative even when it predates it; only nodes the
-    citation graph gives no direction fall back to the seed year.
+    citation graph gives no direction fall back to the focal year.
 
     :param Path tmp_path: Isolated output directory.
     :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
     :return None: Checks the single runtime predicate under all three scope modes.
     """
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph = _build_seed_relation_graph()
+    graph = _build_focal_relation_graph()
     layout = {
         node_id: (float(index), float(index % 3))
         for index, node_id in enumerate(sorted(graph.nodes))
     }
-    exporter = GraphExporter(graph, "seed", layout=layout)
+    exporter = GraphExporter(graph, "s001", layout=layout)
     out_path = tmp_path / "scope.dashboard.html"
     exporter.to_dashboard_html(out_path)
 
@@ -2847,16 +3316,16 @@ def test_dashboard_scope_filter_keys_on_seed_relation_before_year(
         "both-ways",
         "early-semantic",
         "late-reference",
+        "s001",
         "same-year-semantic",
-        "seed",
         "undated-semantic",
     ]
     assert probed["derivative"] == [
         "both-ways",
         "early-citer",
         "late-semantic",
+        "s001",
         "same-year-semantic",
-        "seed",
         "undated-semantic",
     ]
     assert probed["all"] == sorted(graph.nodes)
@@ -2871,9 +3340,9 @@ def _build_discovery_graph(*, ranked: int) -> nx.Graph:
     :param int ranked: How many related papers carry discovery evidence.
     :return nx.Graph: Graph carrying ``discovery_ranker`` and ``discovery_ranking``.
     """
-    graph = _build_seed_relation_graph()
+    graph = _build_focal_relation_graph()
     graph.graph["strategy"] = "hybrid"
-    related = sorted(node_id for node_id in graph.nodes if node_id != "seed")
+    related = sorted(node_id for node_id in graph.nodes if node_id != "s001")
     if ranked:
         graph.graph["discovery_ranker"] = {
             "method": "reciprocal_rank_fusion",
@@ -2885,7 +3354,7 @@ def _build_discovery_graph(*, ranked: int) -> nx.Graph:
                 "discovery_rank": rank,
                 "discovery_score": 1 / (60 + rank),
                 "discovery_features": {
-                    "seed_similarity": 0.5,
+                    "focal_similarity": 0.5,
                     "bibliography_similarity": None,
                     "direct_citation": False,
                     "recommendation_rank": None,
@@ -2915,7 +3384,7 @@ def _export_discovery_dashboard(
         for index, node_id in enumerate(sorted(graph.nodes))
     }
     out_path = tmp_path / f"discovery-{ranked}.dashboard.html"
-    GraphExporter(graph, "seed", layout=layout).to_dashboard_html(out_path)
+    GraphExporter(graph, "s001", layout=layout).to_dashboard_html(out_path)
     return out_path
 
 
@@ -2981,8 +3450,8 @@ process.stdout.write(JSON.stringify({
     assert result["sortKey"] == sort_key
     assert result["control"] == sort_key
     assert result["optionHidden"] is option_hidden
-    related = sorted(node for node in result["order"] if node != "seed")
-    assert result["order"][0] == "seed"
+    related = sorted(node for node in result["order"] if node != "s001")
+    assert result["order"][0] == "s001"
     if sort_key == "discovery_rank":
         assert result["order"][1:] == list(reversed(related))
     else:
@@ -3008,7 +3477,10 @@ const unranked = JSON.parse(JSON.stringify(ranked));
 unranked.nodes.forEach((node) => {
   Object.keys(node).filter((key) => key.startsWith("discovery_")).forEach((key) => delete node[key]);
 });
-const load = (graph) => { probe("applyImportedPayload")(JSON.parse(JSON.stringify(graph)), "next"); };
+const load = (graph) => {
+  const normalized = probe("normalizeImportedDashboardPayload")(JSON.parse(JSON.stringify(graph)), "next");
+  probe("applyDashboardPayload")(normalized.payload);
+};
 const pick = (value) => { sortControl.handlers.forEach((handler) => handler({ target: { value } })); };
 const seen = () => [probe("state.sortKey"), sortControl.value];
 const log = {};
@@ -3045,6 +3517,39 @@ process.stdout.write(JSON.stringify(log));
     }
 
 
+def test_dashboard_compact_panel_navigation(two_node_dashboard: Path) -> None:
+    """Show the chosen panel on small screens and focus the paper after selection."""
+    result = _probe_dashboard_runtime_in_node(
+        two_node_dashboard,
+        """
+        (() => {
+          let compact = true;
+          let focused = false;
+          window.matchMedia = () => ({matches: compact});
+          controls.root = {dataset: {pane: "graph"}};
+          controls.detailTitle = {focus() { focused = true; }};
+          controls.paneButtons = ["graph", "paper-list", "detail"].map(pane => ({
+            dataset: {pane}, setAttribute(key, value) { this[key] = value; }
+          }));
+          const states = [];
+          showPane("paper-list");
+          states.push(controls.root.dataset.pane);
+          showPane("detail", true);
+          states.push(controls.root.dataset.pane);
+          compact = false;
+          showPane("graph");
+          states.push(controls.root.dataset.pane);
+          return {states, focused, pressed: controls.paneButtons.map(b => b["aria-pressed"])};
+        })()
+        """,
+    )
+    assert result == {
+        "states": ["paper-list", "detail", "detail"],
+        "focused": True,
+        "pressed": ["false", "false", "true"],
+    }
+
+
 def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
     two_node_dashboard: Path,
 ) -> None:
@@ -3058,13 +3563,12 @@ def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
         two_node_dashboard,
         "(() => {"
         ' controls.detailMode = { textContent: "" };'
-        ' controls.graphHint = { textContent: "" };'
-        ' state.selectedId = "seed";'
+        ' state.selectedId = "s001";'
         " renderList();"
         ' previewRowOnHover("related");'
         " const afterRerender = controls.detailMode.textContent;"
         " armListPreview();"
-        ' previewRowOnHover("seed");'
+        ' previewRowOnHover("s001");'
         " const hoverSelected = controls.detailMode.textContent;"
         ' previewRowOnHover("related");'
         " return {"
@@ -3080,6 +3584,124 @@ def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
     assert probed["hoverOther"] == "Preview"
 
 
+def test_dashboard_paper_controls_keep_focus_and_show_discovery_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving and opening a ranked paper use separate, focusable controls."""
+    path = _export_discovery_dashboard(tmp_path, monkeypatch, ranked=1)
+    result = _probe_dashboard_runtime_in_node(
+        path,
+        r"""
+(() => {
+  const rows = new Map();
+  const createElement = document.createElement;
+  document.createElement = (tag) => {
+    if (tag !== "li") return createElement(tag);
+    const row = {
+      setAttribute(name, value) { this.id = value; },
+      getAttribute() { return this.id; },
+      querySelector(selector) { return selector === ".star-btn" ? this.save : this.select; },
+      addEventListener() {},
+    };
+    const button = (className) => ({
+      parentElement: row,
+      classList: { contains(name) { return name === className; } },
+      closest() { return this; },
+      focus() { document.activeElement = this; },
+      addEventListener(name, callback) { this.activate = callback; },
+    });
+    row.save = button("star-btn");
+    row.select = button("paper-select");
+    return row;
+  };
+  controls.list = {
+    set innerHTML(value) { rows.clear(); },
+    appendChild(row) { rows.set(row.id, row); },
+  };
+  controls.detailWhy = { innerHTML: "" };
+  controls.detailRanking = { innerHTML: "" };
+  controls.detailLinks = { innerHTML: "" };
+  controls.detailMode = { textContent: "" };
+  window.matchMedia = () => ({ matches: false });
+
+  const id = "undated-semantic";
+  const candidate = nodeById.get(id);
+  candidate.discovery_features.recommendation_rank = 153;
+  candidate.discovery_list_ranks.recommended = 152;
+  candidate.discovery_score = 1 / 61 + 1 / 212;
+  candidate.links = {
+    arxiv_pdf: "https://arxiv.org/pdf/1234",
+    arxiv_abs: "https://arxiv.org/abs/1234",
+    semantic_scholar: "javascript:alert(1)",
+  };
+  state.selectedId = "s001";
+  renderList();
+  const ranked = rows.get(id).innerHTML;
+  const unranked = rows.get("late-reference").innerHTML;
+
+  rows.get(id).save.focus();
+  rows.get(id).save.activate();
+  const afterSave = {
+    selected: state.selectedId,
+    saved: isSaved(id),
+    focusRestored: document.activeElement === rows.get(id).save,
+    html: rows.get(id).innerHTML,
+  };
+
+  state.hoverId = "s001";
+  rows.get(id).select.focus();
+  rows.get(id).select.activate();
+  return {
+    ranked,
+    unranked,
+    afterSave,
+    selected: state.selectedId,
+    hover: state.hoverId,
+    mode: controls.detailMode.textContent,
+    focusRestored: document.activeElement === rows.get(id).select,
+    html: rows.get(id).innerHTML,
+    evidence: controls.detailWhy.innerHTML,
+    breakdown: controls.detailRanking.innerHTML,
+    links: controls.detailLinks.innerHTML,
+  };
+})()
+""",
+    )
+    ranked = result["ranked"]
+    assert 'class="paper-select" type="button"' in ranked
+    assert re.search(r'</button>\s*<button class="star-btn"', ranked)
+    assert 'class="paper-rank">Rank #1' in ranked
+    assert "No direct citation recorded" in ranked
+    assert "paper-rank" not in result["unranked"]
+    assert "Referenced by focal paper" in result["unranked"]
+
+    saved = result["afterSave"]
+    assert saved["selected"] == "s001"
+    assert saved["saved"] and saved["focusRestored"]
+    assert 'aria-pressed="true"' in saved["html"]
+    assert result["selected"] == "undated-semantic"
+    assert result["hover"] is None
+    assert result["mode"] == "Selected"
+    assert result["focusRestored"]
+    assert 'aria-current="true"' in result["html"]
+    assert "<dt>Discovery rank</dt><dd>#1 in the candidate pool" in result["evidence"]
+    assert "<dt>Relation</dt><dd>No direct citation recorded" in result["evidence"]
+    assert "<dt>Discovery signals</dt><dd>Focal similarity 0.500" in result["evidence"]
+    assert "provider recommendation #153" in result["evidence"]
+    assert "<dt>Graph relevance</dt>" in result["evidence"]
+    assert (
+        "<dt>Similarity path to focal paper</dt><dd>Paper undated-semantic → Person, 2020"
+        in result["evidence"]
+    )
+    assert "<summary>Discovery score 0.0211</summary>" in result["breakdown"]
+    assert "Each list adds 1 / (60 + position)" in result["breakdown"]
+    assert "<dt>Recommendation list</dt><dd>#152" in result["breakdown"]
+    assert 'class="primary-link" href="https://arxiv.org/pdf/1234"' in result["links"]
+    assert ">PDF " in result["links"]
+    assert ">arXiv " in result["links"]
+    assert "javascript:" not in result["links"]
+
+
 def test_dashboard_semantic_scholar_button_disables_without_a_link(
     two_node_dashboard: Path,
 ) -> None:
@@ -3092,7 +3714,7 @@ def test_dashboard_semantic_scholar_button_disables_without_a_link(
         "   setAttribute(name, value) { attrs[name] = value; },"
         "   removeAttribute(name) { delete attrs[name]; },"
         " };"
-        ' state.selectedId = "seed";'
+        ' state.selectedId = "s001";'
         " renderList();"
         " const withLink = Object.keys(attrs);"
         ' nodeById.get("related").links.semantic_scholar = null;'
@@ -3113,10 +3735,10 @@ def test_dashboard_semantic_scholar_button_disables_without_a_link(
         (["Ada\nLovelace"], 2020, "Lovelace, 2020"),
         (["Ada\u00a0Lovelace"], 2020, "Lovelace, 2020"),
         (["", "Grace Hopper"], 2020, "Hopper, 2020"),
-        ([" "], 2020, "Seed Paper (2020)"),
-        ([], 2020, "Seed Paper (2020)"),
-        (["Ada Lovelace"], 0, "Seed Paper"),
-        (["Ada Lovelace"], None, "Seed Paper"),
+        ([" "], 2020, "Focal Paper (2020)"),
+        ([], 2020, "Focal Paper (2020)"),
+        (["Ada Lovelace"], 0, "Focal Paper"),
+        (["Ada Lovelace"], None, "Focal Paper"),
     ],
 )
 def test_dashboard_compact_author_labels_match_python(
@@ -3128,36 +3750,36 @@ def test_dashboard_compact_author_labels_match_python(
 ) -> None:
     """Browser and exported labels share author, title, and missing-year fallbacks."""
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
-    graph.nodes[seed_id].pop("paper")
-    graph.nodes[seed_id].update(authors=authors, year=year)
+    graph, focal_id = _build_graph()
+    graph.nodes[focal_id].pop("paper")
+    graph.nodes[focal_id].update(authors=authors, year=year)
     exporter = GraphExporter(
         graph,
-        seed_id,
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        focal_id,
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "author-labels.dashboard.html"
     exporter.to_dashboard_html(out_path)
 
-    assert nodes_module._node_short_label(graph.nodes[seed_id], seed_id) == expected
+    assert nodes_module._node_short_label(graph.nodes[focal_id], focal_id) == expected
     probed = _probe_dashboard_runtime_in_node(
         out_path,
         "({"
-        ' compact: compactNodeLabel("seed"),'
+        ' compact: compactNodeLabel("s001"),'
         " portable: portableGraphPayload(payload).edges.map(edge =>"
-        '   edge.source === "seed" ? edge.source_label : edge.target_label),'
+        '   edge.source === "s001" ? edge.source_label : edge.target_label),'
         " importedPayload: (() => {"
         "   const nextPayload = deepClone(payload);"
-        '   nextPayload.nodes.find(node => node.id === "seed").authors = ["Grace Hopper"];'
+        '   nextPayload.nodes.find(node => node.id === "s001").authors = ["Grace Hopper"];'
         "   return portableGraphPayload(nextPayload).edges.map(edge =>"
-        '     edge.source === "seed" ? edge.source_label : edge.target_label);'
+        '     edge.source === "s001" ? edge.source_label : edge.target_label);'
         " })(),"
         "})",
     )
     assert probed == {
         "compact": expected,
         "portable": [expected],
-        "importedPayload": ["Hopper, 2020" if year else "Seed Paper"],
+        "importedPayload": ["Hopper, 2020" if year else "Focal Paper"],
     }
 
 
@@ -3174,13 +3796,13 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph = nx.Graph()
     graph.graph["strategy"] = "citation"
-    graph.add_node("seed", title="Seed Paper", citation_count=3, is_seed=True)
+    graph.add_node("s001", title="Focal Paper", citation_count=3, is_focal=True)
     graph.add_node("related", title="Related Paper", citation_count=1)
-    graph.add_edge("seed", "related", weight=0.5)
+    graph.add_edge("s001", "related", weight=0.5)
     exporter = GraphExporter(
         graph,
-        "seed",
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        "s001",
+        layout={"s001": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "yearless.dashboard.html"
     exporter.to_dashboard_html(out_path)
@@ -3196,7 +3818,7 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
         "(() => {"
         " renderTimeline();"
         " const roundTrip = portableGraphPayload(normalizeImportedDashboardPayload("
-        ' buildPortableJsonPayload(), "round trip", false).payload);'
+        ' buildPortableJsonPayload(), "round trip").payload);'
         " return {"
         " yearRange: yearRange,"
         " exportedYearRange: buildPortableJsonPayload().meta.year_range,"
@@ -3229,29 +3851,23 @@ def test_dashboard_highlights_fallback_to_path_order_and_use_theme_styles(
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph = nx.Graph()
     graph.graph["strategy"] = "citation"
-    graph.add_node("seed", title="Seed", year=2020, is_seed=True)
+    graph.add_node("s001", title="Focal", year=2020, is_focal=True)
     graph.add_node("related", title="Related", year=2021)
     graph.add_node("other", title="Other", year=2022)
-    graph.add_edge("seed", "related", weight=0.7)
+    graph.add_edge("s001", "related", weight=0.7)
     exporter = GraphExporter(
         graph,
-        "seed",
-        layout={"other": (0.0, 0.0), "related": (1.0, 0.0), "seed": (2.0, 0.0)},
+        "s001",
+        layout={"other": (0.0, 0.0), "related": (1.0, 0.0), "s001": (2.0, 0.0)},
     )
     out_path = tmp_path / "highlights.dashboard.html"
     exporter.to_dashboard_html(out_path, theme="light")
     rendered = out_path.read_text(encoding="utf-8")
 
-    for opacity in ("0.74", "0.18", "0.12"):
+    for opacity in ("0.74", "0.54", "0.12"):
         assert f"opacity: {opacity} !important;" in rendered
     assert (
-        rendered.count(
-            "background: color-mix(in srgb, var(--panel-bg) 82%, transparent);"
-        )
-        == 2
-    )
-    assert (
-        "filter: drop-shadow(0 0 10px color-mix(in srgb, var(--seed-ring) 85%, transparent)) brightness(1.14);"
+        "filter: drop-shadow(0 0 10px color-mix(in srgb, var(--focal-ring) 85%, transparent)) brightness(1.14);"
         in rendered
     )
     assert "rgba(8, 12, 18, 0.72)" not in rendered
@@ -3276,9 +3892,9 @@ def test_dashboard_highlights_fallback_to_path_order_and_use_theme_styles(
         " globalThis.getComputedStyle = () => ({ getPropertyValue() { return '#123456'; } });"
         " const restyles = [];"
         " Plotly.restyle = (...args) => restyles.push(args);"
-        " state.selectedId = 'seed';"
+        " state.selectedId = 's001';"
         " state.hoverId = null;"
-        " state.visibleIds = new Set(['seed', 'related']);"
+        " state.visibleIds = new Set(['s001', 'related']);"
         " syncGraphHighlights();"
         " const haloCall = restyles.find((call) => call[2][0] === haloTraceIndex);"
         " return {"
@@ -3291,19 +3907,19 @@ def test_dashboard_highlights_fallback_to_path_order_and_use_theme_styles(
     classes_by_id = {entry["id"]: entry["classes"] for entry in probed["paths"]}
     assert classes_by_id["other"] == ["is-dimmed", "is-filter-hidden"]
     assert classes_by_id["related"] == ["is-neighbor"]
-    assert classes_by_id["seed"] == ["is-glowing"]
+    assert classes_by_id["s001"] == ["is-glowing"]
     assert probed["haloColor"] == "rgba(18,52,86,0.340)"
 
 
 def test_dashboard_labels_balance_priority_and_spacing() -> None:
-    """Dashboard labels should favor prominent nodes without crowding the seed."""
+    """Dashboard labels should favor prominent nodes without crowding the focal."""
     graph = nx.Graph()
-    graph.add_node("seed", is_seed=True, citation_count=10, year=2020)
+    graph.add_node("s001", is_focal=True, citation_count=10, year=2020)
     graph.add_node("crowded", citation_count=100, year=2024)
     graph.add_node("far-high", citation_count=90, year=2023)
     graph.add_node("far-low", citation_count=5, year=2022)
     positions = {
-        "seed": (0.0, 0.0),
+        "s001": (0.0, 0.0),
         "crowded": (DASHBOARD_LABEL_MIN_DISTANCE * 0.5, 0.0),
         "far-high": (0.5, 0.0),
         "far-low": (-0.5, 0.0),
@@ -3315,7 +3931,7 @@ def test_dashboard_labels_balance_priority_and_spacing() -> None:
         positions,
     )
 
-    assert "seed" in selected
+    assert "s001" in selected
     assert "crowded" not in selected
     assert "far-high" in selected
     assert "far-low" in selected
@@ -3326,8 +3942,8 @@ def test_exporter_dashboard_missing_plotly_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Dashboard export should fail clearly when plotly dependency is missing."""
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id)
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id)
 
     monkeypatch.setattr(
         loaders_module, "_load_plotly_dashboard_runtime", raise_import_error
@@ -3343,11 +3959,11 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     graph = nx.Graph()
     graph.add_node(
         "arxiv:2411.03884",
-        title="Seed",
+        title="Focal",
         year=2024,
         authors=["A"],
         citation_count=10,
-        is_seed=True,
+        is_focal=True,
     )
     graph.add_node(
         "10.1145/3133956.3134029",
@@ -3355,7 +3971,7 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
         year=2017,
         authors=["B"],
         citation_count=5,
-        is_seed=False,
+        is_focal=False,
     )
     graph.add_node(
         "abcdef123456",
@@ -3363,7 +3979,7 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
         year=2018,
         authors=["C"],
         citation_count=1,
-        is_seed=False,
+        is_focal=False,
     )
     graph.add_node(
         "s2-candidate-arxiv",
@@ -3372,7 +3988,7 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
         authors=["D"],
         citation_count=2,
         arxiv_id="2501.00001v3",
-        is_seed=False,
+        is_focal=False,
     )
     graph.add_node(
         "s2-candidate-doi",
@@ -3381,7 +3997,7 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
         authors=["E"],
         citation_count=3,
         doi="10.1109/5.771073",
-        is_seed=False,
+        is_focal=False,
     )
     graph.add_edge("arxiv:2411.03884", "10.1145/3133956.3134029", weight=0.9)
     graph.add_edge("arxiv:2411.03884", "abcdef123456", weight=0.7)
@@ -3487,9 +4103,9 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("years", "expected_labels"),
     [
-        ((None, None), ["Seed", "Year unknown"]),
-        ((2024, 2024), ["Seed", "2024"]),
-        ((2020, 2025), ["Seed", "2020 (older)", "2025 (newer)"]),
+        ((None, None), ["Focal paper", "Year unknown"]),
+        ((2024, 2024), ["Focal paper", "2024"]),
+        ((2020, 2025), ["Focal paper", "2020 (older)", "2025 (newer)"]),
     ],
 )
 @pytest.mark.parametrize("theme_name", ["dark", "light", "solarized"])
@@ -3502,19 +4118,19 @@ def test_static_legend_explains_colors_without_covering_graph(
 ) -> None:
     """Legends show actual year bounds and remain inside the figure, below the graph."""
     graph = nx.Graph()
-    graph.add_node("seed", title="Seed", year=years[0], is_seed=True)
+    graph.add_node("s001", title="Focal", year=years[0], is_focal=True)
     graph.add_node("related", title="Related", year=years[1])
-    graph.add_edge("seed", "related", weight=0.8)
+    graph.add_edge("s001", "related", weight=0.8)
     close_spy = MagicMock(wraps=render_module.plt.close)
     monkeypatch.setattr(render_module.plt, "close", close_spy)
 
     visualize_graph(
         graph,
-        "seed",
+        "s001",
         tmp_path / "graph.png",
         theme_name=theme_name,
         dpi=40,
-        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+        layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
     )
 
     figure = close_spy.call_args.args[0]
@@ -3528,7 +4144,7 @@ def test_static_legend_explains_colors_without_covering_graph(
     assert bounds.y1 < figure.axes[0].get_window_extent().y0
 
 
-def test_visualize_graph_uses_full_seed_title_without_ellipsis(
+def test_visualize_graph_uses_full_focal_title_without_ellipsis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Static rendering should preserve metadata and create its output parents.
@@ -3538,12 +4154,12 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     :return None: Checks current metadata, parent creation, and caller preservation.
     """
     graph = nx.Graph()
-    seed_title = "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
+    focal_title = "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
     graph.add_node(
-        "seed",
+        "s001",
         paper=Paper(
-            paper_id="seed",
-            title=seed_title,
+            paper_id="s001",
+            title=focal_title,
             year=2025,
             authors=[Author(name="Hanyu Lai")],
             citation_count=15,
@@ -3552,7 +4168,7 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
         year=1999,
         authors=["Stale Author"],
         citation_count=999,
-        is_seed=True,
+        is_focal=True,
     )
     graph.add_node(
         "related",
@@ -3567,9 +4183,9 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
         year=1998,
         authors=["Stale Author"],
         citation_count=998,
-        is_seed=False,
+        is_focal=False,
     )
-    graph.add_edge("seed", "related", weight=0.8)
+    graph.add_edge("s001", "related", weight=0.8)
 
     captured: dict[str, str] = {}
     import matplotlib.axes
@@ -3596,55 +4212,55 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert not output_path.parent.exists()
     visualize_graph(
         graph,
-        "seed",
+        "s001",
         output_path,
-        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+        layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
     )
 
     assert output_path.is_file()
     assert "..." not in captured["title"]
-    assert seed_title in captured["title"].replace("\n", " ")
-    effective_seed = compute_sizes_spy.call_args.args[0].nodes["seed"]
-    assert effective_seed["title"] == seed_title
-    assert effective_seed["year"] == 2025
-    assert effective_seed["authors"] == ["Hanyu Lai"]
-    assert effective_seed["citation_count"] == 15
-    assert effective_seed["is_seed"] is True
+    assert focal_title in captured["title"].replace("\n", " ")
+    effective_focal = compute_sizes_spy.call_args.args[0].nodes["s001"]
+    assert effective_focal["title"] == focal_title
+    assert effective_focal["year"] == 2025
+    assert effective_focal["authors"] == ["Hanyu Lai"]
+    assert effective_focal["citation_count"] == 15
+    assert effective_focal["is_focal"] is True
     effective_related = compute_sizes_spy.call_args.args[0].nodes["related"]
     assert effective_related["authors"] == ["   "]
-    assert effective_related["is_seed"] is False
-    assert graph.nodes["seed"]["title"] == "Stale scalar title"
+    assert effective_related["is_focal"] is False
+    assert graph.nodes["s001"]["title"] == "Stale scalar title"
     assert graph.nodes["related"]["authors"] == ["Stale Author"]
 
 
 @pytest.mark.parametrize(
-    ("seed_title", "heading"),
+    ("focal_title", "heading"),
     [
-        (None, "Seed paper"),
-        ("", "Seed paper"),
-        ("   ", "Seed paper"),
+        (None, "Focal paper"),
+        ("", "Focal paper"),
+        ("   ", "Focal paper"),
         ("attention mechanism", "attention mechanism"),
     ],
 )
-def test_visualize_graph_labels_authorless_seed(
+def test_visualize_graph_labels_authorless_focal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    seed_title: str | None,
+    focal_title: str | None,
     heading: str,
 ) -> None:
-    """Label an authorless query seed while keeping its title in the heading."""
+    """Label an authorless query focal while keeping its title in the heading."""
     graph = nx.Graph()
-    seed_id = "query:abc123"
-    graph.add_node(seed_id, title=seed_title, is_seed=True)
+    focal_id = "query:abc123"
+    graph.add_node(focal_id, title=focal_title, is_focal=True)
     close_spy = MagicMock(wraps=render_module.plt.close)
     monkeypatch.setattr(render_module.plt, "close", close_spy)
     visualize_graph(
-        graph, seed_id, tmp_path / "graph.png", layout={seed_id: (0.0, 0.0)}, dpi=40
+        graph, focal_id, tmp_path / "graph.png", layout={focal_id: (0.0, 0.0)}, dpi=40
     )
     axis = close_spy.call_args.args[0].axes[0]
     assert axis.get_title() == f"CiteMesh Visualization: {heading}"
-    assert [text.get_text() for text in axis.texts] == ["Seed"]
-    assert graph.nodes[seed_id]["title"] == seed_title
+    assert [text.get_text() for text in axis.texts] == ["Focal paper"]
+    assert graph.nodes[focal_id]["title"] == focal_title
 
 
 def test_visualize_graph_metadata_overlay_is_compact(
@@ -3653,12 +4269,12 @@ def test_visualize_graph_metadata_overlay_is_compact(
     """Static render metadata should exclude large nested debug payloads."""
     graph = nx.Graph()
     graph.add_node(
-        "seed",
-        title="Seed Paper",
+        "s001",
+        title="Focal Paper",
         year=2025,
         authors=["A"],
         citation_count=5,
-        is_seed=True,
+        is_focal=True,
     )
     graph.add_node(
         "related",
@@ -3666,9 +4282,9 @@ def test_visualize_graph_metadata_overlay_is_compact(
         year=2024,
         authors=["B"],
         citation_count=3,
-        is_seed=False,
+        is_focal=False,
     )
-    graph.add_edge("seed", "related", weight=0.8)
+    graph.add_edge("s001", "related", weight=0.8)
 
     captured_text: dict[str, str] = {}
     import matplotlib.axes
@@ -3684,9 +4300,9 @@ def test_visualize_graph_metadata_overlay_is_compact(
 
     visualize_graph(
         graph,
-        "seed",
+        "s001",
         tmp_path / "graph.png",
-        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+        layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
         metadata={
             "paper_id": "https://arxiv.org/abs/2508.14040",
             "strategy": "hybrid",
@@ -3713,13 +4329,13 @@ def test_static_labels_clear_marker_bounds(area: float | None, dpi: int) -> None
 
     :param float | None area: Explicit marker area, or computed default sizes.
     :param int dpi: Canvas resolution used for text and marker measurement.
-    :return None: Checks both seed and non-seed label bounding boxes.
+    :return None: Checks both focal and non-focal label bounding boxes.
     """
     import matplotlib.pyplot as plt
     from matplotlib.transforms import Affine2D
 
-    graph, seed_id = _build_graph()
-    positions = {"related": (0.75, 0.25), "seed": (0.25, 0.75)}
+    graph, focal_id = _build_graph()
+    positions = {"related": (0.75, 0.25), "s001": (0.25, 0.75)}
     sizes = compute_node_sizes(graph) if area is None else [area, area]
     figure, axis = plt.subplots(dpi=dpi)
     try:
@@ -3732,7 +4348,7 @@ def test_static_labels_clear_marker_bounds(area: float | None, dpi: int) -> None
             axis,
             graph,
             positions,
-            seed_id,
+            focal_id,
             get_theme("light"),
             sizes=None if area is None else sizes,
         )
@@ -3755,19 +4371,19 @@ def test_static_labels_clear_marker_bounds(area: float | None, dpi: int) -> None
         plt.close(figure)
 
 
-@pytest.mark.parametrize("seed_citations", [100_000, 300_000])
-def test_node_size_caps_include_citation_bonus(seed_citations: int) -> None:
+@pytest.mark.parametrize("focal_citations", [100_000, 300_000])
+def test_node_size_caps_include_citation_bonus(focal_citations: int) -> None:
     """Highly cited nodes must stay within the configured area caps.
 
-    :param int seed_citations: Citation count placing the seed above or below its peer.
+    :param int focal_citations: Citation count placing the focal above or below its peer.
     :return None: Checks the final sizes after tier assignment and citation bonuses.
     """
     graph, _ = _build_graph()
-    graph.nodes["seed"]["citation_count"] = seed_citations
+    graph.nodes["s001"]["citation_count"] = focal_citations
     graph.nodes["related"]["citation_count"] = 200_000
-    related_size, seed_size = compute_node_sizes(graph)
-    assert seed_size <= render_module.VIZ_CONFIG.seed_size
-    assert related_size <= render_module.VIZ_CONFIG.max_non_seed_size
+    related_size, focal_size = compute_node_sizes(graph)
+    assert focal_size <= render_module.VIZ_CONFIG.focal_size
+    assert related_size <= render_module.VIZ_CONFIG.max_non_focal_size
 
 
 def test_dashboard_labels_clear_selection_halos_after_import(
@@ -3780,10 +4396,10 @@ def test_dashboard_labels_clear_selection_halos_after_import(
     :return None: Checks marker identity, label text and radius-based pixel clearance.
     """
     _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
-    graph, seed_id = _build_graph()
-    graph.nodes["seed"]["citation_count"] = 200_000
+    graph, focal_id = _build_graph()
+    graph.nodes["s001"]["citation_count"] = 200_000
     exporter = GraphExporter(
-        graph, seed_id, layout={"related": (0.0, 0.0), "seed": (1.0, 1.0)}
+        graph, focal_id, layout={"related": (0.0, 0.0), "s001": (1.0, 1.0)}
     )
     path = tmp_path / "labels.dashboard.html"
     exporter.to_dashboard_html(path)
@@ -3836,7 +4452,9 @@ def test_dashboard_title_labels_face_inward_after_import(
         for node in ("left", "middle", "right")
     }
     for node, title in titles.items():
-        graph.add_node(node, title=title, authors=[], year=2026, is_seed=node == "left")
+        graph.add_node(
+            node, title=title, authors=[], year=2026, is_focal=node == "left"
+        )
     graph.add_edge("left", "middle", weight=0.8)
     graph.add_edge("left", "right", weight=0.7)
     positions = {
@@ -3852,7 +4470,7 @@ def test_dashboard_title_labels_face_inward_after_import(
     imported = _probe_dashboard_runtime_in_node(
         path, "buildFigureSpecFromPayload(payload)"
     )
-    node_order = payload["meta"]["plotly_node_order"]
+    node_order = payload["dashboard"]["meta"]["plotly_node_order"]
     expected = (
         dict.fromkeys(titles, "center")
         if zero_span
@@ -3879,19 +4497,19 @@ def test_dashboard_title_labels_face_inward_after_import(
 
 
 def test_static_labels_are_capped_by_citation_priority() -> None:
-    """Dense static plots should label only the highest-priority non-seed papers."""
+    """Dense static plots should label only the highest-priority non-focal papers."""
     import matplotlib.pyplot as plt
 
     graph = nx.Graph()
     graph.add_node(
-        "seed",
+        "s001",
         title="A long title " * 15,
         year=2025,
-        authors=["Seed Author"],
+        authors=["Focal Author"],
         citation_count=0,
-        is_seed=True,
+        is_focal=True,
     )
-    positions: dict[str, np.ndarray] = {"seed": np.array([0.95, 1.08])}
+    positions: dict[str, np.ndarray] = {"s001": np.array([0.95, 1.08])}
     for index in range(20):
         node_id = f"paper-{index:02d}"
         graph.add_node(
@@ -3900,7 +4518,7 @@ def test_static_labels_are_capped_by_citation_priority() -> None:
             year=2000 + index,
             authors=[f"Author {index}"],
             citation_count=index,
-            is_seed=False,
+            is_focal=False,
         )
         positions[node_id] = np.array(
             [0.1 + 0.27 * float(index % 4), 0.1 + 0.18 * float(index // 4)]
@@ -3913,14 +4531,14 @@ def test_static_labels_are_capped_by_citation_priority() -> None:
         axis,
         graph,
         positions,
-        "seed",
+        "s001",
         get_theme("light"),
         sizes=compute_node_sizes(graph),
     )
 
     labels = {text.get_text() for text in axis.texts}
-    assert len(labels) == MAX_STATIC_NON_SEED_LABELS + 1
-    assert "Author, 2025 (seed)" in labels
+    assert len(labels) == MAX_STATIC_NON_FOCAL_LABELS + 1
+    assert "Author, 2025 (focal)" in labels
     assert "19, 2019" in labels
     assert "0, 2000" not in labels
     plt.close(figure)
@@ -3932,12 +4550,12 @@ def test_static_labels_suppress_overlapping_text_bounds() -> None:
 
     graph = nx.Graph()
     graph.add_node(
-        "seed",
-        title="Seed Paper",
+        "s001",
+        title="Focal Paper",
         year=2025,
-        authors=["Seed Author"],
+        authors=["Focal Author"],
         citation_count=100,
-        is_seed=True,
+        is_focal=True,
     )
     for node_id, citations in [("left", 20), ("right", 10)]:
         graph.add_node(
@@ -3946,11 +4564,11 @@ def test_static_labels_suppress_overlapping_text_bounds() -> None:
             year=2024,
             authors=["Extraordinarilylongsurname"],
             citation_count=citations,
-            is_seed=False,
+            is_focal=False,
         )
 
     positions = {
-        "seed": np.array([0.1, 0.1]),
+        "s001": np.array([0.1, 0.1]),
         "left": np.array([0.45, 0.5]),
         "right": np.array([0.55, 0.5]),
     }
@@ -3961,13 +4579,13 @@ def test_static_labels_suppress_overlapping_text_bounds() -> None:
         axis,
         graph,
         positions,
-        "seed",
+        "s001",
         get_theme("light"),
         sizes=[100.0, 100.0, 100.0],
     )
 
     labels = {text.get_text() for text in axis.texts}
-    assert "Author, 2025 (seed)" in labels
+    assert "Author, 2025 (focal)" in labels
     assert sum(label.startswith("Extraordinarilylongsurname") for label in labels) == 1
     plt.close(figure)
 
@@ -3994,29 +4612,29 @@ def test_missing_year_visual_contracts(
 
     graph = nx.Graph()
     graph.add_node(
-        "seed",
+        "s001",
         paper=Paper(
-            paper_id="seed",
-            title="Seed Paper",
+            paper_id="s001",
+            title="Focal Paper",
             year=None,
             authors=[Author(name="Alice Smith")],
             citation_count=3,
-            abstract="Seed abstract",
+            abstract="Focal abstract",
             categories=["cs.AI"],
-            is_seed=True,
+            is_focal=True,
         ),
-        title="Seed Paper",
+        title="Focal Paper",
         citation_count=3,
         authors=["Alice Smith"],
-        is_seed=True,
+        is_focal=True,
     )
     graph.add_node("missing-year", title="No Year", citation_count=0, authors=[])
-    graph.add_edge("seed", "missing-year")
+    graph.add_edge("s001", "missing-year")
 
     exporter = GraphExporter(
         graph,
-        "seed",
-        layout={"seed": (0.0, 0.0), "missing-year": (1.0, 1.0)},
+        "s001",
+        layout={"s001": (0.0, 0.0), "missing-year": (1.0, 1.0)},
     )
     plotly_path = tmp_path / "graph.plotly.html"
     graphml_path = tmp_path / "graph.graphml"
@@ -4033,24 +4651,24 @@ def test_missing_year_visual_contracts(
     assert marker["cmax"] == 2001.0
     hovertext = captured["hovertext"]
     assert isinstance(hovertext, list)
-    seed_hover = next(text for text in hovertext if "Seed Paper" in text)
-    assert "n.d. | 3 citations" in seed_hover
-    assert "None" not in seed_hover
+    focal_hover = next(text for text in hovertext if "Focal Paper" in text)
+    assert "n.d. | 3 citations" in focal_hover
+    assert "None" not in focal_hover
 
     graphml = nx.read_graphml(graphml_path)
     assert str(graphml.nodes["missing-year"]["year"]) == "0"
 
     graph_1 = nx.Graph()
-    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
-    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
-    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
+    graph_1.add_node("s001", title="Focal", year=None, citation_count=0, is_focal=True)
+    graph_1.add_node("b", title="B", year=None, citation_count=0, is_focal=False)
+    graph_1.add_node("a", title="A", year=None, citation_count=0, is_focal=False)
 
     graph_2 = nx.Graph()
-    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
-    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
-    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+    graph_2.add_node("s001", title="Focal", year=None, citation_count=0, is_focal=True)
+    graph_2.add_node("a", title="A", year=None, citation_count=0, is_focal=False)
+    graph_2.add_node("b", title="B", year=None, citation_count=0, is_focal=False)
 
-    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
+    _, min_year, max_year = compute_node_colors(graph_1, "s001", get_theme("light"))
     assert min_year == 2000
     assert max_year == 2001
 
@@ -4064,16 +4682,16 @@ def test_missing_year_visual_contracts(
 def test_publication_year_coercion_is_shared_across_visual_surfaces() -> None:
     """String, NumPy, and invalid years should resolve consistently everywhere."""
     graph = nx.Graph()
-    graph.add_node("seed", title="Seed", year="2024", is_seed=True)
+    graph.add_node("s001", title="Focal", year="2024", is_focal=True)
     graph.add_node("older", title="Older", year=np.float64(2020.0))
     graph.add_node("invalid", title="Invalid", year="unknown")
-    layout = {"seed": (0.0, 0.0), "older": (1.0, 0.0), "invalid": (0.5, 1.0)}
+    layout = {"s001": (0.0, 0.0), "older": (1.0, 0.0), "invalid": (0.5, 1.0)}
 
-    _, min_year, max_year = compute_node_colors(graph, "seed", get_theme("light"))
-    exporter = GraphExporter(graph, "seed", layout=layout)
+    _, min_year, max_year = compute_node_colors(graph, "s001", get_theme("light"))
+    exporter = GraphExporter(graph, "s001", layout=layout)
     payload = exporter.graph_payload()
     marker_years, scale_min, scale_max = exporter._plotly_year_scale(
-        ["invalid", "older", "seed"]
+        ["invalid", "older", "s001"]
     )
 
     assert (min_year, max_year) == (2020, 2024)
@@ -4122,22 +4740,22 @@ def test_exporter_html_exports_are_byte_stable_with_real_plotly(
 ) -> None:
     """Plotly and dashboard HTML exports should be byte-stable for identical inputs."""
     pytest.importorskip("plotly")
-    layout = {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    layout = {"s001": (0.0, 0.0), "related": (1.0, 1.0)}
     scenarios = [
         ("plotly", "to_plotly_html", None, None),
         (
             "dashboard",
             "to_dashboard_html",
             {"strategy": "hybrid"},
-            {"related": "semantic", "seed": "citation"},
+            {"related": "semantic", "s001": "citation"},
         ),
     ]
 
     for name, method_name, metadata, paper_sources in scenarios:
-        graph, seed_id = _build_graph()
+        graph, focal_id = _build_graph()
         if paper_sources is not None:
             graph.graph["paper_sources"] = paper_sources
-        exporter = GraphExporter(graph, seed_id, metadata=metadata, layout=layout)
+        exporter = GraphExporter(graph, focal_id, metadata=metadata, layout=layout)
         out_a = tmp_path / f"first.{name}.html"
         out_b = tmp_path / f"second.{name}.html"
         getattr(exporter, method_name)(out_a)
@@ -4182,12 +4800,12 @@ def test_layout_positioning_contracts(
     )
 
     graph_1 = nx.Graph()
-    graph_1.add_nodes_from(["seed", "a", "b"])
-    graph_1.add_edges_from([("seed", "a"), ("a", "b")])
+    graph_1.add_nodes_from(["s001", "a", "b"])
+    graph_1.add_edges_from([("s001", "a"), ("a", "b")])
 
     graph_2 = nx.Graph()
-    graph_2.add_nodes_from(["b", "seed", "a"])
-    graph_2.add_edges_from([("seed", "a"), ("a", "b")])
+    graph_2.add_nodes_from(["b", "s001", "a"])
+    graph_2.add_edges_from([("s001", "a"), ("a", "b")])
 
     for layout_seed in [None, 123]:
         pos_1 = compute_layout(graph_1, iterations=10, layout_seed=layout_seed)
@@ -4196,14 +4814,31 @@ def test_layout_positioning_contracts(
             assert np.allclose(pos_1[node_id], pos_2[node_id])
 
     graph_3 = nx.Graph()
-    graph_3.add_edge("seed", "high", weight=0.9)
-    graph_3.add_edge("seed", "low", weight=0.1)
+    graph_3.add_edge("s001", "high", weight=0.9)
+    graph_3.add_edge("s001", "low", weight=0.1)
     compute_layout(graph_3, iterations=10, layout_seed=77)
 
     assert captured["weight_attr"] == KK_LAYOUT_DISTANCE_ATTR
     distances = captured["distances"]
     assert isinstance(distances, dict)
-    assert distances[("high", "seed")] < distances[("low", "seed")]
+    assert distances[("high", "s001")] < distances[("low", "s001")]
+
+    real_spring_layout = nx.spring_layout
+    spring = MagicMock(wraps=real_spring_layout)
+    monkeypatch.setattr(render_module.nx, "spring_layout", spring)
+    monkeypatch.setattr(
+        render_module.nx,
+        "kamada_kawai_layout",
+        MagicMock(side_effect=RuntimeError("forced fallback")),
+    )
+    for layout_seed in [None, 123]:
+        positions = compute_layout(graph_1, iterations=10, layout_seed=layout_seed)
+        reordered = compute_layout(graph_2, iterations=10, layout_seed=layout_seed)
+        assert all(np.isfinite(coords).all() for coords in positions.values())
+        assert all(np.allclose(positions[node], reordered[node]) for node in graph_1)
+        assert spring.call_args.kwargs["seed"] == (
+            42 if layout_seed is None else layout_seed
+        )
 
 
 def test_layout_applies_community_separation_offsets(
@@ -4432,9 +5067,9 @@ def test_get_theme_auto_reads_macos_system_appearance(
 
 def test_visualization_api_defaults_to_dark() -> None:
     """Direct exporter users should receive the same dark-first default as the CLI."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
 
-    assert GraphExporter(graph, seed_id).theme.name == "dark"
+    assert GraphExporter(graph, focal_id).theme.name == "dark"
 
 
 def test_model_profiles_match_expected_formatters() -> None:
@@ -4480,23 +5115,23 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     :param Path tmp_path: Temporary directory for exported graphs and bibliography.
     :return None: Checks enriched fields and complete authors in every export format.
     """
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     author_names = ["Alice Alpha", "Bob Beta", "Carol Gamma", "Dana Delta"]
     with SemanticScholarClient(timeout=1) as cold:
         cold._rate_limit = MagicMock()
         response = MagicMock(status_code=200)
         response.json.return_value = {
-            "paperId": seed_id,
-            "title": "Seed Paper",
+            "paperId": focal_id,
+            "title": "Focal Paper",
             "year": 2020,
-            "abstract": "Seed abstract",
+            "abstract": "Focal abstract",
             "authors": [
                 {"name": name, "authorId": str(index)}
                 for index, name in enumerate(author_names)
             ],
         }
         cold._session.get = MagicMock(return_value=response)
-        fetched = cold.get_paper(seed_id, raise_on_unavailable=True)
+        fetched = cold.get_paper(focal_id, raise_on_unavailable=True)
         assert fetched is not None
         assert [author.name for author in fetched.authors] == author_names
         cold._session.get.assert_called_once()
@@ -4505,13 +5140,13 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
         warm._session.get = MagicMock(
             side_effect=AssertionError("persisted paper must reload without the API")
         )
-        restored = warm.get_paper(seed_id, raise_on_unavailable=True)
+        restored = warm.get_paper(focal_id, raise_on_unavailable=True)
         assert restored is not None and restored is not fetched
         assert restored.authors == fetched.authors
         warm._session.get.assert_not_called()
 
-    graph.nodes[seed_id]["paper"] = restored
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "hybrid"})
+    graph.nodes[focal_id]["paper"] = restored
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "hybrid"})
 
     json_path = tmp_path / "enriched.json"
     csv_path = tmp_path / "enriched.csv"
@@ -4528,19 +5163,19 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     assert "year_range" in payload["meta"]
     nodes = payload["nodes"]
     assert len(nodes) == 2
-    seed_node = next(n for n in nodes if n["is_seed"])
-    assert "provenance" in seed_node
-    assert "seed_relevance" in seed_node
-    assert isinstance(seed_node["seed_relevance"], float)
-    assert "links" in seed_node
-    assert "bibtex" in seed_node
-    assert seed_node["provenance"] == "seed"
-    assert seed_node["seed_relation"] == "seed"
-    assert seed_node["authors"] == author_names
+    focal_node = next(n for n in nodes if n["is_focal"])
+    assert "provenance" in focal_node
+    assert "focal_relevance" in focal_node
+    assert isinstance(focal_node["focal_relevance"], float)
+    assert "links" in focal_node
+    assert "bibtex" in focal_node
+    assert focal_node["provenance"] == "focal"
+    assert focal_node["focal_relation"] == "focal"
+    assert focal_node["authors"] == author_names
     author_field = "author = {" + " and ".join(author_names) + "}"
-    assert author_field in seed_node["bibtex"]
+    assert author_field in focal_node["bibtex"]
 
-    related_node = next(n for n in nodes if not n["is_seed"])
+    related_node = next(n for n in nodes if not n["is_focal"])
     assert related_node["provenance"] in {"citation", "semantic", "both"}
     assert "links" in related_node
     assert "semantic_scholar" in related_node["links"]
@@ -4551,17 +5186,17 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     assert len(lines) == 3  # header + 2 papers
     header = lines[0]
     assert "provenance" in header
-    assert "seed_relevance" in header
+    assert "focal_relevance" in header
     assert "arxiv_url" in header
-    seed_row = next(
-        row for row in csv.DictReader(io.StringIO(csv_text)) if row["id"] == seed_id
+    focal_row = next(
+        row for row in csv.DictReader(io.StringIO(csv_text)) if row["id"] == focal_id
     )
-    assert seed_row["authors"] == "; ".join(author_names)
+    assert focal_row["authors"] == "; ".join(author_names)
 
     # --- BibTeX ---
     bib_text = bib_path.read_text()
     assert "@article{" in bib_text
-    assert "Seed Paper" in bib_text or "Related Paper" in bib_text
+    assert "Focal Paper" in bib_text or "Related Paper" in bib_text
     assert author_field in bib_text
 
 
@@ -4572,20 +5207,20 @@ def test_csv_export_neutralizes_formula_cells_and_uses_lowercase_booleans(
     formula_title = "=cmd|'/C calc'!A0"
     formula_author = "+Plus Author"
     formula_abstract = "@formula abstract"
-    graph, seed_id = _build_hostile_graph(
+    graph, focal_id = _build_hostile_graph(
         title=formula_title, abstract=formula_abstract, author=formula_author
     )
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "citation"})
 
     csv_path = tmp_path / "formula.csv"
     exporter.to_csv(csv_path)
 
     rows = list(csv.DictReader(csv_path.read_text().splitlines()))
-    seed_row = next(row for row in rows if row["id"] == seed_id)
-    assert seed_row["title"] == f"'{formula_title}"
-    assert seed_row["authors"] == f"'{formula_author}"
-    assert seed_row["abstract"] == f"'{formula_abstract}"
-    assert {row["is_seed"] for row in rows} == {"true", "false"}
+    focal_row = next(row for row in rows if row["id"] == focal_id)
+    assert focal_row["title"] == f"'{formula_title}"
+    assert focal_row["authors"] == f"'{formula_author}"
+    assert focal_row["abstract"] == f"'{formula_abstract}"
+    assert {row["is_focal"] for row in rows} == {"true", "false"}
 
 
 def test_csv_export_preserves_single_crlf_row_terminators(
@@ -4617,8 +5252,8 @@ def test_csv_export_preserves_single_crlf_row_terminators(
         write_text(path, content, newline=newline)
 
     monkeypatch.setattr(export_module, "atomic_write_text", record_newline_mode)
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    graph, focal_id = _build_graph()
+    exporter = GraphExporter(graph, focal_id, metadata={"strategy": "citation"})
     csv_path = tmp_path / "terminators.csv"
 
     exporter.to_csv(csv_path)
@@ -4636,7 +5271,7 @@ def test_empty_csv_preserves_columns_and_bibtex_has_no_entries(tmp_path: Path) -
     :param Path tmp_path: Isolated output directory.
     :return None: Checks no paper rows or bibliography records are invented.
     """
-    exporter = GraphExporter(nx.Graph(), "seed")
+    exporter = GraphExporter(nx.Graph(), "s001")
     csv_path = tmp_path / "empty.csv"
     bib_path = tmp_path / "empty.bib"
     exporter.to_csv(csv_path)
@@ -4716,7 +5351,7 @@ def test_bibtex_identifier_fields_are_not_latex_escaped(tmp_path: Path) -> None:
         title="Underscore DOI",
         year=2010,
         doi=underscore_doi,
-        is_seed=True,
+        is_focal=True,
     )
     graph.add_node("wiley", title="Wiley_Style DOI", year=1996, doi=wiley_doi)
     graph.add_edge("underscore", "wiley", weight=0.5)
@@ -4752,7 +5387,7 @@ def test_semantic_export_provenance(
     tmp_path: Path, strategy: str, strategy_source: str
 ) -> None:
     """Semantic exports should classify provenance from either strategy source."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     metadata = None
     if strategy_source == "exporter":
         metadata = {"strategy": strategy}
@@ -4761,22 +5396,22 @@ def test_semantic_export_provenance(
     if strategy == "embedding":
         graph.graph["embedding_runtime"] = {"storage_precision": "int8"}
 
-    exporter = GraphExporter(graph, seed_id, metadata=metadata)
+    exporter = GraphExporter(graph, focal_id, metadata=metadata)
     json_path = tmp_path / f"{strategy}-{strategy_source}.json"
     exporter.to_json(json_path)
 
     payload = json.loads(json_path.read_text())
     assert payload["meta"]["strategy"] == strategy
 
-    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
+    focal_node = next(node for node in payload["nodes"] if node["id"] == focal_id)
     related_node = next(node for node in payload["nodes"] if node["id"] == "related")
 
-    assert seed_node["provenance"] == "seed"
-    assert seed_node["provenance_base"] == "semantic"
-    assert seed_node["seed_relation"] == "seed"
+    assert focal_node["provenance"] == "focal"
+    assert focal_node["provenance_base"] == "semantic"
+    assert focal_node["focal_relation"] == "focal"
     assert related_node["provenance"] == "semantic"
     assert related_node["provenance_base"] == "semantic"
-    assert related_node["seed_relation"] == "semantic_only"
+    assert related_node["focal_relation"] == "semantic_only"
 
 
 def test_visualization_import_preserves_programmatically_selected_backend(
@@ -4826,17 +5461,17 @@ from citemesh.visualization import visualize_graph
 
 graph = nx.Graph()
 graph.add_node(
-    "seed", title="Seed Paper", year=2025, authors=["Seed Author"], is_seed=True
+    "s001", title="Focal Paper", year=2025, authors=["Focal Author"], is_focal=True
 )
 graph.add_node(
     "related", title="Related Paper", year=2024, authors=["Other Author"]
 )
-graph.add_edge("seed", "related", weight=0.8)
+graph.add_edge("s001", "related", weight=0.8)
 visualize_graph(
     graph,
-    "seed",
+    "s001",
     Path(sys.argv[1]),
-    layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
 )
 """
     result = subprocess.run(
@@ -4856,7 +5491,7 @@ def test_visualize_graph_uses_local_agg_canvas_for_macosx(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Static export should avoid the MacOSX GUI canvas without switching globally."""
-    graph, seed_id = _build_graph()
+    graph, focal_id = _build_graph()
     output_path = tmp_path / "graph.png"
 
     monkeypatch.setattr(render_module.matplotlib, "get_backend", lambda: "MacOSX")
@@ -4872,9 +5507,9 @@ def test_visualize_graph_uses_local_agg_canvas_for_macosx(
     )
     visualize_graph(
         graph,
-        seed_id,
+        focal_id,
         output_path,
-        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+        layout={"s001": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
     )
 
     assert output_path.stat().st_size > 0
@@ -4882,22 +5517,24 @@ def test_visualize_graph_uses_local_agg_canvas_for_macosx(
 
 def test_exports_collapse_hard_wrapped_title_and_abstract() -> None:
     """arXiv-style hard wraps leave exported text single-spaced, not the Paper."""
-    graph, seed_id = _build_graph()
-    paper = graph.nodes[seed_id]["paper"]
+    graph, focal_id = _build_graph()
+    paper = graph.nodes[focal_id]["paper"]
     paper.title = (
         "Megalodon: Efficient LLM Pretraining with Unlimited\n  Context Length"
     )
     paper.abstract = "The quadratic complexity of Transformers limits\ntheir ability."
     exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)}
+        graph, focal_id, layout={"s001": (0.0, 0.0), "related": (1.0, 0.0)}
     )
 
-    seed_node = next(n for n in exporter.graph_payload()["nodes"] if n["id"] == seed_id)
+    focal_node = next(
+        n for n in exporter.graph_payload()["nodes"] if n["id"] == focal_id
+    )
 
-    assert seed_node["title"] == (
+    assert focal_node["title"] == (
         "Megalodon: Efficient LLM Pretraining with Unlimited Context Length"
     )
-    assert seed_node["abstract"] == (
+    assert focal_node["abstract"] == (
         "The quadratic complexity of Transformers limits their ability."
     )
     assert "\n" in paper.title

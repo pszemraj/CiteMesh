@@ -1,24 +1,26 @@
 """
-Seed-relevance ranking of a hybrid discovery pool.
+Ranking by relevance to the focal paper of a hybrid discovery pool.
 
 Every candidate carries one retrieval-document vector. Ranked lists over the
 pool are fused by reciprocal rank fusion with ``k = 60``:
 
-- ``semantic``: every candidate by the cosine between the seed's and the
-  candidate's document vectors (``cos_dd``); ties by the cosine with the seed's
+- ``semantic``: every candidate by the cosine between the focal paper's and the
+  candidate's document vectors (``cos_dd``); ties by the cosine with the focal paper's
   query-role vector (``cos_q``), then paper ID.
-- ``reference_context``: every candidate with at least five seed references
+- ``reference_context``: every candidate with at least five focal paper references
   other than itself, by the mean of its five largest cosines to those
-  references (``ctx_ref_top5``); ties as ``semantic``.
-- ``direct``: candidates the seed cites or that cite the seed, by ``cos_dd``;
+  references (``ctx_ref_top5``); ties by query cosine, then paper ID.
+- ``direct``: candidates the focal paper cites or that cite the focal paper, by ``cos_dd``;
   ties by paper ID.
 - ``recommended``: the provider's recommendations in provider order, each
-  paper at its first appearance; ties by paper ID. Without recommendations the
-  list is empty and the other three decide.
+  paper at its first appearance; ties by paper ID.
+- ``focal_reference``: references cited in at least two distinct passages in the
+  focal paper or marked influential by the provider, by passage count, influence,
+  then the semantic list order. This list has weight 0.5.
 
-A candidate scores the sum of ``1 / (k + rank)`` over the lists that contain
-it, with 1-based ranks, and the final order is by score descending, then paper
-ID. Nothing is fitted and no source has a quota. Cosines are computed between
+A candidate scores the sum of ``weight / (k + rank)`` over the lists that
+contain it, with 1-based ranks and weight 1 for the other lists. The final
+order is by score descending, then paper ID. Cosines are computed between
 unit-normalized vectors, so the ranking ignores vector scale, and candidates
 are processed in paper-ID order, so it ignores input order.
 """
@@ -33,7 +35,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 RRF_K = 60
+RRF_WEIGHTS = {"focal_reference": 0.5}
 REFERENCE_CONTEXT_SIZE = 5
+FOCAL_REFERENCE_MIN_CONTEXTS = 2
 
 _SortKey = tuple[float | str, ...]
 Vector = NDArray[np.float32] | NDArray[np.float64]
@@ -45,32 +49,40 @@ class DiscoveryCandidate:
 
     :param str paper_id: Unique pool ID, also the final tie-breaker.
     :param NDArray vector: Retrieval-document vector of any positive scale.
-    :param bool is_reference: Whether the seed cites this paper.
-    :param bool cites_seed: Whether this paper cites the seed.
+    :param bool is_reference: Whether the focal paper cites this paper.
+    :param bool cites_focal: Whether this paper cites the focal paper.
     :param int | None recommendation_rank: Provider position of the paper's
         first appearance among the recommendations, or ``None`` when it was
         not recommended.
+    :param int | None focal_reference_context_count: Distinct focal passages
+        the provider associated with this citation, if available.
+    :param bool | None focal_reference_is_influential: Provider influence flag
+        for this reference, if available.
     """
 
     paper_id: str
     vector: Vector
     is_reference: bool = False
-    cites_seed: bool = False
+    cites_focal: bool = False
     recommendation_rank: int | None = None
+    focal_reference_context_count: int | None = None
+    focal_reference_is_influential: bool | None = None
 
 
 @dataclass(frozen=True)
 class CandidateFeatures:
-    """Seed-relative features of one candidate.
+    """Features relative to the focal paper of one candidate.
 
-    :param float cos_dd: Cosine with the seed's document vector.
-    :param float cos_q: Cosine with the seed's query-role vector.
+    :param float cos_dd: Cosine with the focal paper's document vector.
+    :param float cos_q: Cosine with the focal paper's query-role vector.
     :param float | None ctx_ref_top5: Mean of the five largest cosines with
-        seed references other than the candidate, or ``None`` when fewer than
+        focal paper references other than the candidate, or ``None`` when fewer than
         five such references exist.
-    :param bool direct: Whether the seed cites the candidate or the candidate
-        cites the seed.
+    :param bool direct: Whether the focal paper cites the candidate or the candidate
+        cites the focal paper.
     :param int | None recommendation_rank: Provider recommendation position.
+    :param tuple[int, bool] | None focal_reference_priority: Passage count and
+        influence flag for a focal reference eligible for the extra list.
     """
 
     cos_dd: float
@@ -78,6 +90,7 @@ class CandidateFeatures:
     ctx_ref_top5: float | None
     direct: bool
     recommendation_rank: int | None
+    focal_reference_priority: tuple[int, bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +99,7 @@ class RankedCandidate:
 
     :param str paper_id: Pool ID.
     :param int rank: 1-based position in the fused order.
-    :param float score: Sum of ``1 / (k + rank)`` over the containing lists.
+    :param float score: Sum of ``weight / (k + rank)`` over the containing lists.
     :param CandidateFeatures features: Values the lists were ordered by.
     :param Mapping[str, int] list_ranks: 1-based rank in each containing list.
     """
@@ -102,7 +115,7 @@ def _semantic_key(paper_id: str, features: CandidateFeatures) -> _SortKey:
     """Order the whole pool by document cosine, then query cosine and ID.
 
     :param str paper_id: Pool ID, the final tie-break.
-    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :param CandidateFeatures features: Features relative to the focal paper of the candidate.
     :return _SortKey: Ascending sort key, with cosines negated so larger sorts first.
     """
     return (-features.cos_dd, -features.cos_q, paper_id)
@@ -111,10 +124,10 @@ def _semantic_key(paper_id: str, features: CandidateFeatures) -> _SortKey:
 def _reference_context_key(
     paper_id: str, features: CandidateFeatures
 ) -> _SortKey | None:
-    """Order candidates with a reference context by it, then as ``semantic``.
+    """Order by reference context, then query cosine and paper ID.
 
     :param str paper_id: Pool ID, the final tie-break.
-    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :param CandidateFeatures features: Features relative to the focal paper of the candidate.
     :return _SortKey | None: Ascending sort key with the context and query cosines
         negated, or ``None`` when the candidate has no reference context.
     """
@@ -127,9 +140,9 @@ def _direct_key(paper_id: str, features: CandidateFeatures) -> _SortKey | None:
     """Order direct citation links by document cosine, then ID.
 
     :param str paper_id: Pool ID, the tie-break.
-    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :param CandidateFeatures features: Features relative to the focal paper of the candidate.
     :return _SortKey | None: Ascending sort key with the document cosine negated,
-        or ``None`` when the candidate is not directly linked to the seed.
+        or ``None`` when the candidate is not directly linked to the focal paper.
     """
     return (-features.cos_dd, paper_id) if features.direct else None
 
@@ -138,13 +151,32 @@ def _recommended_key(paper_id: str, features: CandidateFeatures) -> _SortKey | N
     """Order recommendations by provider position, then ID.
 
     :param str paper_id: Pool ID, the tie-break.
-    :param CandidateFeatures features: Seed-relative features of the candidate.
+    :param CandidateFeatures features: Features relative to the focal paper of the candidate.
     :return _SortKey | None: Ascending sort key led by the recommendation position,
         or ``None`` when the provider did not recommend the candidate.
     """
     if features.recommendation_rank is None:
         return None
     return (float(features.recommendation_rank), paper_id)
+
+
+def _focal_reference_key(paper_id: str, features: CandidateFeatures) -> _SortKey | None:
+    """Order eligible focal paper references by passages, influence and semantic rank."""
+    if features.focal_reference_priority is None:
+        return None
+    context_count, influential = features.focal_reference_priority
+    return (-context_count, -int(influential), *_semantic_key(paper_id, features))
+
+
+def _focal_reference_priority(candidate: DiscoveryCandidate) -> tuple[int, bool] | None:
+    """Use provider evidence only for a citation made by the focal paper."""
+    context_count = candidate.focal_reference_context_count or 0
+    influential = candidate.focal_reference_is_influential is True
+    if candidate.is_reference and (
+        context_count >= FOCAL_REFERENCE_MIN_CONTEXTS or influential
+    ):
+        return context_count, influential
+    return None
 
 
 # The fused lists, in summation order. A key returns ``None`` for a candidate
@@ -156,6 +188,7 @@ FUSED_LISTS: tuple[
     ("reference_context", _reference_context_key),
     ("direct", _direct_key),
     ("recommended", _recommended_key),
+    ("focal_reference", _focal_reference_key),
 )
 
 
@@ -172,27 +205,27 @@ def _unit_rows(vectors: Sequence[Vector]) -> NDArray[np.float64]:
 def compute_features(
     candidates: Sequence[DiscoveryCandidate],
     *,
-    seed_document: Vector,
-    seed_query: Vector,
+    focal_document: Vector,
+    focal_query: Vector,
 ) -> dict[str, CandidateFeatures]:
-    """Compute every candidate's seed-relative features.
+    """Compute every candidate's features relative to the focal paper.
 
     The reference set for ``ctx_ref_top5`` is the candidates flagged as
     references; each candidate is compared with the references other than
     itself. Callers validate the vectors: finite, nonzero and of one length.
 
     :param Sequence[DiscoveryCandidate] candidates: Pool members with unique IDs.
-    :param NDArray seed_document: Seed's retrieval-document vector.
-    :param NDArray seed_query: Seed's retrieval-query vector.
+    :param NDArray focal_document: Focal paper's retrieval-document vector.
+    :param NDArray focal_query: Focal paper's retrieval-query vector.
     :return dict[str, CandidateFeatures]: Features keyed by paper ID, in ID order.
     """
     ordered = sorted(candidates, key=lambda candidate: candidate.paper_id)
     if not ordered:
         return {}
-    seed_vectors = _unit_rows([seed_document, seed_query])
+    focal_vectors = _unit_rows([focal_document, focal_query])
     vectors = _unit_rows([candidate.vector for candidate in ordered])
-    cos_dd = vectors @ seed_vectors[0]
-    cos_q = vectors @ seed_vectors[1]
+    cos_dd = vectors @ focal_vectors[0]
+    cos_q = vectors @ focal_vectors[1]
 
     reference_rows = [
         row for row, candidate in enumerate(ordered) if candidate.is_reference
@@ -219,8 +252,9 @@ def compute_features(
             cos_dd=float(cos_dd[row]),
             cos_q=float(cos_q[row]),
             ctx_ref_top5=context[row],
-            direct=candidate.is_reference or candidate.cites_seed,
+            direct=candidate.is_reference or candidate.cites_focal,
             recommendation_rank=candidate.recommendation_rank,
+            focal_reference_priority=_focal_reference_priority(candidate),
         )
         for row, candidate in enumerate(ordered)
     }
@@ -246,11 +280,10 @@ def fused_lists(features: Mapping[str, CandidateFeatures]) -> dict[str, list[str
 def reciprocal_rank_fusion(
     lists: Mapping[str, Sequence[str]],
 ) -> list[tuple[str, float]]:
-    """Fuse ranked lists by summing ``1 / (RRF_K + rank)`` per containing list.
+    """Fuse lists by summing ``weight / (RRF_K + rank)`` per containing list.
 
-    Each score is a correctly rounded sum (:func:`math.fsum`), so papers with
-    the same ranks in any lists, in any list order, score identical floats and
-    the tie-break by paper ID decides between them.
+    The correctly rounded sum (:func:`math.fsum`) preserves ties between
+    papers with the same weighted terms regardless of list order.
 
     :param Mapping[str, Sequence[str]] lists: Ranked paper IDs per list, best
         first, each ID at most once per list.
@@ -258,9 +291,10 @@ def reciprocal_rank_fusion(
         then paper ID.
     """
     terms: dict[str, list[float]] = {}
-    for ranked in lists.values():
+    for name, ranked in lists.items():
+        weight = RRF_WEIGHTS.get(name, 1.0)
         for rank, paper_id in enumerate(ranked, start=1):
-            terms.setdefault(paper_id, []).append(1.0 / (RRF_K + rank))
+            terms.setdefault(paper_id, []).append(weight / (RRF_K + rank))
     scores = [(paper_id, math.fsum(values)) for paper_id, values in terms.items()]
     return sorted(scores, key=lambda item: (-item[1], item[0]))
 
@@ -268,19 +302,19 @@ def reciprocal_rank_fusion(
 def rank_candidates(
     candidates: Sequence[DiscoveryCandidate],
     *,
-    seed_document: Vector,
-    seed_query: Vector,
+    focal_document: Vector,
+    focal_query: Vector,
 ) -> list[RankedCandidate]:
     """Rank a discovery pool by reciprocal rank fusion of :data:`FUSED_LISTS`.
 
     :param Sequence[DiscoveryCandidate] candidates: Pool members with unique IDs
         and validated vectors.
-    :param NDArray seed_document: Seed's retrieval-document vector.
-    :param NDArray seed_query: Seed's retrieval-query vector.
+    :param NDArray focal_document: Focal paper's retrieval-document vector.
+    :param NDArray focal_query: Focal paper's retrieval-query vector.
     :return list[RankedCandidate]: Every candidate, best first.
     """
     features = compute_features(
-        candidates, seed_document=seed_document, seed_query=seed_query
+        candidates, focal_document=focal_document, focal_query=focal_query
     )
     lists = fused_lists(features)
     list_ranks: dict[str, dict[str, int]] = {paper_id: {} for paper_id in features}

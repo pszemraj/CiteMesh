@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import requests
+from rich.console import Console
 
+from citemesh import progress as progress_module
 from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data.cache import JSONValue
 from citemesh.services import semantic_scholar as s2
@@ -24,6 +27,15 @@ from citemesh.services.semantic_scholar import (
     reset_client,
 )
 from tests._helpers import get_paper_id_normalization_cases
+
+
+@pytest.fixture
+def provider_progress(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
+    """Record provider progress counts and context cleanup without rendering."""
+    context = MagicMock()
+    factory = MagicMock(return_value=context)
+    monkeypatch.setattr(s2.endpoints, "progress_task", factory)
+    return factory, context
 
 
 class _MockResponse:
@@ -319,7 +331,7 @@ def test_cache_writes_one_canonical_record_and_alias_stubs() -> None:
         doi="10.1/example",
         arxiv_id="2401.00001",
         references=["ignored"],
-        is_seed=True,
+        is_focal=True,
     )
     s2.disk_cache._persist_paper(paper, "requested")
 
@@ -328,11 +340,20 @@ def test_cache_writes_one_canonical_record_and_alias_stubs() -> None:
     )
     assert canonical["paper"]["title"] == "Canonical"
     assert canonical["paper"]["references"] == []
-    assert canonical["paper"]["is_seed"] is False
+    assert "is_focal" not in canonical["paper"]
     for alias in ("requested", "10.1/example", "arxiv:2401.00001"):
         assert json.loads(
             s2.disk_cache._paper_cache_path(alias).read_text(encoding="utf-8")
         ) == {"version": 2, "canonical_paper_id": "S2-CANON"}
+
+    # Existing v2 caches stored this neutral role alongside complete metadata.
+    canonical["paper"]["is_seed"] = False
+    s2.disk_cache._paper_cache_path("S2-CANON").write_text(
+        json.dumps(canonical), encoding="utf-8"
+    )
+    cached = s2.disk_cache._load_cached_paper("requested")
+    assert cached is not None
+    assert cached.title == "Canonical" and cached.is_focal is False
 
 
 def test_alias_reads_follow_canonical_refresh_and_return_fresh_instances() -> None:
@@ -529,6 +550,7 @@ def test_get_papers_fetches_only_misses_and_preserves_request_order() -> None:
 
 def test_get_papers_splits_arbitrary_missing_count_at_500(
     monkeypatch: pytest.MonkeyPatch,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """A public bulk call splits missing IDs into valid provider batches.
 
@@ -559,10 +581,25 @@ def test_get_papers_splits_arbitrary_missing_count_at_500(
         len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
     ] == [500, 500, 1]
     assert [call.args[1] for call in persist_paper.call_args_list] == ids
+    factory, context = provider_progress
+    factory.assert_called_once_with(
+        total=1001,
+        description="Fetching paper metadata",
+        unit="papers",
+        enabled=None,
+    )
+    assert context.__enter__.return_value.update.call_args_list == [
+        call(500),
+        call(500),
+        call(1),
+    ]
+    context.__exit__.assert_called_once()
 
 
 def test_tolerant_get_papers_warns_after_unavailable_batch(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """A failed metadata batch emits one actionable availability warning.
 
@@ -599,6 +636,9 @@ def test_tolerant_get_papers_warns_after_unavailable_batch(
     ]
     assert len(warnings) == 1
     assert "batch fetching 500 papers" in warnings[0]
+    _factory, context = provider_progress
+    context.__enter__.return_value.update.assert_called_once_with(500)
+    context.__exit__.assert_called_once()
 
 
 @pytest.mark.parametrize("refresh_paper_cache", [False, True])
@@ -671,7 +711,7 @@ def test_get_papers_aggregates_malformed_rows_into_one_warning(
 @pytest.mark.parametrize(
     ("paper_id", "url_id"),
     [
-        ("seed", "seed"),
+        ("focal", "focal"),
         ("DOI:10.1000/example", "10.1000/example"),
         ("arXiv:hep-th/9901001", "arxiv%3Ahep-th/9901001"),
     ],
@@ -684,14 +724,19 @@ def test_get_papers_aggregates_malformed_rows_into_one_warning(
     ],
 )
 def test_relation_discovery_pages_inline_metadata_without_batch(
-    method: str, relation: str, nested: str, paper_id: str, url_id: str
+    method: str,
+    relation: str,
+    nested: str,
+    paper_id: str,
+    url_id: str,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """Relation discovery pages and deduplicates rows that carry full metadata.
 
     :param str method: Public relation method.
     :param str relation: Relation endpoint segment.
     :param str nested: Nested response paper key.
-    :param str paper_id: Seed identifier, including slash-bearing DOI/arXiv IDs.
+    :param str paper_id: Focal paper identifier, including slash-bearing DOI/arXiv IDs.
     :param str url_id: Expected normalized and quoted identifier in the URL.
     :return None: Verifies paging, inline fields, and the absent batch request.
     """
@@ -709,17 +754,28 @@ def test_relation_discovery_pages_inline_metadata_without_batch(
         for related_id in ("a", "b")
     ]
     assert client._session.get.call_count == 2
-    for call in client._session.get.call_args_list:
-        assert call.args[0] == f"{s2.endpoints.PAPER_BASE_URL}/{url_id}/{relation}"
-        assert call.kwargs["params"]["fields"] == ",".join(
+    for request_call in client._session.get.call_args_list:
+        assert (
+            request_call.args[0] == f"{s2.endpoints.PAPER_BASE_URL}/{url_id}/{relation}"
+        )
+        assert request_call.kwargs["params"]["fields"] == ",".join(
             s2.payloads.DEFAULT_PAPER_FIELDS
         )
     client._session.post.assert_not_called()
     assert client._session.get.call_args_list[1].kwargs["params"]["offset"] == 2
+    factory, context = provider_progress
+    factory.assert_called_once_with(
+        total=None,
+        description=f"Collecting focal {relation}",
+        unit="papers",
+    )
+    assert context.__enter__.return_value.update.call_args_list == [call(1), call(1)]
+    context.__exit__.assert_called_once()
 
 
 def test_relation_retries_only_failed_page_and_every_invocation_is_fresh(
     monkeypatch: pytest.MonkeyPatch,
+    provider_progress: tuple[MagicMock, MagicMock],
 ) -> None:
     """A failed page retries at its offset and no memo suppresses a later call.
 
@@ -736,17 +792,99 @@ def test_relation_retries_only_failed_page_and_every_invocation_is_fresh(
     with SemanticScholarClient(api_key="", retry_budget_seconds=0) as client:
         _disable_pacing(client)
         client._session.get = MagicMock(side_effect=responses)
-        assert [p.paper_id for p in client.get_paper_references("seed", limit=2)] == [
+        assert [p.paper_id for p in client.get_paper_references("focal", limit=2)] == [
             "a",
             "b",
         ]
-        assert [p.paper_id for p in client.get_paper_references("seed", limit=1)] == [
+        assert [p.paper_id for p in client.get_paper_references("focal", limit=1)] == [
             "a"
         ]
     offsets = [
         call.kwargs["params"]["offset"] for call in client._session.get.call_args_list
     ]
     assert offsets == [0, 1, 1, 0]
+    _factory, context = provider_progress
+    assert context.__enter__.return_value.update.call_args_list == [
+        call(1),
+        call(1),
+        call(1),
+    ]
+    assert context.__exit__.call_count == 2
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_discovery_progress_closes_after_an_unavailable_page(
+    provider_progress: tuple[MagicMock, MagicMock], strict: bool
+) -> None:
+    """A failed discovery closes its display before returning or propagating."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(return_value=_MockResponse(404))
+        if strict:
+            with pytest.raises(SemanticScholarUnavailableError):
+                client.get_paper_citations("missing", raise_on_unavailable=True)
+        else:
+            assert client.get_paper_citations("missing") == []
+    _factory, context = provider_progress
+    context.__enter__.return_value.update.assert_not_called()
+    context.__exit__.assert_called_once()
+
+
+def test_reference_hydration_does_not_create_nested_provider_progress(
+    provider_progress: tuple[MagicMock, MagicMock],
+) -> None:
+    """Only discovery owns page progress; the hydration loop owns paper progress."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(
+                200, _relation_payload(["reference"], "citedPaper")
+            )
+        )
+        assert client.get_reference_ids("focal") == ["reference"]
+    factory, _context = provider_progress
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tty", "enabled"), [(True, True), (False, True), (True, False)]
+)
+def test_discovery_progress_obeys_shared_terminal_and_verbosity_policy(
+    monkeypatch: pytest.MonkeyPatch, tty: bool, enabled: bool
+) -> None:
+    """Discovery progress is visible only on an interactive, permitted console."""
+    output = io.StringIO()
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: tty)
+    monkeypatch.setattr(progress_module, "_progress_enabled", enabled)
+    monkeypatch.setattr(
+        progress_module,
+        "_progress_console",
+        Console(file=output, force_terminal=True, no_color=True, width=100),
+    )
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, _relation_payload(["citer"], "citingPaper"))
+        )
+        assert [paper.paper_id for paper in client.get_paper_citations("focal")] == [
+            "citer"
+        ]
+    assert ("Collecting focal citations" in output.getvalue()) is (tty and enabled)
+
+
+@pytest.mark.parametrize("missing", [0, 1, 500])
+def test_metadata_progress_hides_single_batches(
+    provider_progress: tuple[MagicMock, MagicMock], missing: int
+) -> None:
+    """One request has no incremental batches and must not nest recovery bars."""
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            return_value=_MockResponse(200, [None] * missing)
+        )
+        assert client.get_papers([f"missing-{index}" for index in range(missing)]) == {}
+    factory, _context = provider_progress
+    assert factory.call_args.kwargs["enabled"] is False
 
 
 def test_relation_null_missing_and_malformed_contracts() -> None:
@@ -781,13 +919,13 @@ def test_reference_cache_empty_legacy_normalization_corruption_and_failure(
     :param pytest.MonkeyPatch monkeypatch: Patches retry delay.
     :return None: Verifies reference cache resilience.
     """
-    path = s2.disk_cache._reference_cache_path("seed")
+    path = s2.disk_cache._reference_cache_path("focal")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "version": 1,
-                "paper_id": "seed",
+                "paper_id": "focal",
                 "references": ["a", {"paper": {"paperId": "b"}}, "a"],
             }
         ),
@@ -795,13 +933,13 @@ def test_reference_cache_empty_legacy_normalization_corruption_and_failure(
     )
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
-        assert client.get_reference_ids("seed") == ["a", "b"]
+        assert client.get_reference_ids("focal") == ["a", "b"]
         assert json.loads(path.read_text())["references"] == ["a", "b"]
         path.write_text("not-json", encoding="utf-8")
         client._session.get = MagicMock(
             return_value=_MockResponse(200, _relation_payload([], "citedPaper"))
         )
-        assert client.get_reference_ids("seed") == []
+        assert client.get_reference_ids("focal") == []
         assert client._session.get.call_args.kwargs["params"]["fields"] == "paperId"
 
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
@@ -829,14 +967,14 @@ def test_get_paper_with_references_raises_when_reference_fetch_is_unavailable(
         _disable_pacing(client)
         client._session.get = MagicMock(
             side_effect=[
-                _MockResponse(200, _paper_payload("seed-with-unavailable-references")),
+                _MockResponse(200, _paper_payload("focal-with-unavailable-references")),
                 _MockResponse(503),
             ]
         )
         with pytest.raises(
             SemanticScholarUnavailableError, match="fetching references"
         ):
-            client.get_paper("seed-with-unavailable-references", fetch_references=True)
+            client.get_paper("focal-with-unavailable-references", fetch_references=True)
 
 
 @pytest.mark.parametrize(
@@ -863,7 +1001,7 @@ def test_recommendations_fallback_when_recent_returns_no_papers(
             ]
         )
         client._session.post = MagicMock()
-        papers = client.get_recommended_papers("seed", raise_on_unavailable=True)
+        papers = client.get_recommended_papers("focal", raise_on_unavailable=True)
     assert [paper.paper_id for paper in papers] == ["b", "a"]
     assert "from" not in client._session.get.call_args_list[0].kwargs["params"]
     assert client._session.get.call_args_list[1].kwargs["params"]["from"] == "all-cs"
@@ -886,7 +1024,7 @@ def test_recommendations_parse_inline_metadata_without_batch_or_cache() -> None:
         client._session.get = fetch
         client._session.post = MagicMock()
         papers = client.get_recommended_papers(
-            "seed", limit=200, raise_on_unavailable=True, pool="all-cs"
+            "focal", limit=200, raise_on_unavailable=True, pool="all-cs"
         )
 
     assert [(paper.paper_id, paper.title) for paper in papers] == [
@@ -924,13 +1062,13 @@ def test_recommendations_can_query_all_cs_directly(
         client._session.post = MagicMock()
         if expected_error is None:
             papers = client.get_recommended_papers(
-                "seed", limit=2, raise_on_unavailable=True, pool="all-cs"
+                "focal", limit=2, raise_on_unavailable=True, pool="all-cs"
             )
             assert [paper.paper_id for paper in papers] == paper_ids
         else:
             with pytest.raises(expected_error, match=f"HTTP {status}"):
                 client.get_recommended_papers(
-                    "seed", limit=2, raise_on_unavailable=True, pool="all-cs"
+                    "focal", limit=2, raise_on_unavailable=True, pool="all-cs"
                 )
 
     client._session.get.assert_called_once()
@@ -967,7 +1105,7 @@ def test_custom_projection_adds_paper_id_and_never_overwrites_complete_cache() -
             ]
         )
         assert (
-            client.get_recommended_papers("seed", fields=["title"])[0].title
+            client.get_recommended_papers("focal", fields=["title"])[0].title
             == "Partial"
         )
         assert client.search_papers("query", fields=["title"])[0].title == "Search"
@@ -997,7 +1135,7 @@ def test_complete_explicit_projection_is_cacheable_and_recommendations_filter_re
                 200, {"recommendedPapers": [_paper_payload("p1")]}
             )
         )
-        assert client.get_recommended_papers("seed", fields=fields)[0].paper_id == "p1"
+        assert client.get_recommended_papers("focal", fields=fields)[0].paper_id == "p1"
     sent = client._session.get.call_args.kwargs["params"]["fields"].split(",")
     assert "references" not in sent
     assert s2.disk_cache._load_cached_paper("p1") is not None
@@ -1025,7 +1163,7 @@ def test_custom_projection_recommendations_keep_first_row_per_paper(
         client._session.get = MagicMock(
             return_value=_MockResponse(200, {"recommendedPapers": rows})
         )
-        papers = client.get_recommended_papers("seed", fields=fields, pool="all-cs")
+        papers = client.get_recommended_papers("focal", fields=fields, pool="all-cs")
 
     assert [(paper.paper_id, paper.title) for paper in papers] == [
         ("b", "Second"),
@@ -1164,42 +1302,121 @@ def test_transient_transport_errors_retry(
 
 
 @pytest.mark.parametrize(
-    ("delay", "failed_attempts"),
-    [(30.0, 2), (15.0, 3)],
+    ("delay", "failed_attempts", "announced_attempts"),
+    [(30.0, 2, [2, 3]), (15.0, 4, [3, 5])],
     ids=["single-wait", "cumulative-waits"],
 )
-def test_retry_waits_warn_once_after_thirty_cumulative_seconds(
+@pytest.mark.parametrize(
+    ("status_code", "status"),
+    [(429, "rate-limited"), (503, "temporarily unavailable")],
+)
+def test_retry_waits_report_brief_status_after_thirty_cumulative_seconds(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     delay: float,
     failed_attempts: int,
+    announced_attempts: list[int],
+    status_code: int,
+    status: str,
 ) -> None:
-    """Retry delays disclose one actionable warning after a long accumulated wait.
-
-    :param pytest.MonkeyPatch monkeypatch: Replaces retry timing and sleeping.
-    :param pytest.LogCaptureFixture caplog: Captured retry disclosure.
-    :param float delay: Fixed delay after every failed attempt.
-    :param int failed_attempts: Number of transient failures before success.
-    :return None: Verifies quiet retry logs do not hide prolonged recovery.
-    """
+    """Long waits report ongoing attempts and the operation awaiting a response."""
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: delay)
     monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
     with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
-            side_effect=[_MockResponse(503)] * failed_attempts
+            side_effect=[_MockResponse(status_code)] * failed_attempts
             + [_MockResponse(200, _paper_payload("p1"))]
         )
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
 
-    warnings = [
+    visible = [
         record.getMessage()
         for record in caplog.records
-        if record.levelno == logging.WARNING
+        if record.levelno >= logging.INFO
     ]
-    assert len(warnings) == 1
-    assert f"waiting {delay:.0f}s (30s total retry delay)" in warnings[0]
+    assert visible == [
+        f"Semantic Scholar is {status} while fetching paper details. "
+        f"Attempt {attempt}/{API_CONFIG.max_retries} in {delay:.0f}s."
+        for attempt in announced_attempts
+    ]
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+        and "Semantic Scholar request failed" in record.getMessage()
+    ]
+    assert len(diagnostics) == failed_attempts
+    assert all("while fetching p1 (attempt " in message for message in diagnostics)
+    assert all(
+        f"HTTP {status_code} from https://" in message for message in diagnostics
+    )
+
+
+def test_retry_notice_omits_provider_identifiers_and_offsets(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The INFO notice names the operation; IDs and offsets stay at DEBUG."""
+    paper_id = "1296631b36a3b390466978f4fd80b683bf13573a"
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 43.0)
+    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(429),
+                _MockResponse(200, _relation_payload(["reference"], "citedPaper")),
+            ]
+        )
+        with caplog.at_level(logging.DEBUG):
+            assert client.get_reference_ids(paper_id, force_refresh=True) == [
+                "reference"
+            ]
+
+    visible = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.INFO
+    ]
+    assert visible == [
+        "Semantic Scholar is rate-limited while fetching references. "
+        f"Attempt 2/{API_CONFIG.max_retries} in 43s."
+    ]
+    assert paper_id not in visible[0]
+    assert "offset" not in visible[0]
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+        and "Semantic Scholar request failed" in record.getMessage()
+    ]
+    assert len(diagnostics) == 1
+    assert (
+        f"while fetching references for {paper_id} at offset 0 (attempt 1/"
+        in diagnostics[0]
+    )
+
+
+def test_short_retry_waits_only_log_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A quick recovery should not interrupt ordinary progress output."""
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 1.0)
+    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(503),
+                _MockResponse(200, _paper_payload("p1")),
+            ]
+        )
+        with caplog.at_level(logging.DEBUG):
+            assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
+
+    assert not [record for record in caplog.records if record.levelno >= logging.INFO]
+    assert "retrying in 1.0s: HTTP 503 from https://" in caplog.text
 
 
 def test_retry_after_cap_and_nonfinite_values() -> None:
@@ -1479,7 +1696,7 @@ def test_relation_records_bypass_and_never_write_paper_cache() -> None:
             )
         )
         client._session.post = MagicMock()
-        papers = client.get_paper_references("seed")
+        papers = client.get_paper_references("focal")
     client._session.post.assert_not_called()
     assert [(paper.paper_id, paper.title) for paper in papers] == [
         ("warm", "Paper"),
@@ -1489,6 +1706,59 @@ def test_relation_records_bypass_and_never_write_paper_cache() -> None:
     assert cached is not None
     assert cached.title == "Warm"
     assert s2.disk_cache._load_cached_paper("cold") is None
+
+
+def test_focal_reference_evidence_comes_from_the_same_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An opt-in focal reference listing captures evidence without extra requests or cached text."""
+    monkeypatch.setattr(s2.endpoints, "GRAPH_RELATION_PAGE_SIZE", 2)
+    pages = [
+        {
+            "data": [
+                {
+                    "citedPaper": _paper_payload("p1"),
+                    "contexts": [" First\nexcerpt ", "First excerpt", "  ", None],
+                    "isInfluential": False,
+                },
+                {"citedPaper": _paper_payload("p2"), "isInfluential": False},
+            ],
+            "next": 2,
+        },
+        {
+            "data": [
+                {
+                    "citedPaper": _paper_payload("p1"),
+                    "contexts": ["First excerpt", "Second excerpt"],
+                    "isInfluential": True,
+                },
+                {"citedPaper": _paper_payload("p3"), "isInfluential": None},
+            ]
+        },
+    ]
+    evidence: dict[str, s2.endpoints.ReferenceEvidence] = {}
+    with SemanticScholarClient(api_key="") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[_MockResponse(200, page) for page in pages]
+        )
+        papers = client.get_paper_references(
+            "focal", limit=4, reference_evidence=evidence
+        )
+        assert [paper.paper_id for paper in papers] == ["p1", "p2", "p3"]
+        assert client.get_cached_reference_ids("focal") == ["p1", "p2", "p3"]
+        calls = client._session.get.call_args_list
+    assert [call.kwargs["params"]["offset"] for call in calls] == [0, 2]
+    assert [call.kwargs["params"]["limit"] for call in calls] == [2, 2]
+    assert all(
+        {"contexts", "isInfluential"} <= set(call.kwargs["params"]["fields"].split(","))
+        for call in calls
+    )
+    assert evidence == {
+        "p1": s2.endpoints.ReferenceEvidence(("First excerpt", "Second excerpt"), True),
+        "p2": s2.endpoints.ReferenceEvidence(is_influential=False),
+    }
+    assert s2.disk_cache._load_cached_paper("p1") is None
 
 
 def test_cache_operation_scope_uses_outer_lock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1698,7 +1968,7 @@ def test_repeated_relation_discovery_refetches_pages_only(
             assert [
                 paper.paper_id
                 for paper in getattr(client, method)(
-                    "seed", limit=1, raise_on_unavailable=True
+                    "focal", limit=1, raise_on_unavailable=True
                 )
             ] == [raw_id]
 
@@ -1765,7 +2035,7 @@ def test_relation_records_equal_batch_records_for_the_same_payload(
         _disable_pacing(client)
         client._session.get = MagicMock(side_effect=pages)
         client._session.post = MagicMock()
-        papers = getattr(client, method)("seed", limit=10, raise_on_unavailable=True)
+        papers = getattr(client, method)("focal", limit=10, raise_on_unavailable=True)
     client._session.post.assert_not_called()
     assert all(s2.disk_cache._load_cached_paper(paper_id) is None for paper_id in ids)
 
@@ -1816,19 +2086,19 @@ def test_complete_reference_listing_populates_reference_cache(
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._session.get = MagicMock(side_effect=responses("citedPaper"))
-        reference_ids = client.get_reference_ids("seed", force_refresh=True)
-        s2.disk_cache._reference_cache_path("seed").unlink()
+        reference_ids = client.get_reference_ids("focal", force_refresh=True)
+        s2.disk_cache._reference_cache_path("focal").unlink()
 
         client._session.get = MagicMock(side_effect=responses(nested_key))
         getattr(client, f"get_paper_{relation}")(
-            "seed", limit=limit, raise_on_unavailable=True
+            "focal", limit=limit, raise_on_unavailable=True
         )
-        assert client.get_cached_reference_ids("seed") == (
+        assert client.get_cached_reference_ids("focal") == (
             reference_ids if complete else None
         )
         if complete:
             client._session.get = MagicMock()
-            assert client.get_reference_ids("seed") == reference_ids
+            assert client.get_reference_ids("focal") == reference_ids
             client._session.get.assert_not_called()
 
 
@@ -1855,7 +2125,7 @@ def test_unconvertible_relation_rows_warn_only_when_most_are_dropped(
             return_value=_MockResponse(200, _relation_page(rows, "citingPaper"))
         )
         with caplog.at_level(logging.DEBUG):
-            papers = client.get_paper_citations("seed", limit=10)
+            papers = client.get_paper_citations("focal", limit=10)
 
     assert len(papers) == 5 - malformed
     [record] = [
@@ -1887,7 +2157,7 @@ def test_unusable_recommendation_rows_warn_only_when_most_are_dropped(
             return_value=_MockResponse(200, {"recommendedPapers": rows})
         )
         with caplog.at_level(logging.DEBUG):
-            papers = client.get_recommended_papers("seed", pool="all-cs")
+            papers = client.get_recommended_papers("focal", pool="all-cs")
 
     assert [paper.paper_id for paper in papers] == ["p2"]
     [record] = [
@@ -1902,11 +2172,13 @@ def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None
 
     :return None: Verifies reference enrichment remains independent from discovery.
     """
-    seed = "arxiv:1706.03762"
+    focal = "arxiv:1706.03762"
     with SemanticScholarClient(api_key="") as client:
         _disable_pacing(client)
         client._persist_reference_cache_entry(
-            s2.disk_cache._reference_cache_path(seed), seed, ["old-a", "old-b", "old-c"]
+            s2.disk_cache._reference_cache_path(focal),
+            focal,
+            ["old-a", "old-b", "old-c"],
         )
         client._session.get = MagicMock(
             return_value=_MockResponse(
@@ -1915,18 +2187,18 @@ def test_complete_reference_cache_does_not_cap_fresh_limited_discovery() -> None
         )
         client._session.post = MagicMock()
 
-        assert client.get_reference_ids(seed) == ["old-a", "old-b", "old-c"]
+        assert client.get_reference_ids(focal) == ["old-a", "old-b", "old-c"]
         client._session.get.assert_not_called()
         assert [
             paper.paper_id
             for paper in client.get_paper_references(
-                seed, limit=1, raise_on_unavailable=True
+                focal, limit=1, raise_on_unavailable=True
             )
         ] == ["current"]
         assert client._session.get.call_args.kwargs["params"]["limit"] == 1
 
     client._session.post.assert_not_called()
-    assert client.get_cached_reference_ids(seed) == ["old-a", "old-b", "old-c"]
+    assert client.get_cached_reference_ids(focal) == ["old-a", "old-b", "old-c"]
 
 
 @pytest.mark.parametrize(
@@ -1954,7 +2226,7 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
             Paper(paper_id="warm", title="Warm metadata", year=2020), "warm"
         )
         client._persist_reference_cache_entry(
-            s2.disk_cache._reference_cache_path("seed"), "seed", ["old-reference"]
+            s2.disk_cache._reference_cache_path("focal"), "focal", ["old-reference"]
         )
 
         if failure == "fallback":
@@ -1974,7 +2246,7 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
                 :return list[Paper]: Empty recommendations for tolerant callers.
                 """
                 return client.get_recommended_papers(
-                    "seed", limit=1, raise_on_unavailable=raise_on_unavailable
+                    "focal", limit=1, raise_on_unavailable=raise_on_unavailable
                 )
 
         else:
@@ -1999,7 +2271,7 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
                 :return list[Paper]: Empty relation records for tolerant callers.
                 """
                 return client.get_paper_references(
-                    "seed", limit=2, raise_on_unavailable=raise_on_unavailable
+                    "focal", limit=2, raise_on_unavailable=raise_on_unavailable
                 )
 
         if raise_on_unavailable:
@@ -2011,6 +2283,6 @@ def test_failed_required_discovery_preserves_existing_persistent_records(
         cached = s2.disk_cache._load_cached_paper("warm")
         assert cached is not None
         assert cached.title == "Warm metadata"
-        assert client.get_cached_reference_ids("seed") == ["old-reference"]
+        assert client.get_cached_reference_ids("focal") == ["old-reference"]
 
     client._session.post.assert_not_called()

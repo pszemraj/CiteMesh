@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 import citemesh.data.embedding_cache as embedding_cache_module
+from citemesh.core.config import EMBEDDING_STORAGE_CONFIG
 from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import (
     BINARY_INDEX_DATASET_NAME,
@@ -316,7 +317,7 @@ def _make_prefetch_proxy(
 
 
 def _set_test_int8_calibration(cache: EmbeddingCache, embedding_dim: int = 2) -> None:
-    """Seed deterministic calibration ranges for direct int8 cache tests.
+    """Initialize deterministic calibration ranges for direct int8 cache tests.
 
     :param EmbeddingCache cache: Cache instance under test.
     :param int embedding_dim: Embedding width covered by the ranges.
@@ -589,15 +590,15 @@ def test_embedding_cache_recovers_failed_append_on_same_instance(
         storage_precision=storage_precision,
     )
     _set_test_int8_calibration(cache)
-    seed = {"p1": {"title": "Seed", "abstract": "x"}}
+    initial = {"p1": {"title": "Initial", "abstract": "x"}}
     appended = {"p2": {"title": "Append", "abstract": "y"}}
     model = LookupEncodeModel(
         {
-            "Seed. x": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Initial. x": np.asarray([1.0, 0.0], dtype=np.float32),
             "Append. y": np.asarray([0.0, 1.0], dtype=np.float32),
         }
     )
-    cache.get_embeddings(seed, model, show_progress=False)
+    cache.get_embeddings(initial, model, show_progress=False)
     cache.mark_hydrated(
         dataset_source="test-corpus",
         dataset_split="train",
@@ -605,8 +606,8 @@ def test_embedding_cache_recovers_failed_append_on_same_instance(
         complete=True,
     )
     with h5py.File(cache.h5_path, "r") as h5:
-        seed_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
-        seed_binary = (
+        initial_embeddings = h5[EMBEDDINGS_DATASET_NAME][:].copy()
+        initial_binary = (
             h5[BINARY_INDEX_DATASET_NAME][:].copy()
             if BINARY_INDEX_DATASET_NAME in h5
             else None
@@ -626,11 +627,11 @@ def test_embedding_cache_recovers_failed_append_on_same_instance(
         )
     with h5py.File(cache.h5_path, "r") as h5:
         assert h5[EMBEDDINGS_DATASET_NAME].shape[0] == 2
-        if seed_binary is not None:
+        if initial_binary is not None:
             assert h5[BINARY_INDEX_DATASET_NAME].shape[0] == 2
 
     if recovery_operation == "get":
-        assert set(cache.get_embeddings(seed, model, show_progress=False)) == {"p1"}
+        assert set(cache.get_embeddings(initial, model, show_progress=False)) == {"p1"}
     else:
         results = cache.search(
             np.asarray([1.0, 0.0], dtype=np.float32),
@@ -648,9 +649,13 @@ def test_embedding_cache_recovers_failed_append_on_same_instance(
         corpus_size=1,
     )
     with h5py.File(cache.h5_path, "r") as h5:
-        np.testing.assert_array_equal(h5[EMBEDDINGS_DATASET_NAME][:], seed_embedding)
-        if seed_binary is not None:
-            np.testing.assert_array_equal(h5[BINARY_INDEX_DATASET_NAME][:], seed_binary)
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], initial_embeddings
+        )
+        if initial_binary is not None:
+            np.testing.assert_array_equal(
+                h5[BINARY_INDEX_DATASET_NAME][:], initial_binary
+            )
 
     cache.upsert_embeddings(appended, model, show_progress=False)
     assert cache.embedding_count() == 2
@@ -893,8 +898,10 @@ def test_embedding_cache_append_syncs_vectors_before_mapping_rows(
     monkeypatch.setattr(cache, "_connect_db", recording_connect_db)
     monkeypatch.setattr(cache, "_flush_h5_file", recording_flush)
     cache.get_embeddings(
-        {"p1": {"title": "Seed", "abstract": "Abstract"}},
-        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        {"p1": {"title": "Initial", "abstract": "Abstract"}},
+        LookupEncodeModel(
+            {"Initial. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
         show_progress=False,
     )
 
@@ -1352,7 +1359,35 @@ def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
     assert list(embeddings) == ["p1", "p2", "p3", "p4"]
 
 
-def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
+def test_length_bucket_progress_counts_completed_inputs_in_original_order() -> None:
+    """Progress counts each finished batch while vectors retain the caller's order."""
+    from citemesh.core.text_batching import encode_texts_in_length_buckets
+
+    texts = ["x" * 120, "tiny", "y" * 90, "small words", "z" * 60]
+    completed: list[int] = []
+    calls: list[list[str]] = []
+
+    def encode_batch(batch: list[str], _show_progress: bool) -> np.ndarray:
+        calls.append(batch)
+        return np.asarray([[float(len(text)), 1.0] for text in batch], dtype=np.float32)
+
+    embeddings = encode_texts_in_length_buckets(
+        texts,
+        batch_size=2,
+        show_progress_bar=False,
+        encode_batch=encode_batch,
+        on_progress=completed.append,
+    )
+
+    assert completed == [0, 2, 4, 5]
+    assert [len(batch) for batch in calls] == [2, 2, 1]
+    assert embeddings[:, 0].tolist() == [float(len(text)) for text in texts]
+
+
+@pytest.mark.parametrize("show_progress", [False, True])
+def test_embedding_cache_dispatches_explicit_prefetch_encoder(
+    show_progress: bool,
+) -> None:
     """Cache encoding should hand the full miss set to an enabled prefetch proxy.
 
     :return None: Verifies explicit fast-path dispatch and complete miss-set input.
@@ -1370,7 +1405,13 @@ def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
             """
             self.calls: list[tuple[list[str], int]] = []
 
-        def encode_prefetched(self, texts: list[str], *, batch_size: int) -> np.ndarray:
+        def encode_prefetched(
+            self,
+            texts: list[str],
+            *,
+            batch_size: int,
+            on_progress: Callable[[int], None] | None = None,
+        ) -> np.ndarray:
             """Record one prefetch dispatch and return deterministic vectors.
 
             :param list[str] texts: Full cache-miss text set.
@@ -1378,6 +1419,10 @@ def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
             :return np.ndarray: Stable FP32 embeddings.
             """
             self.calls.append((list(texts), batch_size))
+            if on_progress is not None:
+                on_progress(0)
+                on_progress(2)
+                on_progress(len(texts))
             return np.asarray(
                 [[float(len(text)), 1.0] for text in texts], dtype=np.float32
             )
@@ -1406,7 +1451,7 @@ def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
         }
 
         embeddings = cache.get_embeddings(
-            papers, model, batch_size=2, show_progress=False
+            papers, model, batch_size=2, show_progress=show_progress
         )
 
     assert model.calls == [
@@ -1521,15 +1566,19 @@ def test_prefetch_proxy_compile_retry_clears_partial_warning_count(
         return True
 
     proxy = _make_prefetch_proxy(monkeypatch, model, restore_eager)
+    completed: list[int] = []
 
     with caplog.at_level(logging.WARNING):
-        embeddings = proxy.encode_prefetched(texts, batch_size=1)
+        embeddings = proxy.encode_prefetched(
+            texts, batch_size=1, on_progress=completed.append
+        )
 
     np.testing.assert_array_equal(
         embeddings, np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
     )
     assert restored_errors == ["compiled forward failed"]
     assert model.forward_calls == 4
+    assert completed == [0, 1, 0, 1, 2]
     assert "truncate 1 of 2 inputs" in caplog.text
     assert "truncate 2 of 2 inputs" not in caplog.text
 
@@ -1597,11 +1646,11 @@ def test_embedding_cache_returns_stored_vector_fidelity_on_first_encode(
         storage_precision=storage_precision,
     )
     _set_test_int8_calibration(cache)
-    papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
+    papers = {"p1": {"title": "Initial", "abstract": "Abstract"}}
     encoded = np.asarray([0.6, 0.8], dtype=np.float32)
     miss = cache.get_embeddings(
         papers,
-        LookupEncodeModel({"Seed. Abstract": encoded}),
+        LookupEncodeModel({"Initial. Abstract": encoded}),
         show_progress=False,
     )
     # An empty lookup would raise if this call re-encoded instead of hitting.
@@ -2643,6 +2692,48 @@ def test_embedding_cache_search_handles_unsorted_prefilter_candidates() -> None:
     assert [result.paper_id for result in results] == ["p5"]
 
 
+@pytest.mark.parametrize(
+    ("floor", "rescored"),
+    [(1, 1), (4, 4), (100, 6)],
+    ids=["no-floor", "floor-above-pool", "floor-capped-by-rows"],
+)
+def test_embedding_cache_binary_prefilter_pool_has_a_floor(
+    monkeypatch: pytest.MonkeyPatch, floor: int, rescored: int
+) -> None:
+    """A small ``top_k`` still rescores the configured floor, capped by cached rows."""
+    monkeypatch.setattr(
+        EMBEDDING_STORAGE_CONFIG, "binary_rescore_min_candidates", floor
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="prefilter-pool-floor")
+        _set_test_int8_calibration(cache)
+        papers = {
+            f"p{idx}": {"title": f"Title {idx}", "abstract": "Abstract"}
+            for idx in range(6)
+        }
+        lookup = LookupEncodeModel(
+            {
+                **{
+                    f"Title {idx}. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)
+                    for idx in range(5)
+                },
+                "Title 5. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            }
+        )
+        cache.get_embeddings(papers, lookup, show_progress=False)
+
+        results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=1,
+        )
+
+    assert [result.paper_id for result in results] == ["p5"]
+    assert cache.last_search_used_binary_prefilter is True
+    assert cache.last_search_rescored_embeddings == rescored
+
+
 def test_embedding_cache_binary_prefilter_rows_are_monotonic_subset() -> None:
     """Binary prefilter should return monotonic candidate rows for HDF5 locality/safety."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2902,7 +2993,7 @@ def test_embedding_cache_restart_persistence_contracts() -> None:
         )
         _set_test_int8_calibration(hydration_cache)
         hydration_cache.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            {"p1": {"title": "Initial", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
             show_progress=False,
         )
@@ -2947,7 +3038,7 @@ def test_embedding_cache_restart_persistence_contracts() -> None:
         assert not cache.has_cached_payload()
         _set_test_int8_calibration(cache)
         cache.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            {"p1": {"title": "Initial", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
             show_progress=False,
         )
@@ -2962,8 +3053,8 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
         _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {
-                "p1": {"title": "Seed 1", "abstract": "A"},
-                "p2": {"title": "Seed 2", "abstract": "B"},
+                "p1": {"title": "Initial 1", "abstract": "A"},
+                "p2": {"title": "Initial 2", "abstract": "B"},
             },
             SeededRandomEncodeModel(),
             show_progress=False,
@@ -3140,7 +3231,7 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
             cache = EmbeddingCache(cache_dir=tmpdir, model_name=case["model_name"])
             _set_test_int8_calibration(cache)
             cache.get_embeddings(
-                {"p1": {"title": "Seed", "abstract": "Abstract"}},
+                {"p1": {"title": "Initial", "abstract": "Abstract"}},
                 SeededRandomEncodeModel(),
                 show_progress=False,
             )
@@ -3240,7 +3331,7 @@ def test_embedding_cache_recovery_when_h5_missing_clears_stale_sqlite_rows() -> 
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5-stale-db")
         _set_test_int8_calibration(cache)
         cache.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            {"p1": {"title": "Initial", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
             show_progress=False,
         )
@@ -3283,7 +3374,7 @@ def test_embedding_cache_reopen_keeps_namespace_after_failed_first_encode(
     )
     cache.set_model_fingerprint("fingerprint-1")
     cache.mark_corpus_metadata_current()
-    papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
+    papers = {"p1": {"title": "Initial", "abstract": "Abstract"}}
     with pytest.raises(KeyError):
         cache.get_embeddings(papers, LookupEncodeModel({}), show_progress=False)
 
@@ -3305,7 +3396,9 @@ def test_embedding_cache_reopen_keeps_namespace_after_failed_first_encode(
     assert reopened.has_current_corpus_metadata()
     reopened.get_embeddings(
         papers,
-        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        LookupEncodeModel(
+            {"Initial. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
         show_progress=False,
     )
     assert reopened.embedding_count() == 1
@@ -3327,8 +3420,10 @@ def test_embedding_cache_reopen_rebuilds_datasetless_file_with_schema_attrs(
     )
     cache.mark_corpus_metadata_current()
     cache.get_embeddings(
-        {"p1": {"title": "Seed", "abstract": "Abstract"}},
-        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        {"p1": {"title": "Initial", "abstract": "Abstract"}},
+        LookupEncodeModel(
+            {"Initial. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
         show_progress=False,
     )
     with h5py.File(cache.h5_path, "a") as h5:
@@ -3947,7 +4042,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
         conn.execute(
             """
             INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
-            VALUES ('seed', 'seed', '', NULL, 'hash', 2, 0)
+            VALUES ('initial', 'initial', '', NULL, 'hash', 2, 0)
             """
         )
         conn.commit()
@@ -3999,7 +4094,7 @@ def test_embedding_cache_recovery_contracts(
         conn.execute(
             """
             INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
-            VALUES ('seed', 'seed', '', NULL, 'hash', 3, 2)
+            VALUES ('initial', 'initial', '', NULL, 'hash', 3, 2)
             """
         )
         conn.commit()
@@ -4012,7 +4107,7 @@ def test_embedding_cache_recovery_contracts(
 
     _set_test_int8_calibration(reloaded)
     reloaded.get_embeddings(
-        {"seed": {"title": "Seed", "abstract": "x", "year": None}}, model
+        {"initial": {"title": "Initial", "abstract": "x", "year": None}}, model
     )
     with h5py.File(reloaded.h5_path, "r") as h5:
         assert "embeddings" in h5
@@ -4059,7 +4154,7 @@ def test_embedding_cache_open_errors_preserve_namespace(
     """
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
     _set_test_int8_calibration(cache)
-    papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
+    papers = {"p1": {"title": "Initial", "abstract": "Abstract"}}
     model = SeededRandomEncodeModel()
     cache.get_embeddings(papers, model, show_progress=False)
     cache.mark_hydrated(
@@ -4146,7 +4241,7 @@ def test_embedding_cache_readonly_hdf5_handle_preserves_namespace(
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="readonly-hdf5")
     _set_test_int8_calibration(cache)
     cache.get_embeddings(
-        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        {"p1": {"title": "Initial", "abstract": "Abstract"}},
         SeededRandomEncodeModel(),
         show_progress=False,
     )
@@ -4183,7 +4278,7 @@ def test_embedding_cache_reload_preserves_calibration_before_first_write(
     with h5py.File(reloaded.h5_path, "r") as h5:
         np.testing.assert_array_equal(h5["calibration_ranges"][:], ranges)
     reloaded.get_embeddings(
-        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        {"p1": {"title": "Initial", "abstract": "Abstract"}},
         SeededRandomEncodeModel(),
         show_progress=False,
     )
@@ -4238,7 +4333,7 @@ def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
     assert changed_setting in caplog.text
     with pytest.raises(RuntimeError, match="Missing persisted int8 calibration ranges"):
         reloaded.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            {"p1": {"title": "Initial", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
             show_progress=False,
         )
@@ -4411,8 +4506,10 @@ def test_embedding_cache_detects_diverged_sqlite_contract_value(
         storage_precision="float32",
     )
     cache.get_embeddings(
-        {"p1": {"title": "Seed", "abstract": "Abstract"}},
-        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        {"p1": {"title": "Initial", "abstract": "Abstract"}},
+        LookupEncodeModel(
+            {"Initial. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
         show_progress=False,
     )
     with cache._connect_db() as conn:
@@ -4452,7 +4549,7 @@ def test_embedding_cache_recovery_preserves_sqlite_ahead_prefix(
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="sqlite-ahead")
     _set_test_int8_calibration(cache)
     papers = {
-        "p1": {"title": "Seed", "abstract": "Abstract"},
+        "p1": {"title": "Initial", "abstract": "Abstract"},
         "p2": {"title": "Other", "abstract": "Abstract"},
     }
     model = SeededRandomEncodeModel()
@@ -4497,7 +4594,7 @@ def test_embedding_cache_reload_preserves_unrecoverable_row_mapping(
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="mapping-gap")
     _set_test_int8_calibration(cache)
     papers = {
-        paper_id: {"title": "Seed", "abstract": "Abstract"}
+        paper_id: {"title": "Initial", "abstract": "Abstract"}
         for paper_id in (["p1", "p2", "p3"] if duplicate_interior_row else ["p1"])
     }
     cache.get_embeddings(
@@ -4595,12 +4692,12 @@ def test_embedding_cache_recovery_truncates_orphan_h5_rows(tmp_path: Path) -> No
     _set_test_int8_calibration(cache)
     cache.get_embeddings(
         {
-            "seed": {"title": "Seed", "abstract": "x"},
+            "initial": {"title": "Initial", "abstract": "x"},
             "other": {"title": "Other", "abstract": "y"},
         },
         LookupEncodeModel(
             {
-                "Seed. x": np.asarray([1.0, 0.0], dtype=np.float32),
+                "Initial. x": np.asarray([1.0, 0.0], dtype=np.float32),
                 "Other. y": np.asarray([0.0, 1.0], dtype=np.float32),
             }
         ),
@@ -4632,7 +4729,7 @@ def test_embedding_cache_recovery_truncates_orphan_h5_rows(tmp_path: Path) -> No
     assert embedding_rows == 2
     assert binary_rows == 2
     assert reloaded.has_cached_payload()
-    assert [result.paper_id for result in results] == ["seed"]
+    assert [result.paper_id for result in results] == ["initial"]
 
 
 def test_embedding_cache_clear_releases_file_handles(tmp_path: Path) -> None:

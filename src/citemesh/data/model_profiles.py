@@ -30,9 +30,10 @@ SimilarityFormatter = Callable[[str, "EmbeddingInputMetadata | None"], str]
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
+EMBEDDINGGEMMA_MODEL_NAME = "unsloth/embeddinggemma-300m"
+DEFAULT_EMBEDDING_MODEL_NAME = EMBEDDINGGEMMA_MODEL_NAME
 DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, tuple[str, ...]] = {
-    "unsloth/embeddinggemma-300m": ("google/embeddinggemma-300m",),
+    EMBEDDINGGEMMA_MODEL_NAME: ("google/embeddinggemma-300m",),
 }
 
 

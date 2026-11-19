@@ -24,20 +24,14 @@ from citemesh.strategies.embedding import (
 )
 
 from .. import console
-from ..build_contract import (
-    _BuildContractValueError,
-    _validate_build_cli_contract,
-    _ValueErrorParserErrorSink,
-)
+from ..build_contract import _BuildContractValueError, _resolve_namespace_settings
 from ..build_options import (
-    _apply_user_config_defaults,
     _configured_client_kwargs,
     _resolve_user_config_api_key,
     _shared_embedding_builder_kwargs,
 )
-from ..cache_selection import _apply_cache_selection
 from ..console import logger
-from ..parser import _output_table, _pop_tracked_option_dests
+from ..parser import _output_table
 
 #: Search flags that override a build-equivalent namespace selector. They share
 #: their destinations with the build parser and all default to ``None``, so a
@@ -59,6 +53,17 @@ _NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
         "all_corpus",
     }
 )
+
+
+#: Search flags that pin a namespace beyond what saved settings select again.
+#: The remaining overrides stay outside the namespace key (``device``), or a
+#: namespace-free hybrid build command restates them (source and corpus view).
+_NAMESPACE_PINNING_DESTS: frozenset[str] = _NAMESPACE_OVERRIDE_DESTS - {
+    "device",
+    "semantic_source",
+    "corpus_size",
+    "all_corpus",
+}
 
 
 class _NamespaceOverrides(TypedDict, total=False):
@@ -204,41 +209,17 @@ def _prepare_local_search_builder(
     :raises _LocalSearchOptionError: If the supplied namespace flags do not form
         a build configuration the contract accepts.
     """
-    defaults = build_parser.parse_args(["local-search-placeholder-seed"])
-    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
-    _pop_tracked_option_dests(defaults)
-    # Local search reads an embedding namespace: a configured strategy must not
-    # replace it, and config defaults must be resolved for this strategy.
-    defaults.strategy = "embedding"
-    config_default_dests = _apply_user_config_defaults(
-        defaults, {"strategy"}, user_config
-    )
     overrides = _namespace_overrides(args)
-    for dest, value in overrides.items():
-        setattr(defaults, dest, value)
-        config_default_dests.discard(dest)
-    # Validate the supplied selectors together so source inference, conflicts,
-    # and storage normalization match the build command.
-    provided_dests = set(overrides)
     try:
-        stored_dests = _apply_cache_selection(
-            defaults, provided_dests, _ValueErrorParserErrorSink()
-        )
-        config_default_dests.difference_update(stored_dests)
-        _validate_build_cli_contract(
-            defaults,
-            _ValueErrorParserErrorSink(),
-            provided_dests,
-            config_defaults=config_default_dests,
-            config_path=user_config.path,
-        )
+        defaults = _resolve_namespace_settings(build_parser, user_config, overrides)
     except _BuildContractValueError as exc:
-        if not getattr(
-            args, "cache_namespace", None
-        ) and not provided_dests.intersection(exc.related_dests):
+        if not getattr(args, "cache_namespace", None) and not exc.related_dests & set(
+            overrides
+        ):
             # Config-only failures may fall back to Semantic Scholar in auto mode.
             raise
         raise _LocalSearchOptionError(str(exc)) from exc
+    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
     return builder, defaults
 
@@ -259,15 +240,45 @@ def _apply_active_model_identity(
         defaults.cache_namespace = builder._cache_selection.namespace_id
 
 
+def _installed_index_build_command(defaults: argparse.Namespace) -> str:
+    """Build the namespace-free hybrid command that default settings resolve.
+
+    :param argparse.Namespace defaults: Effective build-equivalent defaults.
+    :return str: Copyable hybrid build command, carrying a corpus selector only
+        when the search used a capped view or overrode a configured cap.
+    """
+    command = [
+        "citemesh",
+        "build",
+        "<ID>",
+        "--strategy",
+        "hybrid",
+        "--semantic-source",
+        "both",
+        "--export",
+        "dashboard",
+    ]
+    if not defaults.all_corpus and defaults.corpus_size is not None:
+        command.extend(["--corpus-size", str(defaults.corpus_size)])
+    elif defaults.all_corpus and defaults.corpus_size is not None:
+        command.append("--all-corpus")
+    return shlex.join(command)
+
+
 def _local_result_build_command(
-    defaults: argparse.Namespace, cache: EmbeddingCache
+    args: argparse.Namespace, defaults: argparse.Namespace, cache: EmbeddingCache
 ) -> str | None:
     """Build a shell-safe command targeting the local search namespace.
 
+    An installed index that saved settings select again is reached without a
+    namespace, as in the import onboarding; a namespace passed to search, or a
+    selector that pinned it, is repeated so the command reopens the same index.
+
+    :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.Namespace defaults: Effective build-equivalent defaults.
     :param EmbeddingCache cache: Cache whose recorded corpus scope was searched.
-    :return str | None: Copyable embedding build command with namespace selectors,
-        or ``None`` when the cache lacks the corpus scope needed to reproduce it.
+    :return str | None: Copyable build command, or ``None`` when the cache lacks
+        the corpus scope needed to reproduce it.
     """
     command = [
         "citemesh",
@@ -285,6 +296,8 @@ def _local_result_build_command(
         str(defaults.storage_precision),
     ]
     if getattr(defaults, "cache_namespace", None):
+        if not _namespace_overrides(args).keys() & _NAMESPACE_PINNING_DESTS:
+            return _installed_index_build_command(defaults)
         command = [
             "citemesh",
             "build",
@@ -339,28 +352,33 @@ def _print_search_results(
     :param str | None summary: Optional context between the table and identifiers.
     :return None: Prints the table, optional summary, and full paper IDs.
     """
+    compact = console.output_console.width < 80
     table = _output_table(title)
     table.leading = 1
-    table.add_column("#", style="dim", width=3)
-    table.add_column("Paper / authors", ratio=1)
-    table.add_column("Year", justify="right", no_wrap=True)
-    table.add_column(
-        metric, justify="right", width=metric_width, no_wrap=metric_width is None
-    )
+    table.add_column("#", style="dim", no_wrap=True)
+    table.add_column("Paper / authors", ratio=1, overflow="fold")
+    if not compact:
+        table.add_column("Year", justify="right", no_wrap=True)
+        table.add_column(
+            metric, justify="right", width=metric_width, no_wrap=metric_width is None
+        )
     paper_ids = []
     for i, (paper_id, paper_title, authors, year, value) in enumerate(rows, 1):
-        authors_str = ", ".join(authors[:2])
+        authors_str = ", ".join(normalize_text(name) for name in authors[:2])
         if len(authors) > 2:
             authors_str += " et al."
-        table.add_row(
-            str(i),
-            Text.assemble(
-                (paper_title, "bold"),
-                ("\n" + authors_str, "dim") if authors_str else "",
-            ),
-            str(year) if year is not None else "",
-            value,
+        paper = Text.assemble(
+            (normalize_text(paper_title), "bold"),
+            ("\n" + authors_str, "dim") if authors_str else "",
         )
+        if compact:
+            metadata = f"{year} · " if year is not None else ""
+            paper.append(f"\n{metadata}{metric}: {value}", style="dim")
+            table.add_row(str(i), paper)
+        else:
+            table.add_row(
+                str(i), paper, str(year) if year is not None else "", Text(value)
+            )
         paper_ids.append(paper_id)
     console.output_console.print(table)
     if summary is not None:
@@ -396,7 +414,7 @@ def _render_local_search(
             results = builder.search_local(args.query, top_k=args.limit)
             total = getattr(cache, "last_search_total_embeddings", None)
             build_command = (
-                _local_result_build_command(defaults, cache) if results else None
+                _local_result_build_command(args, defaults, cache) if results else None
             )
     except Exception as exc:
         logger.error(

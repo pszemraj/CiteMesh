@@ -2,11 +2,11 @@
 Hybrid graph building strategy.
 
 Discovery pools every reference and citer that Semantic Scholar returns for
-the seed, 200 of its recommendations (``candidates`` and ``both``) and, with a
-local corpus (``arxiv-corpus`` and ``both``), the seed's nearest corpus rows in
+the focal paper, 200 of its recommendations (``candidates`` and ``both``) and, with a
+local corpus (``arxiv-corpus`` and ``both``), the focal paper's nearest corpus rows in
 the retrieval-query and retrieval-document roles. The deduplicated pool is
 ranked by reciprocal rank fusion (:mod:`citemesh.strategies.discovery_ranking`)
-and the best ``max_papers - 1`` papers join the seed. Graph edges between them
+and the best ``max_papers - 1`` papers join the focal paper. Graph edges between them
 combine embedding similarity with bibliographic coupling, weighted by whether
 each paper came from citations, semantic search or both.
 """
@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection, Sequence
 from contextlib import nullcontext
-from dataclasses import replace
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -38,6 +37,7 @@ from citemesh.core.paper_ids import is_local_corpus_paper_id, normalize_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.embedding_contract import ExistingCacheSelection
+from citemesh.progress import progress_task
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -51,15 +51,16 @@ from citemesh.strategies.candidates import (
     candidate_identity_keys,
     candidate_records_match,
     fetch_candidate_source,
-    fetch_seed_references,
+    fetch_focal_references,
     provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
 )
-from citemesh.strategies.discovery_pool import DiscoveryPool
+from citemesh.strategies.discovery_pool import DiscoveryPool, build_discovery_leads
 from citemesh.strategies.discovery_ranking import (
     FUSED_LISTS,
     RRF_K,
+    RRF_WEIGHTS,
     DiscoveryCandidate,
     RankedCandidate,
     rank_candidates,
@@ -84,9 +85,10 @@ HYBRID_DEFAULT_MAX_CITATIONS = 1000
 HYBRID_DEFAULT_MAX_REFERENCES = 1000
 HYBRID_RECOMMENDATION_LIMIT = 200
 HYBRID_CORPUS_NEIGHBOURS = 180
-_REFERENCE_RELATIONS = frozenset({"referenced_by_seed", "overlap"})
-_CITER_RELATIONS = frozenset({"cites_seed", "overlap"})
-SEED_CITATION_RELATIONS = _REFERENCE_RELATIONS | _CITER_RELATIONS
+_COMPUTING_SUBJECTS = frozenset({"computer science", "cs", "stat.ml", "cmp-lg"})
+_REFERENCE_RELATIONS = frozenset({"referenced_by_focal", "overlap"})
+_CITER_RELATIONS = frozenset({"cites_focal", "overlap"})
+FOCAL_CITATION_RELATIONS = _REFERENCE_RELATIONS | _CITER_RELATIONS
 
 
 class EmbeddingInferenceError(RuntimeError):
@@ -132,7 +134,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         Initialize hybrid graph builder.
 
-        :param int max_papers: Maximum total papers, including the seed.
+        :param int max_papers: Maximum total papers, including the focal paper.
         :param int max_citations: Provider fetch limit for citing papers.
         :param int max_references: Provider fetch limit for referenced papers.
         :param bool fetch_references: Whether selected papers' reference lists are
@@ -226,20 +228,20 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
 
         self.paper_sources: dict[str, str] = {}  # paper_id -> citation|semantic|both
-        self.seed_relations: dict[str, str] = {}
+        self.focal_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self.discovery_pool: DiscoveryPool | None = None
         self.discovery_ranking: list[RankedCandidate] = []
 
     @scope_candidate_collection
     def collect_papers(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> dict[str, Paper]:
         """Collect papers while retaining any corpus lifecycle operation lock.
 
-        :param str seed_id: Seed paper identifier.
+        :param str focal_id: Focal paper identifier.
         :param kwargs: Extra options are ignored.
-        :return Dict[str, Paper]: The seed and the selected papers.
+        :return Dict[str, Paper]: The focal paper and the selected papers.
         """
         operation_lock = (
             self.embedding_builder._corpus_operation_lock()
@@ -247,17 +249,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             else nullcontext()
         )
         with operation_lock:
-            return self._collect_papers_under_operation_lock(seed_id)
+            return self._collect_papers_under_operation_lock(focal_id)
 
-    def _collect_papers_under_operation_lock(self, seed_id: str) -> dict[str, Paper]:
+    def _collect_papers_under_operation_lock(self, focal_id: str) -> dict[str, Paper]:
         """Pool, rank and select candidates, then enrich the selected papers.
 
-        :param str seed_id: Seed paper identifier.
-        :return Dict[str, Paper]: The seed and the selected papers.
+        :param str focal_id: Focal paper identifier.
+        :return Dict[str, Paper]: The focal paper and the selected papers.
         """
         embedding = self.embedding_builder
         self.paper_sources = {}
-        self.seed_relations = {}
+        self.focal_relations = {}
         self.candidate_source_status = {}
         self.discovery_pool = None
         self.discovery_ranking = []
@@ -267,25 +269,26 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         timings: dict[str, float] = {}
 
         started = perf_counter()
-        seed, corpus_seed = self._resolve_seed(seed_id)
+        focal, corpus_focal = self._resolve_focal(focal_id)
         timings["prepare"] = perf_counter() - started
-        self.seed_relations[seed.paper_id] = "seed"
-        self.paper_sources[seed.paper_id] = (
+        self.focal_relations[focal.paper_id] = "focal"
+        self.paper_sources[focal.paper_id] = (
             "semantic"
-            if corpus_seed and provider_lookup_identifier(seed.paper_id, seed) is None
+            if corpus_focal
+            and provider_lookup_identifier(focal.paper_id, focal) is None
             else "citation"
         )
-        pool = DiscoveryPool(seed, self.seed_relations)
+        pool = DiscoveryPool(focal, self.focal_relations)
         self.discovery_pool = pool
 
         started = perf_counter()
         logger.info("Collecting related papers...")
-        results = self._fetch_provider_sources(seed, seed_id)
+        results = self._fetch_provider_sources(focal, focal_id)
         timings["provider"] = perf_counter() - started
         if not self._uses_corpus:
             # Without a corpus search to wait for, a total outage fails here,
             # before the model loads.
-            self._require_available_sources(results, seed)
+            self._require_available_sources(results, focal)
 
         started = perf_counter()
         provider_papers = [paper for result in results for paper in result.papers]
@@ -298,27 +301,32 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         embedding._load_model()
         timings["model"] = perf_counter() - started
         started = perf_counter()
+        logger.info("Preparing focal paper embeddings...")
         try:
-            seed_query = embedding._encode_seed_embedding(seed)
+            focal_query = embedding._encode_focal_embedding(focal)
         except Exception as exc:
             raise EmbeddingInferenceError(
-                f"Hybrid seed embedding failed: {type(exc).__name__}: {exc}"
+                f"Hybrid focal paper embedding failed: {type(exc).__name__}: {exc}"
             ) from exc
-        seed_row = self._seed_corpus_row(seed, corpus_seed)
-        seed_vectors = (
-            embedding.cached_corpus_vectors([seed_row]) if seed_row is not None else {}
+        focal_row = self._focal_corpus_row(focal, corpus_focal)
+        focal_vectors = (
+            embedding.cached_corpus_vectors([focal_row])
+            if focal_row is not None
+            else {}
         )
-        seed_document = seed_vectors.get(seed_row or "")
-        if seed_document is None:
-            seed_document = self._embed_documents({seed.paper_id: seed})[seed.paper_id]
+        focal_document = focal_vectors.get(focal_row or "")
+        if focal_document is None:
+            focal_document = self._embed_documents({focal.paper_id: focal})[
+                focal.paper_id
+            ]
         timings["encoding"] = perf_counter() - started
 
         if self._uses_corpus:
             started = perf_counter()
             logger.info("Searching the arXiv corpus...")
-            results.append(self._search_corpus(pool, seed_query, seed_document))
+            results.append(self._search_corpus(pool, focal_query, focal_document))
             timings["corpus"] += perf_counter() - started
-            self._require_available_sources(results, seed)
+            self._require_available_sources(results, focal)
 
         folded = pool.reconcile_publication_versions()
         if folded:
@@ -342,7 +350,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         timings["encoding"] += perf_counter() - started
 
         started = perf_counter()
-        ranked = self._rank_pool(pool, vectors, seed_document, seed_query)
+        ranked = self._rank_pool(pool, vectors, focal_document, focal_query)
         timings["ranking"] = perf_counter() - started
         self.discovery_ranking = ranked
         selected = [item.paper_id for item in ranked[: self.max_papers - 1]]
@@ -353,14 +361,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             len(selected),
         )
 
-        papers: dict[str, Paper] = {seed.paper_id: seed}
+        papers: dict[str, Paper] = {focal.paper_id: focal}
         for paper_id in selected:
             papers[paper_id] = pool.papers[paper_id]
             tags = pool.sources[paper_id]
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
 
         started = perf_counter()
-        self._enrich_selected(papers, pool, corpus_seed, results)
+        self._enrich_selected(papers, pool, corpus_focal, results)
         timings["enrichment"] = perf_counter() - started
         logger.debug(
             "Hybrid collection timings (s): %s.",
@@ -369,12 +377,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return papers
 
     def _require_available_sources(
-        self, results: Sequence[CandidateSourceResult], seed: Paper
+        self, results: Sequence[CandidateSourceResult], focal: Paper
     ) -> None:
         """Record every source outcome and fail when no source could be read.
 
         :param Sequence[CandidateSourceResult] results: Every attempted source.
-        :param Paper seed: Resolved seed.
+        :param Paper focal: Resolved focal paper.
         :return None: Updates ``candidate_source_status``.
         :raises CandidateAcquisitionError: If every source was unavailable.
         """
@@ -388,66 +396,63 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         }[self.semantic_source]
         require_available_candidate_source(
             results,
-            context=f"hybrid {acquisition} acquisition for {seed.paper_id}",
+            context=f"hybrid {acquisition} acquisition for {focal.paper_id}",
         )
 
-    def _resolve_seed(self, seed_id: str) -> tuple[Paper, bool]:
-        """Resolve the seed from the prepared corpus, else from Semantic Scholar.
+    def _resolve_focal(self, focal_id: str) -> tuple[Paper, bool]:
+        """Resolve the focal paper from the prepared corpus, else from Semantic Scholar.
 
-        :param str seed_id: Seed paper identifier.
-        :return tuple[Paper, bool]: Seed carrying the build seed role, and whether
+        :param str focal_id: Focal paper identifier.
+        :return tuple[Paper, bool]: Focal paper carrying the build focal paper role, and whether
             it came from the corpus.
         :raises RuntimeError: If corpus preparation fails.
-        :raises ValueError: If the seed is unknown, or a local corpus ID is used
+        :raises ValueError: If the focal paper is unknown, or a local corpus ID is used
             without a corpus.
         """
         cached: Paper | None = None
         if self._uses_corpus:
             try:
                 self.embedding_builder._prepare_corpus_for_build()
-                cached = self.embedding_builder.resolve_cached_corpus_seed(
-                    seed_id, _corpus_prepared=True
+                cached = self.embedding_builder.resolve_cached_corpus_focal(
+                    focal_id, _corpus_prepared=True
                 )
             except Exception as exc:
                 raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-        elif is_local_corpus_paper_id(seed_id):
+        elif is_local_corpus_paper_id(focal_id):
             raise ValueError(
-                f"Local corpus seed ID '{seed_id}' requires a corpus. Re-run the "
+                f"Local corpus focal paper ID '{focal_id}' requires a corpus. Re-run the "
                 "hybrid build with --semantic-source arxiv-corpus or both and the "
                 "same embedding settings used for local search."
             )
-        seed = cached or self.client.get_paper(seed_id, raise_on_unavailable=True)
-        if seed is None:
-            raise ValueError(
-                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
-                "know this identifier; check the DOI/arXiv/S2 ID)."
-            )
-        # Seed role belongs to this build, not the client-owned metadata record.
-        return replace(seed, is_seed=True), cached is not None
+        focal = self._resolve_focal_paper(
+            focal_id, client=self.client, focal_paper=cached
+        )
+        return focal, cached is not None
 
     def _fetch_provider_sources(
-        self, seed: Paper, seed_id: str
+        self, focal: Paper, focal_id: str
     ) -> list[CandidateSourceResult]:
         """Fetch references, citers and, outside corpus-only mode, recommendations.
 
-        :param Paper seed: Resolved seed.
-        :param str seed_id: Original input, retaining an arXiv version.
+        :param Paper focal: Resolved focal paper.
+        :param str focal_id: Original input, retaining an arXiv version.
         :return list[CandidateSourceResult]: One result per attempted source.
         """
-        provider_id = provider_lookup_identifier(seed.paper_id, seed)
+        provider_id = provider_lookup_identifier(focal.paper_id, focal)
         results: list[CandidateSourceResult] = []
         if self.max_references > 0:
             corpus = self.embedding_builder if self._uses_corpus else None
             results.extend(
-                fetch_seed_references(
+                fetch_focal_references(
                     self.client,
-                    seed,
+                    focal,
                     self.max_references,
-                    seed_identifier=seed_id,
+                    focal_identifier=focal_id,
                     local_lookup=corpus.cached_reference_metadata if corpus else None,
                     local_bibliography_lookup=(
                         corpus.cached_bibliography_metadata if corpus else None
                     ),
+                    collect_reference_evidence=True,
                 )
             )
         if self.max_citations > 0 and provider_id is not None:
@@ -463,32 +468,47 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 )
             )
         if self.semantic_source != "arxiv-corpus":
-            results.append(self._fetch_recommendations(provider_id))
+            results.append(self._fetch_recommendations(provider_id, focal.categories))
         logger.debug(
             "Provider candidates: %s.",
             ", ".join(f"{result.source}={len(result.papers)}" for result in results),
         )
         return results
 
-    def _fetch_recommendations(self, provider_id: str | None) -> CandidateSourceResult:
-        """Fetch the seed's ``all-cs`` recommendations.
+    def _fetch_recommendations(
+        self, provider_id: str | None, categories: Sequence[str]
+    ) -> CandidateSourceResult:
+        """Fetch recommendations using the focal paper's recorded subjects.
 
-        :param Optional[str] provider_id: Provider-safe seed identifier.
+        :param Optional[str] provider_id: Provider-safe focal paper identifier.
+        :param Sequence[str] categories: Subjects supplied by the focal paper record's source.
         :return CandidateSourceResult: Recommendations in provider order.
         """
         if provider_id is None:
             return CandidateSourceResult(
                 "recommendations",
                 CandidateSourceState.UNAVAILABLE,
-                error="The corpus seed has no Semantic Scholar lookup identifier.",
+                error="The focal paper has no Semantic Scholar lookup identifier.",
             )
+        subjects = {category.strip().casefold() for category in categories} - {
+            "",
+            "unknown",
+        }
+        pool = "all-cs"
+        if subjects and not any(
+            subject in _COMPUTING_SUBJECTS or subject.startswith("cs.")
+            for subject in subjects
+        ):
+            pool = "recent"
+        logger.info("Fetching paper recommendations...")
+        logger.debug("Recommendation pool for %s: %s.", provider_id, pool)
         return fetch_candidate_source(
             "recommendations",
             lambda: self.client.get_recommended_papers(
                 provider_id,
                 limit=HYBRID_RECOMMENDATION_LIMIT,
                 raise_on_unavailable=True,
-                pool="all-cs",
+                pool=pool,
             ),
         )
 
@@ -535,18 +555,18 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         return rows
 
-    def _seed_corpus_row(self, seed: Paper, corpus_seed: bool) -> str | None:
-        """Return the corpus row holding the seed's stored document vector.
+    def _focal_corpus_row(self, focal: Paper, corpus_focal: bool) -> str | None:
+        """Return the corpus row holding the focal paper's stored document vector.
 
-        :param Paper seed: Resolved seed.
-        :param bool corpus_seed: Whether the seed was read from the corpus.
+        :param Paper focal: Resolved focal paper.
+        :param bool corpus_focal: Whether the focal paper was read from the corpus.
         :return Optional[str]: Corpus row ID, or ``None`` without one.
         """
         if not self._uses_corpus:
             return None
-        if corpus_seed:
-            return seed.paper_id
-        row = self._corpus_rows([seed]).get(seed.paper_id)
+        if corpus_focal:
+            return focal.paper_id
+        row = self._corpus_rows([focal]).get(focal.paper_id)
         return row.paper_id if row is not None else None
 
     @staticmethod
@@ -566,9 +586,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return None: Updates the pool in place.
         """
         source, relation = {
-            "references": ("citation", "referenced_by_seed"),
-            "arxiv_references": ("citation", "referenced_by_seed"),
-            "citations": ("citation", "cites_seed"),
+            "references": ("citation", "referenced_by_focal"),
+            "arxiv_references": ("citation", "referenced_by_focal"),
+            "citations": ("citation", "cites_focal"),
             "recommendations": ("semantic", "semantic_only"),
         }[result.source]
         for rank, paper in enumerate(result.papers, start=1):
@@ -576,38 +596,52 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if row is not None:
                 pool.add(row, source=source, relation=relation)
             member_id = pool.add(paper, source=source, relation=relation)
-            if member_id is not None and result.source == "recommendations":
+            if member_id is None:
+                continue
+            if result.source == "recommendations":
                 pool.record_recommendation(member_id, rank)
+            if evidence := result.reference_evidence.get(paper.paper_id):
+                pool.record_reference_evidence(member_id, evidence)
 
     def _search_corpus(
         self,
         pool: DiscoveryPool,
-        seed_query: NDArray[np.float32],
-        seed_document: NDArray[np.float32],
+        focal_query: NDArray[np.float32],
+        focal_document: NDArray[np.float32],
     ) -> CandidateSourceResult:
-        """Add the seed's nearest corpus rows in both retrieval roles.
+        """Add the focal paper's nearest corpus rows in both retrieval roles.
 
         :param DiscoveryPool pool: Discovery pool.
-        :param NDArray[np.float32] seed_query: Seed in the retrieval-query role.
-        :param NDArray[np.float32] seed_document: Seed in the retrieval-document role.
+        :param NDArray[np.float32] focal_query: Focal paper vector in the retrieval-query role.
+        :param NDArray[np.float32] focal_document: Focal paper vector in the retrieval-document role.
         :return CandidateSourceResult: Corpus outcome, empty without neighbours.
         :raises RuntimeError: If the corpus search fails.
         """
         added = 0
-        for vector in (seed_query, seed_document):
-            try:
-                neighbours = self.embedding_builder.search_prepared_corpus(
-                    vector, HYBRID_CORPUS_NEIGHBOURS
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
-            for paper in neighbours:
-                if (
-                    pool.add(paper, source="semantic", relation="semantic_only")
-                    is not None
-                ):
+        with progress_task(
+            total=2, description="Searching arXiv corpus", unit="queries"
+        ) as progress:
+            for role, vector in (
+                (EmbeddingTask.RETRIEVAL_QUERY, focal_query),
+                (EmbeddingTask.RETRIEVAL_DOCUMENT, focal_document),
+            ):
+                try:
+                    neighbours = self.embedding_builder.search_prepared_corpus(
+                        vector, HYBRID_CORPUS_NEIGHBOURS
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+                for rank, paper in enumerate(neighbours, start=1):
+                    member_id = pool.add(
+                        paper, source="semantic", relation="semantic_only"
+                    )
+                    if member_id is None:
+                        continue
                     added += 1
-        logger.debug("Corpus neighbours: %d across both seed roles.", added)
+                    if role is EmbeddingTask.RETRIEVAL_QUERY:
+                        pool.record_query_corpus_rank(member_id, rank)
+                progress.update()
+        logger.debug("Corpus neighbours: %d across both focal paper roles.", added)
         return CandidateSourceResult(
             "arxiv_corpus",
             CandidateSourceState.COMPLETE if added else CandidateSourceState.EMPTY,
@@ -619,7 +653,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """Return retrieval-document vectors for papers without a corpus vector.
 
         Candidates mode reads and fills the candidate embedding cache, so a
-        rebuild of the same seed encodes no candidate again. A corpus mode's cache
+        rebuild of the same focal paper encodes no candidate again. A corpus mode's cache
         is the corpus itself, which must not take provider rows, so those modes
         encode in memory, with the same document text.
 
@@ -644,7 +678,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             encoded = embedding._encode_texts(
                 texts,
                 batch_size=min(embedding.encode_batch_size, len(texts)),
-                show_progress_bar=False,
+                show_progress_bar=True,
             )
             return dict(zip(papers, encoded, strict=True))
         except Exception as exc:
@@ -672,47 +706,54 @@ class HybridGraphBuilder(GraphBuilderStrategy):
     def _rank_pool(
         pool: DiscoveryPool,
         vectors: dict[str, NDArray[np.float32]],
-        seed_document: NDArray[np.float32],
-        seed_query: NDArray[np.float32],
+        focal_document: NDArray[np.float32],
+        focal_query: NDArray[np.float32],
     ) -> list[RankedCandidate]:
         """Rank every pool member by reciprocal rank fusion.
 
         :param DiscoveryPool pool: Discovery pool.
         :param dict[str, NDArray[np.float32]] vectors: Member document vectors.
-        :param NDArray[np.float32] seed_document: Seed document vector.
-        :param NDArray[np.float32] seed_query: Seed query-role vector.
+        :param NDArray[np.float32] focal_document: Focal document vector.
+        :param NDArray[np.float32] focal_query: Focal query-role vector.
         :return list[RankedCandidate]: Every member, best first.
         :raises EmbeddingInferenceError: If a vector is missing, malformed,
-            non-finite, zero, or of another dimension than the seed's.
+            non-finite, zero, or of another dimension than the focal paper's.
         """
-        seed_id = pool.seed.paper_id
+        focal_id = pool.focal.paper_id
         # Members carry provider or corpus IDs, which never contain spaces, so
         # this key cannot collide with one.
-        query_key = f"{seed_id} (query role)"
+        query_key = f"{focal_id} (query role)"
         # The one validity gate for ranking inputs; the ranker trusts them.
         validated = validate_embedding_vectors(
-            [seed_id, query_key, *pool.papers],
-            {**vectors, seed_id: seed_document, query_key: seed_query},
+            [focal_id, query_key, *pool.papers],
+            {**vectors, focal_id: focal_document, query_key: focal_query},
             context="Hybrid ranking",
             vector_label="embedding",
             error_factory=EmbeddingInferenceError,
         )
         candidates = []
         for paper_id in pool.papers:
-            relation = pool.seed_relations.get(paper_id, "")
+            relation = pool.focal_relations.get(paper_id, "")
+            evidence = pool.focal_reference_evidence.get(paper_id)
             candidates.append(
                 DiscoveryCandidate(
                     paper_id=paper_id,
                     vector=validated[paper_id],
                     is_reference=relation in _REFERENCE_RELATIONS,
-                    cites_seed=relation in _CITER_RELATIONS,
+                    cites_focal=relation in _CITER_RELATIONS,
                     recommendation_rank=pool.recommendation_ranks.get(paper_id),
+                    focal_reference_context_count=evidence.context_count
+                    if evidence is not None
+                    else None,
+                    focal_reference_is_influential=evidence.is_influential
+                    if evidence is not None
+                    else None,
                 )
             )
         ranked = rank_candidates(
             candidates,
-            seed_document=validated[seed_id],
-            seed_query=validated[query_key],
+            focal_document=validated[focal_id],
+            focal_query=validated[query_key],
         )
         for item in ranked[:10]:
             logger.debug(
@@ -729,28 +770,28 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self,
         papers: dict[str, Paper],
         pool: DiscoveryPool,
-        corpus_seed: bool,
+        corpus_focal: bool,
         results: Sequence[CandidateSourceResult],
     ) -> None:
         """Fill selected papers' provider metadata and citation reference lists.
 
-        :param dict[str, Paper] papers: The seed and the selected papers.
+        :param dict[str, Paper] papers: The focal paper and the selected papers.
         :param DiscoveryPool pool: Discovery pool, for provider evidence.
-        :param bool corpus_seed: Whether the seed was read from the corpus.
+        :param bool corpus_focal: Whether the focal paper was read from the corpus.
         :param Sequence[CandidateSourceResult] results: Attempted sources.
         :return None: Updates papers in place.
         """
-        seed = pool.seed
+        focal = pool.focal
         embedding = self.embedding_builder
-        if corpus_seed:
-            embedding.enrich_cached_corpus_seed(seed)
+        if corpus_focal:
+            embedding.enrich_cached_corpus_focal(focal)
         # Members that absorbed a provider record already carry its metadata.
         provider_backed = set(pool.provider_aliases.values())
         corpus_only = {
             paper_id: paper
             for paper_id, paper in papers.items()
             if paper.is_local_corpus
-            and not paper.is_seed
+            and not paper.is_focal
             and paper_id not in provider_backed
         }
         if corpus_only:
@@ -759,7 +800,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             result.source == "references" and result.state is CandidateSourceState.EMPTY
             for result in results
         ):
-            self.reference_hydrator.withhold_seed_references(seed)
+            self.reference_hydrator.withhold_focal_references(focal)
         # Reference lists, the coupling input, are fetched for citation-sourced papers.
         self.reference_hydrator.hydrate(
             {
@@ -767,7 +808,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 for paper_id, paper in papers.items()
                 if "citation" in pool.sources.get(paper_id, ())
             },
-            seed,
+            focal,
         )
 
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
@@ -853,24 +894,28 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return min(similarity, 1.0)  # Cap at 1.0
 
     def _record_discovery_evidence(self, graph: PaperGraph) -> None:
-        """Attach the ranker and each graph paper's ranking evidence for export.
+        """Attach ranking evidence, focal citation excerpts and additional reading.
 
         :param PaperGraph graph: Built graph.
-        :return None: Sets ``discovery_ranker`` and ``discovery_ranking``.
+        :return None: Adds the available evidence to the graph and its nodes.
         """
         used = {name for item in self.discovery_ranking for name in item.list_ranks}
         lists = [name for name, _sort_key in FUSED_LISTS if name in used]
-        graph.graph["discovery_ranker"] = {
+        ranker: dict[str, object] = {
             "method": "reciprocal_rank_fusion",
             "k": RRF_K,
             "lists": lists,
         }
-        graph.graph["discovery_ranking"] = {
+        weights = {name: weight for name, weight in RRF_WEIGHTS.items() if name in used}
+        if weights:
+            ranker["weights"] = weights
+        graph.graph["discovery_ranker"] = ranker
+        selected_evidence = {
             item.paper_id: {
                 "discovery_rank": item.rank,
                 "discovery_score": item.score,
                 "discovery_features": {
-                    "seed_similarity": item.features.cos_dd,
+                    "focal_similarity": item.features.cos_dd,
                     "bibliography_similarity": item.features.ctx_ref_top5,
                     "direct_citation": item.features.direct,
                     "recommendation_rank": item.features.recommendation_rank,
@@ -882,18 +927,34 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             for item in self.discovery_ranking
             if item.paper_id in graph
         }
+        graph.graph["discovery_ranking"] = selected_evidence
+        pool = self.discovery_pool
+        if pool is None:
+            return
+        for paper_id, evidence in pool.focal_reference_evidence.items():
+            if paper_id in graph:
+                graph.nodes[paper_id]["focal_reference_evidence"] = {
+                    "context_count": evidence.context_count,
+                    "excerpt": evidence.excerpt,
+                    "is_influential": evidence.is_influential,
+                }
+        leads = build_discovery_leads(
+            pool, self.discovery_ranking, selected_evidence, limit=self.max_papers - 1
+        )
+        if leads is not None:
+            graph.graph["discovery_leads"] = leads
 
     def build_graph(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> tuple[PaperGraph, str]:
         """
         Build graph and enforce per-node edge limits for readability.
 
-        :param str seed_id: Seed paper identifier
+        :param str focal_id: Focal paper identifier
         :param kwargs: Extra options are ignored by collection.
-        :return tuple[PaperGraph, str]: Built graph and canonical seed ID.
+        :return tuple[PaperGraph, str]: Built graph and canonical focal paper ID.
         """
-        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph, actual_focal_id = super().build_graph(focal_id, **kwargs)
         graph.graph["strategy"] = self._resolved_strategy_name()
         graph.graph["embedding_runtime"] = (
             self.embedding_builder._embedding_runtime_metadata()
@@ -904,10 +965,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 self.paper_sources.items(), key=lambda item: item[0]
             )
         }
-        graph.graph["seed_relations"] = {
+        graph.graph["focal_relations"] = {
             str(paper_id): str(relation)
             for paper_id, relation in sorted(
-                self.seed_relations.items(), key=lambda item: item[0]
+                self.focal_relations.items(), key=lambda item: item[0]
             )
             if str(paper_id) in graph.nodes
         }
@@ -923,16 +984,16 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 graph.number_of_nodes(),
                 graph.number_of_edges(),
             )
-            return graph, actual_seed_id
+            return graph, actual_focal_id
 
         filtered_graph = build_capped_undirected_graph(
             graph,
             max_edges,
-            seed_id=actual_seed_id,
-            priority_seed_neighbors={
+            focal_id=actual_focal_id,
+            priority_focal_neighbors={
                 paper_id
-                for paper_id, relation in self.seed_relations.items()
-                if relation in SEED_CITATION_RELATIONS and paper_id in graph
+                for paper_id, relation in self.focal_relations.items()
+                if relation in FOCAL_CITATION_RELATIONS and paper_id in graph
             },
         )
 
@@ -946,7 +1007,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),
         )
-        return filtered_graph, actual_seed_id
+        return filtered_graph, actual_focal_id
 
     def should_create_edge(
         self, paper1: Paper, paper2: Paper, similarity: float
@@ -963,9 +1024,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if similarity < 0.2:
             return False
 
-        # Seed paper: always connect if above threshold
-        if paper1.is_seed or paper2.is_seed:
+        # Focal paper: always connect if above threshold
+        if paper1.is_focal or paper2.is_focal:
             return similarity > 0.4
 
-        # Higher threshold for non-seed
+        # Higher threshold for pairs excluding the focal paper
         return similarity > 0.5

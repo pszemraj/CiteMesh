@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from time import strftime
 from typing import TypeVar
 
 from rich.console import Console
@@ -28,6 +29,8 @@ from rich.table import Column
 from ._runtime import stderr_isatty
 
 T = TypeVar("T")
+
+CONSOLE_TIME_FORMAT = "%H:%M:%S"
 
 _progress_console: Console | None = None
 _progress_enabled = True
@@ -53,12 +56,9 @@ def set_progress_enabled(enabled: bool) -> None:
     _progress_enabled = bool(enabled)
 
 
-def progress_enabled() -> bool:
-    """Return whether the CLI currently permits progress displays.
-
-    :return bool: ``True`` when the active verbosity allows progress output.
-    """
-    return _progress_enabled
+def progress_enabled(*, require_tty: bool = False) -> bool:
+    """Check whether verbosity allows progress, optionally requiring a terminal."""
+    return _progress_enabled and (not require_tty or stderr_isatty())
 
 
 def _resolve_console() -> Console:
@@ -71,24 +71,32 @@ def _resolve_console() -> Console:
     return Console(stderr=True)
 
 
-def _columns() -> Sequence[ProgressColumn]:
-    """Build the shared column layout for a progress display.
-
-    ``unit`` is passed as a task field rather than interpolated into a column
-    template so a caller-supplied label can never be parsed as console markup.
-
-    :return Sequence[ProgressColumn]: Ordered progress columns.
-    """
-    return (
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=None, table_column=Column(ratio=1)),
-        MofNCompleteColumn(table_column=Column(no_wrap=True)),
-        TextColumn("{task.fields[unit]}", style="dim"),
-        TimeElapsedColumn(),
-        TextColumn("ETA", style="dim"),
-        TimeRemainingColumn(),
-        TextColumn("{task.fields[postfix]}", style="dim"),
+def _columns(width: int, total: int | None) -> Sequence[ProgressColumn]:
+    """Keep counts visible and show an ETA only when the total is known."""
+    compact = width < 80
+    columns: list[ProgressColumn] = []
+    if width >= 60:
+        columns.append(
+            TextColumn("{task.fields[updated]}", style="log.time", markup=False)
+        )
+    columns.append(
+        TextColumn(
+            "{task.description}",
+            style="progress.description",
+            markup=False,
+            table_column=Column(ratio=1 if compact else None, no_wrap=True),
+        )
     )
+    if not compact:
+        columns.append(BarColumn(bar_width=None, table_column=Column(ratio=1)))
+    columns.append(MofNCompleteColumn(table_column=Column(no_wrap=True)))
+    if not compact:
+        columns.append(TextColumn("{task.fields[unit]}", style="dim", markup=False))
+    if not compact or total is None:
+        columns.append(TimeElapsedColumn())
+    if total is not None:
+        columns.extend([TextColumn("ETA", style="dim"), TimeRemainingColumn()])
+    return columns
 
 
 class ProgressTask:
@@ -136,16 +144,12 @@ class ProgressTask:
         """
         if self._pending_advance:
             self._progress.advance(self._task_id, self._pending_advance)
+            if self._pending_advance > 0:
+                self._progress.update(
+                    self._task_id, updated=strftime(CONSOLE_TIME_FORMAT)
+                )
             self._pending_advance = 0
             self._last_update = self._progress.get_time()
-
-    def set_postfix_str(self, text: str) -> None:
-        """Set the trailing status text shown after the timer.
-
-        :param str text: Status text to display.
-        :return None: Updates the live display.
-        """
-        self._progress.update(self._task_id, postfix=str(text))
 
 
 @contextmanager
@@ -165,10 +169,11 @@ def progress_task(
         bar only when stderr is interactive.
     :return Iterator[ProgressTask]: Handle used to advance the task.
     """
-    show = _progress_enabled and (stderr_isatty() if enabled is None else bool(enabled))
+    show = enabled is not False and progress_enabled(require_tty=enabled is None)
+    console = _resolve_console()
     progress = Progress(
-        *_columns(),
-        console=_resolve_console(),
+        *_columns(console.width, total),
+        console=console,
         disable=not show,
         expand=True,
     )
@@ -177,7 +182,7 @@ def progress_task(
             description,
             total=total,
             unit=unit,
-            postfix="",
+            updated=strftime(CONSOLE_TIME_FORMAT),
         )
         task = ProgressTask(progress, task_id)
         try:

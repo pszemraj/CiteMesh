@@ -21,7 +21,7 @@ class Theme:
     background: str
     node_color_old: tuple[float, float, float]
     node_color_new: tuple[float, float, float]
-    seed_color: tuple[float, float, float]
+    focal_color: tuple[float, float, float]
     edge_color: tuple[float, float, float]
     text_color: str
 
@@ -56,7 +56,7 @@ THEMES: dict[str, Theme] = {
         # that the 0.07-0.32 alpha band used for link strength stays visible.
         node_color_old=(0.22, 0.43, 0.68),
         node_color_new=(0.02, 0.37, 0.34),
-        seed_color=(0.8, 0.16, 0.18),
+        focal_color=(0.8, 0.16, 0.18),
         edge_color=(0.16, 0.21, 0.29),
         text_color="#2d3748",
     ),
@@ -65,7 +65,7 @@ THEMES: dict[str, Theme] = {
         background="#1a1a1a",
         node_color_old=(0.4, 0.6, 0.8),
         node_color_new=(0.2, 0.8, 0.7),
-        seed_color=(0.95, 0.4, 0.35),
+        focal_color=(0.95, 0.4, 0.35),
         edge_color=(0.6, 0.6, 0.6),
         text_color="#e0e0e0",
     ),
@@ -74,7 +74,7 @@ THEMES: dict[str, Theme] = {
         background="#002b36",
         node_color_old=(0.51, 0.58, 0.59),
         node_color_new=(0.15, 0.63, 0.6),
-        seed_color=(0.86, 0.2, 0.18),
+        focal_color=(0.86, 0.2, 0.18),
         edge_color=(0.36, 0.43, 0.45),
         text_color="#93a1a1",
     ),

@@ -9,7 +9,6 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from functools import partial
-from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, TypedDict
@@ -29,6 +28,7 @@ from citemesh.data.embedding_contract import (
     CorpusSourceData,
     EmbeddingContract,
     ExistingCacheSelection,
+    embedding_namespace_id,
 )
 from citemesh.data.model_profiles import embedding_model_profile_key
 
@@ -115,15 +115,22 @@ class _LazyEncoder:
         tokenizer: _LengthTokenizer = getattr(self._encoder(), "tokenizer")
         return tokenizer
 
-    def encode_prefetched(self, texts: Sequence[str], *, batch_size: int) -> ArrayLike:
+    def encode_prefetched(
+        self,
+        texts: Sequence[str],
+        *,
+        batch_size: int,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> ArrayLike:
         """Encode and count a batch using the encoder's prefetch path.
 
         :param texts: Retrieval texts to encode.
         :param batch_size: Maximum texts per inference batch.
+        :param on_progress: Completed-input callback for the active encoding task.
         :return: Encoded vectors in input order.
         """
         encode: _PrefetchBatchEncoder = getattr(self._encoder(), "encode_prefetched")
-        result = encode(texts, batch_size=batch_size)
+        result = encode(texts, batch_size=batch_size, on_progress=on_progress)
         self.encoded_count += len(texts)
         return result
 
@@ -299,7 +306,7 @@ def refresh_builder_corpus(
         namespace = builder._embedding_cache_namespace(
             artifact_identity=contract.model_artifact_identity
         )
-        namespace_id = sha256(namespace.encode()).hexdigest()[:12]
+        namespace_id = embedding_namespace_id(namespace)
         directory = get_cache_dir(create=False) / "embeddings"
         occupied = any(
             (directory / name).exists()

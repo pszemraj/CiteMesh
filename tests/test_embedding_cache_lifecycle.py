@@ -19,6 +19,7 @@ import pytest
 from filelock import FileLock
 
 from citemesh.cli import cache_ops
+from citemesh.core.config import EMBEDDING_STORAGE_CONFIG
 from citemesh.core.paper_ids import BibliographyKey
 from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import EmbeddingCache, constants, lifecycle
@@ -171,6 +172,91 @@ def test_native_search_intersects_membership_and_exact_newest_view(
     assert cache.last_search_rescored_embeddings == 1
     results = cache.search(np.ones(4, dtype=np.float32), 10, corpus_size=3, **kwargs)
     assert {r.paper_id for r in results} == {"paper-1", "paper-2", "paper-3"}
+
+
+@pytest.mark.parametrize(
+    "dtype,binary", [("float32", False), ("int8", False), ("int8", True)]
+)
+def test_ordinary_cache_newest_view_filters_before_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dtype: str, binary: bool
+) -> None:
+    """Bound ordinary rows before top-k, retaining tie and undated-fill order."""
+    cache = EmbeddingCache(
+        cache_dir=tmp_path, storage_precision=dtype, binary_prefilter=binary
+    )
+    if dtype == "int8":
+        cache.set_calibration_ranges(
+            np.asarray([[-1, -1], [1, 1]], dtype=np.float32), embedding_dim=2
+        )
+    records = {
+        "z-undated": {"title": "Undated first"},
+        "2501.00001": {"title": "Best match"},
+        "2601.00001v1": {"title": "Tie first"},
+        "2601.00001v2": {"title": "Tie second"},
+        "a-undated": {"title": "Undated second"},
+        "2602.00001": {"title": "Newest"},
+    }
+
+    class Encoder:
+        def encode(self, texts: list[str], **_kwargs: object) -> np.ndarray:
+            return np.asarray(
+                [[1, 0] if text == "Best match" else [0, 1] for text in texts],
+                dtype=np.float32,
+            )
+
+    cache.get_embeddings(
+        records,
+        Encoder(),
+        show_progress=False,
+        text_builder=lambda record: record["title"],
+    )
+    cache.mark_hydrated(
+        dataset_source="ordinary/source",
+        dataset_split="train",
+        corpus_size=len(records),
+        complete=True,
+    )
+    assert cache.corpus_state() == {}
+    stored = cache.h5_path.read_bytes()
+    monkeypatch.setattr(constants, "EMBEDDING_SEARCH_CHUNK_ROWS", 1)
+    kwargs = dict(binary_prefilter=binary, binary_rescore_multiplier=1)
+    query = np.asarray([1, 0], dtype=np.float32)
+    results = cache.search(query, 1, corpus_size=1, **kwargs)
+    assert [result.paper_id for result in results] == ["2602.00001"]
+    for size, expected in [
+        (2, ["2601.00001v2", "2602.00001"]),
+        (3, ["2601.00001v1", "2601.00001v2", "2602.00001"]),
+        (
+            5,
+            ["2501.00001", "2601.00001v1", "2601.00001v2", "2602.00001", "z-undated"],
+        ),
+        (
+            None,
+            [
+                "2501.00001",
+                "2601.00001v1",
+                "2601.00001v2",
+                "2602.00001",
+                "a-undated",
+                "z-undated",
+            ],
+        ),
+    ]:
+        results = cache.search(query, 10, corpus_size=size, **kwargs)
+        assert [result.paper_id for result in results] == expected
+        assert cache.last_search_total_embeddings == (size or len(records))
+        assert cache.last_search_physical_embeddings == len(records)
+        assert cache.last_search_rescored_embeddings == (size or len(records))
+    # Drop the pool floor so the prefilter's own cut to ``top_k`` is observable.
+    monkeypatch.setattr(EMBEDDING_STORAGE_CONFIG, "binary_rescore_min_candidates", 1)
+    results = cache.search(query, 1, corpus_size=3, **kwargs)
+    assert [result.paper_id for result in results] == ["2601.00001v1"]
+    assert cache.last_search_total_embeddings == 3
+    assert cache.last_search_rescored_embeddings == (1 if binary else 3)
+    assert cache.h5_path.read_bytes() == stored
+    assert cache.get_cached_paper_ids() == set(records)
+    assert cache.payload_stats().hydration_corpus_size == "newest:6"
+    assert cache.corpus_state() == {}
 
 
 def test_manual_corpus_rejects_hit_updates_and_ordinary_writes(tmp_path):

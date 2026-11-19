@@ -58,7 +58,7 @@ class Paper:
     :ivar doi: DOI suffix when available.
     :ivar categories: List of subject categories (e.g., ArXiv categories)
     :ivar references: List of paper IDs this paper references
-    :ivar is_seed: Whether this is the query paper
+    :ivar is_focal: Whether this is the focal paper
     :ivar is_local_corpus: Whether metadata came from a hydrated local corpus row
     """
 
@@ -73,7 +73,7 @@ class Paper:
     doi: str = ""
     categories: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
-    is_seed: bool = False
+    is_focal: bool = False
     is_local_corpus: bool = False
 
     def __post_init__(self) -> None:

@@ -28,6 +28,7 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     resolve_embedding_model_profile,
 )
+from citemesh.progress import progress_task
 
 from . import deps, runtime
 from .precision import _model_floating_dtype_names, _PrecisionEncodeProxy
@@ -41,7 +42,7 @@ from .runtime import (
     _parse_major_minor,
     _require_transformers_compatibility,
     _suppress_expected_fa2_load_dtype_warning,
-    _suppress_transformers_progress_when_hidden,
+    _suppress_transformers_progress,
 )
 
 if TYPE_CHECKING:
@@ -654,12 +655,19 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
         if effective_batch_size < 1:
             raise ValueError("batch_size must be at least 1 when provided")
 
-        return encode_texts(
-            encode_model,
-            texts,
-            batch_size=min(effective_batch_size, len(texts)),
-            show_progress_bar=show_progress_bar,
-        )
+        with progress_task(
+            total=len(texts),
+            description="Encoding papers",
+            unit="papers",
+            enabled=None if show_progress_bar and len(texts) > 1 else False,
+        ) as progress:
+            return encode_texts(
+                encode_model,
+                texts,
+                batch_size=min(effective_batch_size, len(texts)),
+                show_progress_bar=False,
+                on_progress=lambda completed: progress.update(completed - progress.n),
+            )
 
     def _model_load_candidates(self) -> tuple[str, ...]:
         """Return ordered candidate model IDs used for lazy model loading.
@@ -803,8 +811,8 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
             st_kwargs["truncate_dim"] = self.truncate_dim
         if self.model_revision is not None:
             st_kwargs["revision"] = self.model_revision
-        try:
-            with _suppress_transformers_progress_when_hidden():
+        with _suppress_transformers_progress():
+            try:
                 with _suppress_expected_fa2_load_dtype_warning(
                     enabled=(
                         self._attention_implementation_hint == "flash_attention_2"
@@ -815,19 +823,18 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
                     loaded_model = sentence_transformer_cls(
                         candidate_model, **st_kwargs
                     )
-        except (ImportError, ValueError) as exc:
-            if not self._is_flash_attention_load_error(exc):
-                raise
-            logger.warning(
-                "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
-                candidate_model,
-                exc,
-            )
-            # ``model_kwargs`` is the same object st_kwargs carries, so the
-            # downgrade reaches the retry without rebuilding the kwargs.
-            self._attention_implementation_hint = "sdpa"
-            model_kwargs["attn_implementation"] = "sdpa"
-            with _suppress_transformers_progress_when_hidden():
+            except (ImportError, ValueError) as exc:
+                if not self._is_flash_attention_load_error(exc):
+                    raise
+                logger.warning(
+                    "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
+                    candidate_model,
+                    exc,
+                )
+                # ``model_kwargs`` is the same object st_kwargs carries, so the
+                # downgrade reaches the retry without rebuilding the kwargs.
+                self._attention_implementation_hint = "sdpa"
+                model_kwargs["attn_implementation"] = "sdpa"
                 loaded_model = sentence_transformer_cls(candidate_model, **st_kwargs)
         self._validate_loaded_model_precision(loaded_model, candidate_model)
         self._validate_loaded_model_contract(loaded_model, candidate_model)

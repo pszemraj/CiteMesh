@@ -36,9 +36,9 @@ from .geometry import (
 )
 from .loaders import PlotlyGraphObjects
 from .nodes import (
+    _focal_relation_map,
     _node_short_label,
     _provenance_map,
-    _seed_relation_map,
     _serialize_node,
     _sorted_edges,
     _sorted_nodes,
@@ -139,17 +139,17 @@ class _PlotlyLayoutKwargs(TypedDict, total=False):
     title: str
 
 
-def _plotly_title_text(graph: PaperGraph, seed_id: str) -> str:
-    """Build wrapped seed title text used by Plotly figure titles.
+def _plotly_title_text(graph: PaperGraph, focal_id: str) -> str:
+    """Build wrapped focal title text used by Plotly figure titles.
 
-    :param PaperGraph graph: Graph containing the seed node.
-    :param str seed_id: Seed paper identifier.
+    :param PaperGraph graph: Graph containing the focal node.
+    :param str focal_id: Focal paper identifier.
     :return str: Wrapped title string.
     """
-    seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+    focal_attrs = graph.nodes[focal_id] if focal_id in graph else {}
     title = (
-        _serialize_node(seed_id, seed_attrs).get("title", "CiteMesh")
-        if seed_attrs
+        _serialize_node(focal_id, focal_attrs).get("title", "CiteMesh")
+        if focal_attrs
         else "CiteMesh"
     )
     # Plotly renders titles as pseudo-HTML, so upstream markup must be escaped
@@ -262,7 +262,7 @@ def _build_node_style(
 ) -> _NodeStyle:
     """Resolve node label text and marker styling for the active render mode.
 
-    :param PaperGraph graph: Graph supplying seed and ranking attributes.
+    :param PaperGraph graph: Graph supplying focal and ranking attributes.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :param Mapping[Hashable, NDArray[np.float64]] pos: Normalized node positions.
     :param list[object] base_labels: Raw per-node label candidates.
@@ -296,11 +296,11 @@ def _build_node_style(
             [1.0, _rgb_tuple_to_hex(theme_obj.node_color_new)],
         ]
         marker_line_width = [
-            4.0 if graph.nodes[node].get("is_seed") else 0.0 for node in node_ids
+            4.0 if graph.nodes[node].get("is_focal") else 0.0 for node in node_ids
         ]
         marker_line_color = [
-            _rgb_tuple_to_hex(theme_obj.seed_color)
-            if graph.nodes[node].get("is_seed")
+            _rgb_tuple_to_hex(theme_obj.focal_color)
+            if graph.nodes[node].get("is_focal")
             else _rgb_tuple_to_rgba(theme_obj.background, 0.0)
             for node in node_ids
         ]
@@ -340,7 +340,7 @@ def _build_hover_texts(*, graph: PaperGraph, node_ids: list[Hashable]) -> list[s
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :return list[str]: Pseudo-HTML tooltip bodies, one per node.
     """
-    seed_relations = _seed_relation_map(graph)
+    focal_relations = _focal_relation_map(graph)
     provenance_map = _provenance_map(graph)
     hover_texts = []
     for node in node_ids:
@@ -377,10 +377,10 @@ def _build_hover_texts(*, graph: PaperGraph, node_ids: list[Hashable]) -> list[s
             lines.append(html.escape(" | ".join(fact_bits)))
         node_str = str(node)
         relation_label = (
-            "seed paper"
-            if bool(attrs.get("is_seed", False))
+            "focal paper"
+            if bool(attrs.get("is_focal", False))
             else _HOVER_RELATION_LABELS.get(
-                seed_relations.get(node_str, ""),
+                focal_relations.get(node_str, ""),
                 _HOVER_RELATION_LABELS.get(provenance_map.get(node_str, ""), ""),
             )
         )
@@ -402,10 +402,10 @@ def _build_dashboard_overlay_traces(
     marker_sizeref: float,
     theme_obj: Theme,
 ) -> tuple[Scatter, Scatter]:
-    """Build the seed selection halo and neighborhood-edge overlay traces.
+    """Build the focal selection halo and neighborhood-edge overlay traces.
 
     :param PlotlyGraphObjects go: Lazily loaded Plotly graph_objects module.
-    :param PaperGraph graph: Graph supplying the seed flag.
+    :param PaperGraph graph: Graph supplying the focal flag.
     :param list[Hashable] node_ids: Deterministically ordered node identifiers.
     :param list[float] node_x: Node x coordinates.
     :param list[float] node_y: Node y coordinates.
@@ -414,11 +414,11 @@ def _build_dashboard_overlay_traces(
     :param Theme theme_obj: Active visualization theme.
     :return tuple[Scatter, Scatter]: Halo trace and empty neighborhood-edge trace.
     """
-    seed_index = next(
+    focal_index = next(
         (
             idx
             for idx, node in enumerate(node_ids)
-            if bool(graph.nodes[node].get("is_seed", False))
+            if bool(graph.nodes[node].get("is_focal", False))
         ),
         None,
     )
@@ -426,11 +426,11 @@ def _build_dashboard_overlay_traces(
     halo_y: list[float] = []
     halo_sizes: list[float] = []
     halo_colors: list[str] = []
-    if seed_index is not None:
-        halo_x = [node_x[seed_index]]
-        halo_y = [node_y[seed_index]]
-        halo_sizes = [node_sizes[seed_index] * 2.05]
-        halo_colors = [_rgb_tuple_to_rgba(theme_obj.seed_color, 0.26)]
+    if focal_index is not None:
+        halo_x = [node_x[focal_index]]
+        halo_y = [node_y[focal_index]]
+        halo_sizes = [node_sizes[focal_index] * 2.05]
+        halo_colors = [_rgb_tuple_to_rgba(theme_obj.focal_color, 0.26)]
     halo_trace = go.Scatter(
         x=halo_x,
         y=halo_y,
@@ -457,7 +457,7 @@ def _build_dashboard_overlay_traces(
         showlegend=False,
         line=dict(
             width=2.0,
-            color=_rgb_tuple_to_rgba(theme_obj.seed_color, 0.78),
+            color=_rgb_tuple_to_rgba(theme_obj.focal_color, 0.78),
         ),
         opacity=0.98,
     )
@@ -577,8 +577,8 @@ class PlotlyFigureMixin:
         title_prefix: str | None = "CiteMesh",
         margin_top: int = 40,
         for_dashboard: bool = False,
-    ) -> tuple[Figure, list[Hashable]]:
-        """Build a deterministic Plotly figure and point-order mapping.
+    ) -> Figure:
+        """Build a deterministic Plotly figure.
 
         :param PlotlyGraphObjects go: Lazily loaded Plotly graph_objects module.
         :param Theme theme_obj: Active visualization theme.
@@ -587,7 +587,7 @@ class PlotlyFigureMixin:
         :param int margin_top: Top plot margin.
         :param bool for_dashboard: Whether to apply dashboard-specific styling
             (subtle curved edges, muted colors, and reduced label density).
-        :return tuple[Figure, list[Hashable]]: Plotly figure and ordered node IDs.
+        :return Figure: Plotly figure with paper nodes in deterministic order.
         """
         pos = self._get_layout()
         layout_shapes, edge_trace = _build_edge_layer(
@@ -714,15 +714,15 @@ class PlotlyFigureMixin:
         if for_dashboard and node_x and node_y:
             _apply_axis_ranges(layout_kwargs, node_x, node_y)
             # Preserve view state within one result without carrying its viewport
-            # into a different seed graph.
+            # into a different focal graph.
             layout_kwargs["uirevision"] = (
-                f"citemesh-dashboard-static-layout-v1:{_strategy(self.graph, self.metadata)}:{self.seed_id}"
+                f"citemesh-dashboard-static-layout-v1:{_strategy(self.graph, self.metadata)}:{self.focal_id}"
             )
         if for_dashboard and layout_shapes:
             layout_kwargs["shapes"] = layout_shapes
         if title_prefix is not None:
             layout_kwargs["title"] = (
-                f"{title_prefix}: {_plotly_title_text(self.graph, self.seed_id)}"
+                f"{title_prefix}: {_plotly_title_text(self.graph, self.focal_id)}"
             )
 
         if for_dashboard:
@@ -734,14 +734,13 @@ class PlotlyFigureMixin:
             traces.append(node_trace)
         else:
             traces = [trace for trace in (edge_trace, node_trace) if trace is not None]
-        fig = go.Figure(data=traces, layout=go.Layout(**layout_kwargs))
-        return fig, node_ids
+        return go.Figure(data=traces, layout=go.Layout(**layout_kwargs))
 
     def _plotly_div_id(self: _ExporterHost, prefix: str = "citemesh-plotly") -> str:
         """Build a deterministic Plotly HTML container id.
 
         :param str prefix: Prefix for resulting ``div_id``.
-        :return str: Stable ``div_id`` derived from seed id and sorted graph structure.
+        :return str: Stable ``div_id`` derived from focal id and sorted graph structure.
         """
         nodes = [str(node_id) for node_id, _ in _sorted_nodes(self.graph)]
         edges = [
@@ -753,7 +752,7 @@ class PlotlyFigureMixin:
             for left, right, attrs in _sorted_edges(self.graph)
         ]
         digest_payload = json.dumps(
-            {"seed_id": str(self.seed_id), "nodes": nodes, "edges": edges},
+            {"focal_id": str(self.focal_id), "nodes": nodes, "edges": edges},
             sort_keys=True,
             separators=(",", ":"),
         )

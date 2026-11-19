@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING
 
 import networkx as nx
 
-from citemesh.core import Paper
-from citemesh.core.values import parse_float
+from citemesh.core import Author, Paper
+from citemesh.core.values import coerce_citation_count, parse_float
 from citemesh.data.cache import atomic_output_path, atomic_write_text
 
 from ..dashboard.contracts import (
@@ -69,8 +69,10 @@ from .loaders import (
 )
 from .nodes import (
     NodesMixin,
+    _discovery_evidence,
     _node_short_label,
     _node_title,
+    _normalized_text_values,
     _ordered_attrs,
     _serialize_node,
     _sorted_edges,
@@ -86,7 +88,7 @@ if TYPE_CHECKING:
 PAGE_TITLE_PREFIX = "CiteMesh"
 
 
-def _export_page_title(graph: PaperGraph, seed_id: str) -> str:
+def _export_page_title(graph: PaperGraph, focal_id: str) -> str:
     """Build the browser tab title shared by CiteMesh HTML exports.
 
     Reuses the Plotly figure title text so the tab and the on-canvas title name
@@ -94,14 +96,16 @@ def _export_page_title(graph: PaperGraph, seed_id: str) -> str:
     joined by ``<br>``), so it is flattened back to plain text here and
     re-escaped by the head injector.
 
-    :param PaperGraph graph: Graph containing the seed node.
-    :param str seed_id: Seed paper identifier.
+    :param PaperGraph graph: Graph containing the focal node.
+    :param str focal_id: Focal paper identifier.
     :return str: Plain-text page title.
     """
-    seed_title = html.unescape(_plotly_title_text(graph, seed_id).replace("<br>", " "))
-    if not seed_title or seed_title == PAGE_TITLE_PREFIX:
+    focal_title = html.unescape(
+        _plotly_title_text(graph, focal_id).replace("<br>", " ")
+    )
+    if not focal_title or focal_title == PAGE_TITLE_PREFIX:
         return PAGE_TITLE_PREFIX
-    return f"{PAGE_TITLE_PREFIX}: {seed_title}"
+    return f"{PAGE_TITLE_PREFIX}: {focal_title}"
 
 
 def _export_page_style(theme_obj: Theme) -> str:
@@ -147,15 +151,15 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
     def __init__(
         self,
         graph: PaperGraph,
-        seed_id: str,
+        focal_id: str,
         metadata: Mapping[str, object] | None = None,
         theme_name: str = "dark",
         layout: Mapping[Hashable, Iterable[float]] | None = None,
     ):
-        """Create exporter bound to a graph and seed paper metadata.
+        """Create exporter bound to a graph and focal paper metadata.
 
         :param PaperGraph graph: Graph to export.
-        :param str seed_id: Seed paper identifier.
+        :param str focal_id: Focal paper identifier.
         :param Mapping[str, object] | None metadata: Optional metadata to include in outputs. When
             omitted, strategy-sensitive enrichments fall back to graph-level metadata
             when available.
@@ -164,7 +168,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             layout.
         """
         self.graph: PaperGraph = graph
-        self.seed_id = seed_id
+        self.focal_id = focal_id
         self.metadata: Mapping[str, object] = metadata or {}
         self.theme = get_theme(theme_name)
         self._layout: Mapping[Hashable, Iterable[float]] | None = layout
@@ -172,6 +176,88 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         self._color_map_cache: dict[
             str, dict[Hashable, tuple[float, float, float]]
         ] = {}
+
+    @classmethod
+    def from_json(cls, path: Path) -> GraphExporter:
+        """Load a graph JSON export for NetworkX analysis and further exports.
+
+        Restore provenance, focal-paper relations, discovery evidence, and the
+        saved layout and theme. The NetworkX graph is available as ``graph``,
+        with reconstructed ``Paper`` objects and scalar node metadata. Author
+        IDs and reference lists are not part of graph JSON and are not restored.
+        Only the versioned ``citemesh-graph`` format is supported,
+        not dashboard collection packages or arbitrary NetworkX JSON.
+
+        :param Path path: Graph JSON written by :meth:`to_json`.
+        :return GraphExporter: Exporter bound to the reconstructed graph.
+        :raises OSError: If the file cannot be read.
+        :raises ValueError: If the JSON or graph payload is invalid.
+        """
+        from ..dashboard.package import _validate_dashboard_graph_payload
+
+        payload = _validate_dashboard_graph_payload(
+            json.loads(path.read_text(encoding="utf-8")), result_id=str(path)
+        )
+        focal_id = payload["focal_id"]
+        graph: PaperGraph = nx.Graph()
+        graph.graph.update(payload["meta"])
+        graph.graph["focal_id"] = focal_id
+        paper_sources: dict[str, object] = {}
+        focal_relations: dict[str, object] = {}
+        discovery_ranking: dict[str, dict[str, object]] = {}
+        for node in payload["nodes"]:
+            attrs: dict[str, object] = dict(node)
+            node_id = node["id"]
+            attrs.pop("id")
+            attrs["is_focal"] = node_id == focal_id
+            year = coerce_publication_year(attrs.get("year"))
+            attrs["paper"] = Paper(
+                paper_id=node_id,
+                title=str(attrs.get("title") or ""),
+                year=year or None,
+                authors=[
+                    Author(name)
+                    for name in _normalized_text_values(attrs.get("authors"))
+                ],
+                citation_count=coerce_citation_count(attrs.get("citation_count")),
+                abstract=str(attrs.get("abstract") or ""),
+                venue=str(attrs.get("venue") or ""),
+                arxiv_id=str(attrs.get("arxiv_id") or ""),
+                doi=str(attrs.get("doi") or ""),
+                categories=_normalized_text_values(attrs.get("categories")),
+                is_focal=node_id == focal_id,
+                is_local_corpus=bool(attrs.get("is_local_corpus")),
+            )
+            graph.add_node(node_id, **attrs)
+            paper_sources[node_id] = attrs.get("provenance_base", "")
+            focal_relations[node_id] = attrs.get("focal_relation", "")
+            if "discovery_rank" in attrs:
+                discovery_ranking[node_id] = dict(_discovery_evidence(attrs))
+        graph.graph["paper_sources"] = paper_sources
+        graph.graph["focal_relations"] = focal_relations
+        if discovery_ranking:
+            graph.graph["discovery_ranking"] = discovery_ranking
+        for edge in payload["edges"]:
+            edge_attrs: dict[str, object] = dict(edge)
+            edge_attrs.pop("source")
+            edge_attrs.pop("target")
+            graph.add_edge(edge["source"], edge["target"], **edge_attrs)
+
+        dashboard_meta = payload["dashboard"]["meta"]
+        layout: dict[Hashable, Iterable[float]] = dict(
+            zip(
+                dashboard_meta["plotly_node_order"],
+                dashboard_meta["plotly_positions"],
+                strict=True,
+            )
+        )
+        return cls(
+            graph,
+            focal_id,
+            metadata=payload["meta"],
+            theme_name=str(dashboard_meta.get("theme", "dark")),
+            layout=layout,
+        )
 
     # ------------------------------------------------------------------
     # Public export methods
@@ -185,24 +271,27 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         which export formats were requested or in which order exporters ran.
 
         :return GraphPayload: Portable CiteMesh graph payload with dashboard data.
-        :raises ValueError: If the seed identifier is not present among graph nodes.
+        :raises ValueError: If the focal identifier is not present among graph nodes.
         """
+        return self._graph_payload_for_theme(self.theme)
+
+    def _graph_payload_for_theme(self, theme: Theme) -> GraphPayload:
+        """Build the portable graph for JSON or an HTML viewer's active theme."""
         sorted_nodes = _sorted_nodes(self.graph)
         serialized_node_ids = {str(node_id) for node_id, _ in sorted_nodes}
-        if str(self.seed_id) not in serialized_node_ids:
+        if str(self.focal_id) not in serialized_node_ids:
             raise ValueError(
-                f"Cannot export graph payload: seed node {self.seed_id!r} "
+                f"Cannot export graph payload: focal node {self.focal_id!r} "
                 "is not present in the graph."
             )
         enriched = self._enriched_nodes()
         sorted_edges = _sorted_edges(self.graph)
         dashboard_node_ids = [node_id for node_id, _ in sorted_nodes]
         dashboard_meta = self._dashboard_meta(
-            theme_obj=self.theme,
+            theme_obj=theme,
             node_ids=dashboard_node_ids,
             node_payloads=enriched,
             sorted_edges=sorted_edges,
-            include_plotly_geometry=True,
         )
         portable_meta: PortableGraphMetadata = {
             "strategy": dashboard_meta["strategy"],
@@ -213,10 +302,12 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             portable_meta["candidate_source_status"] = candidate_source_status
         if "discovery_ranker" in dashboard_meta:
             portable_meta["discovery_ranker"] = dashboard_meta["discovery_ranker"]
+        if "discovery_leads" in dashboard_meta:
+            portable_meta["discovery_leads"] = dashboard_meta["discovery_leads"]
         payload: GraphPayload = {
             "kind": GRAPH_PAYLOAD_KIND,
             "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,
-            "seed_id": str(self.seed_id),
+            "focal_id": str(self.focal_id),
             "meta": portable_meta,
             "summary": dashboard_meta["summary"],
             "nodes": enriched,
@@ -269,10 +360,10 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             "arxiv_id",
             "doi",
             "categories",
-            "is_seed",
+            "is_focal",
             "provenance",
-            "seed_relation",
-            "seed_relevance",
+            "focal_relation",
+            "focal_relevance",
             "arxiv_url",
             "doi_url",
             "semantic_scholar_url",
@@ -294,10 +385,10 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 "doi": _csv_cell_guard(node.get("doi", "")),
                 "categories": _csv_cell_guard("; ".join(node.get("categories", []))),
                 # Lowercase true/false matches the dashboard's Export CSV button.
-                "is_seed": "true" if node.get("is_seed", False) else "false",
+                "is_focal": "true" if node.get("is_focal", False) else "false",
                 "provenance": _csv_cell_guard(node.get("provenance", "")),
-                "seed_relation": _csv_cell_guard(node.get("seed_relation", "")),
-                "seed_relevance": f"{node.get('seed_relevance', 0.0):.6f}",
+                "focal_relation": _csv_cell_guard(node.get("focal_relation", "")),
+                "focal_relevance": f"{node.get('focal_relevance', 0.0):.6f}",
                 "arxiv_url": _csv_cell_guard(links.get("arxiv_abs", "")),
                 "doi_url": _csv_cell_guard(links.get("doi", "")),
                 "semantic_scholar_url": _csv_cell_guard(
@@ -351,7 +442,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             categories = cleaned.get("categories")
             if isinstance(categories, list):
                 cleaned["categories"] = ", ".join(categories)
-            cleaned["is_seed"] = int(bool(cleaned.get("is_seed")))
+            cleaned["is_focal"] = int(bool(cleaned.get("is_focal")))
             cleaned = {
                 key: _xml_safe_graph_value(value) for key, value in cleaned.items()
             }
@@ -466,7 +557,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 title="<br>".join(tooltip_lines),
                 size=max(6, size / 30),
                 color=color,
-                borderWidth=3 if serialized.get("is_seed") else 1,
+                borderWidth=3 if serialized.get("is_focal") else 1,
             )
 
         for u, v, data in _sorted_edges(self.graph):
@@ -478,7 +569,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             geometry._inject_darkreader_lock(
                 tmp_path,
                 _theme_color_scheme(theme_obj),
-                title=_export_page_title(self.graph, self.seed_id),
+                title=_export_page_title(self.graph, self.focal_id),
                 style=_export_page_style(theme_obj)
                 + "#mynetwork{border:0 !important;}",
                 # Pyvis always emits Bootstrap CDN tags (used only by its
@@ -502,7 +593,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
-        fig, _ = self._build_plotly_figure(
+        fig = self._build_plotly_figure(
             go=go, theme_obj=theme_obj, title_prefix=PAGE_TITLE_PREFIX
         )
 
@@ -526,7 +617,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             geometry._inject_darkreader_lock(
                 tmp_path,
                 _theme_color_scheme(theme_obj),
-                title=_export_page_title(self.graph, self.seed_id),
+                title=_export_page_title(self.graph, self.focal_id),
                 style=_export_page_style(theme_obj),
             )
 
@@ -544,7 +635,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
-        fig, node_ids = self._build_plotly_figure(
+        fig = self._build_plotly_figure(
             go=go,
             theme_obj=theme_obj,
             title_prefix=None,
@@ -552,7 +643,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             for_dashboard=True,
         )
         div_id = self._plotly_div_id(prefix="citemesh-dashboard-plotly")
-        payload = self._dashboard_payload(theme_obj=theme_obj, node_ids=node_ids)
+        payload = self._graph_payload_for_theme(theme_obj)
         payload_json = _script_safe_json(payload)
         figure_json = _script_safe_json(fig.to_plotly_json())
         collection_json = _script_safe_json(self._dashboard_collection_bundle())

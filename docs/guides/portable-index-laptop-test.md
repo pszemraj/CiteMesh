@@ -120,10 +120,12 @@ class CorpusOnlyClient(SemanticScholarClient):
         return {}
 
 
-seed = Paper(**json.loads(Path("out/unseen-paper.json").read_text(encoding="utf-8")))
+focal = Paper(**json.loads(Path("out/unseen-paper.json").read_text(encoding="utf-8")))
 selection = select_existing_cache(NAMESPACE)
 cache = open_existing_cache(selection)
-assert not cache.get_paper_metadata_batch([seed.paper_id]), "Choose an unseen seed"
+assert not cache.get_paper_metadata_batch([focal.paper_id]), (
+    "Choose an unseen focal paper"
+)
 state, count = cache.corpus_state(), cache.embedding_count()
 print(
     "namespace", selection.namespace_id, "contract", selection.contract, "state", state
@@ -138,29 +140,29 @@ for cap in (None, 8):
         max_papers=6,
         min_semantic_similarity=0,
     )
-    graph, seed_id = builder.build_graph(seed.paper_id, seed_paper=seed)
-    assert seed_id == seed.paper_id
+    graph, focal_id = builder.build_graph(focal.paper_id, focal_paper=focal)
+    assert focal_id == focal.paper_id
     assert graph.number_of_nodes() == 6 and graph.number_of_edges() > 0
     assert all(
-        node == seed_id or attributes["paper"].is_local_corpus
+        node == focal_id or attributes["paper"].is_local_corpus
         for node, attributes in graph.nodes(data=True)
     )
     assert cache.embedding_count() == count
     assert cache.corpus_state() == state
-    assert not cache.get_paper_metadata_batch([seed.paper_id])
+    assert not cache.get_paper_metadata_batch([focal.paper_id])
     assert builder.graph_embedding_cache.db_path != cache.db_path
     assert builder.graph_embedding_cache.storage_precision == "float32"
     runtime = graph.graph["embedding_runtime"]
     assert runtime["device"] == DEVICE
     assert runtime["resolved_model_revision"] == selection.contract.model_revision
     label = "full" if cap is None else "newest8"
-    exporter = GraphExporter(graph, seed_id, theme_name="dark")
+    exporter = GraphExporter(graph, focal_id, theme_name="dark")
     exporter.to_json(Path(f"out/unseen-{label}.json"))
     exporter.to_dashboard_html(Path(f"out/unseen-{label}.dashboard.html"))
     print(label, "PASS", runtime)
 ```
 
-**Pass:** both runs print `PASS`. Each dashboard contains the actual unseen seed and five papers from the installed corpus. The full and newest-eight views leave the retrieval corpus and source provenance unchanged; graph vectors occupy a separate float32 namespace. Repeating the script should reuse graph vectors. Open both dashboard files and confirm titles, abstracts, and navigation work.
+**Pass:** both runs print `PASS`. Each dashboard contains the actual unseen focal paper and five papers from the installed corpus. The full and newest-eight views leave the retrieval corpus and source provenance unchanged; graph vectors occupy a separate float32 namespace. Repeating the script should reuse graph vectors. Open both dashboard files and confirm titles, abstracts, and navigation work.
 
 The Python selection API is subject to the project's [pre-1.0 API policy](python-api.md).
 
@@ -173,7 +175,7 @@ citemesh build arxiv:YOUR_REAL_ID --strategy embedding --cache-namespace NAMESPA
 citemesh cache scan
 ```
 
-**Pass:** the output contains the real paper as seed and corpus neighbors. A `query:` seed containing only the unresolved identifier is not a pass for this paper-metadata test. If the provider does not know the paper yet, use step 4; that is a metadata-acquisition limitation rather than an index failure. Do not refresh/rebuild the corpus just to query a new seed.
+**Pass:** the output contains the real focal paper and its corpus neighbors. A synthetic `query:` record containing only the unresolved identifier is not a pass for this paper-metadata test. If the provider does not know the paper yet, use step 4; that is a metadata-acquisition limitation rather than an index failure. Do not refresh/rebuild the corpus just to query a new focal paper.
 
 ## Record each laptop's result
 

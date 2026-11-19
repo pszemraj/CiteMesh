@@ -12,92 +12,100 @@ __DASHBOARD_CSS__
 </head>
 <body>
   <header id="dashboard-toolbar" class="collapsed">
-    <nav id="project-nav" aria-label="CiteMesh project">
+    <div id="masthead">
       <a class="project-name" href="https://github.com/pszemraj/CiteMesh" target="_blank" rel="noopener">CiteMesh</a>
-      <a href="https://github.com/pszemraj/CiteMesh" target="_blank" rel="noopener">GitHub ↗</a>
-      <a href="https://github.com/pszemraj/CiteMesh/tree/main/docs" target="_blank" rel="noopener">Docs ↗</a>
-      <a href="https://github.com/pszemraj/CiteMesh/issues" target="_blank" rel="noopener">Issues ↗</a>
-    </nav>
+      <div id="graph-context">
+        <h1 id="focal-title">Paper graph</h1>
+        <div id="graph-summary"></div>
+      </div>
+      <button class="nav-btn tools-trigger" type="button" popovertarget="graph-tools">Graph tools ▾</button>
+      <div id="graph-tools" popover>
+        <label id="collection-picker">Switch graph
+          <select id="result-select"><option value="" disabled>Current graph</option></select>
+        </label>
+        <div class="tool-group">
+          <button id="add-results-btn" type="button">Add Results…</button>
+          <input id="add-results-input" type="file" accept=".json,.html" multiple hidden />
+          <button id="export-collection-btn" type="button">Export Collection</button>
+        </div>
+        <div class="tool-group">
+          <button id="export-json-btn" type="button">Export JSON</button>
+          <button id="export-csv-btn" type="button">Export CSV</button>
+          <button id="export-bib-btn" type="button">All BibTeX</button>
+          <button id="export-saved-bib-btn" type="button" style="display:none">Saved BibTeX</button>
+          <button id="copy-saved-links-btn" type="button" style="display:none">Copy Saved Links</button>
+        </div>
+        <button id="more-btn" type="button" title="Open the selected paper, or the focal paper, on Semantic Scholar">Semantic Scholar ↗</button>
+        <nav id="project-nav" aria-label="CiteMesh project">
+          <a href="https://github.com/pszemraj/CiteMesh" target="_blank" rel="noopener">GitHub ↗</a>
+          <a href="https://github.com/pszemraj/CiteMesh/tree/main/docs" target="_blank" rel="noopener">Docs ↗</a>
+          <a href="https://github.com/pszemraj/CiteMesh/issues" target="_blank" rel="noopener">Issues ↗</a>
+        </nav>
+      </div>
+    </div>
     <div id="global-nav">
-      <div id="scope-nav" class="nav-group">
-        <button class="nav-btn" data-scope="prior" type="button">Prior works</button>
-        <button class="nav-btn" data-scope="derivative" type="button">Derivative works</button>
+      <input id="search-input" aria-label="Search paper titles, authors, and abstracts" type="search" placeholder="Search papers…" />
+      <div id="scope-nav" aria-label="Paper scope" role="group">
+        <button class="nav-btn" data-scope="all" type="button" aria-pressed="true">All papers</button>
+        <button class="nav-btn" data-scope="prior" type="button" aria-pressed="false">Prior works</button>
+        <button class="nav-btn" data-scope="derivative" type="button" aria-pressed="false">Derivative works</button>
       </div>
       <div class="nav-group">
-        <button id="list-view-btn" class="nav-btn" type="button">List view</button>
-        <button id="filters-toggle" class="nav-btn" type="button">Filters</button>
-        <button id="more-btn" class="nav-btn" type="button" title="Open the selected paper, or the seed, on Semantic Scholar">Semantic Scholar ↗</button>
+        <button id="filters-toggle" class="nav-btn" type="button" aria-expanded="false" aria-controls="toolbar-controls">Filters</button>
+        <button id="saved-filter" class="chip" type="button" aria-pressed="false" title="Show only papers saved to your reading list">Saved</button>
       </div>
-      <div class="nav-group">
-        <button id="export-json-btn" class="nav-btn" type="button">Export JSON</button>
-        <button id="export-csv-btn" class="nav-btn" type="button">Export CSV</button>
-        <button id="export-bib-btn" class="nav-btn" type="button">All BibTeX</button>
-        <button id="export-saved-bib-btn" class="nav-btn" type="button" style="display:none">Saved BibTeX</button>
-        <button id="copy-saved-links-btn" class="nav-btn" type="button" style="display:none" title="Copy a markdown list of saved papers with links">Copy Saved Links</button>
-        <button id="export-collection-btn" class="nav-btn" type="button">Export Collection</button>
-        <button id="add-results-btn" class="nav-btn" type="button">Add Results…</button>
-        <input id="add-results-input" type="file" accept=".json,.html" multiple style="display:none" />
+    </div>
+    <div id="toolbar-controls">
+      <select id="sort-select" aria-label="Sort papers">
+        <option value="relevance">Sort by graph relevance</option>
+        <option value="discovery_rank" hidden>Sort by discovery rank</option>
+        <option value="year">Sort by year</option>
+        <option value="citation_count">Sort by citations</option>
+        <option value="title">Sort by title</option>
+      </select>
+      <input id="year-min" aria-label="Minimum publication year" type="number" placeholder="Year min" />
+      <input id="year-max" aria-label="Maximum publication year" type="number" placeholder="Year max" />
+      <div id="provenance-filters" role="group" aria-label="Candidate sources">
+        <button class="chip active" data-filter="citation" aria-pressed="true" type="button">Citation</button>
+        <button class="chip active" data-filter="semantic" aria-pressed="true" type="button">Semantic</button>
+        <button class="chip active" data-filter="both" aria-pressed="true" type="button">Both</button>
       </div>
-      <div class="nav-group">
-        <label class="visually-hidden" for="result-select">Graph in result set</label>
-        <select id="result-select" title="Switch graph in result set">
-          <option value="" disabled>Current graph</option>
-        </select>
-      </div>
+      <button id="clear-selection" type="button">Clear selection</button>
     </div>
     <div id="dashboard-status" role="status" aria-live="polite"></div>
-    <div id="toolbar-controls">
-      <div class="toolbar-row primary">
-        <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
-        <select id="sort-select" title="Sort papers">
-          <option value="relevance">Sort: Relevance</option>
-          <option value="discovery_rank" hidden>Sort: Discovery rank</option>
-          <option value="year">Sort: Year</option>
-          <option value="citation_count">Sort: Citations</option>
-          <option value="title">Sort: Title</option>
-        </select>
-        <button id="clear-selection" type="button">Clear Selection</button>
-      </div>
-      <div class="toolbar-row secondary">
-        <input id="year-min" type="number" placeholder="Year min" />
-        <input id="year-max" type="number" placeholder="Year max" />
-        <div id="provenance-filters">
-          <button class="chip active" data-filter="citation" type="button">citation</button>
-          <button class="chip active" data-filter="semantic" type="button">semantic</button>
-          <button class="chip active" data-filter="both" type="button">both</button>
-        </div>
-        <button id="saved-filter" class="chip" type="button" title="Show only papers saved to your reading list">Saved</button>
-      </div>
-    </div>
   </header>
-
-  <div id="dashboard-root">
+  <nav id="pane-nav" aria-label="Dashboard panels">
+    <button data-pane="graph" aria-controls="graph-pane" aria-pressed="true" type="button">Graph</button>
+    <button data-pane="paper-list" aria-controls="paper-list-pane" aria-pressed="false" type="button">Papers</button>
+    <button data-pane="detail" aria-controls="detail-pane" aria-pressed="false" type="button">Details</button>
+  </nav>
+  <div id="dashboard-root" data-pane="graph">
     <aside id="paper-list-pane" class="pane">
       <div class="pane-header">
         <h2 class="pane-title">Papers</h2>
-        <span id="paper-count" class="muted">0</span>
+        <div class="paper-list-actions">
+          <span id="paper-count" class="muted">0</span>
+          <button id="more-papers-btn" type="button" aria-haspopup="dialog" aria-controls="more-papers-dialog" hidden>More papers</button>
+        </div>
       </div>
-      <ul id="paper-list"></ul>
+      <ul id="paper-list" role="list" tabindex="-1" aria-label="Papers"></ul>
     </aside>
 
     <main id="graph-pane" class="pane">
       <div class="pane-header">
-        <h2 class="pane-title">Graph</h2>
-        <span id="graph-hint" class="muted">Hover to preview, click to lock</span>
+        <h2 class="pane-title">Similarity graph</h2>
+        <span id="graph-hint" class="muted">Select a node to read</span>
       </div>
       <div id="graph-canvas-wrap">
         <div id="__PLOTLY_DIV_ID__"></div>
-        <div id="graph-footer">
-          <div id="graph-legend">
-            <span class="legend-item"><span class="legend-marker seed"></span>seed</span>
-            <span class="legend-item"><span class="legend-gradient"></span>older &#8594; newer</span>
-            <span class="legend-item muted">size = citations</span>
-          </div>
-          <div id="year-timeline" title="Node color encodes publication year">
-            <span id="timeline-year-min">-</span>
-            <div id="timeline-bar"></div>
-            <span id="timeline-year-max">-</span>
-          </div>
+      </div>
+      <div id="graph-footer">
+        <span class="legend-item"><span class="legend-marker focal"></span>Focal paper</span>
+        <span class="legend-item">Size by citations</span>
+        <div id="year-timeline" title="Node color encodes publication year">
+          <span id="timeline-year-min">–</span>
+          <span id="timeline-bar"></span>
+          <span id="timeline-year-max">–</span>
         </div>
       </div>
     </main>
@@ -107,24 +115,46 @@ __DASHBOARD_CSS__
         <h2 class="pane-title">Details</h2>
         <span id="detail-mode" class="muted">No selection</span>
       </div>
-      <div id="detail-content">
-        <h3 id="detail-title">Select a paper</h3>
-        <div id="detail-subtitle"></div>
+      <div id="detail-content" class="is-empty">
+        <div class="detail-heading">
+          <h3 id="detail-title" tabindex="-1">Select a paper</h3>
+          <div id="detail-subtitle"></div>
+          <div id="detail-metrics"></div>
+          <div id="detail-links"></div>
+          <div id="detail-actions"></div>
+        </div>
+        <section id="detail-why">
+          <h4 id="detail-why-label">Why this paper</h4>
+          <dl id="detail-why-lines" class="detail-evidence"></dl>
+          <div id="detail-ranking"></div>
+          <div id="detail-reference"></div>
+        </section>
         <section id="detail-abstract-card">
           <h4 id="detail-abstract-label">Abstract</h4>
-          <div id="detail-abstract" class="muted">Hover or click a paper to inspect abstract and metadata.</div>
+          <p id="detail-abstract" class="muted">Choose a paper from the graph or list.</p>
         </section>
-        <div id="detail-metrics"></div>
         <div id="detail-categories"></div>
-        <div id="detail-links"></div>
-        <section id="detail-why">
-          <h4 id="detail-why-label">Why This Paper</h4>
-          <div id="detail-why-lines" class="muted">Select a paper to inspect neighborhood evidence.</div>
-        </section>
-        <div id="detail-actions"></div>
       </div>
     </aside>
   </div>
+
+  <dialog id="more-papers-dialog" aria-labelledby="more-papers-heading" aria-describedby="more-papers-description">
+    <div class="pane-header">
+      <h2 class="pane-title" id="more-papers-heading">More papers</h2>
+      <form method="dialog"><button type="submit" autofocus>Close</button></form>
+    </div>
+    <div class="more-papers-content">
+      <p id="more-papers-description" class="muted">These papers are outside the current graph.</p>
+      <section id="more-papers-references" aria-labelledby="more-papers-references-heading" hidden>
+        <h3 id="more-papers-references-heading">Frequently discussed references</h3>
+        <ul id="more-papers-references-list" role="list"></ul>
+      </section>
+      <section id="more-papers-corpus" aria-labelledby="more-papers-corpus-heading" hidden>
+        <h3 id="more-papers-corpus-heading">Related arXiv papers</h3>
+        <ul id="more-papers-corpus-list" role="list"></ul>
+      </section>
+    </div>
+  </dialog>
 
   <script>__PLOTLY_JS__</script>
   <script id="citemesh-dashboard-data" type="application/json">__PAYLOAD_JSON__</script>

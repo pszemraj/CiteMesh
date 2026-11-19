@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Hashable, Iterable, Mapping
+from dataclasses import replace
 from itertools import zip_longest
 from typing import (
     TYPE_CHECKING,
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from citemesh.core.models import PaperGraph
+    from citemesh.services.semantic_scholar import SemanticScholarClient
     from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 import networkx as nx
@@ -34,10 +36,10 @@ logger = logging.getLogger(__name__)
 RELATIONSHIP_DEGREE_CAP = 3
 
 
-class _SeedPaperOption(TypedDict, total=False):
-    """Shared optional seed payload for collection helpers."""
+class _FocalPaperOption(TypedDict, total=False):
+    """Shared optional focal paper payload for collection helpers."""
 
-    seed_paper: Paper | None
+    focal_paper: Paper | None
 
 
 class _CorpusPreparedOption(TypedDict, total=False):
@@ -46,7 +48,7 @@ class _CorpusPreparedOption(TypedDict, total=False):
     _corpus_prepared: bool
 
 
-class GraphCollectionOptions(_SeedPaperOption, _CorpusPreparedOption):
+class GraphCollectionOptions(_FocalPaperOption, _CorpusPreparedOption):
     """Combined keyword options exposed by the abstract graph builder."""
 
 
@@ -125,22 +127,22 @@ def select_capped_undirected_edges(
     edges: Iterable[tuple[Hashable, Hashable, Mapping[str, object]]],
     max_edges_per_node: int,
     *,
-    seed_id: Hashable | None = None,
-    priority_seed_neighbors: Collection[Hashable] = (),
+    focal_id: Hashable | None = None,
+    priority_focal_neighbors: Collection[Hashable] = (),
 ) -> list[tuple[Hashable, Hashable, float]]:
     """Select edges for an undirected graph while capping per-node degree.
 
-    Seed edges are considered before all others, strongest first. When
-    ``priority_seed_neighbors`` is given, the seed's edges alternate between
+    Focal paper edges are considered before all others, strongest first. When
+    ``priority_focal_neighbors`` is given, the focal paper's edges alternate between
     those papers and the rest, starting with a priority paper, so neither group
-    can take every seed slot while the other has an edge to offer.
+    can take every focal paper slot while the other has an edge to offer.
 
     :param Iterable[tuple[Hashable, Hashable, Mapping[str, object]]] edges: Edge tuples with optional
         ``weight`` metadata.
     :param int max_edges_per_node: Maximum degree per node.
-    :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
-    :param Collection[Hashable] priority_seed_neighbors: Papers that take every
-        other seed slot, such as the seed's own references and citers.
+    :param Optional[Hashable] focal_id: Reserve this focal paper's strongest existing edges first.
+    :param Collection[Hashable] priority_focal_neighbors: Papers that take every
+        other focal paper slot, such as the focal paper's own references and citers.
     :return List[Tuple[Hashable, Hashable, float]]: Selected canonicalized edges with weights.
     """
     canonical_edges: dict[tuple[str, str], tuple[Hashable, Hashable, float]] = {}
@@ -161,12 +163,12 @@ def select_capped_undirected_edges(
         canonical_edges.values(),
         key=lambda item: deterministic_sort_key(item[2], item[0], item[1]),
     )
-    seed_key = None if seed_id is None else str(seed_id)
-    priority = {str(node) for node in priority_seed_neighbors}
-    seed_edges = [e for e in by_strength if seed_key in (str(e[0]), str(e[1]))]
-    other_edges = [e for e in by_strength if seed_key not in (str(e[0]), str(e[1]))]
-    preferred = [e for e in seed_edges if {str(e[0]), str(e[1])} & priority]
-    remaining = [e for e in seed_edges if not {str(e[0]), str(e[1])} & priority]
+    focal_key = None if focal_id is None else str(focal_id)
+    priority = {str(node) for node in priority_focal_neighbors}
+    focal_edges = [e for e in by_strength if focal_key in (str(e[0]), str(e[1]))]
+    other_edges = [e for e in by_strength if focal_key not in (str(e[0]), str(e[1]))]
+    preferred = [e for e in focal_edges if {str(e[0]), str(e[1])} & priority]
+    remaining = [e for e in focal_edges if not {str(e[0]), str(e[1])} & priority]
     sorted_edges = [
         edge
         for pair in zip_longest(preferred, remaining)
@@ -201,16 +203,16 @@ def build_capped_undirected_graph(
     graph: PaperGraph,
     max_edges_per_node: int,
     *,
-    seed_id: Hashable | None = None,
-    priority_seed_neighbors: Collection[Hashable] = (),
+    focal_id: Hashable | None = None,
+    priority_focal_neighbors: Collection[Hashable] = (),
 ) -> PaperGraph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
     :param PaperGraph graph: Source graph whose nodes and metadata should be preserved.
     :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
-    :param Optional[Hashable] seed_id: Reserve this seed's strongest existing edges first.
-    :param Collection[Hashable] priority_seed_neighbors: Papers that take every
-        other seed slot; see :func:`select_capped_undirected_edges`.
+    :param Optional[Hashable] focal_id: Reserve this focal paper's strongest existing edges first.
+    :param Collection[Hashable] priority_focal_neighbors: Papers that take every
+        other focal paper slot; see :func:`select_capped_undirected_edges`.
     :return PaperGraph: Rebuilt graph with selected weighted edges.
     """
     filtered_graph: PaperGraph = nx.Graph()
@@ -220,8 +222,8 @@ def build_capped_undirected_graph(
     for u, v, weight in select_capped_undirected_edges(
         graph.edges(data=True),
         max_edges_per_node,
-        seed_id=seed_id,
-        priority_seed_neighbors=priority_seed_neighbors,
+        focal_id=focal_id,
+        priority_focal_neighbors=priority_focal_neighbors,
     ):
         filtered_graph.add_edge(u, v, weight=weight)
 
@@ -262,15 +264,15 @@ class GraphBuilderStrategy(ABC):
 
     @abstractmethod
     def collect_papers(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> dict[str, Paper]:
         """
         Collect papers for the graph using strategy-specific method.
 
-        :param str seed_id: The seed paper identifier (DOI, arXiv ID, or S2 ID)
+        :param str focal_id: The focal paper identifier (DOI, arXiv ID, or S2 ID)
         :param kwargs: Strategy-specific parameters
         :return Dict[str, Paper]: Dictionary mapping paper IDs to Paper objects
-        :raises ValueError: If seed paper cannot be found
+        :raises ValueError: If focal paper cannot be found
         """
         pass
 
@@ -317,6 +319,37 @@ class GraphBuilderStrategy(ABC):
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
 
+    def _resolve_focal_paper(
+        self,
+        focal_id: str,
+        *,
+        client: SemanticScholarClient,
+        focal_paper: Paper | None = None,
+    ) -> Paper:
+        """Resolve a required paper and bind its focal paper role to this build."""
+        focal = focal_paper
+        if focal is None:
+            logger.debug("Fetching focal paper: %s", focal_id)
+            focal = client.get_paper(focal_id, raise_on_unavailable=True)
+        if focal is None:
+            raise ValueError(
+                f"Focal paper not found: {focal_id} (Semantic Scholar does not "
+                "know this identifier; check the DOI/arXiv/S2 ID)."
+            )
+        # Focal paper role belongs to this build, not the supplied metadata record.
+        focal = replace(focal, is_focal=True)
+        self._log_focal_paper(focal)
+        return focal
+
+    @staticmethod
+    def _log_focal_paper(paper: Paper) -> None:
+        """Report the resolved focal paper before collecting its neighbors."""
+        logger.info(
+            "Focal paper: %s%s",
+            " ".join(paper.title.split()),
+            f" ({paper.year})" if paper.year is not None else "",
+        )
+
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
         """Prepare strategy-specific state required by pairwise graph scoring.
 
@@ -326,35 +359,34 @@ class GraphBuilderStrategy(ABC):
         del papers
 
     def build_graph(
-        self, seed_id: str, **kwargs: Unpack[GraphCollectionOptions]
+        self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
     ) -> tuple[PaperGraph, str]:
         """
         Build the complete similarity graph.
 
-        :param str seed_id: The seed paper identifier
+        :param str focal_id: The focal paper identifier
         :param kwargs: Strategy-specific parameters passed to collect_papers.
-        :return tuple[PaperGraph, str]: Built graph and canonical seed paper ID.
+        :return tuple[PaperGraph, str]: Built graph and canonical focal paper ID.
         """
         # Step 1: Collect papers
         logger.debug("Collecting papers using %s...", self.__class__.__name__)
-        self.papers = self.collect_papers(seed_id, **kwargs)
+        self.papers = self.collect_papers(focal_id, **kwargs)
 
         if not self.papers:
             raise ValueError("No papers collected")
 
-        # Find actual seed paper ID (may have been normalized)
-        seed_paper = next((p for p in self.papers.values() if p.is_seed), None)
-        if not seed_paper:
-            raise ValueError("Seed paper not found in collected papers")
+        # Find actual focal paper ID (may have been normalized)
+        focal_paper = next((p for p in self.papers.values() if p.is_focal), None)
+        if not focal_paper:
+            raise ValueError("Focal paper not found in collected papers")
 
-        actual_seed_id = seed_paper.paper_id
+        actual_focal_id = focal_paper.paper_id
 
         summary = self.get_collection_summary()
         if summary:
             logger.info(summary)
         else:
             logger.info("Collected %s papers", len(self.papers))
-        logger.debug("Seed paper: %s", seed_paper.title)
         self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes
@@ -371,7 +403,7 @@ class GraphBuilderStrategy(ABC):
                 venue=paper.venue,
                 arxiv_id=paper.arxiv_id,
                 doi=paper.doi,
-                is_seed=paper.is_seed,
+                is_focal=paper.is_focal,
                 is_local_corpus=paper.is_local_corpus,
             )
         resolved_strategy_name = self._resolved_strategy_name()
@@ -405,7 +437,7 @@ class GraphBuilderStrategy(ABC):
                 "Graph contains no edges: no selected paper pair met the "
                 "strategy's edge criteria."
             )
-        return graph, actual_seed_id
+        return graph, actual_focal_id
 
     def _resolved_strategy_name(self) -> str:
         """Resolve canonical strategy token for graph metadata.

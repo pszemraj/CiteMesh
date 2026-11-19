@@ -1,28 +1,31 @@
 # CLI usage guide
 
-`citemesh build` creates a graph; `search` finds seeds, `view` opens results, `cache` manages persisted data, and `config` saves defaults. See [installation](../../README.md#quick-start) and the [build pipeline](how-it-works.md).
+`citemesh build` creates a graph; `search` finds focal papers, `view` opens results, `cache` manages persisted data, and `config` saves defaults. See [installation](../../README.md#quick-start) and the [build pipeline](how-it-works.md).
 
 ## Common workflows
 
 ### Build a graph
 
 ```bash
+# Hybrid dashboard with local embeddings for Semantic Scholar candidates
+citemesh build "arxiv:2404.08801" --strategy hybrid --export dashboard
+citemesh view
+
+# Add a model-free recommendation graph to the same dashboard collection
+citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
+
 # Minimal citation graph (static PNG, the default export)
 citemesh build "arxiv:1706.03762" --strategy citation -p 20
-
-# Dashboard collection in ./out, the default output directory; a second build adds to it
-citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -e csv --theme dark
-citemesh build "arxiv:1810.04805" -s recommendation -e dashboard --theme dark
 
 # Standalone single-file dashboard
 citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -o out/report.dashboard.html
 
-# Embedding graph over a corpus slice, with a debug trace
+# Encode and search a corpus slice, with a debug trace
 citemesh build "arxiv:1810.04805" -s embedding --dataset-split "train[:2%]" \
   -e plotly --verbose --log-file out/run.log
 ```
 
-Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dashboard` exports need the [viz extra](../../README.md#quick-start). Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
+Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dashboard` exports need the `viz` extra, included in the [hybrid quick start](../../README.md#quick-start). Output directories, standalone files, and collection updates follow the [output-location rules](../reference/output-artifacts.md#output-location).
 
 ### Accepted identifiers
 
@@ -31,11 +34,11 @@ Without `--export`, a build writes a static PNG. The `html`, `plotly`, and `dash
 - Semantic Scholar paper ID
 - Free-form text under `--strategy embedding`, when S2 says the input is not a known paper (outages stay errors)
 
-### Find a seed paper
+### Find a focal paper
 
 ```bash
 citemesh search "attention mechanism transformers" --limit 5
-citemesh build "<paper-id-from-search>" --strategy recommendation
+citemesh build "<paper-id-from-search>" --strategy hybrid --export dashboard
 # search what an arXiv-corpus build hydrated
 citemesh search "long-context attention" --semantic-source arxiv-corpus
 ```
@@ -51,7 +54,7 @@ Searching an installed portable index:
 - `--cache-namespace NAMESPACE` selects the index directly. Its fixed model and source settings override unrelated saved defaults, and explicit conflicts are usage errors (exit 2).
 - This selection never falls back to S2, including under `--mode auto`.
 - Without it, search reads the namespace derived from the current model settings. That reaches an installed index only when those settings match its fixed ones; the default `candidates` source never does.
-- When that namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command.
+- Search skips model loading and cache creation when stored metadata rules out every namespace. When the selected namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command.
 - For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
@@ -59,7 +62,7 @@ Local search derives its namespace from the [saved embedding settings](configura
 Other search behavior:
 
 - `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source.
-- Local results include the searched count and a copyable build command using the active model and recorded corpus scope; installed-index views are preserved in that command. The command is omitted with a warning if the cache has no recorded split.
+- Local results include the searched count and a copyable build command. When saved settings select an installed index, it is a hybrid build with `--semantic-source both` and no namespace. When the search passed `--cache-namespace` or a model or dataset selector, the command repeats the namespace and corpus view. The command is omitted with a warning if the cache has no recorded split.
 - [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard
@@ -88,9 +91,9 @@ See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the comman
 
 ### Missing Semantic Scholar references
 
-Hybrid builds request up to `--max-references` seed references from Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the seed.
+Hybrid builds request up to `--max-references` references from the focal paper through Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the focal paper.
 
-If Semantic Scholar returns no usable seed references or reference discovery is unavailable, CiteMesh tries the seed's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
+If Semantic Scholar returns no usable references for the focal paper or reference discovery is unavailable, CiteMesh tries the focal paper's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
 
 What recovery matches:
 
@@ -99,7 +102,7 @@ What recovery matches:
 
 How recovered references are used:
 
-- They compete under the existing reference and total-paper limits. Hybrid puts every recovered reference into the candidate pool up to the reference limit, where it is ranked like any other candidate; only a bibliography larger than the limit is cut first, by title and abstract similarity to the seed and then citation count.
+- They compete under the existing reference and total-paper limits. Hybrid puts every recovered reference into the candidate pool up to the reference limit, where it is ranked like any other candidate; only a bibliography larger than the limit is cut first, by title and abstract similarity to the focal paper and then citation count.
 - A supplied arXiv version selects that HTML version, while graph identities remain version-independent.
 - Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists.
 
@@ -112,6 +115,8 @@ What recovery does not do:
 ### Help and console output
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
+Log lines carry local `HH:MM:SS` timestamps. Builds show the resolved focal title and year when available. The completion summary gives total elapsed time including export, followed by one copyable path per output. Progress rows show the same clock where width permits, recording the last completed-count advance or the task's start before its first increment.
+Redirected logs use plain text without terminal padding or forced line breaks, unless you set `--log-width` or force color.
 
 `-v`/`--verbose` is shorthand for `--log-level debug`; it works before or after a subcommand. When several verbosity options are present, the last one wins. `--log-level debug --log-file out/run.log` adds option routing, cache and provider details, runtime configuration, retry attempts, and namespace decisions.
 
@@ -122,7 +127,8 @@ Every command takes `-h`/`--help`, listing built-in defaults; [user configuratio
 | `info` | Brief build phases, useful outcomes, and saved output locations. |
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
-Progress bars appear only on an interactive terminal at `info` or `debug`.
+Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
+During long Semantic Scholar waits, `info` shows which operation is waiting, the next attempt number, and its delay. Individual request diagnostics appear at `debug`.
 
 ## Option reference
 
@@ -152,5 +158,5 @@ Common symptoms:
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
-- **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
-- **Slow first embedding run, or a warning that results come from a larger cached corpus**: see [hydration and resume](caching.md#corpus-hydration-and-resume).
+- **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a graph containing only the focal paper. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
+- **Slow first embedding run**: see [hydration and resume](caching.md#corpus-hydration-and-resume).

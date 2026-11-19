@@ -2,7 +2,7 @@
 Candidate pool with indexed paper identity.
 
 The pool holds one collection's pre-ranking candidates, their source tags,
-seed relations, recommendation positions, and the provider-ID aliases that
+focal relations, recommendation positions, and the provider-ID aliases that
 later lists resolve through.
 Hybrid discovery and the embedding strategy's candidates mode both collect
 into it. A record joins a member when it carries the member's provider ID or a
@@ -28,12 +28,13 @@ rule runs only within a group.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Container, Sequence
+from typing import TYPE_CHECKING, TypedDict
 
 from citemesh.core import Paper
 from citemesh.core.paper_ids import bibliography_text_key
 from citemesh.strategies.candidates import (
-    QUERY_SEED_SEARCH_LIMIT,
+    QUERY_FOCAL_SEARCH_LIMIT,
     CandidateIdentityKey,
     CandidateSourceResult,
     ReferenceSelector,
@@ -41,15 +42,18 @@ from citemesh.strategies.candidates import (
     candidate_identity_keys,
     candidate_records_match,
     fetch_candidate_source,
-    fetch_seed_references,
+    fetch_focal_references,
+    merge_focal_relation,
     merge_paper_metadata,
-    merge_seed_relation,
     publication_version_preprint,
     require_available_candidate_source,
 )
+from citemesh.strategies.discovery_ranking import FOCAL_REFERENCE_MIN_CONTEXTS
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
+    from citemesh.services.semantic_scholar.endpoints import ReferenceEvidence
+    from citemesh.strategies.discovery_ranking import RankedCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -58,19 +62,21 @@ class DiscoveryPool:
     """Deduplicated candidates keyed by their surviving paper IDs."""
 
     def __init__(
-        self, seed: Paper, seed_relations: dict[str, str] | None = None
+        self, focal: Paper, focal_relations: dict[str, str] | None = None
     ) -> None:
-        """Start an empty pool for one seed.
+        """Start an empty pool for one focal paper.
 
-        :param Paper seed: Canonical seed; records matching it enrich it instead.
-        :param Optional[Dict[str, str]] seed_relations: Relation labels by paper
-            ID, shared with a caller that keeps the seed's own label there.
+        :param Paper focal: Canonical focal paper; records matching it enrich it instead.
+        :param Optional[Dict[str, str]] focal_relations: Relation labels by paper
+            ID, shared with a caller that keeps the focal paper's own label there.
         """
-        self.seed = seed
-        self.seed_relations = {} if seed_relations is None else seed_relations
+        self.focal = focal
+        self.focal_relations = {} if focal_relations is None else focal_relations
         self.papers: dict[str, Paper] = {}
         self.sources: dict[str, set[str]] = {}
         self.recommendation_ranks: dict[str, int] = {}
+        self.query_corpus_ranks: dict[str, int] = {}
+        self.focal_reference_evidence: dict[str, ReferenceEvidence] = {}
         self.provider_aliases: dict[str, str] = {}
         self.source_status: dict[str, str] = {}
         self._members_by_key: dict[CandidateIdentityKey, dict[str, None]] = {}
@@ -79,17 +85,19 @@ class DiscoveryPool:
     def resolve(self, paper: Paper) -> str | None:
         """Name what a record joins, in the order :meth:`add` applies.
 
-        A record of the seed (same ID or a matching identifier) joins the seed.
+        A record of the focal paper (same ID or a matching identifier) joins the focal paper.
         Otherwise an exact member ID, then a compatible recorded alias (for
         provider records), then a unique identifier match selects a member.
 
         :param Paper paper: Record to reconcile, with a non-empty ID.
-        :return Optional[str]: The seed's ID for a record of the seed, the
+        :return Optional[str]: The focal paper's ID for a record of the focal paper, the
             joined member's ID, or ``None`` for a new work.
         """
         paper_id = str(paper.paper_id).strip()
-        if paper_id == self.seed.paper_id or candidate_records_match(paper, self.seed):
-            return self.seed.paper_id
+        if paper_id == self.focal.paper_id or candidate_records_match(
+            paper, self.focal
+        ):
+            return self.focal.paper_id
         if paper_id in self.papers:
             return paper_id
         if not paper.is_local_corpus:
@@ -103,7 +111,7 @@ class DiscoveryPool:
         return self.unique_match(paper)
 
     def add(self, incoming: Paper, *, source: str, relation: str) -> str | None:
-        """Add one candidate, reconciling it with the seed and existing members.
+        """Add one candidate, reconciling it with the focal paper and existing members.
 
         A record :meth:`resolve` assigns to a member merges into it, and a
         provider record matched only by identifiers is remembered as an alias.
@@ -112,16 +120,16 @@ class DiscoveryPool:
 
         :param Paper incoming: Newly observed candidate payload.
         :param str source: Candidate source tag.
-        :param str relation: Relation-to-seed label.
+        :param str relation: Relation-to-focal label.
         :return Optional[str]: Surviving member ID, or ``None`` for a record with
-            an empty ID, a seed-role record, or one matching the seed.
+            an empty ID, a record carrying the focal paper role, or one matching the focal paper.
         """
         incoming_id = str(incoming.paper_id).strip()
-        if not incoming_id or incoming.is_seed:
+        if not incoming_id or incoming.is_focal:
             return None
         target_id = self.resolve(incoming)
-        if target_id == self.seed.paper_id:
-            merge_paper_metadata(self.seed, incoming)
+        if target_id == self.focal.paper_id:
+            merge_paper_metadata(self.focal, incoming)
             return None
 
         canonical_id = incoming_id
@@ -142,11 +150,11 @@ class DiscoveryPool:
             self.provider_aliases[incoming_id] = target_id
 
         self.sources.setdefault(canonical_id, set()).add(source)
-        merged_relation = merge_seed_relation(
-            self.seed_relations.get(canonical_id, ""), relation
+        merged_relation = merge_focal_relation(
+            self.focal_relations.get(canonical_id, ""), relation
         )
         if merged_relation:
-            self.seed_relations[canonical_id] = merged_relation
+            self.focal_relations[canonical_id] = merged_relation
         return canonical_id
 
     def unique_match(self, paper: Paper) -> str | None:
@@ -189,6 +197,21 @@ class DiscoveryPool:
         """
         self.recommendation_ranks.setdefault(member_id, rank)
 
+    def record_query_corpus_rank(self, member_id: str, rank: int) -> None:
+        """Keep the earliest native query retrieval position for this work."""
+        self.query_corpus_ranks[member_id] = min(
+            rank, self.query_corpus_ranks.get(member_id, rank)
+        )
+
+    def record_reference_evidence(
+        self, member_id: str, evidence: ReferenceEvidence
+    ) -> None:
+        """Retain the observed evidence across records of the same work."""
+        previous = self.focal_reference_evidence.get(member_id)
+        self.focal_reference_evidence[member_id] = (
+            previous.combine(evidence) if previous is not None else evidence
+        )
+
     def absorb(self, target_id: str, absorbed_id: str) -> None:
         """Fold one member into another member that records the same work.
 
@@ -215,12 +238,17 @@ class DiscoveryPool:
             self.recommendation_ranks[target_id] = min(
                 self.recommendation_ranks.get(target_id, absorbed_rank), absorbed_rank
             )
-        relation = merge_seed_relation(
-            self.seed_relations.get(target_id, ""),
-            self.seed_relations.pop(absorbed_id, ""),
+        absorbed_query_rank = self.query_corpus_ranks.pop(absorbed_id, None)
+        if absorbed_query_rank is not None:
+            self.record_query_corpus_rank(target_id, absorbed_query_rank)
+        if evidence := self.focal_reference_evidence.pop(absorbed_id, None):
+            self.record_reference_evidence(target_id, evidence)
+        relation = merge_focal_relation(
+            self.focal_relations.get(target_id, ""),
+            self.focal_relations.pop(absorbed_id, ""),
         )
         if relation:
-            self.seed_relations[target_id] = relation
+            self.focal_relations[target_id] = relation
 
     def reconcile_publication_versions(self) -> int:
         """Fold each publication record into its preprint, corpus row or not.
@@ -291,27 +319,106 @@ class DiscoveryPool:
                 del self._members_by_key[key]
 
 
+class _DiscoveryLeadRequired(TypedDict):
+    """Compact reading-list entry for an omitted candidate."""
+
+    paper_id: str
+    title: str
+    arxiv_id: str
+    doi: str
+    rank: int
+
+
+class DiscoveryLead(_DiscoveryLeadRequired, total=False):
+    """Focal references additionally carry their observed passage count."""
+
+    context_count: int
+
+
+class DiscoveryLeads(TypedDict):
+    """Two capped lists of omitted papers with different evidence."""
+
+    references: list[DiscoveryLead]
+    corpus: list[DiscoveryLead]
+
+
+def _discovery_lead(paper: Paper, rank: int) -> DiscoveryLead:
+    return {
+        "paper_id": paper.paper_id,
+        "title": paper.title,
+        "arxiv_id": paper.arxiv_id,
+        "doi": paper.doi,
+        "rank": rank,
+    }
+
+
+def build_discovery_leads(
+    pool: DiscoveryPool,
+    ranked: Sequence[RankedCandidate],
+    final_graph_ids: Container[str],
+    *,
+    limit: int,
+) -> DiscoveryLeads | None:
+    """Build secondary reading lists from the already ranked candidate pool.
+
+    References require at least two distinct provider contexts and retain the
+    fused order of ``ranked``. Corpus leads keep their original native query-role
+    retrieval rank and exclude papers acquired through a citation or
+    recommendation. Both lists exclude every paper in the final graph.
+    """
+    if limit <= 0:
+        return None
+    omitted = {
+        item.paper_id: item for item in ranked if item.paper_id not in final_graph_ids
+    }
+    references: list[DiscoveryLead] = []
+    for paper_id, item in omitted.items():
+        evidence = pool.focal_reference_evidence.get(paper_id)
+        if evidence is None or evidence.context_count < FOCAL_REFERENCE_MIN_CONTEXTS:
+            continue
+        lead = _discovery_lead(pool.papers[paper_id], item.rank)
+        lead["context_count"] = evidence.context_count
+        references.append(lead)
+        if len(references) == limit:
+            break
+
+    corpus_positions = sorted(
+        (rank, paper_id)
+        for paper_id, rank in pool.query_corpus_ranks.items()
+        if paper_id in omitted
+        and pool.sources[paper_id] == {"semantic"}
+        and paper_id not in pool.recommendation_ranks
+    )
+    corpus = [
+        _discovery_lead(pool.papers[paper_id], rank)
+        for rank, paper_id in corpus_positions[:limit]
+    ]
+    return (
+        {"references": references, "corpus": corpus} if references or corpus else None
+    )
+
+
 def fetch_candidate_pool(
     client: SemanticScholarClient,
-    seed_paper: Paper,
+    focal_paper: Paper,
     *,
     max_references: int = 0,
     max_citations: int = 0,
     max_recommendations: int = 0,
-    seed_identifier: str | None = None,
+    focal_identifier: str | None = None,
     reference_selector: ReferenceSelector | None = None,
 ) -> DiscoveryPool:
-    """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
+    """Fetch a deduplicated candidate pool from Semantic Scholar focal paper neighbors.
 
-    Free-text query seeds (``query:`` IDs) have no S2 neighbors; they are proxied
-    through paper search on the query text before recommendation expansion.
+    Focal paper records generated from free-text queries (``query:`` IDs) have
+    no S2 neighbors. Paper search on the query text supplies recommendation input.
 
     :param SemanticScholarClient client: Semantic Scholar client.
-    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
-    :param int max_references: Maximum seed references to fetch (0 disables).
+    :param Paper focal_paper: Focal paper backed by S2 or generated from a query.
+    :param int max_references: Maximum focal paper references to fetch (0 disables).
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
-    :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param str | None focal_identifier: Original input, retaining an arXiv version.
     :param Callable | None reference_selector: Strategy-specific recovered-reference
         selector.
     :return DiscoveryPool: Deduplicated candidate pool with provenance tags.
@@ -319,49 +426,49 @@ def fetch_candidate_pool(
     with client.candidate_operation_scope():
         return _fetch_candidate_pool(
             client,
-            seed_paper,
+            focal_paper,
             max_references=max_references,
             max_citations=max_citations,
             max_recommendations=max_recommendations,
-            seed_identifier=seed_identifier,
+            focal_identifier=focal_identifier,
             reference_selector=reference_selector,
         )
 
 
 def _fetch_candidate_pool(
     client: SemanticScholarClient,
-    seed_paper: Paper,
+    focal_paper: Paper,
     *,
     max_references: int = 0,
     max_citations: int = 0,
     max_recommendations: int = 0,
-    seed_identifier: str | None = None,
+    focal_identifier: str | None = None,
     reference_selector: ReferenceSelector | None = None,
 ) -> DiscoveryPool:
     """Fetch candidates while an outer operation scope is active.
 
     :param SemanticScholarClient client: Semantic Scholar client.
-    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
-    :param int max_references: Maximum seed references to fetch (0 disables).
+    :param Paper focal_paper: Focal paper backed by S2 or generated from a query.
+    :param int max_references: Maximum focal paper references to fetch (0 disables).
     :param int max_citations: Maximum citing papers to fetch (0 disables).
     :param int max_recommendations: Maximum recommendations to fetch (0 disables).
-    :param str | None seed_identifier: Original input, retaining an arXiv version.
+    :param str | None focal_identifier: Original input, retaining an arXiv version.
     :param Callable | None reference_selector: Strategy-specific recovered-reference
         selector.
     :return DiscoveryPool: Deduplicated candidate pool with provenance tags.
     """
-    pool = DiscoveryPool(seed_paper)
+    pool = DiscoveryPool(focal_paper)
     source_results: list[CandidateSourceResult] = []
-    seed_id = str(seed_paper.paper_id)
-    is_query_seed = seed_id.startswith("query:")
+    focal_id = str(focal_paper.paper_id)
+    is_query_focal = focal_id.startswith("query:")
     query_candidate_budget = (
-        max_references + max_citations + max_recommendations if is_query_seed else 0
+        max_references + max_citations + max_recommendations if is_query_focal else 0
     )
     recommendation_limit = max_recommendations
 
-    if is_query_seed:
-        query_text = (seed_paper.title or "").strip() or seed_id
-        search_limit = min(QUERY_SEED_SEARCH_LIMIT, query_candidate_budget)
+    if is_query_focal:
+        query_text = (focal_paper.title or "").strip() or focal_id
+        search_limit = min(QUERY_FOCAL_SEARCH_LIMIT, query_candidate_budget)
         if search_limit > 0:
             search_result = fetch_candidate_source(
                 "search",
@@ -380,31 +487,31 @@ def _fetch_candidate_pool(
             max(0, query_candidate_budget - len(pool.papers)),
         )
     else:
-        anchor_ids = [seed_id]
+        anchor_ids = [focal_id]
         if max_references > 0:
-            reference_results = fetch_seed_references(
+            reference_results = fetch_focal_references(
                 client,
-                seed_paper,
+                focal_paper,
                 max_references,
-                seed_identifier=seed_identifier,
+                focal_identifier=focal_identifier,
                 reference_selector=reference_selector,
             )
             source_results.extend(reference_results)
             for result in reference_results:
                 for paper in result.papers:
-                    pool.add(paper, source="reference", relation="referenced_by_seed")
+                    pool.add(paper, source="reference", relation="referenced_by_focal")
         if max_citations > 0:
             citation_result = fetch_candidate_source(
                 "citations",
                 lambda: client.get_paper_citations(
-                    seed_id,
+                    focal_id,
                     limit=max_citations,
                     raise_on_unavailable=True,
                 ),
             )
             source_results.append(citation_result)
             for paper in citation_result.papers:
-                pool.add(paper, source="citation", relation="cites_seed")
+                pool.add(paper, source="citation", relation="cites_focal")
 
     if recommendation_limit > 0 and anchor_ids:
         recommendation_result = fetch_candidate_source(
@@ -424,12 +531,12 @@ def _fetch_candidate_pool(
     }
     require_available_candidate_source(
         source_results,
-        context=f"candidate acquisition for {seed_id}",
+        context=f"candidate acquisition for {focal_id}",
     )
 
     logger.debug(
         "Candidate pool for %s: %d papers (refs<=%d cites<=%d recs<=%d).",
-        seed_id,
+        focal_id,
         len(pool.papers),
         max_references,
         max_citations,

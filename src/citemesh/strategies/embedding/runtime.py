@@ -19,7 +19,6 @@ from importlib import metadata as importlib_metadata
 from types import ModuleType
 from typing import Literal
 
-from citemesh._runtime import stderr_isatty
 from citemesh.core.choices import DEVICE_CHOICES as EMBEDDING_DEVICE_CHOICES
 from citemesh.data.model_profiles import EmbeddingModelProfile
 from citemesh.progress import progress_enabled
@@ -125,26 +124,34 @@ def _suppress_expected_fa2_load_dtype_warning(*, enabled: bool) -> Iterator[None
 
 
 @contextmanager
-def _suppress_transformers_progress_when_hidden() -> Iterator[None]:
-    """Temporarily hide Transformers progress bars outside normal CLI output.
+def _suppress_transformers_progress() -> Iterator[None]:
+    """Hide weight-loading bars while preserving Hub download settings.
 
     :return Iterator[None]: Scoped model-loading output configuration.
     """
-    if stderr_isatty() and progress_enabled():
-        yield
-        return
-
     from transformers.utils import logging as transformers_logging
 
-    if not transformers_logging.is_progress_bar_enabled():
-        yield
-        return
-
-    transformers_logging.disable_progress_bar()
+    hub_progress = importlib.import_module("huggingface_hub.utils.tqdm")
+    hide_downloads = (
+        not progress_enabled(require_tty=True)
+        and hub_progress.HF_HUB_DISABLE_PROGRESS_BARS is None
+    )
+    hub_states = hub_progress.progress_bar_states.copy()
+    # The public toggles also reset Hub's named progress settings and conflict
+    # with HF_HUB_DISABLE_PROGRESS_BARS. This flag controls only Transformers'
+    # weight-loading bar across the supported Transformers versions.
+    initially_enabled = transformers_logging.is_progress_bar_enabled()
+    transformers_logging._tqdm_active = False
     try:
+        if hide_downloads:
+            hub_progress.disable_progress_bars()
         yield
     finally:
-        transformers_logging.enable_progress_bar()
+        transformers_logging._tqdm_active = initially_enabled
+        if hide_downloads:
+            # A public enable would erase the caller's named-group overrides.
+            hub_progress.progress_bar_states.clear()
+            hub_progress.progress_bar_states.update(hub_states)
 
 
 def _parse_major_minor(

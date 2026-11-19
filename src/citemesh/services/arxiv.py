@@ -1,4 +1,4 @@
-"""Bibliography and metadata reads for the seed-only arXiv fallback."""
+"""Read focal paper bibliographies and metadata through an arXiv fallback."""
 
 from __future__ import annotations
 
@@ -351,7 +351,7 @@ class ArxivClient:
         return response
 
     def get_bibliography(self, identifier: str) -> list[BibliographyEntry] | None:
-        """Read the seed's bibliography, retaining the requested version.
+        """Read the focal paper's bibliography, retaining the requested version.
 
         :param str identifier: Recognized arXiv suffix.
         :return list[BibliographyEntry] | None: Entries, or unavailable HTML.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import os
 import threading
@@ -12,13 +13,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from rich.console import Console
 
 from citemesh import cli as cli_module
 from citemesh.cli import build_contract as build_contract_module
 from citemesh.cli import build_options as build_options_module
 from citemesh.cli import cache_ops as cache_ops_module
+from citemesh.cli import console as console_module
 from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import parser as parser_module
+from citemesh.cli.commands import config as config_command_module
 from citemesh.core import API_CONFIG
 from citemesh.core.choices import (
     DEVICE_CHOICES,
@@ -970,7 +974,7 @@ def test_configured_corpus_cap_and_full_split_override(
     ] == (expected_corpus_size)
     payload = graph_config_module._build_graph_config_payload(
         args,
-        "seed",
+        "focal",
         {},
         ["json"],
         {"json": Path("graph.json")},
@@ -1245,7 +1249,7 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     ) in messages
     payload = graph_config_module._build_graph_config_payload(
         args,
-        "seed",
+        "focal",
         {},
         ["json"],
         {"json": Path("graph.json")},
@@ -1325,7 +1329,7 @@ def test_single_accepted_config_default_never_breaks_a_plain_build(
     raw_value: object,
     strategy: str,
 ) -> None:
-    """A default the loader accepts must not fail ``build --strategy S <seed>``.
+    """A default the loader accepts must not fail ``build --strategy S <focal>``.
 
     Device availability is a property of the host, not of the config: the probe
     is patched to resolve every device, so ``cuda`` and ``mps`` are checked like
@@ -1591,6 +1595,72 @@ def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> No
     assert os.environ["S2_API_KEY"] == ""
 
 
+@pytest.mark.parametrize("source", ["environment", "config", "anonymous", "empty-env"])
+@pytest.mark.parametrize(
+    "level", [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
+)
+def test_s2_access_status_matches_resolved_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    source: str,
+    level: int,
+) -> None:
+    """Only the first network request reports access mode, without exposing keys."""
+    from citemesh.services import SemanticScholarClient
+
+    environment_key, saved_key = "private-environment-key", "private-config-key"
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    if source == "environment":
+        monkeypatch.setenv("S2_API_KEY", environment_key)
+    elif source == "empty-env":
+        monkeypatch.setenv("S2_API_KEY", "")
+    config = UserConfig(
+        path=Path("unused-config.toml"),
+        s2_api_key=saved_key if source != "anonymous" else None,
+    )
+    expected_key = (
+        environment_key
+        if source == "environment"
+        else saved_key
+        if source == "config"
+        else None
+    )
+    with caplog.at_level(level):
+        key = build_options_module._resolve_user_config_api_key(config)
+        with SemanticScholarClient(api_key=key) as client:
+            assert client._session.headers.get("x-api-key") == expected_key
+            expected_rate = client.requests_per_second
+            assert "local pacing" not in caplog.text
+            client._session.get = MagicMock(return_value=MagicMock(status_code=404))
+            monkeypatch.setattr(
+                "citemesh.services.semantic_scholar.client.time.sleep", lambda _: None
+            )
+            assert client.get_paper("first") is None
+            assert client.get_paper("second") is None
+            assert client._session.get.call_count == 2
+
+    statuses = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+    ]
+    mode = "API key configured" if expected_key else "anonymous shared pool"
+    assert statuses == (
+        [f"Semantic Scholar: {mode} (local pacing: {expected_rate:g} request/s)."]
+        if level <= logging.INFO
+        else []
+    )
+    assert environment_key not in caplog.text
+    assert saved_key not in caplog.text
+    if level == logging.DEBUG:
+        if source == "environment":
+            assert "Using S2_API_KEY from the environment." in caplog.text
+        elif source == "config":
+            assert "Using api.s2_api_key from unused-config.toml." in caplog.text
+        elif source == "empty-env":
+            assert "S2_API_KEY is empty" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # `citemesh config` subcommand
 # ---------------------------------------------------------------------------
@@ -1641,6 +1711,57 @@ def test_config_cli_masks_api_key_in_list() -> None:
     assert get_result.stdout.strip() == secret
 
 
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_config_listing_preserves_full_keys_and_literal_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """Saved settings remain readable without ellipses at normal terminal widths."""
+    path = tmp_path / "config.toml"
+    values: dict[str, ConfigValue] = {
+        "calibration_sample_size": 2000,
+        "min_semantic_similarity": 0.74,
+        "model": "checkpoints/[literal]/" + "long-model-name-" * 5,
+        "model_revision": "a" * 40,
+        "export": ["dashboard", "json"],
+    }
+    for key, value in values.items():
+        set_config_value(f"defaults.{key}", value, path=path)
+    secret = "secret-api-key-123456"
+    set_config_value("api.s2_api_key", secret, path=path)
+    monkeypatch.setattr(config_command_module, "user_config_path", lambda: path)
+    monkeypatch.setattr(
+        config_command_module, "load_user_config", lambda: load_user_config(path)
+    )
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        console_module, "output_console", Console(file=stream, width=width)
+    )
+    result = config_command_module._run_config_command(
+        argparse.Namespace(config_command="list"), parser_module._create_parser()[3]
+    )
+
+    output = stream.getvalue()
+    unwrapped = "".join(output.split())
+    assert result == 0
+    assert "Saved settings" in output
+    assert secret not in output
+    assert "****3456" in output
+    assert "…" not in output
+    for key, value in values.items():
+        assert f"defaults.{key}" in unwrapped
+        assert format_config_value(value) in unwrapped
+    assert all(len(line) <= width for line in output.splitlines())
+
+
+def test_config_listing_empty_state_is_not_an_empty_table() -> None:
+    """An unconfigured installation explains what is saved and how to start."""
+    result = _run_cli(["config", "list"])
+    assert result.returncode == 0
+    assert "No saved settings. Using built-in defaults." in result.stdout
+    assert "citemesh config set KEY VALUE" in result.stdout
+    assert "Key" not in result.stdout
+
+
 def test_config_cli_rejects_unknown_key_and_bad_value() -> None:
     """The config CLI should reject unknown keys and invalid values.
 
@@ -1649,6 +1770,8 @@ def test_config_cli_rejects_unknown_key_and_bad_value() -> None:
     unknown = _run_cli(["config", "set", "defaults.nope", "1"])
     assert unknown.returncode == 2
     assert "Unknown config key" in unknown.stderr
+    assert "citemesh config set --help" in " ".join(unknown.stderr.split())
+    assert "Valid keys:" not in unknown.stderr
 
     bad_value = _run_cli(["config", "set", "defaults.device", "warp"])
     assert bad_value.returncode == 2

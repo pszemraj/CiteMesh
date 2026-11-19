@@ -12,19 +12,38 @@ Import the builders and exporters in a notebook or script; the worked example us
 Every builder implements the same two methods:
 
 ```text
-build_graph(seed_id: str, **kwargs) -> tuple[networkx.Graph, str]  # (graph, resolved_seed_id)
-collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
+build_graph(focal_id: str, **kwargs) -> tuple[networkx.Graph, str]  # (graph, resolved_focal_id)
+collect_papers(focal_id: str, **kwargs) -> dict[str, Paper]
 ```
 
-`build_graph` returns the *resolved* seed ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream - that is what `GraphExporter` and the layout helpers expect.
+`build_graph` returns the *resolved* focal paper ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream - that is what `GraphExporter` and the layout helpers expect.
+
+When updating existing Python code, use `focal_id=` for the paper identifier and `Paper.is_focal` for the node flag. The citation and embedding builders accept previously fetched metadata through `focal_paper=`. See the [saved-file migration notes](../reference/output-artifacts.md#terminology).
 
 ## Exporting
 
-`GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Formats and artifact publication behavior are in [Output Artifacts](../reference/output-artifacts.md).
+`GraphExporter(graph, focal_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Formats and artifact publication behavior are in [Output Artifacts](../reference/output-artifacts.md).
 
 Graphs supplied by callers must follow the [graph-input contract](../reference/output-artifacts.md#graph-input) and the writer's requirements for [JSON](../reference/output-artifacts.md#graph-json-strategyjson), [CSV](../reference/output-artifacts.md#csv-strategycsv), or [BibTeX](../reference/output-artifacts.md#bibtex-strategybib).
 
 The collection-package machinery behind `out/dashboard.html` is **not** part of this surface: from Python, write standalone dashboards; use the CLI when you want a collection.
+
+## Importing graph JSON
+
+`GraphExporter.from_json(path: Path)` reads a saved [graph JSON](../reference/output-artifacts.md#graph-json-strategyjson) into an exporter. Its `graph` attribute is the reconstructed NetworkX graph, with a `Paper` under each node's `paper` attribute and bibliographic metadata alongside it; `focal_id` identifies the focal paper. Provenance, relations to the focal paper, discovery evidence, and stored layout are restored for subsequent exports.
+
+```python
+from pathlib import Path
+
+from citemesh.visualization import GraphExporter
+
+exporter = GraphExporter.from_json(Path("out/api-demo/hybrid.json"))
+graph, focal_id = exporter.graph, exporter.focal_id
+exporter.to_bibtex(Path("out/api-demo/reloaded.bib"))
+exporter.to_dashboard_html(Path("out/api-demo/reloaded.dashboard.html"))
+```
+
+This reads graph JSON files, not dashboard HTML or collection packages. Use the dashboard's **Add Results** control to open a collection package.
 
 ## Portable corpus access
 
@@ -54,18 +73,18 @@ builder = HybridGraphBuilder(
     device="auto",
     truncate_dim=512,
 )
-graph, seed_id = builder.build_graph("arxiv:1706.03762")
+graph, focal_id = builder.build_graph("arxiv:1706.03762")
 
 # Compute the layout once so every export shares identical geometry.
 layout = compute_layout(graph, layout_seed=1234)
-exporter = GraphExporter(graph, seed_id, theme_name="dark", layout=layout)
+exporter = GraphExporter(graph, focal_id, theme_name="dark", layout=layout)
 
 out_dir = Path("out/api-demo")
 out_dir.mkdir(parents=True, exist_ok=True)
 exporter.to_json(out_dir / "hybrid.json")
 exporter.to_dashboard_html(out_dir / "hybrid.dashboard.html")
 visualize_graph(
-    graph, seed_id, out_dir / "hybrid.png", dpi=150, theme_name="dark", layout=layout
+    graph, focal_id, out_dir / "hybrid.png", dpi=150, theme_name="dark", layout=layout
 )
 ```
 

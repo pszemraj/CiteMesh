@@ -1,7 +1,7 @@
 """
 Candidate acquisition and paper-identity helpers.
 
-Fetches the seed's Semantic Scholar neighbors (references, with an arXiv
+Fetches the focal paper's Semantic Scholar neighbors (references, with an arXiv
 bibliography fallback, citations, and recommendations) as per-source results.
 The identity rule and merge helpers here back the indexed pool in
 :mod:`citemesh.strategies.discovery_pool`, which hybrid and the embedding
@@ -13,9 +13,9 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import wraps
+from functools import partial, wraps
 from typing import (
     TYPE_CHECKING,
     Concatenate,
@@ -35,17 +35,19 @@ from citemesh.core.paper_ids import (
     paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
+from citemesh.progress import progress_task
 from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
     from citemesh.core.paper_ids import BibliographyKey
     from citemesh.data.embedding_cache.models import PaperMetadata
     from citemesh.services.semantic_scholar import SemanticScholarClient
+    from citemesh.services.semantic_scholar.endpoints import ReferenceEvidence
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CANDIDATE_POOL_SIZE = 400
-QUERY_SEED_SEARCH_LIMIT = 20
+QUERY_FOCAL_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
 ReferenceSelector = Callable[[Paper, Sequence[Paper], int], list[Paper]]
@@ -82,6 +84,7 @@ class CandidateSourceResult:
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
     error: str | None = ""
+    reference_evidence: dict[str, ReferenceEvidence] = field(default_factory=dict)
 
 
 def scope_candidate_collection(
@@ -255,17 +258,37 @@ def candidate_identifiers_conflict(left: Paper, right: Paper) -> bool:
     return _candidate_match_namespaces(left, right) is None
 
 
+def _matches_abbreviated_author(full: list[str], abbreviated: list[str]) -> bool:
+    """Match leading initials and a surname tail, including particles and suffixes."""
+    if not abbreviated:
+        return False
+    # Reserve a surname even when it is one letter or is followed by a suffix.
+    has_suffix = abbreviated[-1] in {"jr", "sr", "ii", "iii", "iv", "v"}
+    initials = 0
+    for token in abbreviated[: -2 if has_suffix else -1]:
+        if len(token) != 1:
+            break
+        initials += 1
+    surname = abbreviated[initials:]
+    return (
+        initials > 0
+        and len(abbreviated) <= len(full)
+        and abbreviated[:initials] == [name[0] for name in full[:initials]]
+        and surname == full[-len(surname) :]
+    )
+
+
 def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
     """Return the preprint when two records are a preprint and its publication.
 
     Such records often share no identifier. The preprint is the corpus row when
     exactly one record is one (two corpus rows never match), and otherwise the
-    only record with an arXiv ID; it must carry an arXiv ID and the publication
-    a DOI, and conflicting
-    explicit identifiers remain disqualifying. Titles and full first-author
-    names must match after word normalization, and the publication can be in
-    the preprint's year or the following year. Callers must require a unique
-    match on both sides before reconciling records.
+    only record with an arXiv ID. The publication must carry a DOI, have no
+    conflicting explicit identifiers, and be from the same or following year.
+    Word-normalized titles and full first-author names must match. If the
+    publisher abbreviates given names to leading initials, also require the
+    same abstract word sequence, at least twenty words long. Callers must
+    require a unique match on both sides before reconciling records.
 
     :param Paper left: One record.
     :param Paper right: The other record.
@@ -298,15 +321,24 @@ def publication_version_preprint(left: Paper, right: Paper) -> Paper | None:
     ):
         return None
     title = bibliography_text_key(preprint.title)
-    author = bibliography_text_key(preprint.authors[0].name)
-    matches = (
-        " " in title
-        and " " in author
-        and len(author.partition(" ")[0]) > 1
-        and title == bibliography_text_key(publication.title)
-        and author == bibliography_text_key(publication.authors[0].name)
+    author = bibliography_text_key(preprint.authors[0].name).split()
+    if (
+        " " not in title
+        or len(author) < 2
+        or len(author[0]) < 2
+        or title != bibliography_text_key(publication.title)
+    ):
+        return None
+    publication_author = bibliography_text_key(publication.authors[0].name).split()
+    if author == publication_author:
+        return preprint
+    if not _matches_abbreviated_author(author, publication_author):
+        return None
+    abstract = bibliography_text_key(preprint.abstract)
+    same_abstract = len(abstract.split()) >= 20 and abstract == bibliography_text_key(
+        publication.abstract
     )
-    return preprint if matches else None
+    return preprint if same_abstract else None
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
@@ -476,17 +508,17 @@ def select_recovered_references_by_score(
 
 
 def _select_recovered_references_by_text(
-    seed: Paper,
+    focal: Paper,
     recovered: Sequence[Paper],
     limit: int,
 ) -> list[Paper]:
     """Select fallback references by relevance instead of bibliography order.
 
-    Title/abstract similarity to the seed is the primary signal. Citation count
+    Title/abstract similarity to the focal paper is the primary signal. Citation count
     breaks topical ties, and original bibliography order is the stable fallback
     when metadata cannot distinguish records.
 
-    :param Paper seed: Seed paper used as the relevance query.
+    :param Paper focal: Focal paper used as the relevance query.
     :param Sequence[Paper] recovered: Materialized bibliography records.
     :param int limit: Maximum references to retain.
     :return list[Paper]: Ranked, capped reference records.
@@ -495,31 +527,33 @@ def _select_recovered_references_by_text(
         return list(recovered)
 
     index = AbstractSimilarityIndex()
-    index.build({seed.paper_id: seed, **{paper.paper_id: paper for paper in recovered}})
+    index.build(
+        {focal.paper_id: focal, **{paper.paper_id: paper for paper in recovered}}
+    )
     return select_recovered_references_by_score(
         recovered,
         limit,
-        lambda paper: index.similarity(seed.paper_id, paper.paper_id),
+        lambda paper: index.similarity(focal.paper_id, paper.paper_id),
     )
 
 
 def _add_verified_reference(
-    seed: Paper, references: list[Paper], paper: Paper | None
+    focal: Paper, references: list[Paper], paper: Paper | None
 ) -> None:
-    """Keep the canonical reference while excluding matches to the seed.
+    """Keep the canonical reference while excluding matches to the focal paper.
 
     A paper that duplicates an already collected reference is merged into it
     instead of being appended.
 
-    :param Paper seed: Seed paper whose own records are never kept as references.
+    :param Paper focal: Focal paper whose own records are never kept as references.
     :param list[Paper] references: Collected references, extended in place.
     :param Paper | None paper: Resolved reference record, or ``None`` if unresolved.
     :return None: Appends or merges ``paper`` into ``references``.
     """
     if (
         paper is None
-        or paper.paper_id == seed.paper_id
-        or candidate_records_match(seed, paper)
+        or paper.paper_id == focal.paper_id
+        or candidate_records_match(focal, paper)
     ):
         return
     for existing in references:
@@ -531,31 +565,34 @@ def _add_verified_reference(
     references.append(paper)
 
 
-def fetch_seed_references(
+def fetch_focal_references(
     client: SemanticScholarClient,
-    seed: Paper,
+    focal: Paper,
     limit: int,
     *,
-    seed_identifier: str | None = None,
+    focal_identifier: str | None = None,
     local_lookup: Callable[[list[str]], dict[str, Paper]] | None = None,
     local_bibliography_lookup: Callable[
         [Sequence[BibliographyKey]], dict[BibliographyKey, Paper]
     ]
     | None = None,
     reference_selector: ReferenceSelector | None = None,
+    collect_reference_evidence: bool = False,
 ) -> tuple[CandidateSourceResult, ...]:
-    """Collect S2 seed references with an arXiv bibliography fallback.
+    """Collect S2 focal paper references with an arXiv bibliography fallback.
 
     :param SemanticScholarClient client: Existing metadata and discovery client.
-    :param Paper seed: Resolved seed, supplying external identifiers.
+    :param Paper focal: Resolved focal paper, supplying external identifiers.
     :param int limit: Maximum usable references; zero disables discovery.
-    :param str | None seed_identifier: Original input, retaining arXiv version.
+    :param str | None focal_identifier: Original input, retaining arXiv version.
     :param Callable | None local_lookup: Read unambiguous requested aliases from an
         already prepared corpus, keyed by normalized request identifier.
     :param Callable | None local_bibliography_lookup: Resolve identifier-free
         entries by title, first author, and year after an empty S2 response.
     :param Callable | None reference_selector: Strategy-specific selector applied
         after the complete fallback bibliography is materialized.
+    :param bool collect_reference_evidence: Request edge context and influence
+        from the original Semantic Scholar listing.
     :return tuple[CandidateSourceResult, ...]: S2 outcome and optional fallback.
     """
     from citemesh.services import (
@@ -566,11 +603,15 @@ def fetch_seed_references(
 
     if limit <= 0:
         return ()
-    provider_id = provider_lookup_identifier(seed.paper_id, seed)
+    provider_id = provider_lookup_identifier(focal.paper_id, focal)
+    evidence: dict[str, ReferenceEvidence] = {}
+    fetch_references = client.get_paper_references
+    if collect_reference_evidence:
+        fetch_references = partial(fetch_references, reference_evidence=evidence)
     original = (
         fetch_candidate_source(
             "references",
-            lambda: client.get_paper_references(
+            lambda: fetch_references(
                 provider_id, limit=limit, raise_on_unavailable=True
             ),
         )
@@ -578,11 +619,13 @@ def fetch_seed_references(
         else CandidateSourceResult("references", CandidateSourceState.UNAVAILABLE)
     )
     if original.papers:
-        return (original,)
+        return (
+            replace(original, reference_evidence=evidence) if evidence else original,
+        )
     identifier = next(
         (
             value
-            for raw in (seed_identifier or "", seed.arxiv_id, seed.paper_id)
+            for raw in (focal_identifier or "", focal.arxiv_id, focal.paper_id)
             if (value := arxiv_identifier(raw))
         ),
         None,
@@ -613,60 +656,71 @@ def fetch_seed_references(
     # Otherwise HTML order (often alphabetical) chooses survivors before useful
     # metadata is available for ranking.
     identified = [entry.identifiers for entry in entries if entry.identifiers]
-    for offset in range(0, len(identified), 50):
-        batch = identified[offset : offset + 50]
-        ids = list(dict.fromkeys(identifier for entry in batch for identifier in entry))
+    with progress_task(
+        total=len(identified),
+        description="Recovering focal paper references",
+        unit="references",
+        enabled=False if not identified else None,
+    ) as progress:
+        for offset in range(0, len(identified), 50):
+            batch = identified[offset : offset + 50]
+            ids = list(
+                dict.fromkeys(identifier for entry in batch for identifier in entry)
+            )
 
-        resolver.bind_entries(batch)
-        missing = [
-            value
-            for value in ids
-            if value not in resolver.aliases and value not in attempted
-        ]
-        if local_lookup is not None:
-            local_records = local_lookup(missing)
-            for requested_id, paper in local_records.items():
-                normalized_id = normalize_paper_id(requested_id).lower()
-                if normalized_id in missing:
-                    resolver.aliases[normalized_id] = paper
+            resolver.bind_entries(batch)
+            missing = [
+                value
+                for value in ids
+                if value not in resolver.aliases and value not in attempted
+            ]
+            if local_lookup is not None:
+                local_records = local_lookup(missing)
+                for requested_id, paper in local_records.items():
+                    normalized_id = normalize_paper_id(requested_id).lower()
+                    if normalized_id in missing:
+                        resolver.aliases[normalized_id] = paper
+                resolver.bind_entries(batch)
+                missing = [value for value in missing if value not in resolver.aliases]
+            if missing and not client.refresh_paper_cache:
+                cached_records = client.get_cached_papers(missing)
+                resolver.remember(list(cached_records.values()))
+                resolver.aliases.update(cached_records)
             resolver.bind_entries(batch)
             missing = [value for value in missing if value not in resolver.aliases]
-        if missing and not client.refresh_paper_cache:
-            cached_records = client.get_cached_papers(missing)
-            resolver.remember(list(cached_records.values()))
-            resolver.aliases.update(cached_records)
-        resolver.bind_entries(batch)
-        missing = [value for value in missing if value not in resolver.aliases]
-        if missing:
-            metadata_requested = True
-            try:
-                records = client.get_papers(missing, raise_on_unavailable=True)
-            except (
-                SemanticScholarRequestError,
-                SemanticScholarUnavailableError,
-            ) as exc:
-                logger.debug("S2 metadata unavailable during arXiv recovery: %s", exc)
-                records = {}
-            else:
-                metadata_completed = True
-            resolver.remember(list(records.values()))
-            for requested_id, paper in records.items():
-                resolver.aliases[normalize_paper_id(requested_id).lower()] = paper
-            resolver.bind_entries(batch)
-            missing_arxiv = [
-                value
-                for value in missing
-                if value.startswith("arxiv:") and value not in resolver.aliases
-            ]
-            if missing_arxiv:
-                arxiv_records = arxiv.get_papers(missing_arxiv)
-                if arxiv_records is not None:
+            if missing:
+                metadata_requested = True
+                try:
+                    records = client.get_papers(missing, raise_on_unavailable=True)
+                except (
+                    SemanticScholarRequestError,
+                    SemanticScholarUnavailableError,
+                ) as exc:
+                    logger.debug(
+                        "S2 metadata unavailable during arXiv recovery: %s", exc
+                    )
+                    records = {}
+                else:
                     metadata_completed = True
-                    resolver.remember(list(arxiv_records.values()))
-            resolver.bind_entries(batch)
-        attempted.update(ids)
-        for entry in batch:
-            _add_verified_reference(seed, recovered, resolver.resolve(entry))
+                resolver.remember(list(records.values()))
+                for requested_id, paper in records.items():
+                    resolver.aliases[normalize_paper_id(requested_id).lower()] = paper
+                resolver.bind_entries(batch)
+                missing_arxiv = [
+                    value
+                    for value in missing
+                    if value.startswith("arxiv:") and value not in resolver.aliases
+                ]
+                if missing_arxiv:
+                    arxiv_records = arxiv.get_papers(missing_arxiv)
+                    if arxiv_records is not None:
+                        metadata_completed = True
+                        resolver.remember(list(arxiv_records.values()))
+                resolver.bind_entries(batch)
+            attempted.update(ids)
+            for entry in batch:
+                _add_verified_reference(focal, recovered, resolver.resolve(entry))
+            progress.update(len(batch))
     _enrich_local_reference_records(client, recovered)
     resolved_with_identifiers = len(recovered)
 
@@ -684,11 +738,11 @@ def fetch_seed_references(
         if keys:
             records_by_key = local_bibliography_lookup(keys)
             for key in keys:
-                _add_verified_reference(seed, recovered, records_by_key.get(key))
+                _add_verified_reference(focal, recovered, records_by_key.get(key))
 
     materialized_count = len(recovered)
     selector = reference_selector or _select_recovered_references_by_text
-    recovered = selector(seed, recovered, limit)
+    recovered = selector(focal, recovered, limit)
     logger.debug(
         "arXiv bibliography extraction: entries=%d, resolved_with_identifiers=%d, "
         "resolved_by_title=%d, materialized=%d, selected=%d, reference_limit=%d.",
@@ -790,8 +844,8 @@ def require_available_candidate_source(
         )
 
 
-def merge_seed_relation(existing: str, incoming: str) -> str:
-    """Merge two seed-relation labels conservatively.
+def merge_focal_relation(existing: str, incoming: str) -> str:
+    """Merge two labels describing relations to the focal paper conservatively.
 
     :param str existing: Existing relation label.
     :param str incoming: Incoming relation label.
@@ -804,7 +858,7 @@ def merge_seed_relation(existing: str, incoming: str) -> str:
     if (
         not normalized_incoming
         or normalized_existing == normalized_incoming
-        or normalized_existing == "seed"
+        or normalized_existing == "focal"
     ):
         return normalized_existing
     if normalized_existing == "overlap" or normalized_incoming == "overlap":
@@ -812,7 +866,7 @@ def merge_seed_relation(existing: str, incoming: str) -> str:
     if {
         normalized_existing,
         normalized_incoming,
-    } == {"referenced_by_seed", "cites_seed"}:
+    } == {"referenced_by_focal", "cites_focal"}:
         return "overlap"
     if normalized_existing == "semantic_only":
         return normalized_incoming
@@ -903,7 +957,7 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
             seen_references.add(normalized_reference_id)
             reference_ids.append(normalized_reference_id)
     preferred.references = reference_ids
-    preferred.is_seed = bool(preferred.is_seed or incoming.is_seed)
+    preferred.is_focal = bool(preferred.is_focal or incoming.is_focal)
     return preferred
 
 

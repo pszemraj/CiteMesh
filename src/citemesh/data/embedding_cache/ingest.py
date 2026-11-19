@@ -37,6 +37,7 @@ from citemesh.core.text_batching import (
     encode_texts,
     l2_normalize_embeddings,
 )
+from citemesh.progress import progress_task
 
 from ..model_profiles import compose_title_abstract_text
 from .models import (
@@ -339,12 +340,19 @@ class _IngestMixin(_EmbeddingCacheHost):
         :raises ValueError: If the model returns a malformed or non-finite matrix.
         """
         texts = [record.text for record in papers_to_embed]
-        embeddings_array = encode_texts(
-            model,
-            texts,
-            batch_size=min(int(batch_size), len(texts)),
-            show_progress_bar=show_progress,
-        )
+        with progress_task(
+            total=len(texts),
+            description="Encoding papers",
+            unit="papers",
+            enabled=None if show_progress and len(texts) > 1 else False,
+        ) as progress:
+            embeddings_array = encode_texts(
+                model,
+                texts,
+                batch_size=min(int(batch_size), len(texts)),
+                show_progress_bar=False,
+                on_progress=lambda completed: progress.update(completed - progress.n),
+            )
         if embeddings_array.ndim == 1:
             embeddings_array = embeddings_array.reshape(1, -1)
         if embeddings_array.ndim != 2:

@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
-from citemesh.data.cache import atomic_write_json, path_exists
+from citemesh.data.cache import atomic_write_json
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.candidates import CandidateAcquisitionError
@@ -31,7 +32,7 @@ from citemesh.visualization import (
 from citemesh.visualization.dashboard.package import (
     DASHBOARD_PACKAGE_FILENAME,
     DashboardPackageError,
-    load_dashboard_package,
+    load_existing_dashboard_collection,
     render_dashboard_collection_snapshot,
     update_dashboard_package,
 )
@@ -131,8 +132,7 @@ def _resolve_build_plan(args: argparse.Namespace) -> _BuildPlan:
             explicit_output=explicit_output,
         )
         preflight_package_path = collection_root / DASHBOARD_PACKAGE_FILENAME
-        if path_exists(preflight_package_path):
-            load_dashboard_package(preflight_package_path)
+        load_existing_dashboard_collection(preflight_package_path)
 
     return _BuildPlan(
         selected_formats=selected_formats,
@@ -147,14 +147,14 @@ def _resolve_run_output_paths(
     args: argparse.Namespace,
     plan: _BuildPlan,
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
 ) -> tuple[dict[str, Path], Path | None]:
     """Resolve every artifact path for this run and create their directories.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param _BuildPlan plan: Export selection resolved before the graph was built.
     :param PaperGraph graph: Constructed graph, used to derive a default path.
-    :param str seed_id: Canonical seed identifier for the run.
+    :param str focal_id: Canonical focal identifier for the run.
     :return tuple[dict[str, Path], Path | None]: Format-keyed output paths and
         the collection package path, or ``None`` outside collection mode.
     :raises RuntimeError: If collection planning disagrees with the preflight path.
@@ -165,7 +165,7 @@ def _resolve_run_output_paths(
         # The collection resolver places shared and per-paper artifacts.
         base_output_path = Path("out")
     else:
-        base_output_path = generate_output_path(graph, seed_id, strategy=args.strategy)
+        base_output_path = generate_output_path(graph, focal_id, strategy=args.strategy)
 
     dashboard_package_path: Path | None = None
     if plan.dashboard_collection_mode:
@@ -175,7 +175,7 @@ def _resolve_run_output_paths(
             explicit_output=plan.explicit_output,
             strategy=args.strategy,
             graph=graph,
-            seed_id=seed_id,
+            focal_id=focal_id,
         )
         if dashboard_package_path != plan.preflight_package_path:
             raise RuntimeError(
@@ -205,18 +205,18 @@ def _resolve_run_output_paths(
 
 
 def _build_export_metadata(
-    args: argparse.Namespace, graph: PaperGraph, seed_id: str
+    args: argparse.Namespace, graph: PaperGraph, focal_id: str
 ) -> ExportMetadata:
     """Assemble the run metadata embedded in every export artifact.
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param PaperGraph graph: Constructed graph carrying runtime annotations.
-    :param str seed_id: Canonical seed identifier for the run.
+    :param str focal_id: Canonical focal identifier for the run.
     :return ExportMetadata: Metadata passed to the exporter and sidecar payload.
     """
     metadata: ExportMetadata = {
         "paper_id": canonicalize_paper_id_for_metadata(args.paper_id),
-        "seed_id": seed_id,
+        "focal_id": focal_id,
         "strategy": args.strategy,
         "nodes": graph.number_of_nodes(),
         "edges": graph.number_of_edges(),
@@ -250,7 +250,7 @@ def _build_export_metadata(
 def _create_graph_exporter(
     args: argparse.Namespace,
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
     metadata: ExportMetadata,
     output_paths: dict[str, Path],
 ) -> tuple[GraphExporter, dict[Hashable, NDArray[np.float64]] | None]:
@@ -261,7 +261,7 @@ def _create_graph_exporter(
 
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param PaperGraph graph: Constructed graph to export.
-    :param str seed_id: Canonical seed identifier for the run.
+    :param str focal_id: Canonical focal identifier for the run.
     :param ExportMetadata metadata: Run metadata embedded in exports.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
     :return: The exporter and the shared layout, which is
@@ -280,7 +280,7 @@ def _create_graph_exporter(
 
     exporter = GraphExporter(
         graph,
-        seed_id,
+        focal_id,
         metadata=metadata,
         theme_name=args.theme,
         layout=shared_layout,
@@ -293,7 +293,7 @@ def _write_export_artifacts(
     *,
     args: argparse.Namespace,
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
     exporter: GraphExporter,
     plot_metadata: PlotOverlayMetadata,
     shared_layout: dict[Hashable, NDArray[np.float64]] | None,
@@ -304,7 +304,7 @@ def _write_export_artifacts(
     :param dict[str, Path] export_paths: Destination paths for this write.
     :param argparse.Namespace args: Parsed CLI namespace for ``build``.
     :param PaperGraph graph: Constructed graph to render.
-    :param str seed_id: Canonical seed identifier for the run.
+    :param str focal_id: Canonical focal identifier for the run.
     :param GraphExporter exporter: Exporter bound to the run's graph and layout.
     :param PlotOverlayMetadata plot_metadata: Compact metadata overlaid on the plot.
     :param shared_layout: Layout shared by every geometry-bearing format.
@@ -315,7 +315,7 @@ def _write_export_artifacts(
     if "png" in export_paths:
         visualize_graph(
             graph,
-            seed_id,
+            focal_id,
             export_paths["png"],
             iterations=args.spring_iterations,
             dpi=args.dpi,
@@ -377,7 +377,7 @@ def _stage_dashboard_result(
     dashboard_package_path: Path,
     output_paths: dict[str, Path],
     graph: PaperGraph,
-    seed_id: str,
+    focal_id: str,
     exporter: GraphExporter,
     graph_config_payload: GraphConfigData,
     write_export_artifacts: Callable[[dict[str, Path]], None],
@@ -392,7 +392,7 @@ def _stage_dashboard_result(
     :param Path dashboard_package_path: Collection package to update.
     :param dict[str, Path] output_paths: Final artifact paths for the run.
     :param PaperGraph graph: Constructed graph being recorded.
-    :param str seed_id: Canonical seed identifier for the run.
+    :param str focal_id: Canonical focal identifier for the run.
     :param GraphExporter exporter: Exporter bound to the run's graph and layout.
     :param GraphConfigData graph_config_payload: Reproducible build payload.
     :param Callable[[dict[str, Path]], None] write_export_artifacts: Writer that
@@ -428,7 +428,7 @@ def _stage_dashboard_result(
         update_dashboard_package(
             dashboard_package_path,
             graph=graph,
-            seed_id=seed_id,
+            focal_id=focal_id,
             strategy=args.strategy,
             payload=graph_payload,
             build=graph_config_payload["build"].copy(),
@@ -483,54 +483,43 @@ def _render_dashboard_viewer(
     return True
 
 
+def _format_runtime(seconds: float) -> str:
+    seconds = round(seconds, 1)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remainder = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{remainder:02d}s"
+    return f"{minutes}m{remainder:02d}s"
+
+
 def _log_run_summary(
     graph: PaperGraph,
     *,
     output_paths: dict[str, Path],
     graph_config_path: Path | None,
     dashboard_package_path: Path | None,
+    elapsed_seconds: float,
 ) -> None:
-    """Log one user-facing completion result and auxiliary paths for debugging.
+    """Log graph counts, elapsed runtime, and one path per requested output.
 
     :param PaperGraph graph: Constructed graph being summarized.
     :param dict[str, Path] output_paths: Resolved artifact paths for the run.
     :param Path | None graph_config_path: Sidecar path, if one was written.
     :param Path | None dashboard_package_path: Collection package path, if any.
+    :param float elapsed_seconds: Total build-command time, including exports.
     :return None: Emits the closing informational and debug log lines.
     """
-    if set(output_paths) == set(EXPORT_FORMATS):
-        output_directories = sorted(
-            {str(path.parent) for path in output_paths.values()}
-        )
-        if len(output_directories) == 1:
-            logger.info(
-                "Build complete: nodes=%d, edges=%d; %d artifacts saved to %s",
-                graph.number_of_nodes(),
-                graph.number_of_edges(),
-                len(output_paths),
-                output_directories[0],
-            )
-        else:
-            logger.info(
-                "Build complete: nodes=%d, edges=%d; %d artifacts saved across "
-                "%d directories: %s",
-                graph.number_of_nodes(),
-                graph.number_of_edges(),
-                len(output_paths),
-                len(output_directories),
-                ", ".join(output_directories),
-            )
-    else:
-        primary_outputs = ", ".join(
-            f"{format_name}={path}"
-            for format_name, path in sorted(output_paths.items())
-        )
-        logger.info(
-            "Build complete: nodes=%d, edges=%d; outputs: %s",
-            graph.number_of_nodes(),
-            graph.number_of_edges(),
-            primary_outputs,
-        )
+    nodes, edges = graph.number_of_nodes(), graph.number_of_edges()
+    logger.info(
+        "Build complete: %s, %s in %s.",
+        f"{nodes:,} paper{'s' if nodes != 1 else ''}",
+        f"{edges:,} edge{'s' if edges != 1 else ''}",
+        _format_runtime(elapsed_seconds),
+    )
+    for format_name, path in sorted(output_paths.items()):
+        logger.info("Saved %s: %s", format_name, path, extra={"soft_wrap": True})
 
     auxiliary_paths: dict[str, Path] = {}
     if graph_config_path is not None:
@@ -562,6 +551,7 @@ def run_build_command(
     :param UserConfig user_config: Loaded user configuration supplying defaults.
     :return int: Process-style exit code.
     """
+    started_at = perf_counter()
     config_default_dests = _apply_user_config_defaults(
         args, provided_build_options, user_config
     )
@@ -599,22 +589,22 @@ def run_build_command(
         _log_build_side_effect_contract(args)
         # Build graph based on strategy
         logger.info(f"Building graph using {args.strategy} strategy...")
-        graph, seed_id = _build_strategy_graph(args, args.strategy)
+        graph, focal_id = _build_strategy_graph(args, args.strategy)
 
         output_paths, dashboard_package_path = _resolve_run_output_paths(
-            args, plan, graph, seed_id
+            args, plan, graph, focal_id
         )
 
         # Visualize / export
-        metadata = _build_export_metadata(args, graph, seed_id)
+        metadata = _build_export_metadata(args, graph, focal_id)
         exporter, shared_layout = _create_graph_exporter(
-            args, graph, seed_id, metadata, output_paths
+            args, graph, focal_id, metadata, output_paths
         )
         write_export_artifacts = partial(
             _write_export_artifacts,
             args=args,
             graph=graph,
-            seed_id=seed_id,
+            focal_id=focal_id,
             exporter=exporter,
             plot_metadata=_plot_overlay_metadata(metadata),
             shared_layout=shared_layout,
@@ -629,7 +619,7 @@ def run_build_command(
             config_output_paths["dashboard_package"] = dashboard_package_path
         graph_config_payload = _build_graph_config_payload(
             cli_args=args,
-            seed_id=seed_id,
+            focal_id=focal_id,
             metadata=metadata,
             selected_formats=plan.selected_formats,
             output_paths=config_output_paths,
@@ -651,7 +641,7 @@ def run_build_command(
                 dashboard_package_path=dashboard_package_path,
                 output_paths=output_paths,
                 graph=graph,
-                seed_id=seed_id,
+                focal_id=focal_id,
                 exporter=exporter,
                 graph_config_payload=graph_config_payload,
                 write_export_artifacts=write_export_artifacts,
@@ -670,6 +660,7 @@ def run_build_command(
             output_paths=output_paths,
             graph_config_path=graph_config_path,
             dashboard_package_path=dashboard_package_path,
+            elapsed_seconds=perf_counter() - started_at,
         )
 
     except DashboardPackageError as e:

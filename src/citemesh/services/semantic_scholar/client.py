@@ -37,7 +37,6 @@ from .errors import (
 
 logger = logging.getLogger(__name__)
 
-_anonymous_pool_announced = False
 _MIN_REQUEST_TIMEOUT_SECONDS = 0.001
 _MAX_TRANSIENT_NOT_FOUND_ATTEMPTS = 3
 
@@ -92,14 +91,6 @@ class SemanticScholarClient(_EndpointsMixin):
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
-            logger.debug("Using Semantic Scholar API key")
-        else:
-            global _anonymous_pool_announced
-            if not _anonymous_pool_announced:
-                _anonymous_pool_announced = True
-                logger.debug(
-                    "No S2_API_KEY set; using the shared anonymous Semantic Scholar pool."
-                )
 
     @contextlib.contextmanager
     def candidate_operation_scope(self) -> Iterator[None]:
@@ -182,7 +173,7 @@ class SemanticScholarClient(_EndpointsMixin):
         """Persist normalized reference IDs.
 
         :param Path cache_path: Target JSON path.
-        :param str paper_id: Normalized seed identifier.
+        :param str paper_id: Normalized focal paper identifier.
         :param list[str] reference_ids: Ordered reference identifiers.
         """
         normalized = payloads._coerce_cached_reference_ids(reference_ids) or []
@@ -271,6 +262,12 @@ class SemanticScholarClient(_EndpointsMixin):
         """
         min_interval = 1.0 / self.requests_per_second
         with self._rate_limit_lock:
+            if self._next_request_time == 0.0:
+                logger.info(
+                    "Semantic Scholar: %s (local pacing: %g request/s).",
+                    "API key configured" if self._api_key else "anonymous shared pool",
+                    self.requests_per_second,
+                )
             wait_seconds = max(0.0, self._next_request_time - monotonic())
             if state is not None and recovery_started_at is not None:
                 remaining = self._remaining_recovery_budget(state)
@@ -349,6 +346,7 @@ class SemanticScholarClient(_EndpointsMixin):
         params: dict[str, str | int],
         *,
         context: str,
+        summary: str,
         payload: payloads.PaperBatchRequest | None = None,
         raise_on_unavailable: bool = False,
         retry_not_found: bool = False,
@@ -357,7 +355,9 @@ class SemanticScholarClient(_EndpointsMixin):
 
         :param str url: Semantic Scholar endpoint.
         :param dict[str, str | int] params: Query parameters.
-        :param str context: Human-readable operation.
+        :param str context: Detailed operation for diagnostics and errors.
+        :param str summary: Brief operation without identifiers or offsets, shown in
+            the INFO notice for long waits.
         :param PaperBatchRequest | None payload: Optional batch POST body.
         :param bool raise_on_unavailable: Raise after recovery stops.
         :param bool retry_not_found: Treat HTTP 404 as transient only during the
@@ -370,6 +370,7 @@ class SemanticScholarClient(_EndpointsMixin):
                     url,
                     params,
                     context=context,
+                    summary=summary,
                     payload=payload,
                     raise_on_unavailable=raise_on_unavailable,
                     retry_not_found=retry_not_found,
@@ -387,7 +388,6 @@ class SemanticScholarClient(_EndpointsMixin):
             self._handle_unavailable(exhausted, raise_on_unavailable)
             return None
 
-        last_error: Exception | None = None
         retry_wait_seconds = 0.0
         for attempt in range(1, API_CONFIG.max_retries + 1):
             recovery_started_at = monotonic() if attempt > 1 else None
@@ -505,11 +505,11 @@ class SemanticScholarClient(_EndpointsMixin):
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
+            rate_limited = retry._is_rate_limit_error(last_error)
             delay = retry._jittered_backoff(
                 attempt,
                 retry_after=getattr(last_error, "retry_after", None),
-                rate_limited=last_error is not None
-                and retry._is_rate_limit_error(last_error),
+                rate_limited=rate_limited,
             )
             if remaining is not None and delay > remaining:
                 exhausted = self._retry_exhausted(
@@ -521,33 +521,27 @@ class SemanticScholarClient(_EndpointsMixin):
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
-            previous_retry_wait_seconds = retry_wait_seconds
             retry_wait_seconds += delay
-            if (
-                previous_retry_wait_seconds
-                < retry._LONG_RETRY_WARNING_SECONDS
-                <= retry_wait_seconds
-            ):
-                logger.warning(
-                    "Semantic Scholar unavailable while %s (attempt %d/%d); "
-                    "waiting %.0fs (%.0fs total retry delay): %s",
-                    context,
-                    attempt,
+            if retry_wait_seconds >= retry._RETRY_NOTICE_INTERVAL_SECONDS:
+                status = "rate-limited" if rate_limited else "temporarily unavailable"
+                logger.info(
+                    "Semantic Scholar is %s while %s. Attempt %d/%d in %.0fs.",
+                    status,
+                    summary,
+                    attempt + 1,
                     API_CONFIG.max_retries,
                     delay,
-                    retry_wait_seconds,
-                    last_error,
                 )
-            else:
-                logger.debug(
-                    "Semantic Scholar request failed while %s (attempt %d/%d); "
-                    "retrying in %.1fs: %s",
-                    context,
-                    attempt,
-                    API_CONFIG.max_retries,
-                    delay,
-                    last_error,
-                )
+                retry_wait_seconds = 0.0
+            logger.debug(
+                "Semantic Scholar request failed while %s (attempt %d/%d); "
+                "retrying in %.1fs: %s",
+                context,
+                attempt,
+                API_CONFIG.max_retries,
+                delay,
+                last_error,
+            )
             sleep_started_at = monotonic()
             try:
                 time.sleep(delay)

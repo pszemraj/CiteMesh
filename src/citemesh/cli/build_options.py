@@ -45,8 +45,8 @@ class _StrategyBuilderProtocol(Protocol):
     def build_graph(self, paper_id: str) -> tuple[PaperGraph, str]:
         """Build a graph for a paper identifier.
 
-        :param str paper_id: Raw or normalized seed paper identifier.
-        :return tuple[PaperGraph, str]: Built graph and normalized seed paper ID.
+        :param str paper_id: Raw or normalized focal paper identifier.
+        :return tuple[PaperGraph, str]: Built graph and normalized focal paper ID.
         """
         ...
 
@@ -404,6 +404,11 @@ def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
     :return str | None: Environment key, configured key, or no configured value.
     """
     if "S2_API_KEY" in os.environ:
+        logger.debug(
+            "Using S2_API_KEY from the environment."
+            if os.environ["S2_API_KEY"]
+            else "S2_API_KEY is empty; using anonymous Semantic Scholar access."
+        )
         return os.environ["S2_API_KEY"]
     if user_config.s2_api_key:
         logger.debug("Using api.s2_api_key from %s.", user_config.path)
@@ -478,13 +483,14 @@ def _strategy_score_contract(strategy: str) -> ScoreContract:
     elif strategy == "hybrid":
         contract["score_type"] = "hybrid_similarity_composite"
         contract["adjudication_policy"] = (
-            "Every provider reference and citer of the seed, its recommendations "
+            "Every provider reference and citer of the focal paper, its recommendations "
             "(candidates, both) and its nearest corpus rows (arxiv-corpus, both) "
             "are ranked by reciprocal rank fusion (k=60) of document-embedding "
-            "similarity to the seed, similarity to the seed's references, direct "
-            "citation links and recommendation order; the best max_papers - 1 "
-            "are kept. Edge scores weight embedding similarity and bibliographic "
-            "coupling by each paper's source."
+            "similarity to the focal paper, similarity to its references, direct "
+            "links and recommendation order. References cited in multiple passages "
+            "or marked influential receive an additional half-weight vote. The "
+            "best max_papers - 1 are kept. Edge scores weight embedding similarity "
+            "and bibliographic coupling by each paper's source."
         )
     return contract
 
