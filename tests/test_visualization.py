@@ -5449,3 +5449,26 @@ def test_exports_collapse_hard_wrapped_title_and_abstract() -> None:
         "The quadratic complexity of Transformers limits their ability."
     )
     assert "\n" in paper.title
+
+
+def test_dashboard_curve_direction_matches_python_for_unicode_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Browser rerenders preserve Python edge geometry for non-BMP identifiers."""
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, focal_id = _build_graph()
+    exporter = _dashboard_exporter_with_collection(graph, focal_id, title="Focal Paper")
+    output = tmp_path / "unicode-curves.dashboard.html"
+    exporter.to_dashboard_html(output)
+    pairs = [
+        ("related", "s001"),
+        ("😀", "x"),
+        ("x", "😀"),
+        ("𐐀", "paper"),
+        ("研究", "😀"),
+    ]
+    directions = _probe_dashboard_runtime_in_node(
+        output,
+        f"{json.dumps(pairs)}.map(([left, right]) => stableCurveDirection(left, right))",
+    )
+    assert directions == [_stable_curve_direction(left, right) for left, right in pairs]

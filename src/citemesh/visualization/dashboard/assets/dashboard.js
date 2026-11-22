@@ -96,7 +96,7 @@
       const text = String(value || "");
       let digest = 0;
       for (const char of text) {
-        digest = ((digest * 33) + char.charCodeAt(0)) >>> 0;
+        digest = ((digest * 33) + char.codePointAt(0)) >>> 0;
       }
       return digest >>> 0;
     }
