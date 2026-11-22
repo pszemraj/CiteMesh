@@ -23,7 +23,6 @@ from citemesh.cli import console as console_module
 from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import config as config_command_module
-from citemesh.core import API_CONFIG
 from citemesh.core.choices import (
     DEVICE_CHOICES,
     EXPORT_CHOICES,
@@ -932,7 +931,7 @@ def test_configured_corpus_cap_and_full_split_override(
         {},
         ["json"],
         {"json": Path("graph.json")},
-        API_CONFIG.anonymous_retry_budget_seconds,
+        0.0,
     )
     embedding = payload["build"]["embedding"]
     assert embedding.get("corpus_size") == expected_corpus_size
@@ -1211,7 +1210,7 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
         {},
         ["json"],
         {"json": Path("graph.json")},
-        API_CONFIG.anonymous_retry_budget_seconds,
+        0.0,
     )
     embedding = payload["build"]["embedding"]
     assert embedding["semantic_source"] == "candidates"

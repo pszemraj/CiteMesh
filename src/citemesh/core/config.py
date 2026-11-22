@@ -148,16 +148,14 @@ class APIConfig:
     # Timeout settings (seconds)
     default_timeout: float = 30.0
 
-    # Unauthenticated builds use a bounded recovery window after the first failed
-    # request. An explicit API key keeps the established attempt-only policy.
-    max_retries: int = 30
-    retry_delay: float = 2.0  # Initial delay, increases exponentially
-    anonymous_retry_budget_seconds: float = 90.0
+    # Six retries after the initial request, independently for each API section.
+    max_retries: int = 6
+    retry_delay: float = 4.0
 
     # Rate limiting: anonymous requests share a small public pool; authenticated
     # keys are granted 1 request/second by Semantic Scholar.
     requests_per_second: float = 0.5
-    authenticated_requests_per_second: float = 1.0
+    authenticated_requests_per_second: float = 1.0 / 1.2
 
 
 # Global config instances (can be overridden)

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -14,27 +15,23 @@ from .errors import _RetryableRequestError, _RetryExhaustedError
 
 logger = logging.getLogger(__name__)
 
-_MAX_BACKOFF_SECONDS = 60.0
-_MAX_RETRY_AFTER_SECONDS = 300.0
-_RETRY_NOTICE_INTERVAL_SECONDS = 30.0
+_MAX_BACKOFF_SECONDS = 120.0
 
 
-def _jittered_backoff(
+def _retry_delay(
     attempt_number: int,
     *,
     retry_after: float | None = None,
-    rate_limited: bool = False,
 ) -> float:
-    """Compute full-jitter exponential backoff with a Retry-After floor.
+    """Compute the section's exponential backoff with a Retry-After floor.
 
     :param int attempt_number: 1-based number of the failed request.
     :param float | None retry_after: Server-requested delay.
-    :param bool rate_limited: Whether the failure was HTTP 429.
     :return float: Delay before the next request attempt.
     """
-    multiplier = API_CONFIG.retry_delay * (2.0 if rate_limited else 1.0)
-    cap = min(multiplier * (2.0 ** (attempt_number - 1)), _MAX_BACKOFF_SECONDS)
-    delay = random.uniform(0.0, cap)
+    delay = min(
+        API_CONFIG.retry_delay * (2.0 ** (attempt_number - 1)), _MAX_BACKOFF_SECONDS
+    )
     if retry_after is not None:
         delay = max(0.0, retry_after, delay)
     return delay
@@ -57,7 +54,7 @@ def _is_rate_limit_error(error: Exception) -> bool:
 def retry_after_seconds(
     source: BaseException | requests.Response, *, default: float | None = None
 ) -> float | None:
-    """Read a numeric Retry-After header.
+    """Read Retry-After seconds or an HTTP date without shortening its wait.
 
     :param BaseException | requests.Response source: Response or response-bearing error.
     :param float | None default: Fallback for a missing or invalid header.
@@ -73,8 +70,14 @@ def retry_after_seconds(
     try:
         seconds = float(header)
         if not math.isfinite(seconds):
-            raise ValueError("Retry-After must be finite")
-        return min(_MAX_RETRY_AFTER_SECONDS, max(0.0, seconds))
+            return default
     except (TypeError, ValueError):
-        logger.debug("Ignoring invalid Retry-After value %s", header)
-        return default
+        try:
+            deadline = parsedate_to_datetime(header)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            logger.debug("Ignoring invalid Retry-After header.")
+            return default
+    return max(0.0, seconds)

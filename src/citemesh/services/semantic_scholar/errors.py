@@ -27,15 +27,22 @@ class _SemanticScholarResponseContractError(TypeError):
     """Raised when a successful response has an unusable shape."""
 
 
+class _BatchResponseTooLargeError(SemanticScholarRequestError):
+    """A batch must be split to fit the provider's response-size limit."""
+
+
 @dataclass
 class _CandidateOperationState:
-    """Recovery budget shared by one outer candidate collection."""
+    """Retry allowance for one API section, inside the cache operation scope."""
 
     retry_budget_seconds: float
     depth: int = 0
     recovery_seconds: float = 0.0
     reference_cache_hits: int = 0
     last_recovery_error: Exception | None = None
+    section: str = "request"
+    retries_used: int = 0
+    exhausted: bool = False
 
 
 class _CandidateOperationLocal(threading.local):

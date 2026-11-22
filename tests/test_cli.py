@@ -59,7 +59,7 @@ from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import config as config_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
-from citemesh.core import API_CONFIG, Author, Paper
+from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, get_cache_dir
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
@@ -5144,7 +5144,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
 
     citation_config = payload["build"]["citation"]
@@ -5468,7 +5468,7 @@ def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
 @pytest.mark.parametrize(
     ("token", "api_key", "selected_client_budget"),
     [
-        (None, None, API_CONFIG.anonymous_retry_budget_seconds),
+        (None, None, 0.0),
         (None, "configured-key", 0.0),
         ("0", None, 0.0),
         ("37.5", "configured-key", 12.5),
@@ -5554,9 +5554,7 @@ def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
         assert (
             selected_client.retry_budget_seconds == payload["build"]["s2_retry_budget"]
         )
-        assert payload["build"]["s2_retry_budget"] == (
-            API_CONFIG.anonymous_retry_budget_seconds
-        )
+        assert payload["build"]["s2_retry_budget"] == (0.0)
     finally:
         s2.reset_client()
         if keyed_client is not None:
@@ -6116,7 +6114,7 @@ def test_graph_config_payload_records_device() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
 
     assert payload["schema_version"] == 2
@@ -6157,7 +6155,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     replay = sidecar["build"]["embedding"]
     assert replay["model"] == active_model
@@ -6200,7 +6198,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": selector_metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     assert selector_metadata["effective_model_revision"] == resolved_revision
     assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
@@ -6233,7 +6231,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
             metadata={"strategy": "embedding", "embedding": corpus_metadata},
             selected_formats=["json"],
             output_paths={"json": Path("out/embedding.json")},
-            s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+            s2_retry_budget=0.0,
         )
         replay = corpus_sidecar["build"]["embedding"]
         assert corpus_metadata["installed_corpus_selection"] == selection
@@ -6304,7 +6302,7 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
@@ -6319,6 +6317,6 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     assert "dataset_source" not in candidate_payload["build"]["embedding"]
