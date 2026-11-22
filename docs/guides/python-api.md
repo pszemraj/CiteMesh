@@ -94,7 +94,7 @@ visualize_graph(
 
 Pass a `SemanticScholarClient` as `client=` to a builder or use it to fetch references directly. By default it reads `S2_API_KEY` when constructed. An explicit `api_key=` overrides the environment, and an empty string selects anonymous access. The saved `api.s2_api_key` setting applies only in the CLI.
 
-`timeout` sets the HTTP connect and read timeouts in seconds, with a default of 30. It does not impose a deadline on the whole request. `retry_budget_seconds` sets an optional recovery time limit per section. See the [API request policy](cli.md#troubleshooting).
+`timeout` sets the default HTTP connect and read timeouts in seconds (`30` when omitted). It does not impose a deadline on the whole request. `retry_budget_seconds` sets an optional recovery time limit per section. See the [API request policy](cli.md#troubleshooting).
 
 ```python
 from citemesh.services import SemanticScholarClient

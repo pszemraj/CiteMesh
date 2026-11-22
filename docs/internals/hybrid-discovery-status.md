@@ -35,7 +35,7 @@ In `both` mode nine focal papers gained useful papers, one tied and one lost one
 
 ## Precision by list length
 
-Every comparison used the same `-p` limit of 44 related papers. These figures measure precision among returned papers. The table shows the share of the first k papers graded useful and important on the held-out focal papers.
+Every comparison used the same budget of 44 related papers. These figures measure precision among returned papers. The table shows the share of the first k papers graded useful and important on the held-out focal papers.
 
 | Mode | First 10 | First 20 | First 30 | All 44 |
 | --- | ---: | ---: | ---: | ---: |

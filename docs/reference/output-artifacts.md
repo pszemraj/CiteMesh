@@ -126,7 +126,9 @@ The paper list defaults to **Discovery rank** when the graph has related papers 
 
 ![Search narrowing the Megalodon paper list and similarity graph](../../assets/ui-dashboard-search-filter.png)
 
-Downloads are named from the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, focal_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
+Graph JSON, CSV, and all/saved BibTeX downloads use the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Individual **Download BibTeX** filenames are based on the selected paper's ID; **Export Collection** uses `dashboard.citemesh.json`.
+
+Starred papers persist in `localStorage` per `(strategy, focal_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
 Node color is a publication-year gradient shown in the year legend, node size tracks citation count, the focal paper wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
 

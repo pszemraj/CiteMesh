@@ -30,7 +30,7 @@ citemesh config set api.s2_api_key YOUR_KEY
 ```
 
 The `api.s2_api_key` entry in the [config reference](../reference/config/config_reference.toml) covers precedence against the `S2_API_KEY` environment variable and how `config list` and `config get` show the key. The CLI passes a saved key directly to its API client; it does not inject that saved value into child-process environments.
-Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). See the [API request policy](cli.md#troubleshooting) and [Python API](python-api.md#before-you-build-on-this) for direct builders.
+Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). See the [API request policy](cli.md#troubleshooting) and [Python client setup](python-api.md#semantic-scholar-client) for direct builders.
 
 ## The file itself
 

@@ -145,8 +145,10 @@ Semantic Scholar request policy
 
 - **Pacing.** The client spaces authenticated requests at least 1.2 seconds apart and anonymous requests at least 2 seconds apart. HTTP 429 sets a cooldown for subsequent requests through the same client. A `Retry-After` duration or HTTP date can extend the wait beyond the local schedule.
 - **Retries.** Each section allows 29 retries after initial requests, so a persistently failing page or batch gets up to 30 attempts. Delays double from 4 seconds to a 300-second cap: 4, 8, 16, 32, 64, 128, 256, then 300 seconds for later retries. Requests within a section draw from the same retry allowance and retry only the failed page or batch. Focal metadata, focal references, focal citations, recommendations, keyword search, metadata for arXiv bibliography recovery, selected paper metadata, and reference hydration each get their own allowance.
-- **Timeouts.** HTTP requests use 30-second connect and read timeouts, not a wall-clock deadline. Transient connection failures, HTTP 408, HTTP 429, and server errors can retry. Bad parameters and rejected credentials fail immediately.
-- **Recovery time limit.** Set `--s2-retry-budget SECONDS` to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves only the retry allowance. An in-flight request may run past the time limit.
+- **Timeouts.** HTTP connect and read timeouts default to 30 seconds; retries shorten them to the remaining recovery allowance when needed. These are not wall-clock deadlines. Transient connection failures, HTTP 408, HTTP 429, and server errors can retry. Bad parameters and rejected credentials fail immediately.
+- **Recovery time limit.** Set `--s2-retry-budget SECONDS`, for example `--s2-retry-budget 60`, to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves only the retry allowance. An in-flight request may run past the time limit.
+
+The default waits alone can total nearly two hours per section; HTTP time and longer `Retry-After` delays add to that.
 
 Common symptoms:
 
