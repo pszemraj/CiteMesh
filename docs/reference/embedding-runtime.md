@@ -61,6 +61,7 @@ EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support i
 - Eligible on `cuda`, `cpu`, and `mps`, where Inductor-on-Metal remains experimental.
 - Compilation is lazy, so a compiled-call failure restores the eager inner model and retries that encode batch once, for every encode path. Cache writes happen only after all batches finish.
 - CUDA and CPU honor the flag during corpus hydration, resumed hydration included, with dynamic shapes for variable-length batches; MPS defers compilation during cold-cache hydration.
+- Before CUDA compilation, CiteMesh defaults an unset `TRITON_DEFAULT_FP_FUSION` to `1`, preserving Triton 3.9's multiply/add fusion behavior and resolving its unset-default warning. An explicit value, including `0` to disable fusion, takes precedence.
 - CPU compilation enables GEMM autotuning (first-call cost: PyTorch's [max-autotune tutorial](https://docs.pytorch.org/tutorials/unstable/max_autotune_on_CPU_tutorial.html)) and scopes Inductor freezing around each encode call, restoring prior settings and keeping eager parameters for fallback.
 - It compiles SentenceTransformers 6's active `model[0].model`, with legacy `auto_model` support; replacing only the alias can leave the real forward pass uncompiled.
 

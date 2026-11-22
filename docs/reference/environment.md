@@ -30,6 +30,7 @@ A non-empty `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` suppresses the legacy macOS
 | `COLORFGBG` | First `--theme auto` hint. With at least two semicolon-separated fields, the last parseable integer selects dark below `8` and light otherwise. |
 | `DARKMODE` | When set to `1`, selects dark mode for `--theme auto` if `COLORFGBG` did not resolve a theme. Otherwise macOS uses the system appearance and other platforms fall back to light. |
 | `CUDA_VISIBLE_DEVICES` | Honored by torch for CUDA device visibility/selection. |
+| `TRITON_DEFAULT_FP_FUSION` | Controls Triton's multiply/add fusion; see [compile policy](embedding-runtime.md#compile-policy) for CiteMesh's default and override behavior. |
 | `PYTORCH_ENABLE_MPS_FALLBACK` | Honored by torch: falls back to CPU for individual ops missing MPS kernels. |
 | `NO_COLOR` | Honored by Rich: disables ANSI color in console and help output; non-color emphasis such as bold may remain. |
 | `HF_TOKEN` | Honored by huggingface_hub for authenticated model/dataset downloads and bucket access; see [bucket permissions](../guides/caching.md#import-and-selection) and [model access](embedding-runtime.md#model-selection-and-fallback). |

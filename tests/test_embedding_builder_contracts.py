@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing as mp
+import os
 import sqlite3
 import sys
 import threading
@@ -676,7 +677,13 @@ def _install_fake_torch(
     compile_calls: list[dict[str, object]] = []
 
     def _compile(model: object, **kwargs: object) -> object:
-        compile_calls.append({"model": model, "kwargs": dict(kwargs)})
+        compile_calls.append(
+            {
+                "model": model,
+                "kwargs": dict(kwargs),
+                "fp_fusion": os.environ.get("TRITON_DEFAULT_FP_FUSION"),
+            }
+        )
         if compile_behavior == "raise":
             raise RuntimeError("compile failure")
         if compile_behavior == "tagged":
@@ -10996,15 +11003,20 @@ def test_embedding_mps_never_probes_flash_attn(
     assert "flash_attn" not in probed
 
 
+@pytest.mark.parametrize("fp_fusion", [None, "0", "1"])
 def test_embedding_compile_device_gating(
     monkeypatch: pytest.MonkeyPatch,
+    fp_fusion: str | None,
 ) -> None:
-    """Explicit compilation should run on each supported device."""
+    """Compile eligible devices and preserve explicit Triton fusion choices."""
     for device_setup in [
         {"cuda_available": True, "mps_available": False},
         {"cuda_available": False, "mps_available": True},
         {"cuda_available": False, "mps_available": False},
     ]:
+        monkeypatch.delenv("TRITON_DEFAULT_FP_FUSION", raising=False)
+        if fp_fusion is not None:
+            monkeypatch.setenv("TRITON_DEFAULT_FP_FUSION", fp_fusion)
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
             monkeypatch,
@@ -11033,6 +11045,9 @@ def test_embedding_compile_device_gating(
         if builder.device == "cpu":
             expected_kwargs["options"] = {"max_autotune": True}
         assert fake_torch._compile_calls[-1]["kwargs"] == expected_kwargs
+        assert fake_torch._compile_calls[-1]["fp_fusion"] == (
+            "1" if builder.device == "cuda" and fp_fusion is None else fp_fusion
+        )
 
 
 @pytest.mark.parametrize("encode_path", ["direct", "retrieval", "graph", "hydration"])
