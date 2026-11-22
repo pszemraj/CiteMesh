@@ -146,7 +146,8 @@ search_mode = "auto"
 
 [api]
 
-# string (optional). Semantic Scholar API key, which doubles the request rate and lifts the 90-second recovery budget (docs/guides/cli.md#troubleshooting).
+# string (optional). API key for authenticated Semantic Scholar requests.
+# See: docs/guides/cli.md#troubleshooting.
 # Overridden by: the S2_API_KEY environment variable whenever it is set, even to an empty string, which forces anonymous access.
 # Warning: stored in plain text. CiteMesh writes the file owner-only, `citemesh config list` masks the key, and `citemesh config get` prints it.
 # s2_api_key = ""

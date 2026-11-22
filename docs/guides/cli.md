@@ -63,7 +63,7 @@ Other search behavior:
 
 - `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source.
 - Local results include the searched count and a copyable build command. When saved settings select an installed index, it is a hybrid build with `--semantic-source both` and no namespace. When the search passed `--cache-namespace` or a model or dataset selector, the command repeats the namespace and corpus view. The command is omitted with a warning if the cache has no recorded split.
-- [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
+- `--s2-retry-budget` sets an optional recovery time limit for an S2 search, including when `auto` falls back to S2. See [API key configuration](configuration.md#api-key) and [retries](#troubleshooting).
 
 ### View a saved dashboard
 
@@ -128,7 +128,7 @@ Redirected logs use plain text without terminal padding or forced line breaks, u
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
 Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
-During long Semantic Scholar waits, `info` shows which operation is waiting, the next attempt number, and its delay. Individual request diagnostics appear at `debug`.
+At `info`, each scheduled Semantic Scholar retry shows the section, the retry number out of six, the failure category, and the delay. At `debug`, responses also show the endpoint, status, elapsed time, and whether the authentication header was present. The key itself is omitted.
 
 ## Option reference
 
@@ -146,17 +146,16 @@ _`--theme light` with a paper selected._
 
 ## Troubleshooting
 
-Semantic Scholar request policy:
+Semantic Scholar request policy
 
-- **Pacing**: authenticated requests run at 1 request/second, anonymous requests at 0.5.
-- **Retries**: exponential full jitter, up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
-- **Recovery budget, anonymous**: builds share a 90-second budget for a candidate collection. Failed requests, retry attempts, and recovery waits consume it; healthy first requests, local embedding work, and rendering do not.
-- **Recovery budget, authenticated**: builds keep the attempt limit with no elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts.
-- An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary.
+- **Pacing.** The client spaces authenticated requests at least 1.2 seconds apart and anonymous requests at least 2 seconds apart. HTTP 429 sets a cooldown for subsequent requests through the same client. A `Retry-After` duration or HTTP date can extend the wait beyond the local schedule.
+- **Retries.** Each section allows six retries after initial requests, with delays of 4, 8, 16, 32, 64, and 120 seconds. Requests within a section draw from the same allowance and retry only the failed page or batch. Focal metadata, focal references, focal citations, recommendations, keyword search, metadata for arXiv bibliography recovery, selected paper metadata, and reference hydration each get their own allowance.
+- **Timeouts.** HTTP requests have a 30-second timeout. Transient connection failures, HTTP 408, HTTP 429, and server errors can retry. Bad parameters and rejected credentials fail immediately.
+- **Recovery time limit.** Set `--s2-retry-budget SECONDS` to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves the time limit off and keeps the six retry limit. An in-flight request may run past the time limit.
 
 Common symptoms:
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
-- **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a graph containing only the focal paper. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
+- **Partial outage.** Citation and hybrid builds can continue when at least one requested source completes or returns a valid empty result. A section that exhausts its allowance stops making uncached requests. Other sections still have their own allowances. Optional enrichment keeps successful results and available cached data. Exports mark each source `complete`, `empty`, or `unavailable`. If all requested sources are unavailable, the build exits nonzero.
 - **Slow first embedding run**: see [hydration and resume](caching.md#corpus-hydration-and-resume).

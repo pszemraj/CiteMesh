@@ -1102,8 +1102,8 @@ def _add_build_arguments(
         metavar="SECONDS",
         default=None,
         help=(
-            "Override Semantic Scholar recovery time; 0 disables the elapsed cap "
-            "(default: 90 seconds for anonymous access, no cap with an API key)."
+            "Cap Semantic Scholar recovery time per section. "
+            "0 leaves only the six retry limit (default: 0)."
         ),
     )
     export_group = build_parser.add_argument_group("Output")
@@ -1232,9 +1232,8 @@ def _add_search_arguments(
         metavar="SECONDS",
         default=None,
         help=(
-            "Override Semantic Scholar recovery time when search uses S2; 0 "
-            "disables the elapsed cap (default: 90 seconds for anonymous access, "
-            "no cap with an API key)."
+            "Cap recovery time when search uses Semantic Scholar. "
+            "0 leaves only the six retry limit (default: 0)."
         ),
     )
     search_parser.add_argument(

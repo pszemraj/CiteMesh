@@ -23,19 +23,21 @@ For embedding files, see [physical layout](../internals/embedding-cache.md#physi
 
 ## Paper metadata and reference IDs
 
-Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record; identifiers do not hold separate metadata copies. Later lookups check disk first, focal paper resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached.
+Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record. Lookups check disk first, including focal paper resolution. Hybrid builds batch missing metadata for selected papers together with optional metadata for the local corpus focal paper. Failed and malformed responses are not cached.
 
 Discovery listings are the exception: reference, citer, and recommendation responses carry each related paper's metadata inline, so they make no batch request and write nothing to `papers/`. The arXiv bibliography fallback, used when a focal paper's reference listing is empty or unavailable, still resolves its entries through the batch endpoint and the paper cache.
 
 Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and replaces metadata, including citation counts, from successful responses; a failed fetch preserves the old entry. Unchanged title and abstract text reuses its embedding.
 
-Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API. A focal paper's reference listing fetched for discovery refreshes its entry here only when it is complete, meaning the provider ran out of references before the fetch limit.
+Reference IDs live in `references/` with no expiration. Use `--refresh-reference-cache` to fetch fresh lists independently of paper metadata. CiteMesh sends up to 500 uncached paper IDs per batch and checks each returned list against the provider's reference count before saving it. For an incomplete list, CiteMesh uses the paginated references endpoint. If the request fails after retries, the build keeps completed lists and any lists already read from the cache. Recommendation builds also batch these requests and preserve the lookup order for alternate identifiers of the same paper.
+
+Complete empty lists are cached. Unresolved papers stay eligible for a later lookup. CiteMesh refetches corrupt or unusable entries. A focal paper's reference listing fetched for discovery refreshes the cache only if the provider ran out of references before the fetch limit.
 
 Local semantic search over a ready namespace uses cached vectors and metadata without fetching the corpus, though query encoding still uses the recorded model, which may need downloading. Uncached Semantic Scholar search and citation, reference, or recommendation discovery need network access; graph builds may also request provider metadata.
 
 ## Discovery checks
 
-A normal build always checks upstream for the requested recommendations, citations, or references; immediate reruns behave the same way. Discovery lists are not cached. Each endpoint invocation checks upstream and uses the returned order directly. Reference, citer, and recommendation requests ask for the default paper fields of every row; only the later reference-ID hydration of selected papers requests the minimal `paperId` projection.
+A normal build always checks upstream for the requested recommendations, citations, or references, including on immediate reruns. CiteMesh uses the returned order and does not cache discovery lists. Reference, citer, and recommendation discovery fetch paper metadata inline. Later reference hydration requests the reference count and IDs (`referenceCount,references.paperId`).
 
 The check preserves upstream membership and ordering among resolvable papers. Candidates come straight from the response rows, with the first usable row kept for each paper. A row without an ID or usable metadata is omitted while the other papers are retained; each listing logs its dropped rows once, as a warning only when more than half of that listing's rows are dropped and at debug level otherwise.
 
