@@ -22,11 +22,11 @@ Supporting modules: `constants.py` (metadata keys, schema version, chunk sizes, 
 
 ## Physical layout
 
-All namespaces share one `embeddings/` directory, separated by a filename suffix rather than a subdirectory: `sha256(model_name)[:12]` gives `metadata_<hash>.db`, `embeddings_<hash>.h5`, `cache_<hash>.lock`, and `hydration_<hash>.lock`. SQLite holds `papers` (keyed by `paper_id`, carrying `text_hash`, `row_idx`, normalized metadata, and a nullable packed arXiv `chronology_key`), `cache_metadata` (key/value), `replacement_journal` (the undo log below), and `corpus_membership` (active IDs and source ordinals). `papers` carries two indexes, `idx_papers_row_idx` and `idx_papers_chronology_key`; corpus selection and export read chronology directly. HDF5 holds `embeddings` (resizable `N x dim`, chunked at 2048 rows), the optional `binary_index` (`N x ceil(dim/8)` `uint8`, tagged `int8-midpoint-sign-v1`), and for int8 namespaces the fixed `calibration_ranges` (`2 x dim` float32). The runtime contract lives in HDF5 root attrs and is re-asserted on every open.
+All namespaces share the `embeddings/` directory. The first 12 hexadecimal digits of the SHA-256 digest of the serialized namespace give the suffix for `metadata_<hash>.db`, `embeddings_<hash>.h5`, `cache_<hash>.lock`, and `hydration_<hash>.lock`. SQLite holds `papers` (keyed by `paper_id`, carrying `text_hash`, `row_idx`, normalized metadata, and a nullable packed arXiv `chronology_key`), `cache_metadata` (key/value), `replacement_journal` (the undo log below), and `corpus_membership` (active IDs and source ordinals). `papers` carries two indexes, `idx_papers_row_idx` and `idx_papers_chronology_key`; corpus selection and export read chronology directly. HDF5 holds `embeddings` (resizable `N x dim`, chunked at 2048 rows), the optional `binary_index` (`N x ceil(dim/8)` `uint8`, tagged `int8-midpoint-sign-v1`), and for int8 namespaces the fixed `calibration_ranges` (`2 x dim` float32). The runtime contract lives in HDF5 root attrs and is re-asserted on every open.
 
 `sqlite3` uses its default rollback journal and durability settings. The HDF5 flush barrier below orders writes across the two stores.
 
-Build-path hydration state lives in `cache_metadata` under the keys in `constants.py`: `hydration_dataset_source`, `hydration_split`, `hydration_corpus_size` (`all` or `newest:N`), `hydration_complete`, the row-count reconciliation memo, and `hydration_source_revision`, the source commit the corpus was hydrated from. `_prepare_clean_hydration_namespace` writes the revision right after marking the namespace incomplete and before calibration ranges or any row are written; resumes, in-place cap extensions, and metadata migrations read it (`get_hydration_source_revision`), and a resume of an incomplete namespace without it raises instead of reading `main`. A full-split rescan of an unpinned cache, or the corpus identity migration that marks one incomplete, records the commit it reads first. Refresh and import completion stamp the target revision, `_reset_hydration_metadata` clears it with the other hydration keys, and an empty value means the namespace predates recorded revisions and still follows upstream growth while complete. Build runtime metadata reports the pin as `dataset_revision`.
+Build hydration stores `hydration_dataset_source`, `hydration_split`, `hydration_corpus_size` (`all` or `newest:N`), `hydration_complete`, the row-count reconciliation memo, and `hydration_source_revision` in `cache_metadata`. `_prepare_clean_hydration_namespace` marks the namespace incomplete and records the revision before writing calibration ranges or rows. `get_hydration_source_revision` reads the pin, which build runtime metadata reports as `dataset_revision`. Import and refresh completion stamp the target revision. `_reset_hydration_metadata` clears the pin with the other keys. See [corpus hydration and resume](../guides/caching.md#corpus-hydration-and-resume) for how builds and migrations use it.
 
 ## Write ordering and the replacement journal
 
@@ -48,7 +48,7 @@ Runtime consistency keys are seeded once, compared on every reopen, and restampe
 
 Those automatic repairs apply to ordinary uncertified caches. Managed corpus caches use strict inspection and preserve incompatible or missing-half storage until an explicit reset.
 
-Schema **4** requires rebuilding older namespaces whose rows lack `chronology_key`, which capped-corpus growth checks need as a recency watermark.
+Schema **4** adds `chronology_key` as the recency watermark for capped corpus growth checks. See [older caches](../guides/caching.md#older-caches) for when old embedding layouts are rebuilt or replaced.
 
 ## Locking
 
@@ -62,11 +62,11 @@ Exceeding a timeout raises with the lock path and a pointer at the env var or an
 
 ## Certified corpus lifecycle
 
-Portable indexes add a `corpus_membership` table keyed by paper ID with the original source ordinal. This additive change does not invalidate schema-4 vectors. An empty new membership table means unknown coverage until an operation certifies it. Physical rows can outlive source membership.
+The `corpus_membership` table is additive to schema 4. An empty new table means unknown coverage until an operation certifies it. Physical rows can outlive active membership.
 
 Structured cache metadata records the vector contract, original namespace serialization, imported publication origin, completed source descriptor, membership certification, and pending operation target. See [portable index selection](../guides/caching.md#import-and-selection) for user-facing namespace and source-revision behavior.
 
-Strict opening holds the namespace lock and opens the existing SQLite file in read-write mode so SQLite can roll back a hot journal after a crash. It opens HDF5 read-only. Inspection performs no schema migration or layout repair; explicit legacy adoption initializes missing native tables after validation. Missing halves, incompatible contracts, and ambiguous occupied storage fail without clearing payload. Consumer readiness additionally requires completed source state and certified membership; refresh can open its own pending state. Ordinary namespace selection also protects managed storage before repair. Explicit reset is separate from import, which never replaces an occupied incompatible cache.
+Strict opening holds the namespace lock and opens SQLite in read-write mode so it can roll back a hot journal. It opens HDF5 read-only and checks the existing files without migration or repair. Legacy adoption initializes missing tables after validation. Refresh can open its own pending state, and ordinary namespace selection checks managed storage before handing it to native repair.
 
 Import and refresh hold root and hydration operation locks, acquiring the short namespace lock for each mutation. Pending identity is durable before payload writes. Import appends stored values directly and commits metadata/membership only after the HDF5 flush barrier. Recovery determines the committed dense prefix from native mappings. Binary reconstruction runs once at finalization; it never rewrites primary int8 bytes. Completion promotes source, membership, and readiness in one SQLite transaction after flushing HDF5.
 

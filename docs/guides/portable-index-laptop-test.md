@@ -60,7 +60,7 @@ citemesh cache scan
 
 Replace `OWNER/INDEX` and `CONFIG` with the publication's values. This selects the current snapshot; add `--snapshot SNAPSHOT_ID` to select a retained snapshot. For a local export, replace the import command with `citemesh cache import --path ./arxiv-index --log-file index-import.log`.
 
-**Pass:** import reports a namespace; scan shows ready, certified membership and the manifest's active row count, dimension, dtype, source revision, and origin. Import performs data transfer and, for int8, local binary-index reconstruction, with no model loading or calibration. Record the namespace and snapshot identity, and replace `NAMESPACE` in every example below. Keep the local snapshot or completed download available for repeat tests; remote snapshots may be pruned. See [Resume and adoption](caching.md#resume-and-adoption) for resume behavior and [Publishing](caching.md#publishing) for snapshot retention.
+**Pass:** import reports a namespace. Scan shows ready, certified membership and the manifest's active row count, dimension, dtype, source revision, and origin. An int8 import reconstructs the binary index without loading a model or calibrating. Record the namespace and snapshot identity, and replace `NAMESPACE` in every example below. See [resuming an import](caching.md#resume-and-adoption) and [snapshot retention](caching.md#publishing).
 
 ## 3. Search the installed corpus
 

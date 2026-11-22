@@ -25,11 +25,11 @@ For embedding files, see [physical layout](../internals/embedding-cache.md#physi
 
 Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record. Lookups check disk first, including focal paper resolution. Hybrid builds batch missing metadata for selected papers together with optional metadata for the local corpus focal paper. Failed and malformed responses are not cached.
 
-Discovery listings are the exception: reference, citer, and recommendation responses carry each related paper's metadata inline, so they make no batch request and write nothing to `papers/`. The arXiv bibliography fallback, used when a focal paper's reference listing is empty or unavailable, still resolves its entries through the batch endpoint and the paper cache.
+Discovery listings carry related paper metadata inline and write nothing to `papers/`. The [arXiv bibliography fallback](cli.md#missing-semantic-scholar-references) resolves its entries through the batch endpoint and the paper cache.
 
 Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and replaces metadata, including citation counts, from successful responses; a failed fetch preserves the old entry. Unchanged title and abstract text reuses its embedding.
 
-Reference IDs live in `references/` with no expiration. Use `--refresh-reference-cache` to fetch fresh lists independently of paper metadata. CiteMesh sends up to 500 uncached paper IDs per batch and checks each returned list against the provider's reference count before saving it. For an incomplete list, CiteMesh uses the paginated references endpoint. If the request fails after retries, the build keeps completed lists and any lists already read from the cache. Recommendation builds also batch these requests and preserve the lookup order for alternate identifiers of the same paper.
+Reference IDs live in `references/` with no expiration. Use `--refresh-reference-cache` to fetch fresh lists independently of paper metadata. Hydration requests `referenceCount,references.paperId` for up to 500 uncached IDs per batch. CiteMesh splits batches explicitly rejected for size. It uses the paginated references endpoint for single-paper batches that still exceed the limit or lists whose completeness cannot be verified from the returned count. After retries are exhausted, it keeps complete lists from the cache and from successful requests. Recommendation builds preserve lookup order for alternate identifiers of the same paper.
 
 Complete empty lists are cached. Unresolved papers stay eligible for a later lookup. CiteMesh refetches corrupt or unusable entries. A focal paper's reference listing fetched for discovery refreshes the cache only if the provider ran out of references before the fetch limit.
 
@@ -37,31 +37,30 @@ Local semantic search over a ready namespace uses cached vectors and metadata wi
 
 ## Discovery checks
 
-A normal build always checks upstream for the requested recommendations, citations, or references, including on immediate reruns. CiteMesh uses the returned order and does not cache discovery lists. Reference, citer, and recommendation discovery fetch paper metadata inline. Later reference hydration requests the reference count and IDs (`referenceCount,references.paperId`).
+A normal build checks upstream for the requested recommendations, citations, or references, including on immediate reruns. Discovery lists are uncached, regardless of the paper and reference cache refresh settings.
 
 The check preserves upstream membership and ordering among resolvable papers. Candidates come straight from the response rows, with the first usable row kept for each paper. A row without an ID or usable metadata is omitted while the other papers are retained; each listing logs its dropped rows once, as a warning only when more than half of that listing's rows are dropped and at debug level otherwise.
 
-A failed page or failed `all-cs` fallback stops the required acquisition without replacing existing outputs. A request that starts with the `recent` recommendation pool checks `all-cs` if the first response contains no resolvable papers. Both checks must succeed before returning an empty recommendation list. Hybrid's [candidate acquisition](how-it-works.md#2-candidate-acquisition) rules select which provider pool to query first. A reference listing that reached the fetch limit never overwrites the complete reference-ID cache.
+A recommendation request that starts with the `recent` pool checks `all-cs` if the first response has no resolvable papers. Both checks must succeed for the source to report an empty list. See [how hybrid chooses a pool](how-it-works.md#2-candidate-acquisition) and the [policy for failed requests](cli.md#troubleshooting).
 
-Hybrid needs a retrieval-document vector for every pool member:
-
-- In `candidates` mode the pool is the focal paper's references and citers plus up to 200 recommendations, and their vectors are kept in the embedding cache's candidate namespace (see [Embedding namespaces](#embedding-namespaces)). A warm rebuild encodes only the focal paper's query-role vector. The first build encodes the whole pool, at most about 2,200 title-and-abstract texts at the default 1000-paper limits, dominated by the citers of a heavily cited focal paper.
-- In the corpus modes the namespace is the corpus itself and takes no provider rows. Stored corpus vectors are read for corpus rows; the references, citers, and recommendations outside the installed index are encoded in memory on every build and never stored, so they do not change the corpus namespace or its membership.
-- In every mode, the selected papers' symmetric graph-similarity vectors are written to their own cache.
-
-Debug-level output (`--verbose` or `--log-level debug`) reports that discovery IDs were rechecked upstream separately from reused paper metadata and reference IDs; normal output does not. `--refresh-paper-cache` and `--refresh-reference-cache` control those two enrichment caches; neither suppresses the discovery check.
+Debug output distinguishes live discovery checks from reuse of cached paper metadata and reference IDs.
 
 ## Embedding namespaces
 
-A namespace combines model, artifact identity, [representation](../reference/embedding-runtime.md#task-specific-vector-spaces), dimension, formatter, and storage settings. The formatter includes the [text normalization](../reference/embedding-runtime.md#task-specific-vector-spaces) applied to titles, abstracts, and queries. The artifact identity is a resolved commit SHA or a digest of the inference-artifact manifest, so changing a checkpoint selects a different cache. SQLite and HDF5 store each namespace as a pair; [physical layout](../internals/embedding-cache.md#physical-layout) describes the files.
+A namespace combines model, artifact identity, dimension, storage settings, and the [vector role and text formatter](../reference/embedding-runtime.md#task-specific-vector-spaces). The artifact identity is a resolved commit SHA or a digest of the inference-artifact manifest, so changing a checkpoint selects a different cache.
 
 Local custom model fingerprints include declared Python modules, their package initializers, and transitive relative imports. Changing those files selects a new namespace. Fingerprinting parses the code without executing it.
 
-- Candidate mode additionally tags its retrieval namespace `mode=candidates` so S2 candidates never mix with corpus hydration.
 - No device or compute-dtype token in the namespace: CPU, CUDA, and MPS resolve the same one whenever the other contracts match, so a corpus built on a bf16 GPU is read directly by an fp32 host rather than re-encoded. An auto-resolved compute dtype is provenance rather than identity - like the attention backend, TF32, and `--torch-compile`, it shifts numerics slightly without changing what a vector means. The dtype that created a namespace is still recorded, but it does not decide compatibility on reopen.
 - Changing model, revision, profile, dimension, storage precision, int8 calibration size, or the text formatter selects a different namespace. Switching back to the earlier settings reopens the original vectors.
 - The binary prefilter is not part of the namespace: toggling it reuses the same vectors, ranges, and hydration state, rebuilding or dropping only the derived index.
 - A vector is re-encoded only when the paper is new to the namespace or its input text changed. Metadata-only updates refresh the SQLite row, not the vector.
+
+Hybrid reuses retrieval and graph vectors separately:
+
+- In `candidates` mode, `mode=candidates` tags the retrieval namespace so candidate vectors stay separate from corpus vectors. A cold build can encode about 2,200 title-and-abstract texts at the default limits. A warm build whose papers and text match encodes only the focal paper's retrieval query again.
+- In corpus modes, indexed rows use their stored vectors. Provider papers outside the index are encoded in memory on each build and do not change the corpus.
+- The selected graph papers use a separate float32 namespace without a binary prefilter.
 
 Crash safety, the replacement journal, flush ordering, and locking are in [Embedding Cache Internals](../internals/embedding-cache.md).
 
@@ -137,7 +136,6 @@ How refresh reads the source depends on what the namespace holds:
 
 - Reconciling a complete corpus with a newer revision, such as an index imported from a bucket, streams the source once. It still reads every row; only the encoding is incremental.
 - Every pass that has to process the whole source downloads the pinned revision instead: a namespace without a complete corpus, a pending or resumed refresh, first int8 calibration, and the first `--adopt` of a namespace. `datasets` prepares the revision as Arrow in its own cache, and CiteMesh normalizes the rows in parallel on half the logical CPUs once a source has 50,000 rows. For the full arXiv snapshot, expect about 5 GB of prepared Arrow per revision in the `datasets` cache, which later passes reuse. The normalized rows, about 5 GB more, go to a temporary directory under the CiteMesh cache root that is removed when the pass ends, so every pass normalizes with the running code.
-- One pass serves calibration and encoding: the int8 calibration sample is drawn from the prepared rows with the same seeded reservoir build hydration uses.
 
 Repeated source IDs are resolved the same way whether the source is streamed or downloaded, before calibration, encoding, or newest-N selection:
 
@@ -182,7 +180,7 @@ Publishing to an existing configuration name replaces its snapshot, including wh
 
 The publisher writes `README.md` when it is missing and regenerates it on later publications while it still matches the generated overview. Once you edit it, adding links, images, or diagrams, later publications preserve it, along with assets outside `variants/`. Imports read the catalog, selected manifest, and its declared data files, without reading or validating documentation.
 
-Only the current snapshot of each configuration is retained remotely, so old full indexes do not accumulate as repository history. Keep a local export if you need an older snapshot later. Downloads and installed native caches remain on each consumer until removed there. Int8 ranges are established once per native namespace and reused on refresh.
+Only the current snapshot of each configuration is retained remotely, so old full indexes do not accumulate as repository history. Keep a local export if you need an older snapshot later. Downloads and installed native caches remain on each consumer until removed there.
 
 ## Corpus records
 
@@ -194,7 +192,7 @@ The `doi` field accepts a bare DOI, a `doi:` prefix, or a DOI URL. It uses the f
 
 ## Corpus hydration and resume
 
-The automatic hydration rules below apply to ordinary legacy corpus caches. Certified portable indexes follow the explicit refresh and membership rules above.
+These rules apply to corpus caches that builds hydrate directly. Installed indexes follow the [refresh and membership rules](#portable-corpus-indexes).
 
 arXiv-corpus mode hydrates the full selected `--dataset-split` by default - "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; on a cold build the cap bounds what gets embedded, not how many rows are scanned to establish that order. Streaming ranking drains the source before encoding begins. An indexable non-streaming dataset instead scans its identifier columns. A slice such as `train[:2%]` limits the population ranked. Rows without parseable arXiv IDs fill any shortfall in source order, with a warning; when none can be parsed, the cap selects the first N rows.
 
@@ -241,10 +239,11 @@ An int8 write outside those ranges warns once per run. Existing rows need the or
 
 ## Older caches
 
-Caches written by earlier layouts are read or reported as follows, so none needs a manual rebuild to keep working.
+`citemesh cache scan` identifies older layouts. Some remain readable; older embedding layouts can require re-encoding.
 
 - **Version 2 paper caches** stay readable: an alias copy written under a requested identifier supplies its canonical paper ID, and lookups read the canonical record.
 - **Dtype-keyed embedding namespaces** (older `.db` and `.h5` pairs) remain separate and appear as reclaimable schema-3 namespaces in `citemesh cache scan`. After confirming the replacement cache works, delete the matching `metadata_<namespace>.db` and `embeddings_<namespace>.h5` files to reclaim their space. `citemesh cache clear` also reclaims them, but deletes every namespace.
+- **Other older embedding schemas** appear as `Legacy schema vN` and rebuild on access.
 - **Legacy macOS cache**: `citemesh cache scan` reports it with a migration hint. For a full reset, remove it separately from the current cache root.
 - **Legacy corpus caches** need an explicit [adoption](#resume-and-adoption) before they can be exported with certified coverage.
 - **Corpus metadata migrations** are versioned. Each rescans the selected source split and updates cached publication years, DOIs, and venues in place while preserving vectors and corpus membership.

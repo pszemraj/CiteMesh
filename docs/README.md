@@ -24,4 +24,4 @@ New here: [install and build a first graph](../README.md#quick-start), then pick
 
 - [Architecture](internals/architecture.md): package boundaries, extension points, and [hosted demo maintenance](internals/architecture.md#hosted-demo)
 - [Embedding cache](internals/embedding-cache.md)
-- [Hybrid discovery status](internals/hybrid-discovery-status.md): what hybrid does after the discovery rework and how it was evaluated
+- [Hybrid discovery status](internals/hybrid-discovery-status.md): discovery evidence and evaluation limits

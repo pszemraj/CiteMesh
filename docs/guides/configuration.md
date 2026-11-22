@@ -1,6 +1,6 @@
 # User configuration
 
-`citemesh config` stores personal defaults and an optional Semantic Scholar API key in `config.toml` under the [cache root](../reference/environment.md#platform-variables-used-for-cache-root-resolution). The [config reference](../reference/config/config_reference.toml) documents every key, with its type, default, and interactions; [example.toml](../reference/config/example.toml) is a small config to start from.
+`citemesh config` stores personal defaults and an optional Semantic Scholar API key in `config.toml` under the [cache root](../reference/environment.md#platform-variables-used-for-cache-root-resolution). The [config reference](../reference/config/config_reference.toml) is loadable TOML with each key's type, default, and interactions. Copy only the keys you want to change, or start from [example.toml](../reference/config/example.toml).
 
 ```bash
 # configured values + file path
@@ -23,10 +23,6 @@ The [config reference](../reference/config/config_reference.toml) defines how sa
 
 Config defaults, including ignored corpus-only settings, are logged at DEBUG with their keys and file path. The build sidecar records only settings applicable to the selected source and precision.
 
-## Supported keys
-
-The [config reference](../reference/config/config_reference.toml) lists every `[defaults]` and `[api]` key. It is a loadable TOML file: uncommented keys hold their built-in defaults, so copy only the keys you want to change.
-
 ## API key
 
 ```bash
@@ -34,9 +30,7 @@ citemesh config set api.s2_api_key YOUR_KEY
 ```
 
 The `api.s2_api_key` entry in the [config reference](../reference/config/config_reference.toml) covers precedence against the `S2_API_KEY` environment variable and how `config list` and `config get` show the key. The CLI passes a saved key directly to its API client; it does not inject that saved value into child-process environments.
-The first request reports keyed or anonymous access and the local request pacing. Debug output identifies the credential source without displaying the key. See the [API request policy](cli.md#troubleshooting).
-
-Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). Direct-builder behavior is in the [Python API](python-api.md#before-you-build-on-this).
+Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). See the [API request policy](cli.md#troubleshooting) and [Python API](python-api.md#before-you-build-on-this) for direct builders.
 
 ## The file itself
 
