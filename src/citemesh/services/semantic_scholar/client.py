@@ -585,7 +585,7 @@ class SemanticScholarClient(_EndpointsMixin):
             state.retries_used += 1
             status = "rate-limited" if rate_limited else "temporarily unavailable"
             logger.info(
-                "Semantic Scholar is %s while %s. Retry %d/%d in %gs.",
+                "Semantic Scholar is %s (%s). Retry %d/%d in %gs.",
                 status,
                 summary if state.section == "request" else state.section,
                 state.retries_used,

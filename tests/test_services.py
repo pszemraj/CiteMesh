@@ -1345,7 +1345,7 @@ def test_every_retry_reports_section_and_delay(
         if record.levelno >= logging.INFO
     ]
     assert visible == [
-        f"Semantic Scholar is {status} while fetching paper details. "
+        f"Semantic Scholar is {status} (fetching paper details). "
         f"Retry {attempt}/{API_CONFIG.max_retries} in {delay:g}s."
         for attempt in announced_attempts
     ]
@@ -1388,7 +1388,7 @@ def test_retry_notice_omits_provider_identifiers_and_offsets(
         if record.levelno >= logging.INFO
     ]
     assert visible == [
-        "Semantic Scholar is rate-limited while fetching references. "
+        "Semantic Scholar is rate-limited (fetching references). "
         f"Retry 1/{API_CONFIG.max_retries} in 43s."
     ]
     assert paper_id not in visible[0]
@@ -2424,8 +2424,8 @@ def test_sections_share_retries_only_within_their_own_work(
                 assert client._candidate_operation.state.retries_used == 1
             assert client._session.get.call_count == 2
     assert sleeps == [4, 8, 16, 32, 64, 128, 256] + [300] * 22 + [4]
-    assert "selected metadata. Retry 29/29 in 300s." in caplog.text
-    assert "reference hydration. Retry 1/29 in 4s." in caplog.text
+    assert "selected metadata). Retry 29/29 in 300s." in caplog.text
+    assert "reference hydration). Retry 1/29 in 4s." in caplog.text
 
 
 def test_section_elapsed_ceiling_resets_and_recovers_after_interrupt(
