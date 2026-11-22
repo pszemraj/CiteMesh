@@ -1897,14 +1897,11 @@
       downloadBtn.type = "button";
       downloadBtn.textContent = "Download BibTeX";
       downloadBtn.addEventListener("click", () => {
-        const blob = new Blob([node.bibtex || ""], { type: "text/plain;charset=utf-8" });
-        const anchor = document.createElement("a");
-        anchor.href = URL.createObjectURL(blob);
-        anchor.download = `${String(node.id || "paper").replace(/[^a-zA-Z0-9._-]+/g, "_")}.bib`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(anchor.href);
+        downloadBlob(
+          node.bibtex || "",
+          `${String(node.id || "paper").replace(/[^a-zA-Z0-9._-]+/g, "_")}.bib`,
+          "text/plain;charset=utf-8"
+        );
       });
 
       controls.detailActions.appendChild(copyBtn);
@@ -2184,6 +2181,17 @@
       if (focusTitle && pane === "detail") controls.detailTitle.focus();
     }
 
+    function downloadBlob(content, filename, mime) {
+      const blob = new Blob([content], { type: mime });
+      const anchor = document.createElement("a");
+      anchor.href = URL.createObjectURL(blob);
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(anchor.href);
+    }
+
     function setupControls() {
       // The list element survives every rebuild, so one listener re-arms previews
       // as soon as the pointer moves after a re-render.
@@ -2271,17 +2279,6 @@
       });
       syncDiscoveryLeads();
       syncSemanticScholarButton();
-
-      function downloadBlob(content, filename, mime) {
-        const blob = new Blob([content], { type: mime });
-        const anchor = document.createElement("a");
-        anchor.href = URL.createObjectURL(blob);
-        anchor.download = filename;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(anchor.href);
-      }
 
       function focalSlug() {
         const focalNode = nodeById.get((payload.meta && payload.meta.focal_id) || "");
