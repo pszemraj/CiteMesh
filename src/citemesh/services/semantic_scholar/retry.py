@@ -15,7 +15,7 @@ from .errors import _RetryableRequestError, _RetryExhaustedError
 
 logger = logging.getLogger(__name__)
 
-_MAX_BACKOFF_SECONDS = 120.0
+_MAX_BACKOFF_SECONDS = 300.0
 
 
 def _retry_delay(

@@ -148,8 +148,8 @@ class APIConfig:
     # Timeout settings (seconds)
     default_timeout: float = 30.0
 
-    # Six retries after the initial request, independently for each API section.
-    max_retries: int = 6
+    # Up to 30 attempts for failed work: initial request plus 29 section retries.
+    max_retries: int = 29
     retry_delay: float = 4.0
 
     # Rate limiting: anonymous requests share a small public pool; authenticated

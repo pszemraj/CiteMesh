@@ -1103,7 +1103,7 @@ def _add_build_arguments(
         default=None,
         help=(
             "Cap Semantic Scholar recovery time per section. "
-            "0 leaves only the six retry limit (default: 0)."
+            "0 keeps up to 30 attempts with no recovery time limit (default: 0)."
         ),
     )
     export_group = build_parser.add_argument_group("Output")
@@ -1233,7 +1233,7 @@ def _add_search_arguments(
         default=None,
         help=(
             "Cap recovery time when search uses Semantic Scholar. "
-            "0 leaves only the six retry limit (default: 0)."
+            "0 keeps up to 30 attempts with no recovery time limit (default: 0)."
         ),
     )
     search_parser.add_argument(
