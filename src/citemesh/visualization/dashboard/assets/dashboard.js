@@ -1589,6 +1589,16 @@
       }
     }
 
+    function finishGraphRender() {
+      setupGraphInteractions();
+      if (state.selectedId && nodeById.has(state.selectedId)) {
+        renderDetail(state.selectedId, false);
+      } else {
+        renderDetail(null, false);
+      }
+      renderList();
+    }
+
     function applyDashboardPayload(nextPayload) {
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
@@ -1627,15 +1637,7 @@
       syncDiscoverySortOption();
       syncDiscoveryLeads();
       renderTimeline();
-      return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
-        setupGraphInteractions();
-        if (state.selectedId && nodeById.has(state.selectedId)) {
-          renderDetail(state.selectedId, false);
-        } else {
-          renderDetail(null, false);
-        }
-        renderList();
-      });
+      return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(finishGraphRender);
     }
 
     function loadCollectionResult(resultId) {
@@ -2545,15 +2547,7 @@
         });
         return;
       }
-      Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
-        setupGraphInteractions();
-        if (state.selectedId && nodeById.has(state.selectedId)) {
-          renderDetail(state.selectedId, false);
-        } else {
-          renderDetail(null, false);
-        }
-        renderList();
-      });
+      Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(finishGraphRender);
     }
 
     initialize();
