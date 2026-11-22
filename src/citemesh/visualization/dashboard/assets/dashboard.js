@@ -918,11 +918,6 @@
         return tieBreak(nodeA, nodeB);
       }
       if (state.sortKey === "citation_count") {
-        const citationsA = Number(nodeA.citation_count || 0);
-        const citationsB = Number(nodeB.citation_count || 0);
-        if (citationsA !== citationsB) {
-          return citationsB - citationsA;
-        }
         return tieBreak(nodeA, nodeB);
       }
       if (state.sortKey === "discovery_rank") {
