@@ -282,14 +282,6 @@
       return JSON.parse(rawJson);
     }
 
-    function extractEmbeddedScriptJson(text, scriptId) {
-      const parsedDocument = new DOMParser().parseFromString(
-        String(text || ""),
-        "text/html"
-      );
-      return embeddedScriptJson(parsedDocument, scriptId, true);
-    }
-
     function parseImportedResultSetFromText(fileText, filename) {
       const text = String(fileText || "");
       const lowerName = String(filename || "").toLowerCase();
