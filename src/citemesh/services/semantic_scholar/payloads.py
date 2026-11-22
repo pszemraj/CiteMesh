@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import numbers
-from collections.abc import Mapping
 from typing import TypedDict
 
 from citemesh.core import Author, Paper
@@ -257,20 +256,6 @@ def _normalize_external_id(raw_value: object) -> str:
     return raw_value.strip()
 
 
-def _extract_external_ids_from_mapping(
-    mapping: Mapping[object, object],
-) -> tuple[str, str]:
-    """Extract arXiv and DOI IDs from external-id style mappings.
-
-    :param Mapping[object, object] mapping: External IDs map.
-    :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
-    """
-    normalized = {str(key).lower(): value for key, value in mapping.items()}
-    arxiv_id = _normalize_external_id(normalized.get("arxiv"))
-    doi = _normalize_external_id(normalized.get("doi"))
-    return arxiv_id, doi
-
-
 def _extract_external_ids(external_ids: object) -> tuple[str, str]:
     """Extract arXiv and DOI values from raw external-id payloads.
 
@@ -278,8 +263,10 @@ def _extract_external_ids(external_ids: object) -> tuple[str, str]:
     :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
     """
     if isinstance(external_ids, dict):
-        mapping: Mapping[object, object] = external_ids
-        return _extract_external_ids_from_mapping(mapping)
+        normalized = {str(key).lower(): value for key, value in external_ids.items()}
+        arxiv_id = _normalize_external_id(normalized.get("arxiv"))
+        doi = _normalize_external_id(normalized.get("doi"))
+        return arxiv_id, doi
     return "", ""
 
 
