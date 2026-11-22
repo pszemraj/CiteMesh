@@ -20,6 +20,7 @@ from citemesh.core.paper_fields import (
 )
 from citemesh.core.paper_ids import (
     arxiv_identifier_from_doi,
+    canonicalize_or_none,
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
 )
@@ -169,6 +170,40 @@ def _extract_reference_ids(raw_references: object) -> list[str]:
     :return list[str]: Parsed reference ID list (order-preserving, deduplicated).
     """
     return _coerce_cached_reference_ids(raw_references) or []
+
+
+def _complete_batch_reference_ids(record: JSONValue) -> list[str] | None:
+    """Return resolved IDs only when the batch includes the complete reference list."""
+    if not isinstance(record, dict):
+        return None
+    paper_id = record.get("paperId")
+    count = record.get("referenceCount")
+    references = record.get("references")
+    if (
+        not isinstance(paper_id, str)
+        or not paper_id.strip()
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or not isinstance(references, list)
+        or len(references) != count
+    ):
+        return None
+
+    # Count relation rows before removing unresolved IDs and duplicates.
+    reference_ids: dict[str, None] = {}
+    for row in references:
+        if not isinstance(row, dict) or "paperId" not in row:
+            return None
+        raw_id = row["paperId"]
+        if raw_id is None:
+            continue
+        if (
+            not isinstance(raw_id, str)
+            or (paper_id := canonicalize_or_none(raw_id)) is None
+        ):
+            return None
+        reference_ids[paper_id] = None
+    return list(reference_ids)
 
 
 def _validate_integer_limit(

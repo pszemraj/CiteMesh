@@ -20,6 +20,7 @@ from citemesh.services.semantic_scholar.disk_cache import (
     _persist_paper,
     _reference_cache_path,
 )
+from citemesh.services.semantic_scholar.endpoints import ReferenceBatchResult
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
     fetch_focal_references,
@@ -45,7 +46,7 @@ def providers(
     client.get_paper_references.return_value = []
     client.get_paper_citations.return_value = []
     client.get_papers.return_value = {}
-    client.get_reference_ids.return_value = []
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
     client.get_cached_papers.side_effect = lambda identifiers: {
         identifier: cached
         for identifier in identifiers
@@ -374,7 +375,7 @@ def test_hybrid_title_recovery_uses_selected_corpus_view(
     assert builder.paper_sources[reference_id] == "citation"
     # Recovery resolved the entry locally; the selected row is enriched afterwards.
     engine._enrich_corpus_papers.assert_called_once_with(
-        {reference_id: selected[reference_id]}
+        {reference_id: selected[reference_id]}, focal=selected[focal.paper_id]
     )
     client.get_papers.assert_not_called()
     metadata.assert_not_called()
@@ -390,15 +391,16 @@ def test_hydration_uses_provider_aliases_for_recovered_corpus_references(
     local_arxiv = paper("content:arxiv", is_local_corpus=True, arxiv_id="2210.00001")
     local_doi = paper("content:doi", is_local_corpus=True, doi="10.1000/test")
     papers = {item.paper_id: item for item in (focal, opaque, local_arxiv, local_doi)}
-    client.get_reference_ids.side_effect = [["arxiv-reference"], ["doi-reference"]]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {"arxiv:2210.00001": ["arxiv-reference"], "10.1000/test": ["doi-reference"]}
+    )
     builder = CitationGraphBuilder(client=client)
 
     builder.reference_hydrator.hydrate(papers, focal)
 
-    assert client.get_reference_ids.call_args_list == [
-        call("arxiv:2210.00001", force_refresh=False),
-        call("10.1000/test", force_refresh=False),
-    ]
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["arxiv:2210.00001", "10.1000/test"], force_refresh=False
+    )
     assert builder.reference_hydrator.reference_cache == {
         local_arxiv.paper_id: ["arxiv-reference"],
         local_doi.paper_id: ["doi-reference"],
@@ -612,7 +614,7 @@ def test_hybrid_pools_every_provider_reference_once(
     client.get_paper_references.assert_called_once_with(
         focal.paper_id, limit=1000, raise_on_unavailable=True, reference_evidence={}
     )
-    client.get_reference_ids.assert_not_called()
+    client.get_reference_ids_batch.assert_not_called()
     bibliography.assert_not_called()
 
 
@@ -699,8 +701,8 @@ def test_citation_reuses_recovery_without_persisting_partial_bibliography(
     }
     assert cache_path.read_bytes() == original
     assert all(
-        call.args[0] != focal.paper_id
-        for call in client.get_reference_ids.call_args_list
+        focal.paper_id not in call.args[0]
+        for call in client.get_reference_ids_batch.call_args_list
     )
     bibliography.assert_called_once()
 
@@ -721,7 +723,9 @@ def test_citation_hydrates_focal_after_unavailable_arxiv_recovery(
     client.get_paper.return_value = focal
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
     client.get_paper_citations.return_value = [citation]
-    client.get_reference_ids.return_value = ["reference-1", "reference-2"]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {focal.paper_id: ["reference-1", "reference-2"]}
+    )
     bibliography.return_value = html
     builder = CitationGraphBuilder(
         max_papers=2, max_references=1, max_citations=1, client=client
@@ -730,8 +734,8 @@ def test_citation_hydrates_focal_after_unavailable_arxiv_recovery(
     papers = builder.collect_papers(focal.paper_id)
 
     assert papers[focal.paper_id].references == ["reference-1", "reference-2"]
-    client.get_reference_ids.assert_called_once_with(
-        focal.paper_id, force_refresh=False
+    client.get_reference_ids_batch.assert_called_once_with(
+        [focal.paper_id], force_refresh=False
     )
     assert builder.candidate_source_status == {
         "references": "unavailable",
@@ -752,8 +756,8 @@ def test_citation_hydrates_cached_focal_after_recovered_arxiv_references(
     focal = paper("arxiv:2608.27147")
     client.get_paper.return_value = focal
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
-    client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
-        ["cached-reference"] if paper_id == focal.paper_id else []
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {focal.paper_id: ["cached-reference"]}
     )
     bibliography.return_value = [BibliographyEntry(("arxiv:1706.03762",))]
     metadata.return_value = {"arxiv:1706.03762": paper("arxiv:1706.03762")}
@@ -765,8 +769,8 @@ def test_citation_hydrates_cached_focal_after_recovered_arxiv_references(
 
     assert papers[focal.paper_id].references == ["cached-reference"]
     assert any(
-        call.args == (focal.paper_id,) and call.kwargs == {"force_refresh": False}
-        for call in client.get_reference_ids.call_args_list
+        focal.paper_id in call.args[0] and call.kwargs == {"force_refresh": False}
+        for call in client.get_reference_ids_batch.call_args_list
     )
     assert builder.candidate_source_status == {
         "references": "unavailable",

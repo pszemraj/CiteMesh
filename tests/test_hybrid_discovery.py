@@ -176,14 +176,15 @@ class FakeSemanticScholar:
     """In-memory provider serving one focal paper's relations and every paper's references.
 
     ``requests`` counts every HTTP call by kind: ``paper``, ``references`` and
-    ``citations`` (inline relation listings), ``reference_ids`` (ID-only
-    reference listings used for bibliographic coupling), ``recommendations`` and
-    ``batch``.
+    ``citations`` (inline relation listings), ``reference_batch`` (batched ID-only
+    reference lists), ``reference_ids`` (paginated ID-only fallback),
+    ``recommendations`` and ``batch`` (metadata).
     """
 
     papers: dict[str, dict[str, object]] = field(default_factory=dict)
     references: dict[str, list[str]] = field(default_factory=dict)
     reference_evidence: dict[str, dict[str, object]] = field(default_factory=dict)
+    truncate_reference_batch: bool = False
     citations: dict[str, list[str]] = field(default_factory=dict)
     recommendations: list[str] = field(default_factory=list)
     aliases: dict[str, str] = field(default_factory=dict)
@@ -308,20 +309,38 @@ class FakeSemanticScholar:
         self,
         url: str,
         json: dict[str, list[str]] | None = None,
+        params: dict[str, object] | None = None,
         **_kwargs: object,
     ) -> MagicMock:
         """Answer one batch request.
 
         :param str url: Requested endpoint.
         :param dict[str, list[str]] | None json: Batch body.
+        :param dict[str, object] | None params: Field projection.
         :return MagicMock: Transport response.
         """
         assert url == f"{PAPER_BASE_URL}/batch"
-        self.requests["batch"] += 1
+        references_only = (params or {}).get(
+            "fields"
+        ) == "referenceCount,references.paperId"
+        self.requests["reference_batch" if references_only else "batch"] += 1
         rows = []
         for raw_id in (json or {}).get("ids", []):
             paper_id = self._resolve(raw_id)
-            rows.append(None if paper_id is None else self.papers[paper_id])
+            if paper_id is None:
+                rows.append(None)
+            elif references_only:
+                references = self.references.get(paper_id, [])
+                projected = [] if self.truncate_reference_batch else references
+                rows.append(
+                    {
+                        "paperId": paper_id,
+                        "referenceCount": len(references),
+                        "references": [{"paperId": ref_id} for ref_id in projected],
+                    }
+                )
+            else:
+                rows.append(self.papers[paper_id])
         return http_response(rows)
 
 
@@ -717,14 +736,18 @@ def _graph_signature(
     return sorted(map(str, graph.nodes)), edges
 
 
-def test_builds_are_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Repeated builds rank, select and connect papers identically."""
+def test_reference_batch_and_pagination_build_the_same_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building with complete batch or paginated references gives identical edges."""
     scenario = _scenario()
     model = WordHashEncodeModel()
     outcomes = []
     with fake_client(scenario.world) as client:
-        for _ in range(2):
+        for truncate in (False, True):
+            scenario.world.truncate_reference_batch = truncate
             builder = _builder(client, scenario, "both")
+            builder.reference_hydrator.refresh_reference_cache = truncate
             install_runtime(
                 monkeypatch, builder.embedding_builder, model, scenario.corpus
             )
@@ -737,6 +760,8 @@ def test_builds_are_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert outcomes[0] == outcomes[1]
     assert outcomes[0][0] == _FOCAL_ID
+    assert scenario.world.requests["reference_batch"] == 2
+    assert scenario.world.requests["reference_ids"] > 0
 
 
 def test_focal_reference_evidence_tracks_canonical_work_and_build(
@@ -838,7 +863,7 @@ def test_build_caps_additional_reading_and_excludes_graph_papers(
                 "citations": 1,
                 "paper": 1,
                 "recommendations": 1,
-                "reference_ids": 36,
+                "reference_batch": 1,
                 "references": 1,
             },
             {"citations": 1, "recommendations": 1, "references": 1},
@@ -846,7 +871,7 @@ def test_build_caps_additional_reading_and_excludes_graph_papers(
         (
             "arxiv-corpus",
             # The batch enriches selected corpus rows that no provider list named.
-            {"batch": 1, "citations": 1, "reference_ids": 44, "references": 1},
+            {"batch": 1, "citations": 1, "reference_batch": 1, "references": 1},
             {"citations": 1, "references": 1},
         ),
         (
@@ -855,7 +880,7 @@ def test_build_caps_additional_reading_and_excludes_graph_papers(
                 "batch": 1,
                 "citations": 1,
                 "recommendations": 1,
-                "reference_ids": 37,
+                "reference_batch": 1,
                 "references": 1,
             },
             {"citations": 1, "recommendations": 1, "references": 1},

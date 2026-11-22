@@ -346,7 +346,8 @@ class GraphBuilderStrategy(ABC):
         focal = focal_paper
         if focal is None:
             logger.debug("Fetching focal paper: %s", focal_id)
-            focal = client.get_paper(focal_id, raise_on_unavailable=True)
+            with client.retry_section("focal metadata"):
+                focal = client.get_paper(focal_id, raise_on_unavailable=True)
         if focal is None:
             raise ValueError(
                 f"Focal paper not found: {focal_id} (Semantic Scholar does not "

@@ -90,7 +90,7 @@ class CandidateSourceResult:
 def scope_candidate_collection(
     collector: Callable[Concatenate[_BuilderT, _P], _R],
 ) -> Callable[Concatenate[_BuilderT, _P], _R]:
-    """Scope a strategy collection to capability-specific outage budgets.
+    """Hold the client cache operation lock during strategy collection.
 
     :param Callable collector: Strategy collection method to wrap.
     :return Callable: Collector that shares a client scope with nested strategy
@@ -358,11 +358,13 @@ def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
 
 
 def fetch_candidate_source(
+    client: SemanticScholarClient,
     source: str,
     fetch: Callable[[], list[Paper]],
 ) -> CandidateSourceResult:
     """Fetch one source without confusing an outage with valid empty evidence.
 
+    :param SemanticScholarClient client: Provider client owning the retry section.
     :param str source: Stable source name used in metadata.
     :param Callable[[], List[Paper]] fetch: Strict service fetch operation.
     :return CandidateSourceResult: Tri-state source result.
@@ -370,8 +372,10 @@ def fetch_candidate_source(
     """
     from citemesh.services import SemanticScholarUnavailableError
 
+    section = f"focal {source}" if source in {"references", "citations"} else source
     try:
-        papers = tuple(fetch())
+        with client.retry_section(section):
+            papers = tuple(fetch())
     except SemanticScholarUnavailableError as exc:
         return CandidateSourceResult(
             source=source,
@@ -610,6 +614,7 @@ def fetch_focal_references(
         fetch_references = partial(fetch_references, reference_evidence=evidence)
     original = (
         fetch_candidate_source(
+            client,
             "references",
             lambda: fetch_references(
                 provider_id, limit=limit, raise_on_unavailable=True
@@ -656,12 +661,15 @@ def fetch_focal_references(
     # Otherwise HTML order (often alphabetical) chooses survivors before useful
     # metadata is available for ranking.
     identified = [entry.identifiers for entry in entries if entry.identifiers]
-    with progress_task(
-        total=len(identified),
-        description="Recovering focal paper references",
-        unit="references",
-        enabled=False if not identified else None,
-    ) as progress:
+    with (
+        client.retry_section("reference recovery metadata"),
+        progress_task(
+            total=len(identified),
+            description="Recovering focal paper references",
+            unit="references",
+            enabled=False if not identified else None,
+        ) as progress,
+    ):
         for offset in range(0, len(identified), 50):
             batch = identified[offset : offset + 50]
             ids = list(
@@ -721,7 +729,7 @@ def fetch_focal_references(
             for entry in batch:
                 _add_verified_reference(focal, recovered, resolver.resolve(entry))
             progress.update(len(batch))
-    _enrich_local_reference_records(client, recovered)
+        _enrich_local_reference_records(client, recovered)
     resolved_with_identifiers = len(recovered)
 
     if (

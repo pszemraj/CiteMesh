@@ -20,6 +20,7 @@ from citemesh.core.paper_ids import arxiv_identifier_from_doi, normalize_paper_i
 from citemesh.progress import progress_iterator
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
+from citemesh.services.semantic_scholar.endpoints import ReferenceBatchResult
 from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -272,7 +273,7 @@ def test_repeated_collection_preserves_client_owned_focal_role(
     client.get_paper_references.side_effect = candidates
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.side_effect = candidates
-    client.get_reference_ids.return_value = []
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
     builder = builder_type(max_papers=2, client=client)
     if isinstance(builder, HybridGraphBuilder):
         offline_hybrid_encoder(monkeypatch, builder)
@@ -405,7 +406,7 @@ def test_indexed_graphs_require_topical_or_shared_reference_evidence(
     client.get_paper_references.return_value = [other]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = [other]
-    client.get_reference_ids.return_value = []
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
     builder = builder_type(client=client, similarity_threshold=0.0)
 
     graph, _ = builder.build_graph("focal")
@@ -424,48 +425,44 @@ def test_indexed_graphs_require_topical_or_shared_reference_evidence(
 @pytest.mark.parametrize(
     "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
 )
-def test_reference_outage_warns_and_stops_hydration_until_next_collection(
-    builder_type: type[GraphBuilderStrategy], caplog: pytest.LogCaptureFixture
+def test_reference_outage_stops_hydration_until_next_collection(
+    builder_type: type[GraphBuilderStrategy],
 ) -> None:
     """One exhausted reference call skips remaining hydration and resets next build.
 
     :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
-    :param pytest.LogCaptureFixture caplog: Captured user-visible warnings.
-    :return None: Assertions validate outage visibility, retry scope, and contract errors.
+    :return None: Checks build-local outage state and malformed-response handling.
     """
-    from citemesh.services import SemanticScholarUnavailableError
-
     client = MagicMock()
     client.get_paper.return_value = _paper("focal", refs=["focal-ref"])
     related = [_paper("first"), _paper("second")]
     client.get_recommended_papers.return_value = related
     client.get_paper_references.return_value = related
     client.get_paper_citations.return_value = []
-    client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {}, unavailable=True
+    )
     client.get_cached_reference_ids.return_value = None
     builder = builder_type(client=client)
 
-    with caplog.at_level(logging.WARNING):
-        papers = builder.collect_papers("focal")
+    papers = builder.collect_papers("focal")
 
     assert set(papers) == {"focal", "first", "second"}
-    client.get_reference_ids.assert_called_once_with("first", force_refresh=False)
-    assert len(caplog.records) == 1
-    assert (
-        "Reference hydration unavailable; continuing with available reference data."
-        in caplog.text
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["first", "second"], force_refresh=False
     )
-    client.get_reference_ids.reset_mock(side_effect=True)
-    client.get_reference_ids.return_value = ["restored"]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {"first": ["restored"], "second": ["restored"]}
+    )
 
     papers = builder.collect_papers("focal")
 
-    assert client.get_reference_ids.call_count == 2
+    assert client.get_reference_ids_batch.call_count == 2
     assert papers["first"].references == ["restored"]
     assert papers["second"].references == ["restored"]
     for paper in related:
         paper.references = []
-    client.get_reference_ids.side_effect = ValueError("malformed references")
+    client.get_reference_ids_batch.side_effect = ValueError("malformed references")
     with pytest.raises(ValueError, match="malformed references"):
         builder.collect_papers("focal")
 
@@ -496,7 +493,9 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=focal)
-        client._session.get = MagicMock(side_effect=requests.ConnectionError("offline"))
+        client._session.post = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
         client._persist_reference_cache_entry(
             s2.disk_cache._reference_cache_path("warm"), "warm", ["shared"]
         )
@@ -523,7 +522,7 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
 
     assert set(papers) == {"focal", "cold", "warm"}
     assert papers["warm"].references == expected_references
-    assert client._session.get.call_count == API_CONFIG.max_retries
+    assert client._session.post.call_count == 1 + API_CONFIG.max_retries
 
 
 @pytest.mark.parametrize(
@@ -549,6 +548,9 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
         client._session.get = MagicMock(side_effect=_reference_outage_transport)
+        client._session.post = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
         if builder_type is CitationGraphBuilder:
             builder = CitationGraphBuilder(
                 max_papers=3,
@@ -582,16 +584,16 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
                         }
                     assert client.get_reference_ids("warm") == ["cached-reference"]
 
-        assert sleep_mock.call_count >= 2 * (API_CONFIG.max_retries - 1)
-        assert (
-            len(
-                [
-                    call
-                    for call in client._session.get.call_args_list
-                    if call.args[0].endswith("/references")
-                ]
-            )
-            >= 2 * API_CONFIG.max_retries
+        assert sleep_mock.call_count >= 2 * API_CONFIG.max_retries
+        assert client._session.post.call_count == 2 * (1 + API_CONFIG.max_retries)
+        discovery_ref_requests = sum(
+            call.args[0].endswith("/references")
+            for call in client._session.get.call_args_list
+        )
+        assert discovery_ref_requests == (
+            2 * (1 + API_CONFIG.max_retries)
+            if builder_type is CitationGraphBuilder
+            else 0
         )
 
     if builder_type is CitationGraphBuilder:
@@ -628,14 +630,14 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
         )
 
 
-def test_hybrid_candidate_scope_is_shared_with_citation_child(
+def test_hybrid_reference_enrichment_gets_independent_retry_section(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Hybrid nesting shares reference failures without poisoning recommendations.
+    """Hybrid reference discovery and reference hydration retry independently.
 
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
-    :return None: Verifies reference retry sharing and healthy parent enrichment.
+    :return None: Verifies independent retry sequences and healthy candidate discovery.
     """
     monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     focal = _paper("hybrid-scope-focal")
@@ -645,6 +647,9 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
         client._session.get = MagicMock(side_effect=_reference_outage_transport)
+        client._session.post = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
         builder = HybridGraphBuilder(
             max_papers=3,
             max_references=1,
@@ -665,8 +670,9 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
                     if call.args[0].endswith("/references")
                 ]
             )
-            == 2 * API_CONFIG.max_retries
+            == 1 + API_CONFIG.max_retries
         )
+        assert client._session.post.call_count == 1 + API_CONFIG.max_retries
         assert set(papers) == {
             "hybrid-scope-focal",
             "healthy-citation",
@@ -748,7 +754,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
                     if call.args[0].endswith("/references")
                 ]
             )
-            == API_CONFIG.max_retries
+            == 1 + API_CONFIG.max_retries
         )
         assert set(papers) == {
             "embedding-scope-focal",
@@ -850,7 +856,7 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
                     if call.args[0].endswith("/citations")
                 ]
             )
-            == API_CONFIG.max_retries
+            == 1 + API_CONFIG.max_retries
         )
 
     assert (
@@ -890,7 +896,7 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
             ),
         ]
         mock_get_client.return_value = mock_client
-        mock_client.get_reference_ids.return_value = []
+        mock_client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
 
         builder = RecommendationGraphBuilder(max_papers=3, fetch_references=True)
         papers = builder.collect_papers("focal")
@@ -898,7 +904,9 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
     assert "valid" in papers
     assert "missing" not in papers
     assert papers["valid"].references == ["r1", "r2"]
-    mock_client.get_reference_ids.assert_called_once_with("focal", force_refresh=False)
+    mock_client.get_reference_ids_batch.assert_called_once_with(
+        ["focal"], force_refresh=False
+    )
 
 
 def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() -> None:
@@ -971,7 +979,7 @@ def test_recommendation_fetches_primary_discovery_before_focal_references(
 ) -> None:
     """Recommendation acquisition must precede optional focal reference hydration.
 
-    :return None: Verifies the primary candidate fetch wins the shared budget.
+    :return None: Verifies reference enrichment batches after candidate discovery.
     """
     client = MagicMock()
     events: list[str] = []
@@ -987,20 +995,22 @@ def test_recommendation_fetches_primary_discovery_before_focal_references(
         events.append("recommendations")
         return [_paper("candidate")]
 
-    def fetch_references(paper_id: str, *, force_refresh: bool) -> list[str]:
+    def fetch_references(
+        paper_ids: list[str], *, force_refresh: bool
+    ) -> ReferenceBatchResult:
         """Record reference hydration without making an upstream request.
 
-        :param str paper_id: Paper selected for reference enrichment.
+        :param list[str] paper_ids: Papers selected for reference enrichment.
         :param bool force_refresh: Reference-cache bypass flag, expected disabled.
-        :return list[str]: Empty reference list for this fixture.
+        :return ReferenceBatchResult: Empty reference lists for this fixture.
         """
         assert force_refresh is False
         assert "Checking reference lists" in caplog.text
-        events.append(f"references:{paper_id}")
-        return []
+        events.append(f"references:{','.join(paper_ids)}")
+        return ReferenceBatchResult({})
 
     client.get_recommended_papers.side_effect = fetch_recommendations
-    client.get_reference_ids.side_effect = fetch_references
+    client.get_reference_ids_batch.side_effect = fetch_references
 
     with (
         caplog.at_level(logging.INFO),
@@ -1011,7 +1021,7 @@ def test_recommendation_fetches_primary_discovery_before_focal_references(
     ):
         RecommendationGraphBuilder(max_papers=2, client=client).collect_papers("focal")
 
-    assert events == ["recommendations", "references:focal", "references:candidate"]
+    assert events == ["recommendations", "references:focal,candidate"]
     assert [paper.paper_id for paper in progress.call_args.args[0]] == ["candidate"]
     assert progress.call_args.kwargs == dict(
         description="Checking recommendations", unit="papers", enabled=None
@@ -1052,9 +1062,9 @@ def test_citation_collect_populates_reference_cache_and_summary(
     client.get_paper.return_value = focal
     client.get_paper_references.return_value = [ref]
     client.get_paper_citations.return_value = [cit]
-    client.get_reference_ids.side_effect = lambda pid, force_refresh=False: [
-        f"{pid}-ref"
-    ]
+    client.get_reference_ids_batch.side_effect = lambda ids, **_kwargs: (
+        ReferenceBatchResult({paper_id: [f"{paper_id}-ref"] for paper_id in ids})
+    )
 
     builder = CitationGraphBuilder(
         max_papers=3,
@@ -1070,49 +1080,29 @@ def test_citation_collect_populates_reference_cache_and_summary(
     assert papers["ref1"].references == ["ref1-ref"]
     assert papers["cit1"].references == ["cit1-ref"]
     assert builder.get_collection_summary() == "Collected 3 papers"
-    assert client.get_reference_ids.call_args_list == [
-        call("ref1", force_refresh=False),
-        call("cit1", force_refresh=False),
-    ]
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["ref1", "cit1"], force_refresh=False
+    )
     assert "Hydrating reference lists" not in caplog.text
     assert "Collecting related papers" in caplog.text
 
 
-@pytest.mark.parametrize("paper_count", [1, 25])
-def test_citation_reference_hydration_reports_interactive_progress(
-    paper_count: int,
-) -> None:
-    """Long interactive reference hydration should expose per-paper progress.
-
-    :return None: Checks the hydration loop uses the shared progress iterator.
-    """
+def test_citation_hydration_batches_missing_references() -> None:
+    """A reference batch contains selected papers missing inline reference lists."""
     focal = _paper("focal", refs=["focal-ref"])
-    papers = {focal.paper_id: focal}
-    papers.update(
-        {_paper_id: _paper(_paper_id) for _paper_id in map(str, range(paper_count))}
-    )
+    inline = _paper("inline", refs=["existing-reference"])
+    targets = [_paper(f"paper-{index}") for index in range(45)]
+    papers = {paper.paper_id: paper for paper in [focal, inline, *targets]}
     client = MagicMock()
-    client.get_reference_ids.return_value = []
-    progress = MagicMock(
-        side_effect=lambda iterable, **_kwargs: (item for item in iterable)
-    )
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
     builder = CitationGraphBuilder(fetch_references=True, client=client)
 
-    with (
-        patch(
-            "citemesh.strategies.reference_hydration.progress_enabled",
-            return_value=True,
-        ),
-        patch("citemesh.strategies.reference_hydration.progress_iterator", progress),
-    ):
-        builder.reference_hydrator.hydrate(papers, focal)
+    builder.reference_hydrator.hydrate(papers, focal)
 
-    progress.assert_called_once_with(
-        papers.items(),
-        description="Hydrating reference lists",
-        unit="papers",
+    client.get_reference_ids_batch.assert_called_once_with(
+        [paper.paper_id for paper in targets], force_refresh=False
     )
-    assert client.get_reference_ids.call_count == paper_count
+    assert inline.references == ["existing-reference"]
 
 
 def test_citation_collect_discovers_all_sources_before_reference_enrichment() -> None:
@@ -1129,13 +1119,13 @@ def test_citation_collect_discovers_all_sources_before_reference_enrichment() ->
         events.append("discover citations")
         return [_paper("cit1")]
 
-    def reference_ids(paper_id: str, **_kwargs: object) -> list[str]:
-        events.append(f"enrich {paper_id}")
-        return []
+    def reference_ids(paper_ids: list[str], **_kwargs: object) -> ReferenceBatchResult:
+        events.append(f"enrich {','.join(paper_ids)}")
+        return ReferenceBatchResult({})
 
     client.get_paper_references.side_effect = references
     client.get_paper_citations.side_effect = citations
-    client.get_reference_ids.side_effect = reference_ids
+    client.get_reference_ids_batch.side_effect = reference_ids
 
     papers = CitationGraphBuilder(
         max_papers=3,
@@ -1147,7 +1137,7 @@ def test_citation_collect_discovers_all_sources_before_reference_enrichment() ->
 
     assert set(papers) == {"focal", "ref1", "cit1"}
     assert events[:2] == ["discover references", "discover citations"]
-    assert events[2:] == ["enrich focal", "enrich ref1", "enrich cit1"]
+    assert events[2:] == ["enrich focal,ref1,cit1"]
 
 
 @pytest.mark.parametrize(
@@ -1177,7 +1167,9 @@ def test_citation_collect_uses_external_alias_for_pre_resolved_local_focal(
         **external_fields,
     )
     client = MagicMock()
-    client.get_reference_ids.return_value = ["focal-reference"]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {provider_id: ["focal-reference"]}
+    )
     client.get_paper_references.return_value = [_paper("reference")]
     client.get_paper_citations.return_value = [_paper("citation")]
     builder = CitationGraphBuilder(
@@ -1204,7 +1196,9 @@ def test_citation_collect_uses_external_alias_for_pre_resolved_local_focal(
         "focal-reference"
     ]
     client.get_paper.assert_not_called()
-    client.get_reference_ids.assert_any_call(provider_id, force_refresh=False)
+    client.get_reference_ids_batch.assert_called_once_with(
+        [provider_id, "reference", "citation"], force_refresh=False
+    )
     client.get_paper_references.assert_called_once_with(
         provider_id, limit=1, raise_on_unavailable=True
     )
@@ -1225,7 +1219,7 @@ def test_citation_collect_keeps_opaque_pre_resolved_local_focal_off_provider() -
     client = MagicMock()
     for provider_method in (
         "get_paper",
-        "get_reference_ids",
+        "get_reference_ids_batch",
         "get_paper_references",
         "get_paper_citations",
     ):
@@ -1334,8 +1328,8 @@ def test_recommendation_record_of_the_focal_merges_before_member_lookup() -> Non
     client = MagicMock()
     client.get_paper.return_value = focal
     client.get_recommended_papers.return_value = [member, bridge]
-    client.get_reference_ids.side_effect = lambda paper_id, **_kwargs: (
-        [] if paper_id == "m" else [f"ref-of-{paper_id}"]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {"m": [], "focal": ["ref-of-focal"]}
     )
 
     papers = RecommendationGraphBuilder(max_papers=10, client=client).collect_papers(
@@ -1343,11 +1337,60 @@ def test_recommendation_record_of_the_focal_merges_before_member_lookup() -> Non
     )
 
     assert set(papers) == {"focal", "m"}
-    assert [call.args[0] for call in client.get_reference_ids.call_args_list] == [
-        "focal",
-        "m",
-    ]
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["focal", "m"], force_refresh=False
+    )
     assert papers["focal"].references == ["ref-of-focal"]
+
+
+@pytest.mark.parametrize("local_takeover", [False, True])
+def test_recommendation_batches_only_needed_admitted_aliases(
+    local_takeover: bool,
+) -> None:
+    """A later alias fills an empty lookup and inline references keep merge order."""
+    client = MagicMock()
+    client.get_paper.return_value = _focal_paper()
+    recommendations = [
+        replace(_paper("a"), doi="10.1000/a"),
+        replace(_paper("rejected"), abstract=""),
+        replace(_paper("b"), doi="10.1000/b"),
+        replace(_paper("unused-alias"), doi="10.1000/a"),
+        replace(_paper("b-alias"), doi="10.1000/b"),
+        replace(_paper("inline", refs=["a-inline", "a-fetched"]), doi="10.1000/a"),
+        _paper("over-cap"),
+    ]
+    if local_takeover:
+        recommendations.append(
+            replace(
+                _paper("local-a", refs=["a-local"]),
+                doi="10.1000/a",
+                is_local_corpus=True,
+            )
+        )
+    client.get_recommended_papers.return_value = recommendations
+    client.get_reference_ids_batch.side_effect = [
+        ReferenceBatchResult({"focal": [], "a": ["a-fetched"], "b": []}),
+        ReferenceBatchResult({"b-alias": ["b-fetched"]}),
+    ]
+
+    papers = RecommendationGraphBuilder(max_papers=3, client=client).collect_papers(
+        "focal"
+    )
+
+    if local_takeover:
+        assert set(papers) == {"focal", "local-a", "b"}
+        assert papers["local-a"].references == ["a-local", "a-fetched", "a-inline"]
+    else:
+        assert list(papers) == ["focal", "a", "b"]
+        assert papers["a"].references == ["a-fetched", "a-inline"]
+    assert papers["b"].references == ["b-fetched"]
+    assert client.get_reference_ids_batch.call_args_list == [
+        call(
+            ["focal", "b", "a"] if local_takeover else ["focal", "a", "b"],
+            force_refresh=False,
+        ),
+        call(["b-alias"], force_refresh=False),
+    ]
 
 
 def test_citation_collect_preserves_focal_when_relation_reuses_focal_id() -> None:
@@ -1389,7 +1432,9 @@ def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates()
     client.get_paper.return_value = focal
     client.get_paper_references.return_value = [overlap_from_references]
     client.get_paper_citations.return_value = [overlap_from_citations]
-    client.get_reference_ids.return_value = ["overlap-ref"]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {"overlap": ["overlap-ref"]}
+    )
 
     builder = CitationGraphBuilder(
         max_papers=3,
@@ -1402,7 +1447,9 @@ def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates()
 
     assert papers["overlap"].references == ["overlap-ref"]
     assert builder.focal_relations["overlap"] == "overlap"
-    client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["overlap"], force_refresh=False
+    )
 
 
 def test_citation_collect_merges_external_primary_aliases() -> None:
@@ -1719,14 +1766,14 @@ def test_hybrid_discovers_recommendations_before_reference_enrichment(
         events.append("discover recommendations")
         return [_paper("rec1")]
 
-    def reference_ids(paper_id: str, **_kwargs: object) -> list[str]:
-        events.append(f"enrich {paper_id}")
-        return []
+    def reference_ids(paper_ids: list[str], **_kwargs: object) -> ReferenceBatchResult:
+        events.append(f"enrich {','.join(paper_ids)}")
+        return ReferenceBatchResult({})
 
     client.get_paper_references.side_effect = unavailable_references
     client.get_paper_citations.side_effect = unavailable_citations
     client.get_recommended_papers.side_effect = recommendations
-    client.get_reference_ids.side_effect = reference_ids
+    client.get_reference_ids_batch.side_effect = reference_ids
     builder = HybridGraphBuilder(
         max_papers=3,
         max_references=1,
@@ -1763,6 +1810,7 @@ def test_hybrid_corpus_defers_optional_focal_enrichment(
         is_local_corpus=True,
         is_focal=True,
     )
+    semantic = replace(_paper("semantic"), is_local_corpus=True, arxiv_id="2501.00002")
     client = MagicMock()
     client.get_paper_references.side_effect = lambda *_args, **_kwargs: (
         events.append("reference discovery") or []
@@ -1779,13 +1827,17 @@ def test_hybrid_corpus_defers_optional_focal_enrichment(
         fetch_references=True,
         client=client,
     )
+    enrich = builder.embedding_builder._enrich_corpus_papers
     search = stub_hybrid_corpus(builder, focal=focal)
-    search.side_effect = lambda *_args: (
-        events.append("corpus discovery") or [_paper("semantic")]
-    )
+    builder.embedding_builder._enrich_corpus_papers = enrich
+    search.side_effect = lambda *_args: events.append("corpus discovery") or [semantic]
     offline_hybrid_encoder(monkeypatch, builder)
-    builder.embedding_builder.enrich_cached_corpus_focal = MagicMock(
-        side_effect=lambda _focal: events.append("provider focal paper enrichment")
+    client.get_papers.side_effect = lambda ids: (
+        events.append("provider metadata enrichment")
+        or {
+            identifier: replace(_paper(identifier), citation_count=100)
+            for identifier in ids
+        }
     )
     builder.reference_hydrator.hydrate = MagicMock(
         side_effect=lambda _papers, _focal: events.append("reference enrichment")
@@ -1802,18 +1854,19 @@ def test_hybrid_corpus_defers_optional_focal_enrichment(
         "citation discovery",
         "corpus discovery",
         "corpus discovery",
-        "provider focal paper enrichment",
+        "provider metadata enrichment",
         "reference enrichment",
     ]
     client.get_paper.assert_not_called()
+    client.get_papers.assert_called_once_with(["arxiv:2501.00001", "arxiv:2501.00002"])
+    assert papers[focal.paper_id].citation_count == 100
+    assert papers[semantic.paper_id].citation_count == 100
 
 
 def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reference hydration outages must not discard already discovered papers."""
-    from citemesh.services import SemanticScholarUnavailableError
-
     focal = _focal_paper()
     citation_candidate = _paper("citation")
     semantic_candidate = _paper("semantic")
@@ -1821,7 +1874,9 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
     client.get_paper.return_value = focal
     client.get_paper_references.return_value = [citation_candidate]
     client.get_paper_citations.return_value = []
-    client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {}, unavailable=True
+    )
     builder = HybridGraphBuilder(
         max_papers=4,
         semantic_source="arxiv-corpus",
@@ -1831,18 +1886,15 @@ def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
     stub_hybrid_corpus(builder, neighbours=[semantic_candidate])
     offline_hybrid_encoder(monkeypatch, builder)
 
-    with caplog.at_level(logging.WARNING):
-        papers = builder.collect_papers(focal.paper_id)
+    papers = builder.collect_papers(focal.paper_id)
 
     assert set(papers) == {
         focal.paper_id,
         citation_candidate.paper_id,
         semantic_candidate.paper_id,
     }
-    client.get_reference_ids.assert_called_once_with("focal", force_refresh=False)
-    assert (
-        "Reference hydration unavailable; continuing with available reference data."
-        in caplog.text
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["focal", "citation"], force_refresh=False
     )
 
 
@@ -1950,7 +2002,9 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     client.get_paper.return_value = focal
     client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
     client.get_paper_citations.side_effect = SemanticScholarUnavailableError("offline")
-    client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {}, unavailable=True
+    )
     builder = HybridGraphBuilder(
         max_papers=3,
         max_references=1,
@@ -1975,7 +2029,9 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     }
     assert search.call_count == 2
     client.get_paper.assert_called_once_with("focal", raise_on_unavailable=True)
-    client.get_reference_ids.assert_called_once_with("focal", force_refresh=False)
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["focal"], force_refresh=False
+    )
     client.get_recommended_papers.assert_not_called()
     assert (
         "Continuing with unavailable candidate sources: references, citations."
@@ -2403,7 +2459,7 @@ def _single_reference_client() -> MagicMock:
     client.get_paper_references.return_value = [_paper("c1")]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = []
-    client.get_reference_ids.return_value = []
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
     return client
 
 
@@ -3649,7 +3705,7 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     client.get_paper_references.return_value = [_paper("c1"), _paper("c2")]
     client.get_paper_citations.return_value = []
     client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
-    client.get_reference_ids.return_value = []
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult({})
 
     builder = HybridGraphBuilder(max_papers=6, client=client)
     assert builder.semantic_source == "candidates"

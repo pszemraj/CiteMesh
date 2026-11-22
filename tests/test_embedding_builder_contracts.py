@@ -40,6 +40,7 @@ from citemesh.services.semantic_scholar import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
 )
+from citemesh.services.semantic_scholar.endpoints import ReferenceBatchResult
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
@@ -9367,7 +9368,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
         hybrid_client = MagicMock()
         for provider_method in (
             "get_paper",
-            "get_reference_ids",
+            "get_reference_ids_batch",
             "get_paper_references",
             "get_paper_citations",
         ):
@@ -9421,7 +9422,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     active_embedding_builder.client.get_paper.assert_not_called()
     if strategy == "hybrid":
         assert build_builder.paper_sources == {focal_id: "semantic"}
-        build_builder.client.get_reference_ids.assert_not_called()
+        build_builder.client.get_reference_ids_batch.assert_not_called()
         build_builder.client.get_paper_references.assert_not_called()
         build_builder.client.get_paper_citations.assert_not_called()
 
@@ -9487,8 +9488,12 @@ def test_reopened_corpus_focal_preserves_provider_evidence_and_graph_score(
         )
         for paper_id in paper_ids
     }
-    client.get_reference_ids.side_effect = (
-        (lambda _paper_id, **_kwargs: ["shared-reference"])
+    client.get_reference_ids_batch.side_effect = (
+        (
+            lambda paper_ids, **_kwargs: ReferenceBatchResult(
+                {paper_id: ["shared-reference"] for paper_id in paper_ids}
+            )
+        )
         if fetch_references
         else AssertionError("reference IDs are disabled for this fixture")
     )
@@ -9791,11 +9796,6 @@ def test_corpus_collection_holds_one_lock_through_focal_and_neighbor_consumption
             "resolve_cached_corpus_focal",
             lambda *_args, **_kwargs: probe.record(events, "focal") or focal,
         )
-        monkeypatch.setattr(
-            embedding_builder,
-            "enrich_cached_corpus_focal",
-            lambda _focal: probe.record(events, "enrich"),
-        )
         offline_hybrid_encoder(monkeypatch, hybrid_builder)
         monkeypatch.setattr(
             embedding_builder,
@@ -9810,7 +9810,7 @@ def test_corpus_collection_holds_one_lock_through_focal_and_neighbor_consumption
         monkeypatch.setattr(
             embedding_builder,
             "_enrich_corpus_papers",
-            lambda _papers: probe.record(events, "enrich neighbors"),
+            lambda _papers, **_kwargs: probe.record(events, "enrich neighbors"),
         )
 
     papers = public_builder.collect_papers(focal.paper_id)
