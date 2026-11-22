@@ -5852,18 +5852,28 @@ def _assert_encoded_corpus_records(
     )
 
 
-def test_complete_capped_cache_extends_to_larger_corpus_size(
+@pytest.mark.parametrize(
+    ("corpus_size", "expected_token", "expected_reconciliation"),
+    [(2, "newest:2", (2, 2)), (None, "all", None)],
+)
+def test_complete_capped_cache_extends_to_larger_corpus(
     monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int | None,
+    expected_token: str,
+    expected_reconciliation: tuple[int, int] | None,
 ) -> None:
-    """Raising --corpus-size must top the cache up instead of re-encoding it.
+    """A larger cap or --all-corpus extends the cache without re-encoding it.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param int | None corpus_size: New cap or the full source split.
+    :param str expected_token: Recorded hydration target after extension.
+    :param tuple[int, int] | None expected_reconciliation: Recorded source/cache counts.
     :return None: Asserts reuse of cached vectors and the new recorded corpus size.
     """
     source = "fixture/source"
     builder, clear_cache_mock, model = _complete_corpus_cache_builder(
         monkeypatch,
-        corpus_size=2,
+        corpus_size=corpus_size,
         cached_corpus_size=1,
         cached_ids=("2601.00001",),
     )
@@ -5885,9 +5895,9 @@ def test_complete_capped_cache_extends_to_larger_corpus_size(
     builder._ensure_cache_hydrated(use_streaming=False)
 
     assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
-    assert cache.payload_stats().hydration_corpus_size == "newest:2"
-    assert cache.is_hydrated("train", 2, dataset_source=source)
-    assert cache.get_hydration_rowcount_reconciliation() == (2, 2)
+    assert cache.payload_stats().hydration_corpus_size == expected_token
+    assert cache.is_hydrated("train", corpus_size, dataset_source=source)
+    assert cache.get_hydration_rowcount_reconciliation() == expected_reconciliation
     _assert_encoded_corpus_records(builder, model, records[1:])
     builder._ensure_cache_hydrated(use_streaming=False)
     load.assert_called_once()
@@ -6264,46 +6274,6 @@ def test_ordinary_newest_view_preserves_hydrated_source_ties(
     assert cache.corpus_state() == {}
     model.encode.assert_not_called()
     clear.assert_not_called()
-
-
-def test_complete_capped_cache_extends_to_all_corpus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--all-corpus over a capped cache must extend it rather than clear it.
-
-    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :return None: Asserts the capped rows survive and the token becomes ``all``.
-    """
-    source = "fixture/source"
-    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
-        monkeypatch,
-        corpus_size=None,
-        cached_corpus_size=1,
-        cached_ids=("2601.00001",),
-    )
-    cache = builder.embedding_cache
-    records = [
-        {"id": "2601.00001", "title": "First", "abstract": "A"},
-        {"id": "2601.00002", "title": "Second", "abstract": "A"},
-    ]
-    monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
-    )
-    monkeypatch.setattr(
-        deps_module,
-        "_import_datasets_module",
-        lambda: types.SimpleNamespace(
-            load_dataset=lambda *args, **kwargs: iter(records)
-        ),
-    )
-
-    builder._ensure_cache_hydrated(use_streaming=False)
-
-    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
-    assert cache.payload_stats().hydration_corpus_size == "all"
-    assert cache.is_hydrated("train", None, dataset_source=source)
-    _assert_encoded_corpus_records(builder, model, records[1:])
-    clear_cache_mock.assert_not_called()
 
 
 @pytest.mark.parametrize("new_id", ["2602.00003", "2601.00002"])
