@@ -1944,48 +1944,6 @@ def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
     query_client.get_recommended_papers.assert_not_called()
 
 
-def test_refresh_reference_cache_force_lookup_contracts() -> None:
-    """Refresh mode should bypass stale memory entries and force service lookups."""
-    citation_client = MagicMock()
-    citation_client.get_reference_ids.return_value = ["fresh-ref"]
-    citation_builder = CitationGraphBuilder(
-        fetch_references=True,
-        refresh_reference_cache=True,
-        client=citation_client,
-    )
-    hydrator = citation_builder.reference_hydrator
-    hydrator.reference_cache["paper-1"] = ["stale-ref"]
-
-    refs = hydrator._fetch("paper-1")
-
-    assert refs == ["fresh-ref"]
-    citation_client.get_reference_ids.assert_called_once_with(
-        "paper-1", force_refresh=True
-    )
-    assert hydrator.reference_cache["paper-1"] == ["fresh-ref"]
-
-    recommendation_client = MagicMock()
-    recommendation_client.get_reference_ids.return_value = ["r2"]
-    recommendation_builder = RecommendationGraphBuilder(
-        fetch_references=True,
-        refresh_reference_cache=True,
-        client=recommendation_client,
-    )
-    paper = Paper(
-        paper_id="paper-2",
-        title="Paper 2",
-        year=2020,
-        abstract="paper two",
-    )
-
-    recommendation_builder.reference_hydrator.ensure(paper)
-
-    assert paper.references == ["r2"]
-    recommendation_client.get_reference_ids.assert_called_once_with(
-        "paper-2", force_refresh=True
-    )
-
-
 def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2037,32 +1995,6 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
         "Continuing with unavailable candidate sources: references, citations."
         in caplog.text
     )
-
-
-def test_citation_related_paper_reference_failure_remains_uncached() -> None:
-    """One unavailable related-paper reference list should not abort collection."""
-    from citemesh.services import SemanticScholarUnavailableError
-
-    client = MagicMock()
-    client.get_reference_ids.side_effect = SemanticScholarUnavailableError(
-        "publisher elided references"
-    )
-    builder = CitationGraphBuilder(fetch_references=True, client=client)
-    paper = _paper("related-paper")
-
-    builder.reference_hydrator.ensure(paper)
-
-    assert paper.references == []
-    assert paper.paper_id not in builder.reference_hydrator.reference_cache
-    client.get_reference_ids.assert_called_once_with(
-        paper.paper_id,
-        force_refresh=False,
-    )
-
-    client.get_reference_ids.side_effect = RuntimeError("local hydration bug")
-    builder = CitationGraphBuilder(fetch_references=True, client=client)
-    with pytest.raises(RuntimeError, match="local hydration bug"):
-        builder.reference_hydrator.ensure(_paper("broken-paper"))
 
 
 def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:

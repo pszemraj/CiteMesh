@@ -8,19 +8,15 @@ and reads only persisted reference caches after the provider is unavailable.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from citemesh.core import Paper
 from citemesh.core.paper_ids import normalize_paper_id
-from citemesh.services import SemanticScholarUnavailableError
 from citemesh.strategies.candidates import provider_lookup_identifier
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
-
-logger = logging.getLogger(__name__)
 
 
 class ReferenceHydrator:
@@ -122,56 +118,3 @@ class ReferenceHydrator:
             paper.references = list(cached_refs)
             return None
         return provider_lookup_identifier(paper_id, paper)
-
-    def ensure(self, paper: Paper) -> None:
-        """Fill one paper's reference IDs without clobbering an existing list.
-
-        :param Paper paper: Paper record to hydrate in place.
-        :return None: Sets ``paper.references`` when a list is available.
-        """
-        if not self.fetch_references:
-            return
-
-        provider_id = self._pending_lookup(paper)
-        if provider_id is None:
-            return
-        paper_id = paper.paper_id.strip()
-        if self._source_unavailable:
-            if not self.refresh_reference_cache:
-                cached_refs = self.client.get_cached_reference_ids(provider_id)
-                if cached_refs is not None:
-                    self.reference_cache[paper_id] = cached_refs
-                    paper.references = list(cached_refs)
-            return
-
-        try:
-            paper.references = self._fetch(paper_id, provider_lookup_id=provider_id)
-        except SemanticScholarUnavailableError as exc:
-            self._source_unavailable = True
-            logger.warning(
-                "Reference hydration unavailable; continuing with available "
-                "reference data."
-            )
-            logger.debug("Reference hydration failed for %s: %s", paper_id, exc)
-
-    def _fetch(
-        self, paper_id: str, *, provider_lookup_id: str | None = None
-    ) -> list[str]:
-        """Return a paper's reference IDs, from memory unless refreshing.
-
-        :param str paper_id: In-memory cache key for the paper.
-        :param Optional[str] provider_lookup_id: Provider-safe request identifier;
-            defaults to ``paper_id``.
-        :return list[str]: Referenced paper IDs.
-        """
-        if not self.refresh_reference_cache and paper_id in self.reference_cache:
-            return self.reference_cache[paper_id]
-        if self.refresh_reference_cache:
-            self.reference_cache.pop(paper_id, None)
-
-        ref_ids = self.client.get_reference_ids(
-            provider_lookup_id or paper_id,
-            force_refresh=self.refresh_reference_cache,
-        )
-        self.reference_cache[paper_id] = ref_ids
-        return ref_ids
