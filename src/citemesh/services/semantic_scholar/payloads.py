@@ -198,10 +198,10 @@ def _complete_batch_reference_ids(record: JSONValue) -> list[str] | None:
             continue
         if (
             not isinstance(raw_id, str)
-            or (paper_id := canonicalize_or_none(raw_id)) is None
+            or (ref_id := canonicalize_or_none(raw_id)) is None
         ):
             return None
-        reference_ids[paper_id] = None
+        reference_ids[ref_id] = None
     return list(reference_ids)
 
 
