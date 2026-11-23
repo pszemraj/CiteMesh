@@ -1354,7 +1354,7 @@ def test_every_retry_reports_section_and_delay(
     ]
     rate_limited_retries = failed_attempts if status_code == 429 else 0
     assert visible[-1] == (
-        f"fetching paper details: {failed_attempts} retries "
+        f"Semantic Scholar fetching paper details: {failed_attempts} retries "
         f"({rate_limited_retries} rate-limited), {clock.now:.1f} s"
     )
     diagnostics = [
@@ -1401,7 +1401,7 @@ def test_retry_notice_omits_provider_identifiers_and_offsets(
     assert visible == [
         "Semantic Scholar is rate-limited (fetching references). "
         f"Retry 1/{API_CONFIG.max_retries} in 43s.",
-        "fetching references: 1 retry (1 rate-limited), 43.0 s",
+        "Semantic Scholar fetching references: 1 retry (1 rate-limited), 43.0 s",
     ]
     diagnostics = [
         record.getMessage()
@@ -1482,7 +1482,9 @@ def test_retry_progress_and_summary_cover_the_whole_section(
                 assert client.get_paper("p3")
 
     visible = [record.getMessage() for record in caplog.records]
-    retry_summary = "selected metadata: 2 retries (1 rate-limited), 4.0 s"
+    retry_summary = (
+        "Semantic Scholar selected metadata: 2 retries (1 rate-limited), 4.0 s"
+    )
     if tty:
         assert visible == [retry_summary]
         assert "Semantic Scholar · selected metadata · 2 retries · retry in 4s" in (
@@ -1534,7 +1536,7 @@ def test_reference_hydration_retries_update_the_existing_bar(
         for line in output.getvalue().splitlines()
     )
     assert [record.getMessage() for record in caplog.records] == [
-        "reference hydration: 1 retry (1 rate-limited), 0.0 s"
+        "Semantic Scholar reference hydration: 1 retry (1 rate-limited), 0.0 s"
     ]
 
 
@@ -2544,10 +2546,12 @@ def test_attempts_are_per_request_and_exhaustion_stops_only_its_section(
     summaries = [message for message in caplog.messages if "rate-limited)," in message]
     assert len(summaries) == 2
     assert summaries[0].startswith(
-        f"selected metadata: 32 retries ({32 if rate_limited else 0} rate-limited),"
+        "Semantic Scholar selected metadata: "
+        f"32 retries ({32 if rate_limited else 0} rate-limited),"
     )
     assert summaries[1].startswith(
-        f"reference hydration: 1 retry ({int(rate_limited)} rate-limited),"
+        "Semantic Scholar reference hydration: "
+        f"1 retry ({int(rate_limited)} rate-limited),"
     )
     if status == 429:
         # Rate limits retry at the next pacing slot, which this test disables.

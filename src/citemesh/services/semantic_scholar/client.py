@@ -164,7 +164,7 @@ class SemanticScholarClient(_EndpointsMixin):
         state.retry_progress.close()
         total = state.total_retries
         logger.info(
-            "%s: %d %s (%d rate-limited), %.1f s",
+            "Semantic Scholar %s: %d %s (%d rate-limited), %.1f s",
             state.retry_progress.section,
             total,
             "retry" if total == 1 else "retries",
