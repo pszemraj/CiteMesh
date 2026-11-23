@@ -1328,8 +1328,11 @@ def test_every_retry_reports_section_and_delay(
     status: str,
 ) -> None:
     """Long waits report ongoing attempts and the operation awaiting a response."""
+    clock = _Clock()
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: False)
+    monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
     monkeypatch.setattr(s2.retry, "_retry_delay", lambda *_a, **_k: delay)
-    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
     with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
@@ -1344,11 +1347,16 @@ def test_every_retry_reports_section_and_delay(
         for record in caplog.records
         if record.levelno >= logging.INFO
     ]
-    assert visible == [
+    assert visible[:-1] == [
         f"Semantic Scholar is {status} (fetching paper details). "
         f"Retry {attempt}/{API_CONFIG.max_retries} in {delay:g}s."
         for attempt in announced_attempts
     ]
+    rate_limited_retries = failed_attempts if status_code == 429 else 0
+    assert visible[-1] == (
+        f"fetching paper details: {failed_attempts} retries "
+        f"({rate_limited_retries} rate-limited), {clock.now:.1f} s"
+    )
     diagnostics = [
         record.getMessage()
         for record in caplog.records
@@ -1367,8 +1375,11 @@ def test_retry_notice_omits_provider_identifiers_and_offsets(
 ) -> None:
     """The INFO notice names the operation; IDs and offsets stay at DEBUG."""
     paper_id = "1296631b36a3b390466978f4fd80b683bf13573a"
+    clock = _Clock()
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: False)
+    monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
     monkeypatch.setattr(s2.retry, "_retry_delay", lambda *_a, **_k: 43.0)
-    monkeypatch.setattr(s2.client.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
     with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
         _disable_pacing(client)
         client._session.get = MagicMock(
@@ -1389,10 +1400,9 @@ def test_retry_notice_omits_provider_identifiers_and_offsets(
     ]
     assert visible == [
         "Semantic Scholar is rate-limited (fetching references). "
-        f"Retry 1/{API_CONFIG.max_retries} in 43s."
+        f"Retry 1/{API_CONFIG.max_retries} in 43s.",
+        "fetching references: 1 retry (1 rate-limited), 43.0 s",
     ]
-    assert paper_id not in visible[0]
-    assert "offset" not in visible[0]
     diagnostics = [
         record.getMessage()
         for record in caplog.records
@@ -1425,6 +1435,107 @@ def test_short_retry_waits_report_retry_as_well_as_diagnostics(
 
     assert "Retry 1/29 in 1s." in caplog.text
     assert "retrying in 1.0s: HTTP 503 from https://" in caplog.text
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_retry_progress_and_summary_cover_the_whole_section(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tty: bool
+) -> None:
+    """Retries accumulate across requests and are summarized once on section exit."""
+    output = io.StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: tty)
+    monkeypatch.setattr(progress_module, "_progress_enabled", True)
+    monkeypatch.setattr(
+        progress_module,
+        "_progress_console",
+        Console(file=output, force_terminal=True, no_color=True, width=100),
+    )
+    clock = _Clock()
+    monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
+    monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
+    with SemanticScholarClient(api_key="test") as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(429),
+                _MockResponse(200, _paper_payload("p1")),
+                _MockResponse(503),
+                _MockResponse(200, _paper_payload("p2")),
+                _MockResponse(200, _paper_payload("p3")),
+            ]
+        )
+        with caplog.at_level(logging.INFO):
+            with client.retry_section("selected metadata"):
+                assert output.getvalue() == ""
+                assert client.get_paper("p1")
+                if tty:
+                    assert "Semantic Scholar · selected metadata · 1 retry" in (
+                        output.getvalue()
+                    )
+                with client.retry_section("selected metadata"):
+                    assert client.get_paper("p2")
+                state = client._candidate_operation.state
+                assert (state.rate_limited_retries, state.other_retries) == (1, 1)
+                assert "rate-limited)," not in caplog.text
+            with client.retry_section("focal metadata"):
+                assert client.get_paper("p3")
+
+    visible = [record.getMessage() for record in caplog.records]
+    retry_summary = "selected metadata: 2 retries (1 rate-limited), 4.0 s"
+    if tty:
+        assert visible == [retry_summary]
+        assert "Semantic Scholar · selected metadata · 2 retries · retry in 4s" in (
+            output.getvalue()
+        )
+    else:
+        assert visible == [
+            "Semantic Scholar is temporarily unavailable (selected metadata). "
+            f"Retry 1/{API_CONFIG.max_retries} in 4s.",
+            retry_summary,
+        ]
+        assert output.getvalue() == ""
+
+
+def test_reference_hydration_retries_update_the_existing_bar(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Live retry text appears in the reference hydration bar."""
+    output = io.StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: True)
+    monkeypatch.setattr(progress_module, "_progress_enabled", True)
+    monkeypatch.setattr(
+        progress_module,
+        "_progress_console",
+        Console(file=output, force_terminal=True, no_color=True, width=100),
+    )
+    standalone = MagicMock(side_effect=AssertionError("Retry started a second Live"))
+    monkeypatch.setattr(progress_module, "Live", standalone)
+    clock = _Clock()
+    monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
+    monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
+    with SemanticScholarClient(api_key="test") as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            side_effect=[
+                _MockResponse(429),
+                _MockResponse(
+                    200, [{"paperId": "p1", "referenceCount": 0, "references": []}]
+                ),
+            ]
+        )
+        with caplog.at_level(logging.INFO):
+            assert client.get_reference_ids_batch(["p1"]).reference_ids == {"p1": []}
+
+    standalone.assert_not_called()
+    assert any(
+        "Hydrating reference lists" in line and "1 retry" in line
+        for line in output.getvalue().splitlines()
+    )
+    assert [record.getMessage() for record in caplog.records] == [
+        "reference hydration: 1 retry (1 rate-limited), 0.0 s"
+    ]
 
 
 def test_retry_after_preserves_long_waits_and_rejects_nonfinite_values() -> None:
@@ -2386,6 +2497,7 @@ def test_attempts_are_per_request_and_exhaustion_stops_only_its_section(
     """Each request restarts its schedule; an exhausted section skips later work."""
     clock = _Clock()
     sleeps: list[float] = []
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: False)
     monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
 
     def sleep(seconds: float) -> None:
@@ -2412,6 +2524,9 @@ def test_attempts_are_per_request_and_exhaustion_stops_only_its_section(
                 assert client.get_paper("completed", raise_on_unavailable=True)
                 with pytest.raises(SemanticScholarUnavailableError, match="0 attempts"):
                     client.get_paper("skipped", raise_on_unavailable=True)
+                state = client._candidate_operation.state
+                assert state.total_retries == 32
+                assert state.rate_limited_retries == (32 if status == 429 else 0)
             assert client._session.get.call_count == 34
             client._session.get = MagicMock(
                 side_effect=[
@@ -2420,9 +2535,20 @@ def test_attempts_are_per_request_and_exhaustion_stops_only_its_section(
                 ]
             )
             with client.retry_section("reference hydration"):
+                assert client._candidate_operation.state.total_retries == 0
                 assert client.get_paper("fresh", raise_on_unavailable=True)
                 assert not client._candidate_operation.state.exhausted
+                assert client._candidate_operation.state.total_retries == 1
             assert client._session.get.call_count == 2
+    rate_limited = status == 429
+    summaries = [message for message in caplog.messages if "rate-limited)," in message]
+    assert len(summaries) == 2
+    assert summaries[0].startswith(
+        f"selected metadata: 32 retries ({32 if rate_limited else 0} rate-limited),"
+    )
+    assert summaries[1].startswith(
+        f"reference hydration: 1 retry ({int(rate_limited)} rate-limited),"
+    )
     if status == 429:
         # Rate limits retry at the next pacing slot, which this test disables.
         assert sleeps == [0.0] * 33

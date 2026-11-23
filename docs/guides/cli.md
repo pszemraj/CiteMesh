@@ -123,7 +123,7 @@ The first Semantic Scholar request reports keyed or anonymous access and local p
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
 Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
-At `info`, each Semantic Scholar retry that waits beyond normal pacing shows the section, the retry count, the failure category, and the delay. Immediate HTTP 429 retries appear only at `debug`. At `debug`, responses also show the endpoint, status, elapsed time, and whether the authentication header was present. The key itself is omitted.
+After the first Semantic Scholar retry, interactive terminals show a running section count and any backoff wait in the section's progress row or a temporary line. When the section ends, one `info` summary reports total retries, rate-limited retries, and elapsed time. Redirected output also retains `info` notices for waits beyond normal pacing. At `debug`, individual retry attempts are logged; responses also show the endpoint, status, elapsed time, and whether the authentication header was present. The key itself is omitted.
 
 ## Option reference
 

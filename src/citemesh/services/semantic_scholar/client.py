@@ -22,6 +22,7 @@ from citemesh.data.cache import (
     cache_operation_lock,
     get_cache_dir,
 )
+from citemesh.progress import RetryProgress
 
 from . import disk_cache, payloads, retry
 from .endpoints import PAPER_BASE_URL, _EndpointsMixin
@@ -109,6 +110,7 @@ class SemanticScholarClient(_EndpointsMixin):
             if owns_state:
                 state = _CandidateOperationState(self.retry_budget_seconds)
                 self._candidate_operation.state = state
+                started_at = monotonic()
             else:
                 state = self._candidate_operation.state
             state.depth += 1
@@ -123,6 +125,7 @@ class SemanticScholarClient(_EndpointsMixin):
                             state.reference_cache_hits,
                         )
                     del self._candidate_operation.state
+                    self._finish_retry_section(state, started_at)
 
     @contextlib.contextmanager
     def retry_section(self, name: str) -> Iterator[None]:
@@ -130,21 +133,44 @@ class SemanticScholarClient(_EndpointsMixin):
 
         A request that exhausts its attempts stops the section's later uncached
         requests without affecting other sections. Nested work with the same name
-        shares that state and the optional elapsed ceiling. Cache coordination
-        remains owned by the outer collection.
+        shares its retry counts and optional recovery budget. Log a summary when
+        the section ends if it scheduled retries.
         """
         with self.candidate_operation_scope():
             previous = self._candidate_operation.state
             if previous.section == name:
                 yield
                 return
+            if previous.retry_progress is not None:
+                previous.retry_progress.close()
             section = _CandidateOperationState(self.retry_budget_seconds, section=name)
             self._candidate_operation.state = section
+            started_at = monotonic()
             try:
                 yield
             finally:
                 previous.reference_cache_hits += section.reference_cache_hits
                 self._candidate_operation.state = previous
+                self._finish_retry_section(section, started_at)
+
+    @staticmethod
+    def _finish_retry_section(
+        state: _CandidateOperationState, started_at: float
+    ) -> None:
+        """Clear retry progress and log the count and elapsed section time."""
+        if state.retry_progress is None:
+            return
+        elapsed = monotonic() - started_at
+        state.retry_progress.close()
+        total = state.total_retries
+        logger.info(
+            "%s: %d %s (%d rate-limited), %.1f s",
+            state.retry_progress.section,
+            total,
+            "retry" if total == 1 else "retries",
+            state.rate_limited_retries,
+            elapsed,
+        )
 
     def __enter__(self) -> SemanticScholarClient:
         """Return the client for context-manager use.
@@ -417,8 +443,7 @@ class SemanticScholarClient(_EndpointsMixin):
         :param str url: Semantic Scholar endpoint.
         :param dict[str, str | int] params: Query parameters.
         :param str context: Detailed operation for diagnostics and errors.
-        :param str summary: Brief operation without identifiers or offsets, shown in
-            INFO retry notices for requests outside a named section.
+        :param str summary: Brief operation label for retries outside a named section.
         :param PaperBatchRequest | None payload: Optional batch POST body.
         :param bool raise_on_unavailable: Raise after recovery stops.
         :param bool retry_not_found: Treat HTTP 404 as transient only during the
@@ -585,14 +610,20 @@ class SemanticScholarClient(_EndpointsMixin):
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
-            # Pacing-slot retries after HTTP 429 cost about a second; only real
-            # waits are worth an INFO notice.
-            if delay:
+            if rate_limited:
+                state.rate_limited_retries += 1
+            else:
+                state.other_retries += 1
+            section = summary if state.section == "request" else state.section
+            if state.retry_progress is None:
+                state.retry_progress = RetryProgress(section)
+            shown = state.retry_progress.update(state.total_retries, delay=delay)
+            if delay and not shown:
                 status = "rate-limited" if rate_limited else "temporarily unavailable"
                 logger.info(
                     "Semantic Scholar is %s (%s). Retry %d/%d in %gs.",
                     status,
-                    summary if state.section == "request" else state.section,
+                    section,
                     attempt,
                     API_CONFIG.max_retries,
                     delay,
@@ -611,6 +642,8 @@ class SemanticScholarClient(_EndpointsMixin):
                 time.sleep(delay)
             finally:
                 self._charge_recovery(state, sleep_started_at)
+            if delay and shown:
+                state.retry_progress.update(state.total_retries)
 
         raise AssertionError("retry loop terminated without a result")
 

@@ -9,7 +9,10 @@ from typing import Any
 
 import pytest
 from rich.console import Console
+from rich.errors import LiveError
+from rich.live import Live
 from rich.progress import Progress
+from rich.text import Text
 
 from citemesh import progress as progress_module
 
@@ -60,6 +63,28 @@ def recorded_displays(monkeypatch: pytest.MonkeyPatch) -> list[Progress]:
             displays.append(self)
 
     monkeypatch.setattr(progress_module, "Progress", _RecordingProgress)
+    return displays
+
+
+@pytest.fixture
+def retry_displays(monkeypatch: pytest.MonkeyPatch) -> list[Live]:
+    """Record standalone retry displays without replacing their rendering."""
+    displays: list[Live] = []
+
+    def record_live(
+        renderable: Text, *, console: Console, transient: bool, auto_refresh: bool
+    ) -> Live:
+        """Construct the requested live line and retain it for assertions."""
+        live = Live(
+            renderable,
+            console=console,
+            transient=transient,
+            auto_refresh=auto_refresh,
+        )
+        displays.append(live)
+        return live
+
+    monkeypatch.setattr(progress_module, "Live", record_live)
     return displays
 
 
@@ -316,3 +341,168 @@ def test_progress_iterator_close_after_break_stops_display(
 
     assert display.live.is_started is False
     assert display.tasks[0].completed == 1
+
+
+def test_retry_line_starts_on_first_retry_and_clears_on_close(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+    retry_displays: list[Live],
+    recorded_displays: list[Progress],
+) -> None:
+    """Retries replace one transient text line without constructing a bar."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: True)
+    monkeypatch.setattr(progress_module, "strftime", lambda _format: "12:04:31")
+    reporter = progress_module.RetryProgress("focal references")
+    try:
+        assert reporter.update(0) is False
+        assert retry_displays == []
+        assert reporter.update(1) is True
+        assert "1 retry" in progress_console.export_text()
+        assert reporter.update(12, delay=3.5) is True
+        assert len(retry_displays) == 1
+        live = retry_displays[0]
+        assert live.is_started
+        assert live.transient
+        rendered = "".join(
+            segment.text for segment in progress_console.render(live.renderable)
+        )
+        assert rendered.rstrip("\n") == (
+            "12:04:31 Semantic Scholar · focal references · 12 retries · retry in 3.5s"
+        )
+        reporter.update(12)
+        assert "retry in" not in "".join(
+            segment.text for segment in progress_console.render(live.renderable)
+        )
+        assert recorded_displays == []
+    finally:
+        reporter.close()
+    assert not live.is_started
+    assert progress_module._active_retry_progress.get() is None
+
+
+@pytest.mark.parametrize(("interactive", "allowed"), [(False, True), (True, False)])
+def test_retry_display_requires_terminal_and_progress_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+    retry_displays: list[Live],
+    recorded_displays: list[Progress],
+    interactive: bool,
+    allowed: bool,
+) -> None:
+    """Redirected output and disabled progress never create retry displays."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: interactive)
+    progress_module.set_progress_enabled(allowed)
+    reporter = progress_module.RetryProgress("focal references")
+    with progress_module.progress_task(
+        total=3, description="Hydrating reference lists"
+    ):
+        assert reporter.update(12, delay=2) is False
+    reporter.close()
+    assert retry_displays == []
+    assert recorded_displays[0].disable
+    assert progress_console.export_text() == ""
+
+
+@pytest.mark.parametrize("width", [40, 60, 80])
+def test_retry_line_keeps_count_and_wait_visible_on_narrow_terminals(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+    retry_displays: list[Live],
+    width: int,
+) -> None:
+    """Compact the section label before clipping retry counts or backoff waits."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: True)
+    progress_console.width = width
+    reporter = progress_module.RetryProgress("reference recovery metadata")
+    try:
+        assert reporter.update(12, delay=4) is True
+        rendered = "".join(
+            segment.text
+            for segment in progress_console.render(retry_displays[0].renderable)
+        )
+        assert "12 retries" in rendered
+        assert rendered.rstrip().endswith("4s")
+        assert len(rendered.rstrip()) <= width
+    finally:
+        reporter.close()
+
+
+def test_retry_line_unavailable_does_not_interrupt_work(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+) -> None:
+    """A console occupied by another thread's Live can keep its existing display."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: True)
+
+    def reject_start(self: Live, *, refresh: bool = False) -> None:
+        """Reproduce Rich 13.7 rejecting a second active live display."""
+        raise LiveError("Only one live display may be active at once")
+
+    monkeypatch.setattr(Live, "start", reject_start)
+    reporter = progress_module.RetryProgress("focal metadata")
+    assert reporter.update(1, delay=4) is False
+    reporter.close()
+    assert progress_module._active_retry_progress.get() is None
+    assert progress_console.export_text() == ""
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 120])
+def test_retry_count_uses_active_bar_and_clears_at_section_end(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+    retry_displays: list[Live],
+    recorded_displays: list[Progress],
+    width: int,
+) -> None:
+    """A section with a bar retains its count and never starts another Live."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: True)
+    progress_console.width = width
+    reporter = progress_module.RetryProgress("reference hydration")
+    with progress_module.progress_task(
+        total=2000, description="Hydrating reference lists"
+    ) as task:
+        try:
+            task.update(1)
+            assert reporter.update(12, delay=2) is True
+            display = recorded_displays[0]
+            rendered = "".join(
+                segment.text
+                for segment in progress_console.render(display.get_renderable())
+            )
+            assert "12 retries" in rendered
+            assert "2s" in rendered
+            assert "0/2000" in rendered
+            assert "ETA" in rendered
+            assert task.n == 1
+            assert retry_displays == []
+        finally:
+            reporter.close()
+        assert display.tasks[0].description == "Hydrating reference lists"
+        assert display.tasks[0].fields["retry_status"] == ""
+    assert progress_module._active_task.get() is None
+
+
+def test_retry_line_yields_to_a_later_bar(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+    retry_displays: list[Live],
+    recorded_displays: list[Progress],
+) -> None:
+    """Starting a bar after a retry line stops the line before opening the bar."""
+    monkeypatch.setattr(progress_module, "stderr_isatty", lambda: True)
+    reporter = progress_module.RetryProgress("selected metadata")
+    try:
+        reporter.update(1)
+        with progress_module.progress_task(
+            total=1000, description="Fetching paper metadata"
+        ):
+            assert not retry_displays[0].is_started
+            assert recorded_displays[0].tasks[0].fields["retry_status"] == "1 retry"
+            reporter.update(2)
+            assert len(retry_displays) == 1
+        reporter.update(3)
+        assert len(retry_displays) == 2
+        assert retry_displays[1].is_started
+    finally:
+        reporter.close()
+    assert all(not live.is_started for live in retry_displays)
