@@ -12,7 +12,7 @@ A 429 from S2 therefore behaves like random load shedding, not a token bucket th
 
 ## Policy
 
-- **Pacing.** One request at a time, at least 1.2 seconds apart with a key and 2 seconds apart without. This keeps the client inside S2's published per-key rate, so a 429 is S2's load shedding, not ours.
+- **Pacing.** The minimum interval between request starts on the same client is 1.2 seconds with an API key and 2 seconds for anonymous access. This keeps the client within S2's published per-key rate.
 - **429 without `Retry-After`.** Retry at the next pacing slot. Never back off exponentially on a 429.
 - **`Retry-After`.** Honored when present: the delay applies to the request and advances a client-wide cooldown, so every later request through that client waits too.
 - **Server errors, HTTP 408, connection failures.** Exponential backoff from 4 seconds, doubling per attempt to a 300-second cap. These are real outages, where waiting helps.
