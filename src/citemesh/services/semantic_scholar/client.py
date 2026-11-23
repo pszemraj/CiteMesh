@@ -247,7 +247,7 @@ class SemanticScholarClient(_EndpointsMixin):
 
     @staticmethod
     def _charge_recovery(state: _CandidateOperationState, started_at: float) -> None:
-        """Charge actual elapsed recovery work to the shared allowance.
+        """Charge actual elapsed recovery work to the section's recovery time limit.
 
         :param _CandidateOperationState state: Active collection state.
         :param float started_at: Monotonic start time.
@@ -438,7 +438,7 @@ class SemanticScholarClient(_EndpointsMixin):
         raise_on_unavailable: bool = False,
         retry_not_found: bool = False,
     ) -> JSONValue:
-        """Retry failed work within the current section's allowance.
+        """Retry one request within its attempt limit and the section's time limit.
 
         :param str url: Semantic Scholar endpoint.
         :param dict[str, str | int] params: Query parameters.
