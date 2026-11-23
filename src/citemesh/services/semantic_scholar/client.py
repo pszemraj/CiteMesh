@@ -297,6 +297,9 @@ class SemanticScholarClient(_EndpointsMixin):
     ) -> None:
         """Reserve one globally paced request slot.
 
+        On a first attempt, only cooldown beyond the normal pacing slot uses
+        the recovery budget. A retry's entire wait counts toward that budget.
+
         :param _CandidateOperationState | None state: Active recovery state.
         :param float | None recovery_started_at: Start of a budgeted attempt.
         :param str operation: Request operation for a budget error.
@@ -307,10 +310,9 @@ class SemanticScholarClient(_EndpointsMixin):
         while True:
             with self._rate_limit_lock:
                 started = monotonic()
-                cooling_down = self._cooldown_until > started
-                wait_seconds = max(
-                    0.0, max(self._next_request_time, self._cooldown_until) - started
-                )
+                pacing_slot = max(started, self._next_request_time)
+                cooldown_wait = max(0.0, self._cooldown_until - pacing_slot)
+                wait_seconds = pacing_slot - started + cooldown_wait
                 if not wait_seconds:
                     if self._next_request_time == 0.0:
                         logger.info(
@@ -322,14 +324,14 @@ class SemanticScholarClient(_EndpointsMixin):
                         )
                     self._next_request_time = started + min_interval
                     return
-                if state is not None and (
-                    recovery_started_at is not None or cooling_down
-                ):
+                if state is not None:
                     remaining = self._remaining_recovery_budget(state)
                     if remaining is not None:
+                        budgeted_wait = cooldown_wait
                         if recovery_started_at is not None:
                             remaining -= max(0.0, started - recovery_started_at)
-                        if wait_seconds > max(0.0, remaining):
+                            budgeted_wait = wait_seconds
+                        if budgeted_wait > max(0.0, remaining):
                             raise self._retry_exhausted(
                                 state,
                                 operation=operation,
@@ -341,8 +343,9 @@ class SemanticScholarClient(_EndpointsMixin):
             try:
                 time.sleep(wait_seconds)
             finally:
-                if state is not None and recovery_started_at is None and cooling_down:
-                    self._charge_recovery(state, started)
+                if state is not None and recovery_started_at is None and cooldown_wait:
+                    elapsed_cooldown = max(0.0, monotonic() - pacing_slot)
+                    state.recovery_seconds += min(elapsed_cooldown, cooldown_wait)
 
     def _advance_cooldown(self, seconds: float) -> None:
         """Make subsequent requests observe the provider cooldown."""

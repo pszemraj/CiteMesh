@@ -1647,6 +1647,39 @@ def test_spent_budget_blocks_network_but_cached_reads_still_work(
         assert client._session.get.call_count == 1
 
 
+@pytest.mark.parametrize(("retry_after", "recovery_seconds"), [(1, 0.0), (2, 0.5)])
+def test_fresh_section_charges_only_cooldown_beyond_normal_pacing(
+    monkeypatch: pytest.MonkeyPatch, retry_after: int, recovery_seconds: float
+) -> None:
+    """A fresh section waits for both deadlines and pays only for extra cooldown."""
+    clock = _Clock()
+    monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
+    monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
+
+    def rate_limit(*_args: object, **_kwargs: object) -> _MockResponse:
+        clock.sleep(0.5)
+        return _MockResponse(429, headers={"Retry-After": str(retry_after)})
+
+    with SemanticScholarClient(api_key="", retry_budget_seconds=1.25) as client:
+        client._session.get = MagicMock(side_effect=rate_limit)
+        with (
+            client.retry_section("focal references"),
+            pytest.raises(SemanticScholarUnavailableError, match="next wait exceeds"),
+        ):
+            client.get_paper("limited", raise_on_unavailable=True)
+
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, _paper_payload())
+        )
+        with client.retry_section("focal citations"):
+            assert client.get_paper("p1", raise_on_unavailable=True)
+            assert clock.now == 2.0 + recovery_seconds
+            assert (
+                client._candidate_operation.state.recovery_seconds == recovery_seconds
+            )
+        client._session.get.assert_called_once()
+
+
 def test_unaffordable_retry_after_stops_section_and_preserves_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
