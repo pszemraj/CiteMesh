@@ -1549,6 +1549,39 @@ def test_config_cli_rejects_api_key_setting() -> None:
     assert not user_config_path().exists()
 
 
+def test_dotenv_cannot_redirect_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the S2 API key may come from the CLI's dotenv file."""
+    monkeypatch.delenv("CITEMESH_CACHE_DIR")
+    expected_path = user_config_path()
+    (tmp_path / ".env").write_text(
+        f'CITEMESH_CACHE_DIR="{(tmp_path / "other-cache").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = _run_cli(["config", "path"])
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(expected_path)
+
+
+@pytest.mark.parametrize("args", [["--help"], ["config", "path"]])
+def test_cli_ignores_non_utf8_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    args: list[str],
+) -> None:
+    """A dotenv decoding error warns without preventing the command."""
+    (tmp_path / ".env").write_bytes(b"S2_API_KEY=\xff\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert _run_cli(args).returncode == 0
+    assert "Ignoring .env file" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("preset", "expected"),
     [(None, "from-dotenv"), ("from-shell", "from-shell"), ("", "")],

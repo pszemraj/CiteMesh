@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from importlib import import_module
 from types import ModuleType
 
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv
 from rich.console import Console as Console
 
 from citemesh import __version__ as __version__
@@ -94,8 +94,17 @@ def _run(argv: Sequence[str] | None) -> int:
     :param Sequence[str] | None argv: Optional CLI argument list without executable.
     :return int: Process-style exit code.
     """
-    # Real environment variables, including an empty S2_API_KEY, win over .env.
-    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if "S2_API_KEY" not in os.environ:
+        dotenv_path = find_dotenv(usecwd=True)
+        try:
+            api_key = dotenv_values(dotenv_path).get("S2_API_KEY")
+        except UnicodeDecodeError:
+            logger.warning(
+                "Ignoring .env file %s because it is not UTF-8.", dotenv_path
+            )
+        else:
+            if api_key is not None:
+                os.environ["S2_API_KEY"] = api_key
     parser, build_parser, cache_parser, config_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
