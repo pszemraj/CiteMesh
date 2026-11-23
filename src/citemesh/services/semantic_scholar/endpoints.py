@@ -21,7 +21,7 @@ from typing import (
 from urllib.parse import quote
 
 from citemesh.core import Paper
-from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import canonicalize_or_none, normalize_paper_id
 from citemesh.data.cache import JSONValue
 from citemesh.progress import progress_task
 
@@ -559,11 +559,13 @@ class _EndpointsMixin:
                     raw_id = payloads._payload_get(paper, "paperId")
                     if raw_id is None:
                         continue
-                    if not isinstance(raw_id, str) or not raw_id.strip():
+                    if (
+                        not isinstance(raw_id, str)
+                        or (normalized_id := canonicalize_or_none(raw_id)) is None
+                    ):
                         raise _SemanticScholarResponseContractError(
                             f"Semantic Scholar returned invalid {relation} paper ID."
                         )
-                    normalized_id = normalize_paper_id(raw_id)
                     if reference_evidence is not None and (
                         evidence := _reference_evidence(row)
                     ):

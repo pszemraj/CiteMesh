@@ -111,6 +111,22 @@ def test_reference_batch_falls_back_only_for_incomplete_rows(
     assert client.get_cached_reference_ids("missing") is None
 
 
+@pytest.mark.parametrize("bad_id", ["", "  ", "doi:"])
+def test_invalid_reference_ids_fail_as_contract_errors_on_both_paths(
+    client: SemanticScholarClient, bad_id: str
+) -> None:
+    """An unusable ID falls back from the batch, then fails as a response error."""
+    client._session.post.return_value = http_response([_row("paper", bad_id)])
+    client._session.get.return_value = http_response(
+        {"data": [{"citedPaper": {"paperId": bad_id}}]}
+    )
+
+    with pytest.raises(TypeError, match="invalid references paper ID"):
+        client.get_reference_ids_batch(["paper"])
+    assert client._session.get.call_count == 1
+    assert client.get_cached_reference_ids("paper") is None
+
+
 def test_reference_batch_splits_explicit_size_rejections(
     client: SemanticScholarClient,
 ) -> None:
