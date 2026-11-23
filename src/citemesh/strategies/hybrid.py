@@ -811,6 +811,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 if "citation" in pool.sources.get(paper_id, ())
             },
             focal,
+            provider_aliases=pool.provider_aliases,
         )
 
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:

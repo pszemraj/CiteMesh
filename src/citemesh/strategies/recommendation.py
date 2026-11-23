@@ -135,7 +135,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                     continue
             pool.add(paper, source="recommendation", relation="semantic_only")
         papers.update(pool.papers)
-        self.reference_hydrator.hydrate(papers, focal)
+        self.reference_hydrator.hydrate(
+            pool.papers, focal, provider_aliases=pool.provider_aliases
+        )
 
         self._abstract_index.build(papers)
         self._set_collection_summary(

@@ -8,7 +8,7 @@ and reads only persisted reference caches after the provider is unavailable.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from citemesh.core import Paper
@@ -62,11 +62,19 @@ class ReferenceHydrator:
         self.reference_cache[focal.paper_id.strip()] = []
         focal.references = []
 
-    def hydrate(self, papers: dict[str, Paper], focal: Paper) -> None:
-        """Fill the focal paper's and the collected papers' reference lists.
+    def hydrate(
+        self,
+        papers: dict[str, Paper],
+        focal: Paper,
+        *,
+        provider_aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        """Fill selected reference lists, using merged provider IDs as fallbacks.
 
         :param Dict[str, Paper] papers: Collected papers, possibly with the focal paper.
         :param Paper focal: Focal paper for this build.
+        :param Mapping[str, str] | None provider_aliases: Map from merged
+            provider ID to retained paper ID, in discovery order.
         :return None: Updates paper records and the in-memory cache.
         """
         if not self.fetch_references:
@@ -77,13 +85,41 @@ class ReferenceHydrator:
             *(paper for key, paper in papers.items() if key != focal.paper_id),
         ]
         targets = [
-            (paper, lookup_id)
+            (paper, normalize_paper_id(lookup_id))
             for paper in selected
             if (lookup_id := self._pending_lookup(paper)) is not None
         ]
-        fetched = self.fetch_many([lookup_id for _, lookup_id in targets])
+        if not targets and not provider_aliases:
+            return
+        lookup_ids = [lookup_id for _, lookup_id in targets]
+        with self.client.retry_section("reference hydration"):
+            fetched = self.fetch_many(lookup_ids)
+            for paper, lookup_id in targets:
+                if (refs := fetched.get(lookup_id)) is not None:
+                    self.reference_cache[paper.paper_id.strip()] = refs
+                    paper.references = list(refs)
+            if provider_aliases:
+                self._hydrate_aliases(
+                    papers, provider_aliases, set(lookup_ids), fetched
+                )
+
+    def _hydrate_aliases(
+        self,
+        papers: Mapping[str, Paper],
+        provider_aliases: Mapping[str, str],
+        attempted: set[str],
+        fetched: dict[str, list[str]],
+    ) -> None:
+        """Use the first non-empty merged provider list for each missing member."""
+        targets = [
+            (paper, normalize_paper_id(alias))
+            for alias, member_id in provider_aliases.items()
+            if (paper := papers.get(member_id)) is not None and not paper.references
+        ]
+        missing = [lookup_id for _, lookup_id in targets if lookup_id not in attempted]
+        fetched.update(self.fetch_many(missing))
         for paper, lookup_id in targets:
-            if (refs := fetched.get(normalize_paper_id(lookup_id))) is not None:
+            if not paper.references and (refs := fetched.get(lookup_id)):
                 self.reference_cache[paper.paper_id.strip()] = refs
                 paper.references = list(refs)
 

@@ -1343,11 +1343,33 @@ def test_recommendation_record_of_the_focal_merges_before_member_lookup() -> Non
     assert papers["focal"].references == ["ref-of-focal"]
 
 
+def test_recommendation_keeps_coupling_from_merged_alias() -> None:
+    """An empty canonical list can use a merged record's references for an edge."""
+    client = MagicMock()
+    client.get_paper.return_value = replace(_focal_paper(), abstract="Protein folding")
+    candidate = replace(_paper("candidate"), abstract="Matrix algebra", doi="10.1000/a")
+    client.get_recommended_papers.return_value = [
+        candidate,
+        replace(candidate, paper_id="alias"),
+    ]
+    client.get_reference_ids_batch.side_effect = [
+        ReferenceBatchResult({"focal": ["shared"], "candidate": []}),
+        ReferenceBatchResult({"alias": ["shared"]}),
+    ]
+
+    graph, focal_id = RecommendationGraphBuilder(
+        max_papers=3, client=client
+    ).build_graph("focal")
+
+    assert set(graph) == {"focal", "candidate"}
+    assert graph.has_edge(focal_id, "candidate")
+
+
 @pytest.mark.parametrize("local_takeover", [False, True])
 def test_recommendation_hydrates_only_admitted_papers_missing_references(
     local_takeover: bool,
 ) -> None:
-    """Use merged inline lists and look up each admitted paper at most once."""
+    """Batch aliases of admitted members with missing lists in ingestion order."""
     client = MagicMock()
     client.get_paper.return_value = _focal_paper()
     recommendations = [
@@ -1355,6 +1377,8 @@ def test_recommendation_hydrates_only_admitted_papers_missing_references(
         replace(_paper("rejected"), abstract=""),
         replace(_paper("b"), doi="10.1000/b"),
         replace(_paper("b-alias"), doi="10.1000/b"),
+        replace(_paper("b-alias-first-list"), doi="10.1000/b"),
+        replace(_paper("b-alias-second-list"), doi="10.1000/b"),
         replace(_paper("inline", refs=["a-inline"]), doi="10.1000/a"),
         _paper("over-cap"),
     ]
@@ -1367,9 +1391,16 @@ def test_recommendation_hydrates_only_admitted_papers_missing_references(
             )
         )
     client.get_recommended_papers.return_value = recommendations
-    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
-        {"focal": ["focal-reference"], "b": []}
-    )
+    client.get_reference_ids_batch.side_effect = [
+        ReferenceBatchResult({"focal": ["focal-reference"], "b": []}),
+        ReferenceBatchResult(
+            {
+                "b-alias": [],
+                "b-alias-first-list": ["first"],
+                "b-alias-second-list": ["second"],
+            }
+        ),
+    ]
 
     papers = RecommendationGraphBuilder(max_papers=3, client=client).collect_papers(
         "focal"
@@ -1382,10 +1413,13 @@ def test_recommendation_hydrates_only_admitted_papers_missing_references(
         assert list(papers) == ["focal", "a", "b"]
         assert papers["a"].references == ["a-inline"]
     assert papers["focal"].references == ["focal-reference"]
-    assert papers["b"].references == []
-    client.get_reference_ids_batch.assert_called_once_with(
-        ["focal", "b"], force_refresh=False
-    )
+    assert papers["b"].references == ["first"]
+    assert [
+        request.args[0] for request in client.get_reference_ids_batch.call_args_list
+    ] == [
+        ["focal", "b"],
+        ["b-alias", "b-alias-first-list", "b-alias-second-list"],
+    ]
 
 
 def test_citation_collect_preserves_focal_when_relation_reuses_focal_id() -> None:
@@ -1835,7 +1869,9 @@ def test_hybrid_corpus_defers_optional_focal_enrichment(
         }
     )
     builder.reference_hydrator.hydrate = MagicMock(
-        side_effect=lambda _papers, _focal: events.append("reference enrichment")
+        side_effect=lambda _papers, _focal, **_kwargs: events.append(
+            "reference enrichment"
+        )
     )
 
     with caplog.at_level(logging.INFO):
@@ -1856,6 +1892,44 @@ def test_hybrid_corpus_defers_optional_focal_enrichment(
     client.get_papers.assert_called_once_with(["arxiv:2501.00001", "arxiv:2501.00002"])
     assert papers[focal.paper_id].citation_count == 100
     assert papers[semantic.paper_id].citation_count == 100
+
+
+def test_hybrid_hydrates_aliases_for_selected_citation_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid reuses a cited alias's list within citation-sourced hydration."""
+    client = MagicMock()
+    client.get_paper.return_value = replace(_focal_paper(), references=["shared"])
+    cited = replace(_paper("cited"), doi="10.1000/cited")
+    semantic = replace(_paper("semantic"), doi="10.1000/semantic")
+    client.get_paper_references.return_value = [
+        cited,
+        replace(cited, paper_id="cited-alias"),
+    ]
+    client.get_recommended_papers.return_value = [
+        semantic,
+        replace(semantic, paper_id="semantic-alias"),
+    ]
+    client.get_reference_ids_batch.side_effect = [
+        ReferenceBatchResult({"cited": []}),
+        ReferenceBatchResult({"cited-alias": ["shared"]}),
+    ]
+    builder = HybridGraphBuilder(
+        max_papers=3, max_references=2, max_citations=0, client=client
+    )
+    offline_hybrid_encoder(monkeypatch, builder)
+
+    papers = builder.collect_papers("focal")
+
+    assert set(papers) == {"focal", "cited", "semantic"}
+    assert papers["cited"].references == ["shared"]
+    assert papers["semantic"].references == []
+    assert [
+        request.args[0] for request in client.get_reference_ids_batch.call_args_list
+    ] == [
+        ["cited"],
+        ["cited-alias"],
+    ]
 
 
 def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
