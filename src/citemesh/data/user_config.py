@@ -1,9 +1,9 @@
 """
 Persistent user configuration (``config.toml``) for CiteMesh.
 
-The file at ``<cache_root>/config.toml`` stores validated CLI defaults and an
-optional Semantic Scholar API key. CLI code applies loaded values to parsed
-commands.
+The file at ``<cache_root>/config.toml`` stores validated CLI defaults. CLI
+code applies loaded values to parsed commands. Credentials do not belong here:
+the Semantic Scholar API key comes from ``S2_API_KEY``.
 
 Option vocabularies come from dependency-free core constants, so loading
 configuration never imports strategy or visualization modules.
@@ -56,7 +56,6 @@ _ConfigValueT = TypeVar("_ConfigValueT", bound=ConfigValue)
 USER_CONFIG_FILENAME = "config.toml"
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULTS_TABLE = "defaults"
-API_TABLE = "api"
 
 # Reading config.toml fails with these. ``ValueError`` covers decoding errors
 # and ``TOMLDecodeError``, and also the plain ``ValueError`` that tomllib lets
@@ -227,13 +226,8 @@ CONFIG_DEFAULT_KEY_SPECS: dict[str, ConfigCaster] = {
     "search_mode": _choice_caster(SEARCH_MODE_CHOICES),
 }
 
-CONFIG_API_KEY_SPECS: dict[str, Callable[[object], str]] = {
-    "s2_api_key": _cast_str,
-}
-
 _TABLE_SPECS: dict[str, Mapping[str, ConfigCaster]] = {
     DEFAULTS_TABLE: CONFIG_DEFAULT_KEY_SPECS,
-    API_TABLE: CONFIG_API_KEY_SPECS,
 }
 
 
@@ -243,7 +237,6 @@ class UserConfig:
 
     path: Path
     defaults: dict[str, ConfigValue] = field(default_factory=dict)
-    s2_api_key: str | None = None
 
 
 def user_config_path() -> Path:
@@ -260,7 +253,6 @@ def known_config_keys() -> list[str]:
     :return list[str]: Sorted dotted keys (for example ``defaults.device``).
     """
     keys = [f"{DEFAULTS_TABLE}.{key}" for key in CONFIG_DEFAULT_KEY_SPECS]
-    keys.extend(f"{API_TABLE}.{key}" for key in CONFIG_API_KEY_SPECS)
     return sorted(keys)
 
 
@@ -353,12 +345,7 @@ def load_user_config(path: Path | None = None) -> UserConfig:
     defaults = _validated_table(
         document, DEFAULTS_TABLE, CONFIG_DEFAULT_KEY_SPECS, config_path
     )
-    api = _validated_table(document, API_TABLE, CONFIG_API_KEY_SPECS, config_path)
-    return UserConfig(
-        path=config_path,
-        defaults=defaults,
-        s2_api_key=api.get("s2_api_key"),
-    )
+    return UserConfig(path=config_path, defaults=defaults)
 
 
 def _read_raw_document(config_path: Path) -> dict[str, TOMLValue]:
@@ -412,9 +399,7 @@ def _write_document(config_path: Path, document: Mapping[str, TOMLValue]) -> Non
             f"Cannot serialize config document for {config_path}: {exc}"
         ) from exc
     try:
-        # config.toml can hold api.s2_api_key, so it stays owner-only even
-        # when a pre-existing file carries broader permission bits.
-        atomic_write_text(config_path, payload, newline=None, mode=0o600)
+        atomic_write_text(config_path, payload, newline=None)
     except OSError as exc:
         raise ConfigFileError(
             f"Failed to write config file {config_path}: {exc}"

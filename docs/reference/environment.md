@@ -4,7 +4,7 @@
 
 | Variable | Default | Accepted values | Runtime effect |
 | --- | --- | --- | --- |
-| `S2_API_KEY` | unset | string | Semantic Scholar credentials; see [API-key precedence](../guides/configuration.md#api-key) and [request policy](../guides/cli.md#troubleshooting). |
+| `S2_API_KEY` | unset | string | Semantic Scholar API key, never read from `config.toml`; the CLI also reads it from a `.env` file. See [API key](../guides/configuration.md#api-key) and the [request policy](../guides/cli.md#troubleshooting). |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path (`~` expanded) | Overrides the root for paper, reference, and embedding caches and `config.toml`. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 

@@ -231,7 +231,7 @@ def test_atomic_writes_without_fchmod(
     text_path = tmp_path / "config.toml"
     json_path = tmp_path / "paper.json"
 
-    cache_module.atomic_write_text(text_path, 'theme = "dark"\n', mode=0o600)
+    cache_module.atomic_write_text(text_path, 'theme = "dark"\n')
     cache_module.atomic_write_json(json_path, {"paper_id": "focal"})
 
     assert text_path.read_text(encoding="utf-8") == 'theme = "dark"\n'
@@ -357,19 +357,13 @@ def test_atomic_write_text_preserves_target_permissions(
     assert shared.read_text(encoding="utf-8") == "rewritten"
 
 
-def test_atomic_write_text_new_and_explicit_modes(tmp_path: Path) -> None:
-    """Fresh files respect umask and explicit modes override existing modes."""
+def test_atomic_write_text_new_file_respects_umask(tmp_path: Path) -> None:
+    """Fresh files take the process umask."""
     current_umask = os.umask(0)
     os.umask(current_umask)
     fresh = tmp_path / "fresh.json"
     cache_module.atomic_write_text(fresh, "{}")
     assert fresh.stat().st_mode & 0o7777 == 0o666 & ~current_umask
-
-    secret = tmp_path / "config.toml"
-    secret.write_text("old")
-    secret.chmod(0o644)
-    cache_module.atomic_write_text(secret, "new", mode=0o600)
-    assert secret.stat().st_mode & 0o7777 == 0o600
 
 
 def _write_embedding_namespace_schema(db_path: Path, schema_version: int) -> None:

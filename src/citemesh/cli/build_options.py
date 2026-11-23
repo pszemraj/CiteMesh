@@ -8,7 +8,6 @@ embedding runs, and the merge of user-config defaults into a parsed namespace.
 from __future__ import annotations
 
 import argparse
-import os
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
@@ -54,7 +53,6 @@ class _StrategyBuilderProtocol(Protocol):
 class _ClientOptions(TypedDict, total=False):
     """HTTP client options supplied by parsed CLI settings."""
 
-    api_key: str | None
     refresh_paper_cache: bool
     retry_budget_seconds: float
 
@@ -394,42 +392,19 @@ def _apply_user_config_defaults(
     return applied
 
 
-def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
-    """Resolve the S2 API key without exposing config secrets to subprocesses.
-
-    Environment presence wins even for an empty value, so ``S2_API_KEY=""``
-    still explicitly disables the configured key.
-
-    :param UserConfig user_config: Loaded user configuration snapshot.
-    :return str | None: Environment key, configured key, or no configured value.
-    """
-    if "S2_API_KEY" in os.environ:
-        logger.debug(
-            "Using S2_API_KEY from the environment."
-            if os.environ["S2_API_KEY"]
-            else "S2_API_KEY is empty; using anonymous Semantic Scholar access."
-        )
-        return os.environ["S2_API_KEY"]
-    if user_config.s2_api_key:
-        logger.debug("Using api.s2_api_key from %s.", user_config.path)
-    return user_config.s2_api_key or None
-
-
 def _configured_client_kwargs(args: argparse.Namespace) -> _ConfiguredClientKwargs:
     """Inject a client only when this command has API-specific settings.
 
-    :param argparse.Namespace args: Parsed arguments and resolved API key.
+    The client reads ``S2_API_KEY`` itself.
+
+    :param argparse.Namespace args: Parsed arguments.
     :return: Optional client constructor argument for builders.
     """
-    api_key = getattr(args, "_s2_api_key", None)
     refresh = bool(getattr(args, "refresh_paper_cache", False))
     retry_budget = getattr(args, "s2_retry_budget", None)
-    if api_key is None and not refresh and retry_budget is None:
+    if not refresh and retry_budget is None:
         return {}
-    client_kwargs: _ClientOptions = {
-        "api_key": api_key,
-        "refresh_paper_cache": refresh,
-    }
+    client_kwargs: _ClientOptions = {"refresh_paper_cache": refresh}
     if retry_budget is not None:
         client_kwargs["retry_budget_seconds"] = retry_budget
     client = SemanticScholarClient(**client_kwargs)

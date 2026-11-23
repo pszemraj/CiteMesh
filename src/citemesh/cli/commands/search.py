@@ -27,7 +27,6 @@ from .. import console
 from ..build_contract import _BuildContractValueError, _resolve_namespace_settings
 from ..build_options import (
     _configured_client_kwargs,
-    _resolve_user_config_api_key,
     _shared_embedding_builder_kwargs,
 )
 from ..console import logger
@@ -219,7 +218,6 @@ def _prepare_local_search_builder(
             # Config-only failures may fall back to Semantic Scholar in auto mode.
             raise
         raise _LocalSearchOptionError(str(exc)) from exc
-    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
     return builder, defaults
 

@@ -1257,7 +1257,6 @@ def test_s2_search_forwards_result_count_and_retry_budget(
 
     assert result.returncode == 0
     client_factory.assert_called_once_with(
-        api_key=None,
         refresh_paper_cache=False,
         retry_budget_seconds=37.5,
     )
@@ -5407,14 +5406,10 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.setattr(
             build_options_module, "SemanticScholarClient", client_factory
         )
-        monkeypatch.setenv("S2_API_KEY", "configured-key")
         result = run_cli_command([*argv, "--refresh-paper-cache"])
         assert result.returncode == 0, result.stderr
-        client_factory.assert_called_once_with(
-            api_key="configured-key", refresh_paper_cache=True
-        )
+        client_factory.assert_called_once_with(refresh_paper_cache=True)
         assert captured == {**expected_kwargs, "client": client_factory.return_value}
-        monkeypatch.delenv("S2_API_KEY")
 
 
 @pytest.mark.parametrize(
@@ -5444,7 +5439,6 @@ def test_build_s2_retry_budget_routes_explicit_override(
     configured = build_options_module._configured_client_kwargs(args)
 
     factory.assert_called_once_with(
-        api_key=None,
         refresh_paper_cache=False,
         retry_budget_seconds=expected,
     )
@@ -5466,21 +5460,19 @@ def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("token", "api_key", "selected_client_budget"),
+    ("token", "selected_client_budget"),
     [
-        (None, None, 0.0),
-        (None, "configured-key", 0.0),
-        ("0", None, 0.0),
-        ("37.5", "configured-key", 12.5),
+        (None, 0.0),
+        ("0", 0.0),
+        ("37.5", 12.5),
     ],
 )
 def test_graph_config_payload_records_effective_s2_retry_budget(
-    token: str | None, api_key: str | None, selected_client_budget: float
+    token: str | None, selected_client_budget: float
 ) -> None:
     """Graph sidecars should retain the selected client's S2 recovery budget.
 
     :param str | None token: Optional explicit CLI budget token.
-    :param str | None api_key: Resolved key presence used for the default policy.
     :param float selected_client_budget: Effective budget from the selected client.
     :return None: Checks the sidecar does not recalculate client policy.
     """
@@ -5489,7 +5481,6 @@ def test_graph_config_payload_records_effective_s2_retry_budget(
     if token is not None:
         argv.extend(["--s2-retry-budget", token])
     cli_args = build_parser.parse_args(argv)
-    cli_args._s2_api_key = api_key
 
     payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,

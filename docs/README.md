@@ -7,7 +7,7 @@ New here: [install and build a first graph](../README.md#quick-start), then pick
 - [CLI usage](guides/cli.md): commands, flags, and troubleshooting
 - [Strategies](guides/strategies.md): choosing a discovery method
 - [How CiteMesh builds a graph](guides/how-it-works.md): the pipeline from focal paper to export
-- [User configuration](guides/configuration.md): persistent defaults and credentials
+- [User configuration](guides/configuration.md): persistent defaults and the API key
 - [Caching and data](guides/caching.md): reuse, hydration, portable corpus indexes, and maintenance
 - [Python API](guides/python-api.md): builders, installed indexes, and exporters for scripts and notebooks
 - [Portable index laptop test](guides/portable-index-laptop-test.md): repeatable import and unseen-paper checks across devices

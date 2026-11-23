@@ -122,7 +122,6 @@ def test_reference_values_are_the_built_in_defaults() -> None:
     assert {f"defaults.{key}" for key in loaded.defaults} == {
         key for key in uncommented if key.startswith("defaults.")
     }
-    assert loaded.s2_api_key is None
 
     built_in = _built_in_build_defaults()
     for key, value in loaded.defaults.items():
@@ -153,7 +152,5 @@ def test_example_loads_through_the_real_loader() -> None:
     """
     loaded = load_user_config(EXAMPLE_PATH)
     loaded_keys = {f"defaults.{key}" for key in loaded.defaults}
-    if loaded.s2_api_key is not None:
-        loaded_keys.add("api.s2_api_key")
 
     assert loaded_keys == _uncommented_keys(EXAMPLE_PATH)

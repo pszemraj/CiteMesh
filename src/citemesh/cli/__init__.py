@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from importlib import import_module
 from types import ModuleType
 
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console as Console
 
 from citemesh import __version__ as __version__
@@ -32,7 +33,6 @@ from citemesh.visualization.dashboard.package import (
     update_dashboard_package,
 )
 
-from .build_options import _resolve_user_config_api_key
 from .console import REDIRECTED_LOG_WIDTH as REDIRECTED_LOG_WIDTH
 from .console import _configure_logging
 from .console import logger as logger
@@ -94,6 +94,8 @@ def _run(argv: Sequence[str] | None) -> int:
     :param Sequence[str] | None argv: Optional CLI argument list without executable.
     :return int: Process-style exit code.
     """
+    # Real environment variables, including an empty S2_API_KEY, win over .env.
+    load_dotenv(find_dotenv(usecwd=True), override=False)
     parser, build_parser, cache_parser, config_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
@@ -117,7 +119,6 @@ def _run(argv: Sequence[str] | None) -> int:
         return _command_module("view")._run_view_command(args.path, args.browser)
 
     user_config = load_user_config()
-    args._s2_api_key = _resolve_user_config_api_key(user_config)
 
     if args.command == "build":
         return _command_module("build").run_build_command(

@@ -8,7 +8,7 @@
 # Saved options that do not apply to the selected strategy are ignored.
 # Semantic discovery, model/storage and corpus settings apply to embedding/hybrid builds. Local search reuses relevant runtime and cache selectors.
 # --cache-namespace overrides model, model_revision, model_profile, truncate_dim, storage_precision, calibration_sample_size, dataset_source and dataset_split.
-# Unknown tables and keys are ignored with a warning.
+# Unknown tables and keys are ignored with a warning. The Semantic Scholar API key is not a config key: set S2_API_KEY in the environment (docs/guides/configuration.md#api-key).
 # A value that breaks a constraint stated here is ignored with a warning naming the key, and the built-in default applies.
 # A file that cannot be read as TOML is ignored whole, with a warning. Entries state failure only where it differs, such as a combination that stops a build.
 # Strings are trimmed and must be nonempty, and an int is at least 1 unless its entry says otherwise.
@@ -143,11 +143,3 @@ streaming = false
 # An unusable installed index or a failed local query stays an error, including in 'auto'.
 # See: docs/guides/cli.md#find-a-focal-paper
 search_mode = "auto"
-
-[api]
-
-# string (optional). API key for authenticated Semantic Scholar requests.
-# See: docs/guides/cli.md#troubleshooting.
-# Overridden by: the S2_API_KEY environment variable whenever it is set, even to an empty string, which forces anonymous access.
-# Warning: stored in plain text. CiteMesh writes the file owner-only, `citemesh config list` masks the key, and `citemesh config get` prints it.
-# s2_api_key = ""

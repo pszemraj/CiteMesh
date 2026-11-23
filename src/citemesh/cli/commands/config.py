@@ -9,7 +9,6 @@ from rich.text import Text
 from citemesh.data.user_config import (
     ConfigFileError,
     ConfigKeyError,
-    ConfigValue,
     ConfigValueError,
     format_config_value,
     load_user_config,
@@ -22,17 +21,6 @@ from citemesh.data.user_config import (
 from .. import console
 from ..console import logger
 from ..parser import _missing_command, _output_table
-
-
-def _masked_secret(value: str) -> str:
-    """Mask a secret for display, keeping a short recognizable suffix.
-
-    :param str value: Secret value to mask.
-    :return str: Masked representation.
-    """
-    if len(value) <= 8:
-        return "****"
-    return f"****{value[-4:]}"
 
 
 def _run_config_command(
@@ -70,8 +58,6 @@ def _run_config_command(
             (f"defaults.{key}", format_config_value(value))
             for key, value in sorted(user_config.defaults.items())
         ]
-        if user_config.s2_api_key:
-            rows.append(("api.s2_api_key", _masked_secret(user_config.s2_api_key)))
         if not rows:
             console.output_console.print(
                 Text("No saved settings. Using built-in defaults.", style="dim")
@@ -96,15 +82,11 @@ def _run_config_command(
 
     if command == "get":
         try:
-            table_name, key, _spec = parse_config_key(args.key)
+            _table, key, _spec = parse_config_key(args.key)
         except ConfigKeyError as exc:
             config_parser.error(str(exc))
         user_config = load_user_config()
-        if table_name == "api":
-            # Direct get is intentionally raw for shell substitution; list is masked.
-            value: ConfigValue | None = user_config.s2_api_key
-        else:
-            value = user_config.defaults.get(key)
+        value = user_config.defaults.get(key)
         if value is None:
             logger.error("Config key '%s' is not set.", args.key)
             return 1
@@ -119,12 +101,7 @@ def _run_config_command(
         except ConfigFileError as exc:
             logger.error("%s", exc)
             return 1
-        updated_display_value = (
-            _masked_secret(str(value))
-            if str(args.key).strip() == "api.s2_api_key"
-            else format_config_value(value)
-        )
-        logger.info("Set %s = %s", args.key, updated_display_value)
+        logger.info("Set %s = %s", args.key, format_config_value(value))
         logger.debug("Saved config to %s", user_config_path())
         return 0
 

@@ -1540,7 +1540,7 @@ def _add_config_arguments(
         description=(
             "Manage persistent CiteMesh defaults stored in config.toml under "
             "the cache root. Precedence: explicit CLI flag > config.toml > "
-            "built-in default; S2_API_KEY, when set, overrides api.s2_api_key."
+            "built-in default."
         ),
         epilog=_rich_epilog(
             _help_examples(
