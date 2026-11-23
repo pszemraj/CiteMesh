@@ -126,10 +126,12 @@ class SemanticScholarClient(_EndpointsMixin):
 
     @contextlib.contextmanager
     def retry_section(self, name: str) -> Iterator[None]:
-        """Give one pipeline section an independent retry allowance.
+        """Give one pipeline section independent outage state.
 
-        Nested work with the same name inherits the section's retries and optional
-        elapsed ceiling. Cache coordination remains owned by the outer collection.
+        A request that exhausts its attempts stops the section's later uncached
+        requests without affecting other sections. Nested work with the same name
+        shares that state and the optional elapsed ceiling. Cache coordination
+        remains owned by the outer collection.
         """
         with self.candidate_operation_scope():
             previous = self._candidate_operation.state
@@ -208,7 +210,7 @@ class SemanticScholarClient(_EndpointsMixin):
     def _remaining_recovery_budget(
         state: _CandidateOperationState,
     ) -> float | None:
-        """Return remaining shared recovery seconds, or ``None`` when uncapped.
+        """Return remaining section recovery seconds, or ``None`` when uncapped.
 
         :param _CandidateOperationState state: Active collection state.
         :return float | None: Remaining seconds.
@@ -378,9 +380,7 @@ class SemanticScholarClient(_EndpointsMixin):
                     return [None] * len(payload["ids"])
         if response.status_code in {408, 429} or response.status_code >= 500:
             retry_after = retry.retry_after_seconds(response)
-            if response.status_code == 429:
-                self._advance_cooldown(retry._retry_delay(1, retry_after=retry_after))
-            elif retry_after is not None:
+            if retry_after is not None:
                 self._advance_cooldown(retry_after)
             raise _RetryableRequestError(
                 f"HTTP {response.status_code} from {url}",
@@ -418,7 +418,7 @@ class SemanticScholarClient(_EndpointsMixin):
         :param dict[str, str | int] params: Query parameters.
         :param str context: Detailed operation for diagnostics and errors.
         :param str summary: Brief operation without identifiers or offsets, shown in
-            the INFO notice for long waits.
+            INFO retry notices for requests outside a named section.
         :param PaperBatchRequest | None payload: Optional batch POST body.
         :param bool raise_on_unavailable: Raise after recovery stops.
         :param bool retry_not_found: Treat HTTP 404 as transient only during the
@@ -444,7 +444,11 @@ class SemanticScholarClient(_EndpointsMixin):
                 state,
                 operation=context,
                 attempts=0,
-                reason="section recovery allowance exhausted",
+                reason=(
+                    "section stopped after an earlier request exhausted its attempts"
+                    if state.exhausted
+                    else "section recovery time limit reached"
+                ),
             )
             self._handle_unavailable(exhausted, raise_on_unavailable)
             return None
@@ -470,7 +474,7 @@ class SemanticScholarClient(_EndpointsMixin):
                                 state,
                                 operation=context,
                                 attempts=attempt - 1,
-                                reason="shared recovery budget exhausted",
+                                reason="section recovery time limit reached",
                             )
                         timeout = max(
                             _MIN_REQUEST_TIMEOUT_SECONDS, min(timeout, remaining)
@@ -543,12 +547,12 @@ class SemanticScholarClient(_EndpointsMixin):
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
 
-            if state.retries_used >= API_CONFIG.max_retries:
+            if attempt > API_CONFIG.max_retries:
                 exhausted = self._retry_exhausted(
                     state,
                     operation=context,
                     attempts=attempt,
-                    reason="maximum section retries reached",
+                    reason="maximum request attempts reached",
                     cause=last_error,
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
@@ -560,18 +564,17 @@ class SemanticScholarClient(_EndpointsMixin):
                     state,
                     operation=context,
                     attempts=attempt,
-                    reason="shared recovery budget exhausted",
+                    reason="section recovery time limit reached",
                     cause=last_error,
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
             rate_limited = retry._is_rate_limit_error(last_error)
             delay = retry._retry_delay(
-                state.retries_used + 1,
+                attempt,
                 retry_after=getattr(last_error, "retry_after", None),
+                rate_limited=rate_limited,
             )
-            if rate_limited:
-                self._advance_cooldown(delay)
             if remaining is not None and delay > remaining:
                 exhausted = self._retry_exhausted(
                     state,
@@ -582,16 +585,18 @@ class SemanticScholarClient(_EndpointsMixin):
                 )
                 self._handle_unavailable(exhausted, raise_on_unavailable)
                 return None
-            state.retries_used += 1
-            status = "rate-limited" if rate_limited else "temporarily unavailable"
-            logger.info(
-                "Semantic Scholar is %s (%s). Retry %d/%d in %gs.",
-                status,
-                summary if state.section == "request" else state.section,
-                state.retries_used,
-                API_CONFIG.max_retries,
-                delay,
-            )
+            # Pacing-slot retries after HTTP 429 cost about a second; only real
+            # waits are worth an INFO notice.
+            if delay:
+                status = "rate-limited" if rate_limited else "temporarily unavailable"
+                logger.info(
+                    "Semantic Scholar is %s (%s). Retry %d/%d in %gs.",
+                    status,
+                    summary if state.section == "request" else state.section,
+                    attempt,
+                    API_CONFIG.max_retries,
+                    delay,
+                )
             logger.debug(
                 "Semantic Scholar request failed while %s (attempt %d/%d); "
                 "retrying in %.1fs: %s",

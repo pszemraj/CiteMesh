@@ -33,7 +33,7 @@ class _BatchResponseTooLargeError(SemanticScholarRequestError):
 
 @dataclass
 class _CandidateOperationState:
-    """Retry allowance for one API section, inside the cache operation scope."""
+    """Outage state for one API section, inside the cache operation scope."""
 
     retry_budget_seconds: float
     depth: int = 0
@@ -41,7 +41,6 @@ class _CandidateOperationState:
     reference_cache_hits: int = 0
     last_recovery_error: Exception | None = None
     section: str = "request"
-    retries_used: int = 0
     exhausted: bool = False
 
 

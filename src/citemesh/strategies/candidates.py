@@ -468,8 +468,8 @@ def _enrich_local_reference_records(
             )
             s2_records = {}
     else:
-        # A local record is already sufficient recovery. Avoid spending the shared
-        # retry budget unless the caller explicitly requested refresh.
+        # A local record is already sufficient recovery. Avoid upstream requests
+        # unless the caller explicitly requested refresh.
         s2_records = client.get_cached_papers(lookup_ids)
     for local_paper, lookup_id in local_targets:
         s2_paper = s2_records.get(normalize_paper_id(lookup_id))

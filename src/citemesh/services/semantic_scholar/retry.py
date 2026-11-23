@@ -22,15 +22,27 @@ def _retry_delay(
     attempt_number: int,
     *,
     retry_after: float | None = None,
+    rate_limited: bool = False,
 ) -> float:
-    """Compute the section's exponential backoff with a Retry-After floor.
+    """Compute the extra wait before retrying one request.
 
-    :param int attempt_number: 1-based number of the failed request.
+    Semantic Scholar rejects keyed and anonymous requests with HTTP 429 at a rate
+    that does not fall with longer waits, so a 429 without ``Retry-After`` retries
+    at the next local pacing slot. Other transient failures back off exponentially
+    from this request's own attempt number.
+
+    :param int attempt_number: 1-based attempt number of the failed request.
     :param float | None retry_after: Server-requested delay.
-    :return float: Delay before the next request attempt.
+    :param bool rate_limited: Whether the failure was HTTP 429.
+    :return float: Delay before the next request attempt, beyond local pacing.
     """
-    delay = min(
-        API_CONFIG.retry_delay * (2.0 ** (attempt_number - 1)), _MAX_BACKOFF_SECONDS
+    delay = (
+        0.0
+        if rate_limited
+        else min(
+            API_CONFIG.retry_delay * (2.0 ** (attempt_number - 1)),
+            _MAX_BACKOFF_SECONDS,
+        )
     )
     if retry_after is not None:
         delay = max(0.0, retry_after, delay)

@@ -1240,7 +1240,7 @@ def test_retry_attempt_count_status_and_nonretryable_4xx(
         client._session.get = MagicMock(return_value=_MockResponse(503))
         with pytest.raises(
             SemanticScholarUnavailableError,
-            match=r"fetching p1.*30 attempts.*maximum section retries reached.*HTTP 503",
+            match=r"fetching p1.*30 attempts.*maximum request attempts reached.*HTTP 503",
         ):
             client.get_paper("p1", raise_on_unavailable=True)
         assert client._session.get.call_count == 30
@@ -1523,7 +1523,7 @@ def test_spent_budget_blocks_network_but_cached_reads_still_work(
         client._session.get = MagicMock(side_effect=fail)
         with client.candidate_operation_scope():
             with pytest.raises(
-                SemanticScholarUnavailableError, match="budget exhausted"
+                SemanticScholarUnavailableError, match="recovery time limit reached"
             ):
                 client.get_paper("first", raise_on_unavailable=True)
             assert (
@@ -1915,7 +1915,7 @@ def test_nested_recovery_budget_excludes_healthy_work_and_resets(
             assert client._candidate_operation.state.recovery_seconds == 3.0
             with client.candidate_operation_scope():
                 with pytest.raises(
-                    SemanticScholarUnavailableError, match="budget exhausted"
+                    SemanticScholarUnavailableError, match="recovery time limit reached"
                 ):
                     client.get_paper("failed", raise_on_unavailable=True)
             with pytest.raises(SemanticScholarUnavailableError, match="0 attempts"):
@@ -2380,10 +2380,10 @@ def test_recovered_relation_metadata_preserves_complete_reference_ids(
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_sections_share_retries_only_within_their_own_work(
+def test_attempts_are_per_request_and_exhaustion_stops_only_its_section(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, status: int
 ) -> None:
-    """Successful pages stay complete, and later sections start at retry one."""
+    """Each request restarts its schedule; an exhausted section skips later work."""
     clock = _Clock()
     sleeps: list[float] = []
     monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
@@ -2398,21 +2398,21 @@ def test_sections_share_retries_only_within_their_own_work(
         client._session.get = MagicMock(
             side_effect=[_MockResponse(status)] * 3
             + [_MockResponse(200, _paper_payload("completed"))]
-            + [_MockResponse(status)] * 27
+            + [_MockResponse(status)] * 30
         )
         with client.candidate_operation_scope(), caplog.at_level(logging.INFO):
             with client.retry_section("selected metadata"):
                 assert client.get_paper("completed", raise_on_unavailable=True)
                 with client.retry_section("selected metadata"):
                     with pytest.raises(
-                        SemanticScholarUnavailableError, match="after 27 attempts"
+                        SemanticScholarUnavailableError, match="after 30 attempts"
                     ):
                         client.get_paper("failed", raise_on_unavailable=True)
                 # A completed result still comes from cache after section exhaustion.
                 assert client.get_paper("completed", raise_on_unavailable=True)
                 with pytest.raises(SemanticScholarUnavailableError, match="0 attempts"):
                     client.get_paper("skipped", raise_on_unavailable=True)
-            assert client._session.get.call_count == 31
+            assert client._session.get.call_count == 34
             client._session.get = MagicMock(
                 side_effect=[
                     _MockResponse(status),
@@ -2421,11 +2421,19 @@ def test_sections_share_retries_only_within_their_own_work(
             )
             with client.retry_section("reference hydration"):
                 assert client.get_paper("fresh", raise_on_unavailable=True)
-                assert client._candidate_operation.state.retries_used == 1
+                assert not client._candidate_operation.state.exhausted
             assert client._session.get.call_count == 2
-    assert sleeps == [4, 8, 16, 32, 64, 128, 256] + [300] * 22 + [4]
-    assert "selected metadata). Retry 29/29 in 300s." in caplog.text
-    assert "reference hydration). Retry 1/29 in 4s." in caplog.text
+    if status == 429:
+        # Rate limits retry at the next pacing slot, which this test disables.
+        assert sleeps == [0.0] * 33
+        assert "Retry" not in caplog.text
+    else:
+        backoff = [4, 8, 16, 32, 64, 128, 256] + [300] * 22
+        assert sleeps == [4, 8, 16] + backoff + [4]
+        assert "selected metadata). Retry 3/29 in 16s." in caplog.text
+        assert "selected metadata). Retry 1/29 in 4s." in caplog.text
+        assert "selected metadata). Retry 29/29 in 300s." in caplog.text
+        assert "reference hydration). Retry 1/29 in 4s." in caplog.text
 
 
 def test_section_elapsed_ceiling_resets_and_recovers_after_interrupt(
@@ -2465,7 +2473,7 @@ def test_section_elapsed_ceiling_resets_and_recovers_after_interrupt(
                 client.get_paper("interrupted", raise_on_unavailable=True)
             assert client._candidate_operation.state.section == "request"
             with client.retry_section("search"):
-                assert client._candidate_operation.state.retries_used == 0
+                assert not client._candidate_operation.state.exhausted
                 assert client._candidate_operation.state.recovery_seconds == 0
 
 
@@ -2571,17 +2579,23 @@ def test_pacing_and_shared_cooldown_apply_across_sections(
     assert starts == pytest.approx([0, 1.2, 11.2])
 
 
-def test_terminal_rate_limit_still_cools_down_the_next_section(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("retry_after", [None, "4"])
+def test_terminal_rate_limit_cools_down_the_next_section_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, retry_after: str | None
 ) -> None:
-    """Exhausting retries cannot let the next section immediately bypass a 429."""
+    """A server Retry-After outlives an exhausted section; a bare 429 does not."""
+    from dataclasses import replace
+
     clock = _Clock()
     monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
     monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
+    monkeypatch.setattr(s2.client, "API_CONFIG", replace(API_CONFIG, max_retries=0))
+    headers = {"Retry-After": retry_after} if retry_after else None
     with SemanticScholarClient(api_key="test") as client:
-        client._session.get = MagicMock(return_value=_MockResponse(429))
+        client._session.get = MagicMock(
+            return_value=_MockResponse(429, headers=headers)
+        )
         with client.retry_section("recommendations"):
-            client._candidate_operation.state.retries_used = 29
             with pytest.raises(SemanticScholarUnavailableError):
                 client.get_paper("limited", raise_on_unavailable=True)
         assert clock.now == 0
@@ -2590,7 +2604,8 @@ def test_terminal_rate_limit_still_cools_down_the_next_section(
         )
         with client.retry_section("selected metadata"):
             assert client.get_paper("fresh", raise_on_unavailable=True)
-        assert clock.now == 4
+        # Without Retry-After, only local pacing (1.2s keyed) separates the sends.
+        assert clock.now == pytest.approx(4 if retry_after else 1.2)
 
 
 def test_pacing_rechecks_cooldown_published_while_a_caller_waits(
@@ -2630,21 +2645,14 @@ def test_pacing_rechecks_cooldown_published_while_a_caller_waits(
         assert client._next_request_time == pytest.approx(11.2)
 
 
-def test_rate_limit_can_recover_on_the_thirtieth_attempt(
+def test_rate_limit_retries_at_pacing_slots_and_recovers_on_the_thirtieth_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A prolonged outage can recover on the last permitted send without real waits."""
+    """Rejections that do not fall with longer waits cost only paced resends."""
     clock = _Clock()
-    sleeps: list[float] = []
     monkeypatch.setattr(s2.client, "monotonic", clock.monotonic)
-
-    def sleep(seconds: float) -> None:
-        sleeps.append(seconds)
-        clock.sleep(seconds)
-
-    monkeypatch.setattr(s2.client.time, "sleep", sleep)
+    monkeypatch.setattr(s2.client.time, "sleep", clock.sleep)
     with SemanticScholarClient(api_key="test") as client:
-        _disable_pacing(client)
         client._session.get = MagicMock(
             side_effect=[_MockResponse(429)] * 29
             + [_MockResponse(200, _paper_payload("recovered"))]
@@ -2652,5 +2660,5 @@ def test_rate_limit_can_recover_on_the_thirtieth_attempt(
         with client.retry_section("focal references"):
             assert client.get_paper("recovered", raise_on_unavailable=True)
         assert client._session.get.call_count == 30
-    assert sleeps == [4, 8, 16, 32, 64, 128, 256] + [300] * 22
-    assert clock.now == 7108
+    # 29 keyed pacing intervals, where escalating backoff would have slept 7108s.
+    assert clock.now == pytest.approx(29 * 1.2)

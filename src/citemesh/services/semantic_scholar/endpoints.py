@@ -243,7 +243,7 @@ class _EndpointsMixin:
             ...
 
         def retry_section(self, name: str) -> AbstractContextManager[None]:
-            """Share a retry allowance across one provider section."""
+            """Share outage state across one provider section."""
             ...
 
         def _request_json(

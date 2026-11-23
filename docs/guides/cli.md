@@ -123,7 +123,7 @@ The first Semantic Scholar request reports keyed or anonymous access and local p
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
 Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
-At `info`, each scheduled Semantic Scholar retry shows the section, the retry count, the failure category, and the delay. At `debug`, responses also show the endpoint, status, elapsed time, and whether the authentication header was present. The key itself is omitted.
+At `info`, each Semantic Scholar retry that waits beyond normal pacing shows the section, the retry count, the failure category, and the delay. Immediate HTTP 429 retries appear only at `debug`. At `debug`, responses also show the endpoint, status, elapsed time, and whether the authentication header was present. The key itself is omitted.
 
 ## Option reference
 
@@ -143,12 +143,12 @@ _`--theme light` with a paper selected._
 
 Semantic Scholar request policy
 
-- **Pacing.** The client spaces authenticated requests at least 1.2 seconds apart and anonymous requests at least 2 seconds apart. HTTP 429 sets a cooldown for subsequent requests through the same client. A `Retry-After` duration or HTTP date can extend the wait beyond the local schedule.
-- **Retries.** Each section allows 29 retries after initial requests, so a persistently failing page or batch gets up to 30 attempts. Delays double from 4 seconds to a 300-second cap: 4, 8, 16, 32, 64, 128, 256, then 300 seconds for later retries. Requests within a section draw from the same retry allowance and retry only the failed page or batch. Focal metadata, focal references, focal citations, recommendations, keyword search, metadata for arXiv bibliography recovery, selected paper metadata, and reference hydration each get their own allowance.
-- **Timeouts.** HTTP connect and read timeouts default to 30 seconds; retries shorten them to the remaining recovery allowance when needed. These are not wall-clock deadlines. Transient connection failures, HTTP 408, HTTP 429, and server errors can retry. Bad parameters and rejected credentials fail immediately.
-- **Recovery time limit.** Set `--s2-retry-budget SECONDS`, for example `--s2-retry-budget 60`, to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves only the retry allowance. An in-flight request may run past the time limit.
+- **Pacing.** The client spaces authenticated requests at least 1.2 seconds apart and anonymous requests at least 2 seconds apart, within Semantic Scholar's published per-key rate. A `Retry-After` duration or HTTP date delays every later request through the same client.
+- **Retries.** Each failed page or batch gets up to 30 attempts and retries only itself. Semantic Scholar answers a large share of keyed and anonymous requests with HTTP 429 at times, and in measurements that share did not fall with waits from 1 to over 60 seconds, so a 429 without `Retry-After` retries at the next pacing slot. Server errors, HTTP 408, and connection failures back off from 4 seconds, doubling per attempt of that request to a 300-second cap. A request that exhausts its attempts stops later uncached requests in its section. Focal metadata, focal references, focal citations, recommendations, keyword search, metadata for arXiv bibliography recovery, selected paper metadata, and reference hydration are separate sections.
+- **Timeouts.** HTTP connect and read timeouts default to 30 seconds; retries shorten them to the remaining recovery time limit when one is set. These are not wall-clock deadlines. Bad parameters and rejected credentials fail immediately.
+- **Recovery time limit.** Set `--s2-retry-budget SECONDS`, for example `--s2-retry-budget 60`, to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves only the attempt limit. An in-flight request may run past the time limit.
 
-The default waits alone can total nearly two hours per section; HTTP time and longer `Retry-After` delays add to that.
+A request rejected only with HTTP 429 costs about one pacing interval per retry. Persistent server errors can wait about two hours per request before its attempts run out; set a recovery time limit to stop sooner.
 
 Common symptoms:
 

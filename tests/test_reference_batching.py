@@ -158,10 +158,12 @@ def test_reference_batch_outage_keeps_warm_and_completed_lists(
     monkeypatch.setattr(endpoints, "PAPER_BATCH_SIZE", 2)
     incomplete = _row("incomplete")
     incomplete["referenceCount"] = 2
-    client._session.post.side_effect = [
-        http_response([_row("done", "ref"), incomplete]),
-        _response(status),
-    ]
+    # The second chunk stays down until its attempts or recovery ceiling run out.
+    client._session.post.side_effect = lambda *_args, **_kwargs: (
+        http_response([_row("done", "ref"), incomplete])
+        if client._session.post.call_count == 1
+        else _response(status)
+    )
     client._persist_reference_cache_entry(
         endpoints.disk_cache._reference_cache_path("warm"), "warm", []
     )
@@ -175,10 +177,9 @@ def test_reference_batch_outage_keeps_warm_and_completed_lists(
         "warm": [],
         "done": ["ref"],
     }
-    assert _requested_batches(client._session.post) == [
-        ["done", "incomplete"],
-        ["failed"],
-    ]
+    first, *retried = _requested_batches(client._session.post)
+    assert first == ["done", "incomplete"]
+    assert retried and all(batch == ["failed"] for batch in retried)
     client._session.get.assert_not_called()
     assert client.get_cached_reference_ids("incomplete") is None
     assert client.get_cached_reference_ids("failed") is None

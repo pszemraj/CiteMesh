@@ -106,7 +106,7 @@ with SemanticScholarClient(timeout=15, retry_budget_seconds=30) as client:
 
 `get_reference_ids_batch()` returns complete lists keyed by normalized request ID in `reference_ids`. An empty list means the listing is complete and contains no usable reference IDs. Unresolved or unfinished IDs are omitted. If `unavailable` is true, the result contains the lists gathered before an outage stopped further requests. Invalid credentials raise `SemanticScholarRequestError`. Set `force_refresh=True` to skip cache reads. See [Paper metadata and reference IDs](caching.md#paper-metadata-and-reference-ids).
 
-`with client.retry_section(name):` gives grouped calls a shared retry allowance. Nested sections with the active name share the same allowance. A different name gets its own. Reference batches use `"reference hydration"`, so use that name to share the allowance across multiple batch calls.
+`with client.retry_section(name):` groups calls under shared outage state and an optional recovery time limit: after one request exhausts its attempts, later uncached requests in that section stop. Nested sections with the active name share that state. A different name gets its own. Reference batches use `"reference hydration"`, so use that name to share it across multiple batch calls.
 
 ## Before you build on this
 

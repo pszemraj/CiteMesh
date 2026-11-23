@@ -148,7 +148,9 @@ class APIConfig:
     # Timeout settings (seconds)
     default_timeout: float = 30.0
 
-    # Up to 30 attempts for failed work: initial request plus 29 section retries.
+    # Up to 30 attempts per request: the initial request plus 29 retries. HTTP 429
+    # retries at the next pacing slot; other transient failures back off from
+    # retry_delay, doubling to a 300-second cap.
     max_retries: int = 29
     retry_delay: float = 4.0
 
