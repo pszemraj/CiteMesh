@@ -10,6 +10,8 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, TypedDict
 
+from citemesh.data.cache import atomic_output_path
+
 if TYPE_CHECKING:
     from huggingface_hub import HfApi
 
@@ -189,16 +191,14 @@ def _download_files(bucket_id: str, files: Sequence[tuple[str, Path]]) -> None:
         return
     api = HfApi()
     for remote, target in files:
-        partial = target.with_name(target.name + ".incomplete")
-        partial.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(target) + ".lock"):
             if target.is_file():
                 continue
-            with _hub_errors(bucket_id):
+            with _hub_errors(bucket_id), atomic_output_path(target) as partial:
                 api.download_bucket_files(
                     bucket_id, files=[(remote, partial)], raise_on_missing_files=True
                 )
-            partial.replace(target)
 
 
 def _fetch_text(bucket_id: str, remote: str) -> str:

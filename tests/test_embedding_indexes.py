@@ -871,9 +871,9 @@ def test_concurrent_downloads_preserve_completed_artifacts(
         assert not errors
     assert calls == (["first", "second"] if first_interrupted else ["first"])
     assert (root / selected.shards[0].path).read_bytes() == payload
-    assert (
-        not (root / selected.shards[0].path).with_suffix(".parquet.incomplete").exists()
-    )
+    shard = root / selected.shards[0].path
+    # Interrupted transfers leave no temporary file beside the shard.
+    assert not list(shard.parent.glob(f".{shard.stem}.*"))
     assert validate_snapshot(root) == selected
     assert indexes.download_publication(publication) == root
     assert len(calls) == (2 if first_interrupted else 1)
