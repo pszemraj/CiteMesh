@@ -148,7 +148,7 @@ Semantic Scholar request policy
 - **Timeouts.** HTTP connect and read timeouts default to 30 seconds; retries shorten them to the remaining recovery time limit when one is set. These are not wall-clock deadlines. Bad parameters and rejected credentials fail immediately.
 - **Recovery time limit.** Set `--s2-retry-budget SECONDS`, for example `--s2-retry-budget 60`, to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves only the attempt limit. An in-flight request may run past the time limit.
 
-A request rejected only with HTTP 429 costs about one pacing interval per retry. Persistent server errors can wait about two hours per request before its attempts run out; set a recovery time limit to stop sooner.
+A request rejected only with HTTP 429 costs about one pacing interval per retry. Persistent server errors can wait about two hours per request before its attempts run out; set a recovery time limit to stop sooner. The measurements behind this policy are in [Semantic Scholar request policy](../internals/semantic-scholar-requests.md).
 
 Common symptoms:
 

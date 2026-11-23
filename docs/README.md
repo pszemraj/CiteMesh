@@ -24,4 +24,5 @@ New here: [install and build a first graph](../README.md#quick-start), then pick
 
 - [Architecture](internals/architecture.md): package boundaries, extension points, and [hosted demo maintenance](internals/architecture.md#hosted-demo)
 - [Embedding cache](internals/embedding-cache.md)
+- [Semantic Scholar request policy](internals/semantic-scholar-requests.md): pacing, retries, and the rate-limit measurements behind them
 - [Hybrid discovery status](internals/hybrid-discovery-status.md): discovery evidence and evaluation limits
