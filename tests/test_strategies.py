@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import networkx as nx
 import numpy as np
@@ -1344,19 +1344,18 @@ def test_recommendation_record_of_the_focal_merges_before_member_lookup() -> Non
 
 
 @pytest.mark.parametrize("local_takeover", [False, True])
-def test_recommendation_batches_only_needed_admitted_aliases(
+def test_recommendation_hydrates_only_admitted_papers_missing_references(
     local_takeover: bool,
 ) -> None:
-    """A later alias fills an empty lookup and inline references keep merge order."""
+    """Use merged inline lists and look up each admitted paper at most once."""
     client = MagicMock()
     client.get_paper.return_value = _focal_paper()
     recommendations = [
         replace(_paper("a"), doi="10.1000/a"),
         replace(_paper("rejected"), abstract=""),
         replace(_paper("b"), doi="10.1000/b"),
-        replace(_paper("unused-alias"), doi="10.1000/a"),
         replace(_paper("b-alias"), doi="10.1000/b"),
-        replace(_paper("inline", refs=["a-inline", "a-fetched"]), doi="10.1000/a"),
+        replace(_paper("inline", refs=["a-inline"]), doi="10.1000/a"),
         _paper("over-cap"),
     ]
     if local_takeover:
@@ -1368,10 +1367,9 @@ def test_recommendation_batches_only_needed_admitted_aliases(
             )
         )
     client.get_recommended_papers.return_value = recommendations
-    client.get_reference_ids_batch.side_effect = [
-        ReferenceBatchResult({"focal": [], "a": ["a-fetched"], "b": []}),
-        ReferenceBatchResult({"b-alias": ["b-fetched"]}),
-    ]
+    client.get_reference_ids_batch.return_value = ReferenceBatchResult(
+        {"focal": ["focal-reference"], "b": []}
+    )
 
     papers = RecommendationGraphBuilder(max_papers=3, client=client).collect_papers(
         "focal"
@@ -1379,18 +1377,15 @@ def test_recommendation_batches_only_needed_admitted_aliases(
 
     if local_takeover:
         assert set(papers) == {"focal", "local-a", "b"}
-        assert papers["local-a"].references == ["a-local", "a-fetched", "a-inline"]
+        assert set(papers["local-a"].references) == {"a-local", "a-inline"}
     else:
         assert list(papers) == ["focal", "a", "b"]
-        assert papers["a"].references == ["a-fetched", "a-inline"]
-    assert papers["b"].references == ["b-fetched"]
-    assert client.get_reference_ids_batch.call_args_list == [
-        call(
-            ["focal", "b", "a"] if local_takeover else ["focal", "a", "b"],
-            force_refresh=False,
-        ),
-        call(["b-alias"], force_refresh=False),
-    ]
+        assert papers["a"].references == ["a-inline"]
+    assert papers["focal"].references == ["focal-reference"]
+    assert papers["b"].references == []
+    client.get_reference_ids_batch.assert_called_once_with(
+        ["focal", "b"], force_refresh=False
+    )
 
 
 def test_citation_collect_preserves_focal_when_relation_reuses_focal_id() -> None:

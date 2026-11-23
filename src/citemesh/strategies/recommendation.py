@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,7 +15,6 @@ from citemesh.core import (
     DEFAULT_RELATIONSHIP_SIMILARITY_THRESHOLD,
     Paper,
 )
-from citemesh.core.paper_ids import normalize_paper_id
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
@@ -27,7 +25,6 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     fetch_candidate_source,
-    provider_lookup_identifier,
     require_available_candidate_source,
     scope_candidate_collection,
 )
@@ -112,21 +109,13 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         )
 
         recommendations = recommendation_result.papers
-        fetch_references = self.reference_hydrator.fetch_references
-        reference_progress = bool(recommendations) and fetch_references
+        reference_progress = (
+            bool(recommendations) and self.reference_hydrator.fetch_references
+        )
         if reference_progress:
             logger.info(
                 "Checking reference lists for the focal paper and its recommendations..."
             )
-        lookups: dict[str, deque[str]] = {}
-        reference_prefix_sizes: dict[str, int] = {}
-        if (
-            fetch_references
-            and not focal.references
-            and (lookup_id := provider_lookup_identifier(focal.paper_id, focal))
-        ):
-            lookups[focal.paper_id] = deque([normalize_paper_id(lookup_id)])
-
         # The pool merges records of one work, including records of the focal paper,
         # which enrich the original focal paper object so the graph keeps its focal paper node.
         pool = DiscoveryPool(focal)
@@ -138,98 +127,21 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         ):
             if not str(paper.paper_id).strip():
                 continue
-            target_id = pool.resolve(paper)
-            if target_id is None:
+            if pool.resolve(paper) is None:
                 # A new member needs text for the abstract index and a free slot.
                 if not paper.abstract or not paper.title:
                     continue
                 if len(pool.papers) + 1 >= self.max_papers:
                     continue
-            # Record aliases that the original order would try if earlier lookups
-            # proved empty. Identity matching does not depend on reference lists.
-            lookup_id = (
-                provider_lookup_identifier(paper.paper_id, paper)
-                if fetch_references
-                and target_id != focal.paper_id
-                and not paper.references
-                and (target_id is None or not pool.papers[target_id].references)
-                else None
-            )
-            # A local record taking over a work keeps its own inline references first.
-            takes_over = (
-                paper.is_local_corpus
-                and target_id is not None
-                and target_id != paper.paper_id
-                and target_id in lookups
-            )
-            prefix_size = (
-                len({value for ref in paper.references if (value := str(ref).strip())})
-                if takes_over
-                else 0
-            )
-            canonical_id = pool.add(
-                paper, source="recommendation", relation="semantic_only"
-            )
-            if canonical_id is not None:
-                if (
-                    target_id is not None
-                    and target_id != canonical_id
-                    and target_id in lookups
-                ):
-                    lookups[canonical_id] = lookups.pop(target_id)
-                    if prefix_size:
-                        reference_prefix_sizes[canonical_id] = prefix_size
-                if lookup_id is not None:
-                    aliases = lookups.setdefault(canonical_id, deque())
-                    normalized_id = normalize_paper_id(lookup_id)
-                    if normalized_id not in aliases:
-                        aliases.append(normalized_id)
+            pool.add(paper, source="recommendation", relation="semantic_only")
         papers.update(pool.papers)
-        self._hydrate_recommendation_references(papers, lookups, reference_prefix_sizes)
+        self.reference_hydrator.hydrate(papers, focal)
 
         self._abstract_index.build(papers)
         self._set_collection_summary(
             f"Collected {len(papers)} papers from recommendations"
         )
         return papers
-
-    def _hydrate_recommendation_references(
-        self,
-        papers: dict[str, Paper],
-        lookups: dict[str, deque[str]],
-        reference_prefix_sizes: dict[str, int],
-    ) -> None:
-        """Batch the next eligible lookup for each work until it has references."""
-        if not lookups:
-            return
-        seen: dict[str, list[str]] = {}
-        with self.client.retry_section("reference hydration"):
-            while lookups:
-                batch = {paper_id: ids.popleft() for paper_id, ids in lookups.items()}
-                missing = list(
-                    dict.fromkeys(x for x in batch.values() if x not in seen)
-                )
-                if missing:
-                    fetched = self.reference_hydrator.fetch_many(missing)
-                    seen.update(
-                        (lookup_id, fetched.get(lookup_id, [])) for lookup_id in missing
-                    )
-                for paper_id, lookup_id in batch.items():
-                    if references := seen[lookup_id]:
-                        paper = papers[paper_id]
-                        prefix_size = reference_prefix_sizes.get(paper_id, 0)
-                        paper.references = list(
-                            dict.fromkeys(
-                                [
-                                    *paper.references[:prefix_size],
-                                    *references,
-                                    *paper.references[prefix_size:],
-                                ]
-                            )
-                        )
-                        del lookups[paper_id]
-                    elif not lookups[paper_id]:
-                        del lookups[paper_id]
 
     def build_graph(
         self, focal_id: str, **kwargs: Unpack[GraphCollectionOptions]
