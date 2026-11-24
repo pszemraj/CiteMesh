@@ -249,6 +249,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if citation_limit > 0 and provider_focal_id is not None:
             logger.debug(f"Fetching up to {citation_limit} citations...")
             citation_result = fetch_candidate_source(
+                self.client,
                 "citations",
                 lambda: self.client.get_paper_citations(
                     provider_focal_id,
@@ -274,9 +275,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             context=f"citation acquisition for {focal.paper_id}",
         )
 
-        # Candidate discovery is required acquisition. Complete every requested
-        # source before optional reference enrichment can spend the shared S2
-        # recovery budget.
+        # Finish candidate acquisition before the optional reference enrichment.
         self.reference_hydrator.hydrate(papers, focal)
 
         reference_lists = sum(bool(paper.references) for paper in papers.values())

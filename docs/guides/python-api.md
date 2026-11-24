@@ -18,7 +18,7 @@ collect_papers(focal_id: str, **kwargs) -> dict[str, Paper]
 
 `build_graph` returns the *resolved* focal paper ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream - that is what `GraphExporter` and the layout helpers expect.
 
-When updating existing Python code, use `focal_id=` for the paper identifier and `Paper.is_focal` for the node flag. The citation and embedding builders accept previously fetched metadata through `focal_paper=`. See the [saved-file migration notes](../reference/output-artifacts.md#terminology).
+The citation and embedding builders accept previously fetched metadata through `focal_paper=`. Update older code to use `focal_id=` and `Paper.is_focal`. See the [saved-file migration notes](../reference/output-artifacts.md#terminology).
 
 ## Exporting
 
@@ -30,7 +30,7 @@ The collection-package machinery behind `out/dashboard.html` is **not** part of 
 
 ## Importing graph JSON
 
-`GraphExporter.from_json(path: Path)` reads a saved [graph JSON](../reference/output-artifacts.md#graph-json-strategyjson) into an exporter. Its `graph` attribute is the reconstructed NetworkX graph, with a `Paper` under each node's `paper` attribute and bibliographic metadata alongside it; `focal_id` identifies the focal paper. Provenance, relations to the focal paper, discovery evidence, and stored layout are restored for subsequent exports.
+`GraphExporter.from_json(path: Path)` reads a saved [graph JSON](../reference/output-artifacts.md#graph-json-strategyjson) into an exporter. Its `graph` attribute is the reconstructed NetworkX graph, with a `Paper` under each node's `paper` attribute and bibliographic metadata alongside it; `focal_id` identifies the focal paper. The exporter restores provenance, relations to the focal paper, discovery evidence, and layout. Graph JSON omits author IDs and reference lists.
 
 ```python
 from pathlib import Path
@@ -90,10 +90,26 @@ visualize_graph(
 
 `RecommendationGraphBuilder(max_papers=40, similarity_threshold=0.2)` is the lighter substitute: same two methods, no embedding model, so no `embeddings` extra and no GPU.
 
+## Semantic Scholar client
+
+Pass a `SemanticScholarClient` as `client=` to a builder or use it to fetch references directly. By default it reads `S2_API_KEY` when constructed. An explicit `api_key=` overrides the environment, and an empty string selects anonymous access. The Python API does not read `.env` files; call `dotenv.load_dotenv()` yourself if you want that.
+
+`timeout` sets the default HTTP connect and read timeouts in seconds (`30` when omitted). It does not impose a deadline on the whole request. `retry_budget_seconds` sets an optional recovery time limit per section. See the [API request policy](cli.md#troubleshooting).
+
+```python
+from citemesh.services import SemanticScholarClient
+
+with SemanticScholarClient(timeout=15, retry_budget_seconds=30) as client:
+    batch = client.get_reference_ids_batch(["arxiv:1706.03762", "arxiv:1810.04805"])
+    print(batch.reference_ids)
+```
+
+`get_reference_ids_batch()` returns complete lists keyed by normalized request ID in `reference_ids`. An empty list means the listing is complete and contains no usable reference IDs. Unresolved or unfinished IDs are omitted. If `unavailable` is true, the result contains the lists gathered before an outage stopped further requests. Invalid credentials raise `SemanticScholarRequestError`. Set `force_refresh=True` to skip cache reads. See [Paper metadata and reference IDs](caching.md#paper-metadata-and-reference-ids).
+
+`with client.retry_section(name):` groups calls under shared outage state and an optional recovery time limit: after one request exhausts its attempts, later uncached requests in that section stop. Nested sections with the active name share that state. A different name gets its own. Reference batches use `"reference hydration"`, so use that name to share it across multiple batch calls.
+
 ## Before you build on this
 
-- **Credentials.** Set `S2_API_KEY` before the first builder creates the shared API client. Saved `api.s2_api_key` values are applied by the CLI, not by direct builder construction. The [API request policy](cli.md#troubleshooting) also applies to Python calls.
-- **S2 recovery budget.** Import `SemanticScholarClient` from `citemesh.services` and pass `SemanticScholarClient(retry_budget_seconds=...)` to a builder to override its shared recovery-time allowance. It follows the CLI's [API request policy](cli.md#troubleshooting).
 - **Configuration and caches.** Builders take constructor arguments and built-in defaults; they do not load `[defaults]` from `config.toml`. They share the CLI's [cache root and namespaces](caching.md), so Python runs can reuse or extend those caches.
 - **Constructor keywords mirror CLI flags** (`max_citations=` is `--max-citations`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants - `max_papers >= 1`, `top_k >= 1` for the embedding builder, non-negative `max_citations` and `max_references` and a known `semantic_source` for the hybrid builder - and raise `ValueError`.
 - **Failures are exceptions, not empty graphs.** A total candidate-source outage raises `CandidateAcquisitionError`, semantic inference that cannot produce a complete ranking space raises `EmbeddingInferenceError`, and an unavailable explicit device raises `ValueError`.

@@ -459,6 +459,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             citer_lookup_id = provider_id
             results.append(
                 fetch_candidate_source(
+                    self.client,
                     "citations",
                     lambda: self.client.get_paper_citations(
                         citer_lookup_id,
@@ -503,6 +504,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info("Fetching paper recommendations...")
         logger.debug("Recommendation pool for %s: %s.", provider_id, pool)
         return fetch_candidate_source(
+            self.client,
             "recommendations",
             lambda: self.client.get_recommended_papers(
                 provider_id,
@@ -783,8 +785,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         focal = pool.focal
         embedding = self.embedding_builder
-        if corpus_focal:
-            embedding.enrich_cached_corpus_focal(focal)
         # Members that absorbed a provider record already carry its metadata.
         provider_backed = set(pool.provider_aliases.values())
         corpus_only = {
@@ -794,8 +794,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             and not paper.is_focal
             and paper_id not in provider_backed
         }
-        if corpus_only:
-            embedding._enrich_corpus_papers(corpus_only)
+        if corpus_focal or corpus_only:
+            embedding._enrich_corpus_papers(
+                corpus_only, focal=focal if corpus_focal else None
+            )
         if any(
             result.source == "references" and result.state is CandidateSourceState.EMPTY
             for result in results
@@ -809,6 +811,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 if "citation" in pool.sources.get(paper_id, ())
             },
             focal,
+            provider_aliases=pool.provider_aliases,
         )
 
     def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:

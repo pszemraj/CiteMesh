@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from citemesh.core import Paper
+    from citemesh.progress import RetryProgress
 
 
 class SemanticScholarUnavailableError(RuntimeError):
@@ -27,15 +28,29 @@ class _SemanticScholarResponseContractError(TypeError):
     """Raised when a successful response has an unusable shape."""
 
 
+class _BatchResponseTooLargeError(SemanticScholarRequestError):
+    """A batch must be split to fit the provider's response-size limit."""
+
+
 @dataclass
 class _CandidateOperationState:
-    """Recovery budget shared by one outer candidate collection."""
+    """Outage state and retry counts for one API section."""
 
     retry_budget_seconds: float
     depth: int = 0
     recovery_seconds: float = 0.0
     reference_cache_hits: int = 0
     last_recovery_error: Exception | None = None
+    section: str = "request"
+    exhausted: bool = False
+    rate_limited_retries: int = 0
+    other_retries: int = 0
+    retry_progress: RetryProgress | None = None
+
+    @property
+    def total_retries(self) -> int:
+        """Return the number of retries scheduled in this section."""
+        return self.rate_limited_retries + self.other_retries
 
 
 class _CandidateOperationLocal(threading.local):

@@ -23,7 +23,6 @@ from citemesh.cli import console as console_module
 from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import config as config_command_module
-from citemesh.core import API_CONFIG
 from citemesh.core.choices import (
     DEVICE_CHOICES,
     EXPORT_CHOICES,
@@ -119,7 +118,6 @@ def test_load_missing_file_returns_empty_config(tmp_path: Path) -> None:
     """
     config = load_user_config(tmp_path / "config.toml")
     assert config.defaults == {}
-    assert config.s2_api_key is None
 
 
 def test_set_get_unset_round_trip(tmp_path: Path) -> None:
@@ -181,26 +179,6 @@ def test_unset_removes_an_unknown_key_present_in_the_file(tmp_path: Path) -> Non
     assert config_path.read_text(encoding="utf-8") == '[defaults]\ntheme = "dark"\n'
     with pytest.raises(ConfigKeyError, match="Unknown config key"):
         unset_config_value("defaults.max_semantic", path=config_path)
-
-
-def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
-    """config.toml must stay owner-only on POSIX because it can hold an API key.
-
-    :param Path tmp_path: Pytest temporary directory.
-    :return None: Assertions validate persisted values and POSIX permission bits.
-    """
-    config_path = tmp_path / "config.toml"
-    set_config_value("defaults.max_papers", "25", path=config_path)
-    if os.name == "posix":
-        assert config_path.stat().st_mode & 0o7777 == 0o600
-    assert load_user_config(config_path).defaults["max_papers"] == 25
-
-    if os.name == "posix":
-        config_path.chmod(0o644)
-    set_config_value("defaults.max_papers", "30", path=config_path)
-    if os.name == "posix":
-        assert config_path.stat().st_mode & 0o7777 == 0o600
-    assert load_user_config(config_path).defaults["max_papers"] == 30
 
 
 def test_config_set_serializes_concurrent_writes(
@@ -932,7 +910,7 @@ def test_configured_corpus_cap_and_full_split_override(
         {},
         ["json"],
         {"json": Path("graph.json")},
-        API_CONFIG.anonymous_retry_budget_seconds,
+        0.0,
     )
     embedding = payload["build"]["embedding"]
     assert embedding.get("corpus_size") == expected_corpus_size
@@ -1211,7 +1189,7 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
         {},
         ["json"],
         {"json": Path("graph.json")},
-        API_CONFIG.anonymous_retry_budget_seconds,
+        0.0,
     )
     embedding = payload["build"]["embedding"]
     assert embedding["semantic_source"] == "candidates"
@@ -1514,50 +1492,130 @@ def test_configured_combined_source_is_kept_for_hybrid(flags: list[str]) -> None
 
 
 # ---------------------------------------------------------------------------
-# API key precedence
+# API key lives in the environment, not config.toml
 # ---------------------------------------------------------------------------
 
 
-def test_config_api_key_resolved_without_environment_export(
+def test_configured_client_kwargs_leave_api_key_to_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The config API key should reach the client without subprocess inheritance.
+    """The CLI builds a client only for API options and never passes a key.
 
     :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
-    :return None: Assertions validate config-key application.
+    :return None: Assertions validate the client construction arguments.
     """
-    monkeypatch.delenv("S2_API_KEY", raising=False)
-    config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    key = build_options_module._resolve_user_config_api_key(config)
-    assert key == "config-key"
-    assert "S2_API_KEY" not in os.environ
     factory = MagicMock()
     monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
-    args = argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
+    assert build_options_module._configured_client_kwargs(argparse.Namespace()) == {}
+    factory.assert_not_called()
+    args = argparse.Namespace(refresh_paper_cache=True)
     kwargs = build_options_module._configured_client_kwargs(args)
-    factory.assert_called_once_with(api_key="config-key", refresh_paper_cache=True)
+    factory.assert_called_once_with(refresh_paper_cache=True)
     assert kwargs["client"] is factory.return_value
-    assert args._s2_client is factory.return_value
-    assert "S2_API_KEY" not in os.environ
 
 
-def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicitly empty environment API key should outrank config.
+def test_leftover_api_section_is_ignored_without_echoing_the_value(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A saved ``[api]`` table is dropped with a warning that omits the secret.
 
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :return None: Assertions validate the warning and the loaded defaults.
+    """
+    secret = "secret-api-key-123456"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[defaults]\ntheme = "dark"\n[api]\ns2_api_key = "{secret}"\n',
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
+        config = load_user_config(config_path)
+    assert config.defaults == {"theme": "dark"}
+    assert "Ignoring unknown config table [api]" in caplog.text
+    assert secret not in caplog.text
+
+
+def test_config_cli_rejects_api_key_setting() -> None:
+    """``config set api.s2_api_key`` fails as an unknown key and writes nothing.
+
+    :return None: Assertions validate the usage error and the absent file.
+    """
+    secret = "secret-api-key-123456"
+    result = _run_cli(["config", "set", "api.s2_api_key", secret])
+    assert result.returncode == 2
+    assert "Unknown config key 'api.s2_api_key'" in result.stderr
+    assert secret not in result.stderr
+    assert not user_config_path().exists()
+
+
+def test_dotenv_cannot_redirect_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the S2 API key may come from the CLI's dotenv file."""
+    monkeypatch.delenv("CITEMESH_CACHE_DIR")
+    expected_path = user_config_path()
+    (tmp_path / ".env").write_text(
+        f'CITEMESH_CACHE_DIR="{(tmp_path / "other-cache").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = _run_cli(["config", "path"])
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(expected_path)
+
+
+@pytest.mark.parametrize("args", [["--help"], ["config", "path"]])
+def test_cli_ignores_non_utf8_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    args: list[str],
+) -> None:
+    """A dotenv decoding error warns without preventing the command."""
+    (tmp_path / ".env").write_bytes(b"S2_API_KEY=\xff\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert _run_cli(args).returncode == 0
+    assert "Ignoring .env file" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected"),
+    [(None, "from-dotenv"), ("from-shell", "from-shell"), ("", "")],
+)
+def test_cli_reads_s2_api_key_from_dotenv_without_overriding_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: str | None,
+    expected: str,
+) -> None:
+    """The CLI loads ``.env`` from the working directory; real variables win.
+
+    :param Path tmp_path: Pytest temporary directory used as the working directory.
     :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :param str | None preset: Value already exported, or ``None`` when unset.
+    :param str expected: Value ``S2_API_KEY`` holds after the CLI starts.
     :return None: Assertions validate environment precedence.
     """
-    monkeypatch.setenv("S2_API_KEY", "")
-    config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    assert build_options_module._resolve_user_config_api_key(config) == ""
-    assert os.environ["S2_API_KEY"] == ""
+    (tmp_path / ".env").write_text("S2_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("S2_API_KEY", "placeholder")
+    if preset is None:
+        monkeypatch.delenv("S2_API_KEY")
+    else:
+        monkeypatch.setenv("S2_API_KEY", preset)
+    assert _run_cli(["config", "path"]).returncode == 0
+    assert os.environ["S2_API_KEY"] == expected
 
 
-@pytest.mark.parametrize("source", ["environment", "config", "anonymous", "empty-env"])
+@pytest.mark.parametrize("source", ["environment", "anonymous", "empty-env"])
 @pytest.mark.parametrize(
     "level", [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
 )
-def test_s2_access_status_matches_resolved_credentials(
+def test_s2_access_status_matches_environment_credentials(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     source: str,
@@ -1566,26 +1624,15 @@ def test_s2_access_status_matches_resolved_credentials(
     """Only the first network request reports access mode, without exposing keys."""
     from citemesh.services import SemanticScholarClient
 
-    environment_key, saved_key = "private-environment-key", "private-config-key"
+    environment_key = "private-environment-key"
     monkeypatch.delenv("S2_API_KEY", raising=False)
     if source == "environment":
         monkeypatch.setenv("S2_API_KEY", environment_key)
     elif source == "empty-env":
         monkeypatch.setenv("S2_API_KEY", "")
-    config = UserConfig(
-        path=Path("unused-config.toml"),
-        s2_api_key=saved_key if source != "anonymous" else None,
-    )
-    expected_key = (
-        environment_key
-        if source == "environment"
-        else saved_key
-        if source == "config"
-        else None
-    )
+    expected_key = environment_key if source == "environment" else None
     with caplog.at_level(level):
-        key = build_options_module._resolve_user_config_api_key(config)
-        with SemanticScholarClient(api_key=key) as client:
+        with SemanticScholarClient() as client:
             assert client._session.headers.get("x-api-key") == expected_key
             expected_rate = client.requests_per_second
             assert "local pacing" not in caplog.text
@@ -1609,14 +1656,6 @@ def test_s2_access_status_matches_resolved_credentials(
         else []
     )
     assert environment_key not in caplog.text
-    assert saved_key not in caplog.text
-    if level == logging.DEBUG:
-        if source == "environment":
-            assert "Using S2_API_KEY from the environment." in caplog.text
-        elif source == "config":
-            assert "Using api.s2_api_key from unused-config.toml." in caplog.text
-        elif source == "empty-env":
-            assert "S2_API_KEY is empty" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1653,22 +1692,6 @@ def test_config_cli_round_trip() -> None:
     assert get_after_unset.returncode == 1
 
 
-def test_config_cli_masks_api_key_in_list() -> None:
-    """Config listing should mask API keys while direct get remains scriptable.
-
-    :return None: Assertions validate secret display behavior.
-    """
-    secret = "secret-api-key-123456"
-    assert _run_cli(["config", "set", "api.s2_api_key", secret]).returncode == 0
-    list_result = _run_cli(["config", "list"])
-    assert list_result.returncode == 0
-    assert secret not in list_result.stdout
-    assert "****" in list_result.stdout
-    # `get` still returns the full value for scripting.
-    get_result = _run_cli(["config", "get", "api.s2_api_key"])
-    assert get_result.stdout.strip() == secret
-
-
 @pytest.mark.parametrize("width", [40, 60, 80, 120])
 def test_config_listing_preserves_full_keys_and_literal_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, width: int
@@ -1684,8 +1707,6 @@ def test_config_listing_preserves_full_keys_and_literal_values(
     }
     for key, value in values.items():
         set_config_value(f"defaults.{key}", value, path=path)
-    secret = "secret-api-key-123456"
-    set_config_value("api.s2_api_key", secret, path=path)
     monkeypatch.setattr(config_command_module, "user_config_path", lambda: path)
     monkeypatch.setattr(
         config_command_module, "load_user_config", lambda: load_user_config(path)
@@ -1702,8 +1723,6 @@ def test_config_listing_preserves_full_keys_and_literal_values(
     unwrapped = "".join(output.split())
     assert result == 0
     assert "Saved settings" in output
-    assert secret not in output
-    assert "****3456" in output
     assert "…" not in output
     for key, value in values.items():
         assert f"defaults.{key}" in unwrapped

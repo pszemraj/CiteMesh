@@ -113,7 +113,7 @@ def _parse_year(paper: DatasetRecord) -> int | None:
     if isinstance(year, (int, float, str)) and year:
         try:
             return int(year)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
 
     raw_id = _dataset_record_raw_paper_id(paper)

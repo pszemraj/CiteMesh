@@ -9,6 +9,7 @@ attempt plus its eager-restore recovery path.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from types import ModuleType
@@ -1099,6 +1100,9 @@ class _ModelRuntimeMixin(_EmbeddingBuilderHostBase):
             return
 
         try:
+            if self.device == "cuda":
+                # Preserve Triton 3.9's fusion default unless explicitly overridden.
+                os.environ.setdefault("TRITON_DEFAULT_FP_FUSION", "1")
             compile_kwargs: _TorchCompileOptions = (
                 {"dynamic": True} if self.device in {"cuda", "cpu"} else {}
             )

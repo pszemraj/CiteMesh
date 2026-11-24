@@ -283,3 +283,17 @@ def test_extract_dataset_paper_metadata_falls_back_for_empty_rows() -> None:
     """
     with pytest.raises(ValueError, match="Dataset row 7 has no paper identifier"):
         _extract_dataset_paper_metadata({"title": "   "}, 7)
+
+
+@pytest.mark.parametrize("year", [float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    ("paper_id", "expected"), [("2101.00001", 2021), ("source-paper", None)]
+)
+def test_infinite_year_uses_identifier_fallback(
+    year: float, paper_id: str, expected: int | None
+) -> None:
+    """Nonfinite year metadata follows the same fallback as other invalid values."""
+    metadata = _extract_dataset_paper_metadata(
+        {"id": paper_id, "title": "A paper", "year": year}, 0
+    )
+    assert metadata["year"] == expected

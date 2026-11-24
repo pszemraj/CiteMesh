@@ -92,6 +92,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         logger.info("Collecting recommendations...")
         logger.debug("Recommendation focal paper: %s", focal.paper_id)
         recommendation_result = fetch_candidate_source(
+            self.client,
             "recommendations",
             lambda: self.client.get_recommended_papers(
                 focal.paper_id,
@@ -107,8 +108,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             context=f"recommendation acquisition for {focal.paper_id}",
         )
 
-        # Discovery is the primary acquisition path. Do it before optionally
-        # enriching the focal paper, whose retries share the S2 recovery budget.
         recommendations = recommendation_result.papers
         reference_progress = (
             bool(recommendations) and self.reference_hydrator.fetch_references
@@ -117,8 +116,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             logger.info(
                 "Checking reference lists for the focal paper and its recommendations..."
             )
-        self.reference_hydrator.ensure(focal)
-
         # The pool merges records of one work, including records of the focal paper,
         # which enrich the original focal paper object so the graph keeps its focal paper node.
         pool = DiscoveryPool(focal)
@@ -130,18 +127,17 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         ):
             if not str(paper.paper_id).strip():
                 continue
-            target_id = pool.resolve(paper)
-            if target_id is None:
+            if pool.resolve(paper) is None:
                 # A new member needs text for the abstract index and a free slot.
                 if not paper.abstract or not paper.title:
                     continue
                 if len(pool.papers) + 1 >= self.max_papers:
                     continue
-                self.reference_hydrator.ensure(paper)
-            elif target_id != focal.paper_id and not pool.papers[target_id].references:
-                self.reference_hydrator.ensure(paper)
             pool.add(paper, source="recommendation", relation="semantic_only")
         papers.update(pool.papers)
+        self.reference_hydrator.hydrate(
+            pool.papers, focal, provider_aliases=pool.provider_aliases
+        )
 
         self._abstract_index.build(papers)
         self._set_collection_summary(

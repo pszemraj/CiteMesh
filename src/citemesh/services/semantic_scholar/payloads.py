@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import numbers
-from collections.abc import Mapping
 from typing import TypedDict
 
 from citemesh.core import Author, Paper
@@ -20,6 +19,7 @@ from citemesh.core.paper_fields import (
 )
 from citemesh.core.paper_ids import (
     arxiv_identifier_from_doi,
+    canonicalize_or_none,
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
 )
@@ -171,6 +171,40 @@ def _extract_reference_ids(raw_references: object) -> list[str]:
     return _coerce_cached_reference_ids(raw_references) or []
 
 
+def _complete_batch_reference_ids(record: JSONValue) -> list[str] | None:
+    """Return resolved IDs only when the batch includes the complete reference list."""
+    if not isinstance(record, dict):
+        return None
+    paper_id = record.get("paperId")
+    count = record.get("referenceCount")
+    references = record.get("references")
+    if (
+        not isinstance(paper_id, str)
+        or not paper_id.strip()
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or not isinstance(references, list)
+        or len(references) != count
+    ):
+        return None
+
+    # Count relation rows before removing unresolved IDs and duplicates.
+    reference_ids: dict[str, None] = {}
+    for row in references:
+        if not isinstance(row, dict) or "paperId" not in row:
+            return None
+        raw_id = row["paperId"]
+        if raw_id is None:
+            continue
+        if (
+            not isinstance(raw_id, str)
+            or (ref_id := canonicalize_or_none(raw_id)) is None
+        ):
+            return None
+        reference_ids[ref_id] = None
+    return list(reference_ids)
+
+
 def _validate_integer_limit(
     limit: int,
     field_name: str,
@@ -222,20 +256,6 @@ def _normalize_external_id(raw_value: object) -> str:
     return raw_value.strip()
 
 
-def _extract_external_ids_from_mapping(
-    mapping: Mapping[object, object],
-) -> tuple[str, str]:
-    """Extract arXiv and DOI IDs from external-id style mappings.
-
-    :param Mapping[object, object] mapping: External IDs map.
-    :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
-    """
-    normalized = {str(key).lower(): value for key, value in mapping.items()}
-    arxiv_id = _normalize_external_id(normalized.get("arxiv"))
-    doi = _normalize_external_id(normalized.get("doi"))
-    return arxiv_id, doi
-
-
 def _extract_external_ids(external_ids: object) -> tuple[str, str]:
     """Extract arXiv and DOI values from raw external-id payloads.
 
@@ -243,8 +263,10 @@ def _extract_external_ids(external_ids: object) -> tuple[str, str]:
     :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
     """
     if isinstance(external_ids, dict):
-        mapping: Mapping[object, object] = external_ids
-        return _extract_external_ids_from_mapping(mapping)
+        normalized = {str(key).lower(): value for key, value in external_ids.items()}
+        arxiv_id = _normalize_external_id(normalized.get("arxiv"))
+        doi = _normalize_external_id(normalized.get("doi"))
+        return arxiv_id, doi
     return "", ""
 
 

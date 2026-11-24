@@ -10,7 +10,7 @@ Two independent fixture evaluations used full primary-source arXiv abstracts, wi
 
 Validation has 10 different papers from object detection, semantic segmentation, speech recognition, and policy optimization: 8 positives and 37 negatives. Nine detection-versus-segmentation pairs are its nearest negative boundary. Labels describe the same core research problem or an explicit core methodological continuation, rather than requiring identical methods.
 
-Both evaluations use `unsloth/embeddinggemma-300m`, the shipped graph-similarity formatter, CPU inference with four threads, automatic checkpoint dtype selection, verified BF16 autocast, and normalized FP32 outputs. Frozen texts, source links, and labels live in `tests/_semantic_abstracts.py`; measured outputs stay outside the repository. The slow suite recomputes the development selection and checks edge decisions through both embedding and hybrid scorers. Equal years and citation counts isolate the semantic gate from demographic weights.
+Both evaluations used `unsloth/embeddinggemma-300m`, the graph-similarity formatter, CPU inference with four threads, automatic checkpoint dtype selection, verified BF16 autocast, and normalized FP32 outputs. The [fixtures](../../tests/_semantic_abstracts.py) contain the frozen texts, source links, and labels. The [slow tests](../../tests/test_semantic_quality.py) recompute the development selection and check edge decisions through both embedding and hybrid scorers. Equal years and citation counts isolate the semantic gate.
 
 | Set | Threshold | Related retained | Unrelated admitted | Precision | Recall | F1 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -23,7 +23,7 @@ Both evaluations use `unsloth/embeddinggemma-300m`, the shipped graph-similarity
 
 The higher threshold favors precision: combined false edges drop from five to one, at the cost of one additional missed related pair. Validation F1 slightly decreases; 0.74 is a development-selected precision tradeoff, not a universal optimum. In validation, RetinaNet/YOLO (0.7392) becomes a false negative and Faster R-CNN/FCN (0.7445) remains a false positive under these labels. Transformer/BERT (0.7146) remains below the gate. Lowering the threshold to 0.71 recovers it but admits additional unrelated edges. Shared references can still qualify pairs independently in hybrid graphs.
 
-These small, manually labeled fixtures are regressions rather than a representative benchmark of scientific relevance. They do not calibrate other checkpoints or dimensions. Set `--min-semantic-similarity` or [`defaults.min_semantic_similarity`](../guides/configuration.md#supported-keys) after evaluating the intended representation and discovery tradeoff.
+These small, manually labeled fixtures are regressions rather than a representative benchmark of scientific relevance. They do not calibrate other checkpoints or dimensions. Set `--min-semantic-similarity` or [`defaults.min_semantic_similarity`](config/config_reference.toml) after evaluating the intended representation and discovery tradeoff.
 
 With the designated model cached locally:
 
@@ -124,15 +124,15 @@ The decision favors retention of the full model's retrieval behavior over the lo
 
 ### Decision
 
-Retrieval documents keep both the title and the abstract, in EmbeddingGemma's two document fields (`title: T | text: A`), and the focal paper's retrieval query keeps `T. A`. Dropping the title did not raise precision and lost important papers at the top of the list. Encoding the title alone, or giving the title its own vector, was worse throughout and would also double encoding cost.
+Retrieval keeps both title and abstract in the [query and document prompts](embedding-runtime.md#task-specific-vector-spaces). Dropping the title returned fewer important papers in the first ten. Title-only retrieval returned fewer useful papers. Combining separate title and abstract encodings returned fewer useful papers and requires two encodes per paper.
 
 ### Method
 
-Sixteen machine-learning focal papers from 2021 to 2026 were replayed offline through the shipped hybrid ranking. Each pool held the focal paper's references, citers, and 200 recommendations, plus its 180 nearest corpus papers in the query role and in the document role, ranked by reciprocal rank fusion and cut at 44 papers. Every candidate and the focal paper were re-encoded under each variant from rehuman-normalized text: corpus papers from their arXiv text, the rest from their Semantic Scholar text. Grades are a blind Claude Sonnet judge's relevance labels from title and abstract: useful is 1 or 2, important is 2, tangent is 0. Papers that no earlier arm had surfaced stay ungraded and count only in the denominator.
+The offline replay used sixteen machine-learning focal papers from 2021 to 2026 and the earlier four-list hybrid ranker (`rrf_dd2_direct_rec`). Each pool held references, citers, up to 200 recommendations, and up to 180 corpus neighbors per focal embedding role. The replay retained 44 papers per focal paper. Each variant re-encoded candidates as documents and the focal paper as both query and document, using normalized arXiv text for corpus rows and Semantic Scholar text for other candidates. A blind Claude Sonnet judge graded titles and abstracts. Useful is 1 or 2, important is 2, and tangent is 0. Ungraded papers count only in the denominator.
 
 - **TA**: title and abstract, as shipped.
 - **A**: abstract only (`title: none | text: A`); papers without an abstract keep their TA text.
-- **T**: title only (`title: T | text:`, as a paper without an abstract is encoded).
+- **T**: title only (`title: T | text:`); papers without a title keep their TA text.
 - **SUM**: one stored vector, the normalized sum of the T and A vectors, at two encodes per paper.
 - **PAIR**: two stored vectors per paper; a pair scores the mean of its title-title and abstract-abstract cosines.
 
@@ -149,6 +149,7 @@ Shares of the returned list over all 16 focal papers (160 slots at k = 10, 320 a
 | A | 20 | 79.4% | 45.6% | 18.4% | 2.2% |
 | A | 44 | 65.8% | 32.2% | 25.4% | 8.8% |
 | T | 10 | 63.1% | 37.5% | 18.1% | 18.8% |
+| T | 20 | 53.8% | 26.2% | 18.4% | 27.8% |
 | T | 44 | 41.6% | 19.6% | 16.9% | 41.5% |
 | SUM | 10 | 83.8% | 52.5% | 15.0% | 1.2% |
 | SUM | 20 | 74.4% | 41.6% | 21.6% | 4.1% |
@@ -157,13 +158,13 @@ Shares of the returned list over all 16 focal papers (160 slots at k = 10, 320 a
 | PAIR | 20 | 76.9% | 43.8% | 19.7% | 3.4% |
 | PAIR | 44 | 61.5% | 31.0% | 24.6% | 13.9% |
 
-Per focal paper, TA and A tie on useful and tangent papers at k = 10 (TA ahead on 3 focal papers, behind on 4) and at k = 20, but TA has more important papers in its top 10 on 10 focal papers and fewer on 3 (sign test p = 0.09). TA has more useful papers than SUM in its top 20 on 10 focal papers and fewer on none (p = 0.002), more than PAIR in its top 10 on 7 focal papers and fewer on 1 (p = 0.07), and more than T in its top 10 on 15 of 16 focal papers, tying on the other.
+TA and A returned similar numbers of useful and tangent papers at k = 10 and k = 20. At k = 10, TA returned more useful papers for 3 focal papers and fewer for 4. TA returned more important papers in its top ten for 10 focal papers and fewer for 3 (sign test p = 0.09). For useful papers, TA beat SUM at k = 20 on 10 focal papers and lost on none (p = 0.002), beat PAIR at k = 10 on 7 and lost on 1 (p = 0.07), and beat T at k = 10 on 15 of 16, tying on the other.
 
 The same replay with the stored pre-normalization vectors scores 86.9% useful, 60.0% important and 13.1% tangent at k = 10, and 70.7% useful and 29.3% tangent at k = 44 with nothing ungraded, so normalization matches the old text at the top and returns 3 points fewer tangents over the full list.
 
 ### Limits
 
 - Each variant re-selected its corpus neighbours from each focal paper's wide candidate table (2,260 to 20,093 corpus papers per focal paper: the TA neighbourhoods of the focal paper, its references, and its citers), not from the whole index, so a variant could not retrieve a paper TA never reached.
-- At k = 44, A leaves 8.8% of its list ungraded. If every one of those papers were useful, A would reach 74.6% against TA's 72.2-73.8%, so the most A can achieve on the full list is a tie.
+- At k = 44, A leaves 8.8% of its list ungraded. Counting all of those papers as useful raises A to at most 74.6%, compared with TA's 72.2% to 73.8%. The ungraded papers leave the full-list ordering uncertain.
 - The judge reads only titles and abstracts, which may favour semantically retrieved papers over structurally relevant ones.
 - Graph edges were not compared: the symmetric similarity role keeps `T. A`, and the 0.74 threshold above was calibrated on that text.

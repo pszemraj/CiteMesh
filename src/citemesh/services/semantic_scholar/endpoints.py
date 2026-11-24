@@ -21,7 +21,7 @@ from typing import (
 from urllib.parse import quote
 
 from citemesh.core import Paper
-from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import canonicalize_or_none, normalize_paper_id
 from citemesh.data.cache import JSONValue
 from citemesh.progress import progress_task
 
@@ -29,6 +29,7 @@ from . import disk_cache, payloads
 from .errors import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
+    _BatchResponseTooLargeError,
     _SemanticScholarResponseContractError,
 )
 from .payloads import RecommendationResponse, RelationPage, SearchResponse
@@ -58,6 +59,14 @@ class _RelationListing(NamedTuple):
     records: dict[str, object]
     complete: bool
     papers: list[Paper]
+
+
+@dataclass(frozen=True)
+class ReferenceBatchResult:
+    """Complete results by normalized request ID, with provider outage status."""
+
+    reference_ids: dict[str, list[str]]
+    unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -231,6 +240,10 @@ class _EndpointsMixin:
 
         def candidate_operation_scope(self) -> AbstractContextManager[None]:
             """Scope supplied by the client that hosts this mixin."""
+            ...
+
+        def retry_section(self, name: str) -> AbstractContextManager[None]:
+            """Share outage state across one provider section."""
             ...
 
         def _request_json(
@@ -546,11 +559,13 @@ class _EndpointsMixin:
                     raw_id = payloads._payload_get(paper, "paperId")
                     if raw_id is None:
                         continue
-                    if not isinstance(raw_id, str) or not raw_id.strip():
+                    if (
+                        not isinstance(raw_id, str)
+                        or (normalized_id := canonicalize_or_none(raw_id)) is None
+                    ):
                         raise _SemanticScholarResponseContractError(
                             f"Semantic Scholar returned invalid {relation} paper ID."
                         )
-                    normalized_id = normalize_paper_id(raw_id)
                     if reference_evidence is not None and (
                         evidence := _reference_evidence(row)
                     ):
@@ -723,12 +738,22 @@ class _EndpointsMixin:
         :return list[str]: Ordered unique reference identifiers.
         """
         normalized_id = normalize_paper_id(paper_id)
-        cache_path = disk_cache._reference_cache_path(normalized_id)
         if not force_refresh:
             cached = self.get_cached_reference_ids(normalized_id)
             if cached is not None:
                 self._candidate_operation.state.reference_cache_hits += 1
                 return cached
+        return (
+            self._fetch_reference_ids(
+                normalized_id, raise_on_unavailable=raise_on_unavailable
+            )
+            or []
+        )
+
+    def _fetch_reference_ids(
+        self, normalized_id: str, *, raise_on_unavailable: bool
+    ) -> list[str] | None:
+        """Fetch and store a complete paginated listing, distinguishing a miss."""
         listing = self._relation_records(
             normalized_id,
             relation="references",
@@ -738,10 +763,113 @@ class _EndpointsMixin:
             raise_on_unavailable=raise_on_unavailable,
         )
         if listing is None:
-            return []
+            return None
         references = list(listing.records)
-        self._persist_reference_cache_entry(cache_path, normalized_id, references)
+        self._persist_reference_cache_entry(
+            disk_cache._reference_cache_path(normalized_id), normalized_id, references
+        )
         return references
+
+    @_scoped_endpoint
+    def get_reference_ids_batch(
+        self, paper_ids: Sequence[str], *, force_refresh: bool = False
+    ) -> ReferenceBatchResult:
+        """Reuse cached lists and batch-fetch uncached reference IDs.
+
+        Returns all completed lists, including authoritative empty lists. Missing
+        papers are omitted and left uncached. An outage ends upstream hydration
+        while preserving completed results.
+        """
+        normalized_ids = list(dict.fromkeys(map(normalize_paper_id, paper_ids)))
+        reference_ids: dict[str, list[str]] = {}
+        if not force_refresh:
+            for paper_id in normalized_ids:
+                if (cached := self.get_cached_reference_ids(paper_id)) is not None:
+                    reference_ids[paper_id] = cached
+            self._candidate_operation.state.reference_cache_hits += len(reference_ids)
+        missing = [
+            paper_id for paper_id in normalized_ids if paper_id not in reference_ids
+        ]
+        if not missing:
+            return ReferenceBatchResult(reference_ids)
+
+        fallback_ids: list[str] = []
+        with (
+            self.retry_section("reference hydration"),
+            progress_task(
+                total=len(missing),
+                description="Hydrating reference lists",
+                unit="papers",
+            ) as progress,
+        ):
+            try:
+                for offset in range(0, len(missing), PAPER_BATCH_SIZE):
+                    batch_ids = missing[offset : offset + PAPER_BATCH_SIZE]
+                    previous_fallback_count = len(fallback_ids)
+                    self._fill_reference_batch(batch_ids, reference_ids, fallback_ids)
+                    progress.update(
+                        len(batch_ids) - (len(fallback_ids) - previous_fallback_count)
+                    )
+                for paper_id in fallback_ids:
+                    refs = self._fetch_reference_ids(
+                        paper_id, raise_on_unavailable=True
+                    )
+                    if refs is not None:
+                        reference_ids[paper_id] = refs
+                    progress.update(1)
+            except SemanticScholarUnavailableError as exc:
+                logger.warning(
+                    "Reference hydration unavailable; continuing with available "
+                    "reference data. %s",
+                    exc,
+                )
+                return ReferenceBatchResult(reference_ids, unavailable=True)
+        return ReferenceBatchResult(reference_ids)
+
+    def _fill_reference_batch(
+        self,
+        batch_ids: list[str],
+        reference_ids: dict[str, list[str]],
+        fallback_ids: list[str],
+    ) -> None:
+        """Apply complete rows and queue only incomplete rows for pagination."""
+        try:
+            response = self._request_json(
+                f"{PAPER_BASE_URL}/batch",
+                {"fields": "referenceCount,references.paperId"},
+                context=f"batch fetching {len(batch_ids)} reference lists",
+                summary="fetching reference lists",
+                payload={"ids": batch_ids},
+                raise_on_unavailable=True,
+                retry_not_found=True,
+            )
+        except _BatchResponseTooLargeError:
+            if len(batch_ids) == 1:
+                fallback_ids.extend(batch_ids)
+            else:
+                midpoint = len(batch_ids) // 2
+                self._fill_reference_batch(
+                    batch_ids[:midpoint], reference_ids, fallback_ids
+                )
+                self._fill_reference_batch(
+                    batch_ids[midpoint:], reference_ids, fallback_ids
+                )
+            return
+        if not isinstance(response, list) or len(response) != len(batch_ids):
+            raise _SemanticScholarResponseContractError(
+                "Semantic Scholar batch response must contain one row per requested ID."
+            )
+        for paper_id, record in zip(batch_ids, response, strict=True):
+            if record is None:
+                continue
+            refs = payloads._complete_batch_reference_ids(record)
+            if refs is None:
+                fallback_ids.append(paper_id)
+                continue
+            reference_ids[paper_id] = refs
+            self._persist_reference_cache_entry(
+                disk_cache._reference_cache_path(paper_id), paper_id, refs
+            )
 
     @staticmethod
     def _resolve_paper_fields(fields: list[str] | None) -> tuple[list[str], bool]:

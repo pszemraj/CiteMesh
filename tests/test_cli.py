@@ -59,7 +59,7 @@ from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import config as config_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
-from citemesh.core import API_CONFIG, Author, Paper
+from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, get_cache_dir
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
@@ -1257,7 +1257,6 @@ def test_s2_search_forwards_result_count_and_retry_budget(
 
     assert result.returncode == 0
     client_factory.assert_called_once_with(
-        api_key=None,
         refresh_paper_cache=False,
         retry_budget_seconds=37.5,
     )
@@ -5144,7 +5143,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
 
     citation_config = payload["build"]["citation"]
@@ -5407,14 +5406,10 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.setattr(
             build_options_module, "SemanticScholarClient", client_factory
         )
-        monkeypatch.setenv("S2_API_KEY", "configured-key")
         result = run_cli_command([*argv, "--refresh-paper-cache"])
         assert result.returncode == 0, result.stderr
-        client_factory.assert_called_once_with(
-            api_key="configured-key", refresh_paper_cache=True
-        )
+        client_factory.assert_called_once_with(refresh_paper_cache=True)
         assert captured == {**expected_kwargs, "client": client_factory.return_value}
-        monkeypatch.delenv("S2_API_KEY")
 
 
 @pytest.mark.parametrize(
@@ -5444,7 +5439,6 @@ def test_build_s2_retry_budget_routes_explicit_override(
     configured = build_options_module._configured_client_kwargs(args)
 
     factory.assert_called_once_with(
-        api_key=None,
         refresh_paper_cache=False,
         retry_budget_seconds=expected,
     )
@@ -5466,21 +5460,19 @@ def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("token", "api_key", "selected_client_budget"),
+    ("token", "selected_client_budget"),
     [
-        (None, None, API_CONFIG.anonymous_retry_budget_seconds),
-        (None, "configured-key", 0.0),
-        ("0", None, 0.0),
-        ("37.5", "configured-key", 12.5),
+        (None, 0.0),
+        ("0", 0.0),
+        ("37.5", 12.5),
     ],
 )
 def test_graph_config_payload_records_effective_s2_retry_budget(
-    token: str | None, api_key: str | None, selected_client_budget: float
+    token: str | None, selected_client_budget: float
 ) -> None:
     """Graph sidecars should retain the selected client's S2 recovery budget.
 
     :param str | None token: Optional explicit CLI budget token.
-    :param str | None api_key: Resolved key presence used for the default policy.
     :param float selected_client_budget: Effective budget from the selected client.
     :return None: Checks the sidecar does not recalculate client policy.
     """
@@ -5489,7 +5481,6 @@ def test_graph_config_payload_records_effective_s2_retry_budget(
     if token is not None:
         argv.extend(["--s2-retry-budget", token])
     cli_args = build_parser.parse_args(argv)
-    cli_args._s2_api_key = api_key
 
     payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
@@ -5554,9 +5545,7 @@ def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
         assert (
             selected_client.retry_budget_seconds == payload["build"]["s2_retry_budget"]
         )
-        assert payload["build"]["s2_retry_budget"] == (
-            API_CONFIG.anonymous_retry_budget_seconds
-        )
+        assert payload["build"]["s2_retry_budget"] == (0.0)
     finally:
         s2.reset_client()
         if keyed_client is not None:
@@ -6116,7 +6105,7 @@ def test_graph_config_payload_records_device() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
 
     assert payload["schema_version"] == 2
@@ -6157,7 +6146,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     replay = sidecar["build"]["embedding"]
     assert replay["model"] == active_model
@@ -6200,7 +6189,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": selector_metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     assert selector_metadata["effective_model_revision"] == resolved_revision
     assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
@@ -6233,7 +6222,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
             metadata={"strategy": "embedding", "embedding": corpus_metadata},
             selected_formats=["json"],
             output_paths={"json": Path("out/embedding.json")},
-            s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+            s2_retry_budget=0.0,
         )
         replay = corpus_sidecar["build"]["embedding"]
         assert corpus_metadata["installed_corpus_selection"] == selection
@@ -6304,7 +6293,7 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
@@ -6319,6 +6308,6 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
-        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
+        s2_retry_budget=0.0,
     )
     assert "dataset_source" not in candidate_payload["build"]["embedding"]

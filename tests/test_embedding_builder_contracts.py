@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing as mp
+import os
 import sqlite3
 import sys
 import threading
@@ -40,6 +41,7 @@ from citemesh.services.semantic_scholar import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
 )
+from citemesh.services.semantic_scholar.endpoints import ReferenceBatchResult
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
@@ -675,7 +677,13 @@ def _install_fake_torch(
     compile_calls: list[dict[str, object]] = []
 
     def _compile(model: object, **kwargs: object) -> object:
-        compile_calls.append({"model": model, "kwargs": dict(kwargs)})
+        compile_calls.append(
+            {
+                "model": model,
+                "kwargs": dict(kwargs),
+                "fp_fusion": os.environ.get("TRITON_DEFAULT_FP_FUSION"),
+            }
+        )
         if compile_behavior == "raise":
             raise RuntimeError("compile failure")
         if compile_behavior == "tagged":
@@ -5851,18 +5859,28 @@ def _assert_encoded_corpus_records(
     )
 
 
-def test_complete_capped_cache_extends_to_larger_corpus_size(
+@pytest.mark.parametrize(
+    ("corpus_size", "expected_token", "expected_reconciliation"),
+    [(2, "newest:2", (2, 2)), (None, "all", None)],
+)
+def test_complete_capped_cache_extends_to_larger_corpus(
     monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int | None,
+    expected_token: str,
+    expected_reconciliation: tuple[int, int] | None,
 ) -> None:
-    """Raising --corpus-size must top the cache up instead of re-encoding it.
+    """A larger cap or --all-corpus extends the cache without re-encoding it.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param int | None corpus_size: New cap or the full source split.
+    :param str expected_token: Recorded hydration target after extension.
+    :param tuple[int, int] | None expected_reconciliation: Recorded source/cache counts.
     :return None: Asserts reuse of cached vectors and the new recorded corpus size.
     """
     source = "fixture/source"
     builder, clear_cache_mock, model = _complete_corpus_cache_builder(
         monkeypatch,
-        corpus_size=2,
+        corpus_size=corpus_size,
         cached_corpus_size=1,
         cached_ids=("2601.00001",),
     )
@@ -5884,9 +5902,9 @@ def test_complete_capped_cache_extends_to_larger_corpus_size(
     builder._ensure_cache_hydrated(use_streaming=False)
 
     assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
-    assert cache.payload_stats().hydration_corpus_size == "newest:2"
-    assert cache.is_hydrated("train", 2, dataset_source=source)
-    assert cache.get_hydration_rowcount_reconciliation() == (2, 2)
+    assert cache.payload_stats().hydration_corpus_size == expected_token
+    assert cache.is_hydrated("train", corpus_size, dataset_source=source)
+    assert cache.get_hydration_rowcount_reconciliation() == expected_reconciliation
     _assert_encoded_corpus_records(builder, model, records[1:])
     builder._ensure_cache_hydrated(use_streaming=False)
     load.assert_called_once()
@@ -6263,46 +6281,6 @@ def test_ordinary_newest_view_preserves_hydrated_source_ties(
     assert cache.corpus_state() == {}
     model.encode.assert_not_called()
     clear.assert_not_called()
-
-
-def test_complete_capped_cache_extends_to_all_corpus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--all-corpus over a capped cache must extend it rather than clear it.
-
-    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :return None: Asserts the capped rows survive and the token becomes ``all``.
-    """
-    source = "fixture/source"
-    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
-        monkeypatch,
-        corpus_size=None,
-        cached_corpus_size=1,
-        cached_ids=("2601.00001",),
-    )
-    cache = builder.embedding_cache
-    records = [
-        {"id": "2601.00001", "title": "First", "abstract": "A"},
-        {"id": "2601.00002", "title": "Second", "abstract": "A"},
-    ]
-    monkeypatch.setattr(
-        builder, "_resolve_dataset_split_row_count", lambda _source, *, revision: 2
-    )
-    monkeypatch.setattr(
-        deps_module,
-        "_import_datasets_module",
-        lambda: types.SimpleNamespace(
-            load_dataset=lambda *args, **kwargs: iter(records)
-        ),
-    )
-
-    builder._ensure_cache_hydrated(use_streaming=False)
-
-    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
-    assert cache.payload_stats().hydration_corpus_size == "all"
-    assert cache.is_hydrated("train", None, dataset_source=source)
-    _assert_encoded_corpus_records(builder, model, records[1:])
-    clear_cache_mock.assert_not_called()
 
 
 @pytest.mark.parametrize("new_id", ["2602.00003", "2601.00002"])
@@ -9367,7 +9345,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
         hybrid_client = MagicMock()
         for provider_method in (
             "get_paper",
-            "get_reference_ids",
+            "get_reference_ids_batch",
             "get_paper_references",
             "get_paper_citations",
         ):
@@ -9421,7 +9399,7 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     active_embedding_builder.client.get_paper.assert_not_called()
     if strategy == "hybrid":
         assert build_builder.paper_sources == {focal_id: "semantic"}
-        build_builder.client.get_reference_ids.assert_not_called()
+        build_builder.client.get_reference_ids_batch.assert_not_called()
         build_builder.client.get_paper_references.assert_not_called()
         build_builder.client.get_paper_citations.assert_not_called()
 
@@ -9487,8 +9465,12 @@ def test_reopened_corpus_focal_preserves_provider_evidence_and_graph_score(
         )
         for paper_id in paper_ids
     }
-    client.get_reference_ids.side_effect = (
-        (lambda _paper_id, **_kwargs: ["shared-reference"])
+    client.get_reference_ids_batch.side_effect = (
+        (
+            lambda paper_ids, **_kwargs: ReferenceBatchResult(
+                {paper_id: ["shared-reference"] for paper_id in paper_ids}
+            )
+        )
         if fetch_references
         else AssertionError("reference IDs are disabled for this fixture")
     )
@@ -9791,11 +9773,6 @@ def test_corpus_collection_holds_one_lock_through_focal_and_neighbor_consumption
             "resolve_cached_corpus_focal",
             lambda *_args, **_kwargs: probe.record(events, "focal") or focal,
         )
-        monkeypatch.setattr(
-            embedding_builder,
-            "enrich_cached_corpus_focal",
-            lambda _focal: probe.record(events, "enrich"),
-        )
         offline_hybrid_encoder(monkeypatch, hybrid_builder)
         monkeypatch.setattr(
             embedding_builder,
@@ -9810,7 +9787,7 @@ def test_corpus_collection_holds_one_lock_through_focal_and_neighbor_consumption
         monkeypatch.setattr(
             embedding_builder,
             "_enrich_corpus_papers",
-            lambda _papers: probe.record(events, "enrich neighbors"),
+            lambda _papers, **_kwargs: probe.record(events, "enrich neighbors"),
         )
 
     papers = public_builder.collect_papers(focal.paper_id)
@@ -11026,15 +11003,20 @@ def test_embedding_mps_never_probes_flash_attn(
     assert "flash_attn" not in probed
 
 
+@pytest.mark.parametrize("fp_fusion", [None, "0", "1"])
 def test_embedding_compile_device_gating(
     monkeypatch: pytest.MonkeyPatch,
+    fp_fusion: str | None,
 ) -> None:
-    """Explicit compilation should run on each supported device."""
+    """Compile eligible devices and preserve explicit Triton fusion choices."""
     for device_setup in [
         {"cuda_available": True, "mps_available": False},
         {"cuda_available": False, "mps_available": True},
         {"cuda_available": False, "mps_available": False},
     ]:
+        monkeypatch.delenv("TRITON_DEFAULT_FP_FUSION", raising=False)
+        if fp_fusion is not None:
+            monkeypatch.setenv("TRITON_DEFAULT_FP_FUSION", fp_fusion)
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
             monkeypatch,
@@ -11063,6 +11045,9 @@ def test_embedding_compile_device_gating(
         if builder.device == "cpu":
             expected_kwargs["options"] = {"max_autotune": True}
         assert fake_torch._compile_calls[-1]["kwargs"] == expected_kwargs
+        assert fake_torch._compile_calls[-1]["fp_fusion"] == (
+            "1" if builder.device == "cuda" and fp_fusion is None else fp_fusion
+        )
 
 
 @pytest.mark.parametrize("encode_path", ["direct", "retrieval", "graph", "hydration"])

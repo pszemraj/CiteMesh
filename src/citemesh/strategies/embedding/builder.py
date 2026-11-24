@@ -1199,7 +1199,8 @@ class EmbeddingGraphBuilder(
         from citemesh.services import SemanticScholarRequestError
 
         try:
-            provider_papers = self.client.get_papers([lookup_id])
+            with self.client.retry_section("focal metadata"):
+                provider_papers = self.client.get_papers([lookup_id])
         except SemanticScholarRequestError as exc:
             logger.warning(
                 "Citation enrichment for the focal paper was rejected; keeping corpus metadata: %s",
@@ -1275,9 +1276,10 @@ class EmbeddingGraphBuilder(
         if resolved_focal_paper is None and self.semantic_source == "arxiv-corpus":
             resolved_focal_paper = self._resolve_cached_corpus_focal(focal_id)
         if resolved_focal_paper is None:
-            resolved_focal_paper = self.client.get_paper(
-                focal_id, raise_on_unavailable=True
-            )
+            with self.client.retry_section("focal metadata"):
+                resolved_focal_paper = self.client.get_paper(
+                    focal_id, raise_on_unavailable=True
+                )
 
         if resolved_focal_paper:
             # Focal paper role belongs to this build, including caller-provided metadata.
@@ -2025,17 +2027,24 @@ class EmbeddingGraphBuilder(
                 self._ensure_cache_hydrated(use_streaming=use_streaming)
             return self._search_cache_candidates(focal_embedding)
 
-    def _enrich_corpus_papers(self, papers: dict[str, Paper]) -> None:
+    def _enrich_corpus_papers(
+        self, papers: dict[str, Paper], *, focal: Paper | None = None
+    ) -> None:
         """Enrich collected corpus papers with cached or batched provider metadata.
 
         Conflicting identifiers leave a record unchanged. Rejected batches retain
         metadata already reused or fetched during the current request.
 
         :param Dict[str, Paper] papers: Collected papers, including the focal paper, which is skipped.
+        :param Paper | None focal: Optional local focal paper to include in the batch.
         :return None: Fills missing metadata and updates citation counts in place,
             preserving corpus identifiers and existing title/abstract text.
         """
         targets: list[tuple[Paper, str]] = []
+        if focal is not None and (
+            focal_lookup := provider_lookup_identifier(focal.paper_id, focal)
+        ):
+            targets.append((focal, focal_lookup))
         for paper_id, paper in papers.items():
             if paper.is_focal:
                 continue
@@ -2055,9 +2064,10 @@ class EmbeddingGraphBuilder(
         from citemesh.services import SemanticScholarRequestError
 
         try:
-            batch_results = self.client.get_papers(
-                [lookup_id for _paper, lookup_id in targets]
-            )
+            with self.client.retry_section("selected metadata"):
+                batch_results = self.client.get_papers(
+                    [lookup_id for _paper, lookup_id in targets]
+                )
         except SemanticScholarRequestError as exc:
             logger.warning(
                 "Corpus metadata enrichment was rejected; keeping metadata "

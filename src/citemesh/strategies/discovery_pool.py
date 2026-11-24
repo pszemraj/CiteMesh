@@ -471,6 +471,7 @@ def _fetch_candidate_pool(
         search_limit = min(QUERY_FOCAL_SEARCH_LIMIT, query_candidate_budget)
         if search_limit > 0:
             search_result = fetch_candidate_source(
+                client,
                 "search",
                 lambda: client.search_papers(
                     query_text,
@@ -502,6 +503,7 @@ def _fetch_candidate_pool(
                     pool.add(paper, source="reference", relation="referenced_by_focal")
         if max_citations > 0:
             citation_result = fetch_candidate_source(
+                client,
                 "citations",
                 lambda: client.get_paper_citations(
                     focal_id,
@@ -515,6 +517,7 @@ def _fetch_candidate_pool(
 
     if recommendation_limit > 0 and anchor_ids:
         recommendation_result = fetch_candidate_source(
+            client,
             "recommendations",
             lambda: client.get_recommended_papers(
                 anchor_ids[0],

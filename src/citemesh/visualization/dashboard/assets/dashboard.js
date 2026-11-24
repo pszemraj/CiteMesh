@@ -96,7 +96,7 @@
       const text = String(value || "");
       let digest = 0;
       for (const char of text) {
-        digest = ((digest * 33) + char.charCodeAt(0)) >>> 0;
+        digest = ((digest * 33) + char.codePointAt(0)) >>> 0;
       }
       return digest >>> 0;
     }
@@ -280,14 +280,6 @@
         throw new Error(`Imported dashboard file is missing ${scriptId}.`);
       }
       return JSON.parse(rawJson);
-    }
-
-    function extractEmbeddedScriptJson(text, scriptId) {
-      const parsedDocument = new DOMParser().parseFromString(
-        String(text || ""),
-        "text/html"
-      );
-      return embeddedScriptJson(parsedDocument, scriptId, true);
     }
 
     function parseImportedResultSetFromText(fileText, filename) {
@@ -926,11 +918,6 @@
         return tieBreak(nodeA, nodeB);
       }
       if (state.sortKey === "citation_count") {
-        const citationsA = Number(nodeA.citation_count || 0);
-        const citationsB = Number(nodeB.citation_count || 0);
-        if (citationsA !== citationsB) {
-          return citationsB - citationsA;
-        }
         return tieBreak(nodeA, nodeB);
       }
       if (state.sortKey === "discovery_rank") {
@@ -1602,6 +1589,16 @@
       }
     }
 
+    function finishGraphRender() {
+      setupGraphInteractions();
+      if (state.selectedId && nodeById.has(state.selectedId)) {
+        renderDetail(state.selectedId, false);
+      } else {
+        renderDetail(null, false);
+      }
+      renderList();
+    }
+
     function applyDashboardPayload(nextPayload) {
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
@@ -1640,15 +1637,7 @@
       syncDiscoverySortOption();
       syncDiscoveryLeads();
       renderTimeline();
-      return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
-        setupGraphInteractions();
-        if (state.selectedId && nodeById.has(state.selectedId)) {
-          renderDetail(state.selectedId, false);
-        } else {
-          renderDetail(null, false);
-        }
-        renderList();
-      });
+      return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(finishGraphRender);
     }
 
     function loadCollectionResult(resultId) {
@@ -1908,14 +1897,11 @@
       downloadBtn.type = "button";
       downloadBtn.textContent = "Download BibTeX";
       downloadBtn.addEventListener("click", () => {
-        const blob = new Blob([node.bibtex || ""], { type: "text/plain;charset=utf-8" });
-        const anchor = document.createElement("a");
-        anchor.href = URL.createObjectURL(blob);
-        anchor.download = `${String(node.id || "paper").replace(/[^a-zA-Z0-9._-]+/g, "_")}.bib`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(anchor.href);
+        downloadBlob(
+          node.bibtex || "",
+          `${String(node.id || "paper").replace(/[^a-zA-Z0-9._-]+/g, "_")}.bib`,
+          "text/plain;charset=utf-8"
+        );
       });
 
       controls.detailActions.appendChild(copyBtn);
@@ -2195,6 +2181,17 @@
       if (focusTitle && pane === "detail") controls.detailTitle.focus();
     }
 
+    function downloadBlob(content, filename, mime) {
+      const blob = new Blob([content], { type: mime });
+      const anchor = document.createElement("a");
+      anchor.href = URL.createObjectURL(blob);
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(anchor.href);
+    }
+
     function setupControls() {
       // The list element survives every rebuild, so one listener re-arms previews
       // as soon as the pointer moves after a re-render.
@@ -2282,17 +2279,6 @@
       });
       syncDiscoveryLeads();
       syncSemanticScholarButton();
-
-      function downloadBlob(content, filename, mime) {
-        const blob = new Blob([content], { type: mime });
-        const anchor = document.createElement("a");
-        anchor.href = URL.createObjectURL(blob);
-        anchor.download = filename;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(anchor.href);
-      }
 
       function focalSlug() {
         const focalNode = nodeById.get((payload.meta && payload.meta.focal_id) || "");
@@ -2558,15 +2544,7 @@
         });
         return;
       }
-      Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
-        setupGraphInteractions();
-        if (state.selectedId && nodeById.has(state.selectedId)) {
-          renderDetail(state.selectedId, false);
-        } else {
-          renderDetail(null, false);
-        }
-        renderList();
-      });
+      Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(finishGraphRender);
     }
 
     initialize();

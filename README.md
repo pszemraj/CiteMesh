@@ -101,9 +101,9 @@ Every flag is in `citemesh COMMAND --help` and the [CLI guide](docs/guides/cli.m
 ## Limits
 
 - **Pre-1.0 public beta.** Export formats, cache layouts, and defaults may change between revisions. CiteMesh runs on macOS, Linux, and Windows.
-- **Semantic Scholar sets the pace.** Focal paper lookup and most candidate collection go through its API, which rate-limits clients and can return HTTP 429. CiteMesh retries with backoff; [configure an API key](docs/guides/configuration.md#api-key) for steadier builds. See the [retry policy](docs/guides/cli.md#troubleshooting) for recovery budgets and outage handling.
+- **Semantic Scholar sets the pace.** Focal paper lookup and most candidate collection use its API. HTTP 429 can delay builds even with an [API key](docs/guides/configuration.md#api-key). The [request policy](docs/guides/cli.md#troubleshooting) covers pacing, retries, and outage handling.
 - **Thin provider coverage gives thin graphs.** Recommendation depends on what Semantic Scholar recommends for the focal paper. For an arXiv focal paper, citation, hybrid, and embedding candidate builds can [recover references from its HTML bibliography](docs/guides/cli.md#missing-semantic-scholar-references) when Semantic Scholar returns none.
-- **Graphs are sparse by design.** Each paper keeps only its few strongest links (3 for recommendation and citation, 4 by default for embedding, 5 for hybrid), so the graph shows the closest relations rather than every one ([edge scoring](docs/guides/how-it-works.md#6-edge-scoring)).
+- **Graphs are sparse by design.** Each paper keeps only its few strongest links; [edge scoring](docs/guides/how-it-works.md#6-edge-scoring) describes the limits for each strategy.
 
 ## How it works
 

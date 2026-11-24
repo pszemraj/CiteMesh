@@ -2,27 +2,21 @@
 Reference-list hydration for bibliographic coupling.
 
 Edge scores compare papers' reference lists. A :class:`ReferenceHydrator`
-fetches each collected paper's reference IDs at most once per build, keeps
-them in memory, and after the first provider outage stops requesting and reads
-only persisted reference caches, so an outage costs one failed request rather
-than one per paper.
+groups collected papers' reference lookups, keeps completed lists in memory,
+and reads only persisted reference caches after the provider is unavailable.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Generator, Iterable
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from citemesh.core import Paper
-from citemesh.progress import progress_enabled, progress_iterator
-from citemesh.services import SemanticScholarUnavailableError
+from citemesh.core.paper_ids import normalize_paper_id
 from citemesh.strategies.candidates import provider_lookup_identifier
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
-
-logger = logging.getLogger(__name__)
 
 
 class ReferenceHydrator:
@@ -65,99 +59,98 @@ class ReferenceHydrator:
         :param Paper focal: Focal paper for this build.
         :return None: Empties the focal paper's reference list for this build.
         """
-        self.reference_cache[focal.paper_id] = []
+        self.reference_cache[focal.paper_id.strip()] = []
         focal.references = []
 
-    def hydrate(self, papers: dict[str, Paper], focal: Paper) -> None:
-        """Fill the focal paper's and the collected papers' reference lists.
+    def hydrate(
+        self,
+        papers: dict[str, Paper],
+        focal: Paper,
+        *,
+        provider_aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        """Fill selected reference lists, using merged provider IDs as fallbacks.
 
         :param Dict[str, Paper] papers: Collected papers, possibly with the focal paper.
         :param Paper focal: Focal paper for this build.
+        :param Mapping[str, str] | None provider_aliases: Map from merged
+            provider ID to retained paper ID, in discovery order.
         :return None: Updates paper records and the in-memory cache.
-        """
-        if self.fetch_references:
-            logger.debug("Hydrating reference lists for %d papers...", len(papers))
-
-        self.ensure(focal)
-
-        progress_bar: Generator[tuple[str, Paper], None, None] | None = None
-        paper_items: Iterable[tuple[str, Paper]] = papers.items()
-        if self.fetch_references and progress_enabled() and papers:
-            progress_bar = progress_iterator(
-                paper_items,
-                description="Hydrating reference lists",
-                unit="papers",
-            )
-            paper_items = progress_bar
-
-        try:
-            for paper_id, paper in paper_items:
-                if paper_id != focal.paper_id:
-                    self.ensure(paper)
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
-
-    def ensure(self, paper: Paper) -> None:
-        """Fill one paper's reference IDs without clobbering an existing list.
-
-        :param Paper paper: Paper record to hydrate in place.
-        :return None: Sets ``paper.references`` when a list is available.
         """
         if not self.fetch_references:
             return
 
-        paper_id = str(paper.paper_id).strip()
-        if not paper_id:
+        selected = [
+            focal,
+            *(paper for key, paper in papers.items() if key != focal.paper_id),
+        ]
+        targets = [
+            (paper, normalize_paper_id(lookup_id))
+            for paper in selected
+            if (lookup_id := self._pending_lookup(paper)) is not None
+        ]
+        if not targets and not provider_aliases:
             return
+        lookup_ids = [lookup_id for _, lookup_id in targets]
+        with self.client.retry_section("reference hydration"):
+            fetched = self.fetch_many(lookup_ids)
+            for paper, lookup_id in targets:
+                if (refs := fetched.get(lookup_id)) is not None:
+                    self.reference_cache[paper.paper_id.strip()] = refs
+                    paper.references = list(refs)
+            if provider_aliases:
+                self._hydrate_aliases(
+                    papers, provider_aliases, set(lookup_ids), fetched
+                )
 
+    def _hydrate_aliases(
+        self,
+        papers: Mapping[str, Paper],
+        provider_aliases: Mapping[str, str],
+        attempted: set[str],
+        fetched: dict[str, list[str]],
+    ) -> None:
+        """Use the first non-empty merged provider list for each missing member."""
+        targets = [
+            (paper, normalize_paper_id(alias))
+            for alias, member_id in provider_aliases.items()
+            if (paper := papers.get(member_id)) is not None and not paper.references
+        ]
+        missing = [lookup_id for _, lookup_id in targets if lookup_id not in attempted]
+        fetched.update(self.fetch_many(missing))
+        for paper, lookup_id in targets:
+            if not paper.references and (refs := fetched.get(lookup_id)):
+                self.reference_cache[paper.paper_id.strip()] = refs
+                paper.references = list(refs)
+
+    def fetch_many(self, lookup_ids: Sequence[str]) -> dict[str, list[str]]:
+        """Hydrate provider lookups, returning completed lists by normalized ID."""
+        if not self.fetch_references or not lookup_ids:
+            return {}
+        if self._source_unavailable:
+            if self.refresh_reference_cache:
+                return {}
+            return {
+                paper_id: refs
+                for paper_id in dict.fromkeys(map(normalize_paper_id, lookup_ids))
+                if (refs := self.client.get_cached_reference_ids(paper_id)) is not None
+            }
+        result = self.client.get_reference_ids_batch(
+            lookup_ids, force_refresh=self.refresh_reference_cache
+        )
+        self._source_unavailable = result.unavailable
+        return result.reference_ids
+
+    def _pending_lookup(self, paper: Paper) -> str | None:
+        """Reuse in-memory references or identify a paper requiring a lookup."""
+        paper_id = paper.paper_id.strip()
+        if not paper_id:
+            return None
         if paper.references:
             self.reference_cache.setdefault(paper_id, list(paper.references))
-            return
-
+            return None
         cached_refs = self.reference_cache.get(paper_id)
         if cached_refs is not None:
             paper.references = list(cached_refs)
-            return
-        provider_id = provider_lookup_identifier(paper_id, paper)
-        if provider_id is None:
-            return
-        if self._source_unavailable:
-            if not self.refresh_reference_cache:
-                cached_refs = self.client.get_cached_reference_ids(provider_id)
-                if cached_refs is not None:
-                    self.reference_cache[paper_id] = cached_refs
-                    paper.references = list(cached_refs)
-            return
-
-        try:
-            paper.references = self._fetch(paper_id, provider_lookup_id=provider_id)
-        except SemanticScholarUnavailableError as exc:
-            self._source_unavailable = True
-            logger.warning(
-                "Reference hydration unavailable; continuing with available "
-                "reference data."
-            )
-            logger.debug("Reference hydration failed for %s: %s", paper_id, exc)
-
-    def _fetch(
-        self, paper_id: str, *, provider_lookup_id: str | None = None
-    ) -> list[str]:
-        """Return a paper's reference IDs, from memory unless refreshing.
-
-        :param str paper_id: In-memory cache key for the paper.
-        :param Optional[str] provider_lookup_id: Provider-safe request identifier;
-            defaults to ``paper_id``.
-        :return list[str]: Referenced paper IDs.
-        """
-        if not self.refresh_reference_cache and paper_id in self.reference_cache:
-            return self.reference_cache[paper_id]
-        if self.refresh_reference_cache:
-            self.reference_cache.pop(paper_id, None)
-
-        ref_ids = self.client.get_reference_ids(
-            provider_lookup_id or paper_id,
-            force_refresh=self.refresh_reference_cache,
-        )
-        self.reference_cache[paper_id] = ref_ids
-        return ref_ids
+            return None
+        return provider_lookup_identifier(paper_id, paper)

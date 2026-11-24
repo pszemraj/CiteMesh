@@ -1,6 +1,6 @@
 # Output artifacts
 
-File names, path resolution, and the schema of every format CiteMesh writes. Dashboard runs maintain one reusable viewer plus one versioned data package per collection, not a dashboard per focal paper.
+File names, path resolution, and the schemas of CiteMesh exports.
 
 ## Terminology
 
@@ -10,14 +10,14 @@ Graph JSON, dashboard collections, and build sidecars now use schema version 2. 
 
 ## Artifact set
 
-A dashboard run writes two shared files at the collection root, and sharing a finished collection needs only those two:
+A collection build writes two shared files at the collection root. To share a finished collection, send those two files:
 
-- `dashboard.html` - reusable tri-pane viewer with an embedded snapshot, so it opens from the local filesystem
-- `dashboard.citemesh.json` - authoritative, portable package holding one or more graph results and their build settings
+- `dashboard.html` - reusable viewer that opens from the local filesystem
+- `dashboard.citemesh.json` - portable package with graph results and build settings
 
 A hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots (60-second timeout).
 
-Every collection build also writes a directory `<title-slug>-<hash>/` for the focal paper, holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.
+Each collection result also has graph JSON and a config sidecar, even under `--export dashboard` alone. Other formats are written when selected. The default without `--export` is `png`. See [Output location](#output-location) for paths.
 
 - `<strategy>.png` - static Matplotlib render
 - `<strategy>.html` - Pyvis interactive network; self-contained, with vis-network inlined, so it opens offline and needs no sibling asset folder
@@ -62,7 +62,7 @@ A malformed, unsupported, or inaccessible existing package stops the build befor
 The graph payload requires its `focal_id` to identify a node present in the graph. It contains:
 
 - `kind` (`"citemesh-graph"`), `schema_version` (`2`), `focal_id`
-- `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources. Hybrid builds also include `discovery_ranker`, which describes how the papers were ranked: `{"method": "reciprocal_rank_fusion", "k": 60, "lists": [...]}`, where `lists` names the active lists. Optional `weights` records contributions that differ from one. For example, `{"focal_reference": 0.5}` gives focal citation use half weight. [Ranking formula](../guides/how-it-works.md#5-ranking-and-selection)
+- `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` for candidate sources when recorded by the builder. Hybrid builds also include `discovery_ranker`, which describes how the papers were ranked: `{"method": "reciprocal_rank_fusion", "k": 60, "lists": [...]}`, where `lists` names the active lists. Optional `weights` records contributions that differ from one. For example, `{"focal_reference": 0.5}` gives focal citation use half weight. [Ranking formula](../guides/how-it-works.md#5-ranking-and-selection)
 - `summary` - `nodes`, `edges`
 - `nodes` - enriched per-paper objects
 - `dashboard` - render metadata and stored layout geometry, always present
@@ -84,13 +84,11 @@ Each node carries:
 "discovery_list_ranks": {"semantic": 5, "reference_context": 2, "direct": 1, "recommended": null}
 ```
 
-`focal_relevance` is personalized PageRank over the final similarity graph. The dashboard labels it **Graph relevance**. The dashboard defaults to **Discovery rank** when every related paper has a rank, and **Graph relevance** otherwise. When ranks exist for only some papers, sorting by discovery rank puts unranked papers last. **Why this paper** shows the paper's place in the candidate pool, its discovery signals, and the separate graph evidence. Expand **Discovery score** to see the positions used in fusion. **Add Results** resets the sort, search, year, and scope controls for the loaded graph.
-
 A selected focal reference can carry `focal_reference_evidence`. Its `context_count` counts distinct nonempty passages supplied by Semantic Scholar, `excerpt` holds a sample passage when available, and `is_influential` records the provider flag when supplied. These fields refer to the relationship with this particular focal paper.
 
-**More papers** opens additional reading suggestions beyond the graph. The optional `meta.discovery_leads.references` list contains omitted focal references with at least two reported citation passages, ordered by fused discovery rank. The `corpus` list contains omitted papers found only by the arXiv index, ordered by the focal query’s native retrieval rank. Each list uses at most the graph’s requested related-paper budget. Entries carry a title, identifiers and original rank. Only `nodes` and `edges` define the graph.
+The optional `meta.discovery_leads.references` list contains omitted focal references with at least two reported citation passages, ordered by fused discovery rank. The `corpus` list contains omitted papers found only by the arXiv index, ordered by the focal query's native retrieval rank. Each list uses at most the graph's requested related-paper budget. Entries carry a title, identifiers and original rank. Only `nodes` and `edges` define the graph.
 
-JSON and dashboard share this node schema, and every JSON export carries the layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file loads back into a dashboard through **Add Results** intact.
+The viewer uses this node schema and the layout geometry in `dashboard.meta.plotly_*`.
 
 ## CSV (`<strategy>.csv`)
 
@@ -118,16 +116,19 @@ The header names the focal paper, discovery strategy, and graph size. When recor
 
 **Prior works** includes papers the focal paper references. **Derivative works** includes papers that cite it. For papers without a recorded direction, CiteMesh uses the publication year relative to the focal paper. The focal paper, papers with links in both directions, and undirected papers with unknown years appear in both views. Choose **All papers** to return to the full scope.
 
-The paper list shows discovery rank where available. Select a title to read its abstract, open its source, and inspect **Why this paper**. A missing direct citation in the collected data can reflect incomplete provider coverage.
+The paper list defaults to **Discovery rank** when the graph has related papers and all have a rank. Otherwise it starts on **Graph relevance**, which uses personalized PageRank over the final similarity graph. Sorting by discovery rank places unranked papers last. Select a title to read its abstract, open its source, and inspect **Why this paper** for its position in the candidate pool, discovery signals, and graph evidence. Expand **Discovery score** to see list positions used in fusion. A missing direct citation can reflect incomplete provider coverage.
 
 - **Filters** changes the sort order, publication years, and candidate sources.
 - **Saved** shows papers you have starred in this graph.
 - **Graph tools** contains the graph selector for collections, project links, and the Semantic Scholar shortcut for the selected or focal paper. **Export JSON**, **Export CSV**, and **All BibTeX** download the active graph. **Saved BibTeX** and **Copy Saved Links** appear after you star a paper.
-- **Add Results** in Graph tools imports graph JSON, collection packages, or dashboard HTML. It updates matching graph slots in the current browser session. Use **Export Collection** to keep a copy of the imported set.
+- **Add Results** in Graph tools imports graph JSON with its saved layout, collection packages, or dashboard HTML. It updates matching graph slots for the session and resets sort, search, year, and scope for the loaded graph. Use **Export Collection** to keep the imported set.
+- **More papers** opens additional reading suggestions beyond the graph.
 
 ![Search narrowing the Megalodon paper list and similarity graph](../../assets/ui-dashboard-search-filter.png)
 
-Downloads are named from the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, focal_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
+Graph JSON, CSV, and all/saved BibTeX downloads use the focal paper's title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Individual **Download BibTeX** filenames are based on the selected paper's ID; **Export Collection** uses `dashboard.citemesh.json`.
+
+Starred papers persist in `localStorage` per `(strategy, focal_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
 Node color is a publication-year gradient shown in the year legend, node size tracks citation count, the focal paper wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
 
@@ -135,7 +136,7 @@ Node color is a publication-year gradient shown in the year legend, node size tr
 
 The sidecar records `schema_version: 2`, `build`, `outputs` (resolved artifact paths), and `metadata`.
 
-`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record `max_citations` and `max_references`, which for hybrid are provider fetch limits), `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus-only runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. Hybrid runs never record a candidate-pool budget, since no such budget sizes their pool; `arxiv-corpus` and `both` runs record the corpus settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` disables the elapsed cap (see the [API request policy](../guides/cli.md#troubleshooting)).
+`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record `max_citations` and `max_references`, which for hybrid are provider fetch limits), `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus-only runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. Hybrid runs never record a candidate-pool budget, since no such budget sizes their pool; `arxiv-corpus` and `both` runs record the corpus settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the recovery time limit in seconds per API section. `0.0` means no time limit. See the [API request policy](../guides/cli.md#troubleshooting).
 
 `metadata` carries:
 

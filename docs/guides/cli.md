@@ -57,13 +57,13 @@ Searching an installed portable index:
 - Search skips model loading and cache creation when stored metadata rules out every namespace. When the selected namespace is empty, the `auto` fallback warning and the `--mode local` error name any installed corpora with a `--cache-namespace` command.
 - For fixed settings, corpus views, and recovery, see [Portable corpus indexes](caching.md#portable-corpus-indexes).
 
-Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
+Local search derives its namespace from the [saved embedding settings](../reference/config/config_reference.toml). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
 Other search behavior:
 
 - `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source.
 - Local results include the searched count and a copyable build command. When saved settings select an installed index, it is a hybrid build with `--semantic-source both` and no namespace. When the search passed `--cache-namespace` or a model or dataset selector, the command repeats the namespace and corpus view. The command is omitted with a warning if the cache has no recorded split.
-- [API-key configuration](configuration.md#api-key) and [retries](#troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
+- [API key configuration](configuration.md#api-key) and the [request policy](#troubleshooting) apply when search uses S2.
 
 ### View a saved dashboard
 
@@ -93,7 +93,7 @@ See [Portable corpus indexes](caching.md#portable-corpus-indexes) for the comman
 
 Hybrid builds request up to `--max-references` references from the focal paper through Semantic Scholar (1000 by default; `--max-references 0` turns reference discovery off) and rank every reference returned together with the other candidates. `--no-references` does not turn discovery off: it only skips the later fetch of the selected papers' reference lists used for bibliographic coupling. A retrieved reference that enters through another source still carries its known relationship to the focal paper.
 
-If Semantic Scholar returns no usable references for the focal paper or reference discovery is unavailable, CiteMesh tries the focal paper's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. Corpus-only embedding search does not fetch HTML.
+If Semantic Scholar returns no usable references for the focal paper or reference discovery is unavailable, CiteMesh tries the focal paper's arXiv HTML bibliography when it has an arXiv ID. This applies to citation, hybrid, and embedding candidate collection. It recovers outgoing references, while incoming citations need Semantic Scholar. It requires no PDF/LaTeX extraction or extra dependency. Corpus-only embedding search does not fetch HTML.
 
 What recovery matches:
 
@@ -106,17 +106,12 @@ How recovered references are used:
 - A supplied arXiv version selects that HTML version, while graph identities remain version-independent.
 - Partial recovered lists are not used for shared-reference scoring or stored as complete S2 reference lists.
 
-What recovery does not do:
-
-- Missing HTML and unresolved references leave other available sources usable.
-- It finds outgoing references, not incoming citations, and does not imply complete bibliography coverage.
-- It needs no PDF/LaTeX extraction or extra dependency.
-
 ### Help and console output
 
 Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
 Log lines carry local `HH:MM:SS` timestamps. Builds show the resolved focal title and year when available. The completion summary gives total elapsed time including export, followed by one copyable path per output. Progress rows show the same clock where width permits, recording the last completed-count advance or the task's start before its first increment.
 Redirected logs use plain text without terminal padding or forced line breaks, unless you set `--log-width` or force color.
+The first Semantic Scholar request reports keyed or anonymous access and local pacing. Debug output names the credential source without displaying the key.
 
 `-v`/`--verbose` is shorthand for `--log-level debug`; it works before or after a subcommand. When several verbosity options are present, the last one wins. `--log-level debug --log-file out/run.log` adds option routing, cache and provider details, runtime configuration, retry attempts, and namespace decisions.
 
@@ -128,7 +123,7 @@ Redirected logs use plain text without terminal padding or forced line breaks, u
 | `debug` | Cache, provider, runtime, and scoring diagnostics for development. |
 
 Progress bars appear by default on an interactive terminal at `info` or `debug`, covering paper discovery, corpus queries, embedding batches, reference recovery, and reference enrichment. Provider listings with unknown totals show the completed count against `?`. Narrow terminals prioritize counts and ETA. Search results place year and score or citation count beneath each paper on narrow terminals, while keeping full paper IDs on their own lines.
-During long Semantic Scholar waits, `info` shows which operation is waiting, the next attempt number, and its delay. Individual request diagnostics appear at `debug`.
+After the first Semantic Scholar retry, interactive terminals show a running section count and any backoff wait in the section's progress row or a temporary line. When the section ends, one `info` summary reports total retries, rate-limited retries, and elapsed time. Redirected output also retains `info` notices for waits beyond normal pacing. At `debug`, individual retry attempts are logged; responses also show the endpoint, status, elapsed time, and whether the authentication header was present. The key itself is omitted.
 
 ## Option reference
 
@@ -146,17 +141,18 @@ _`--theme light` with a paper selected._
 
 ## Troubleshooting
 
-Semantic Scholar request policy:
+Semantic Scholar request policy
 
-- **Pacing**: authenticated requests run at 1 request/second, anonymous requests at 0.5.
-- **Retries**: exponential full jitter, up to 30 attempts per HTTP request, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Pagination retries only the failed page. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
-- **Recovery budget, anonymous**: builds share a 90-second budget for a candidate collection. Failed requests, retry attempts, and recovery waits consume it; healthy first requests, local embedding work, and rendering do not.
-- **Recovery budget, authenticated**: builds keep the attempt limit with no elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts.
-- An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary.
+- **Pacing.** The client spaces authenticated requests at least 1.2 seconds apart and anonymous requests at least 2 seconds apart, within Semantic Scholar's published per-key rate. A `Retry-After` duration or HTTP date delays every later request through the same client.
+- **Retries.** Each failed page or batch gets up to 30 attempts and retries only itself. Semantic Scholar answers a large share of keyed and anonymous requests with HTTP 429 at times, and in measurements that share did not fall with waits from 1 to over 60 seconds, so a 429 without `Retry-After` retries at the next pacing slot. Server errors, HTTP 408, and connection failures back off from 4 seconds, doubling per attempt of that request to a 300-second cap. A request that exhausts its attempts stops later uncached requests in its section. Focal metadata, focal references, focal citations, recommendations, keyword search, metadata for arXiv bibliography recovery, selected paper metadata, and reference hydration are separate sections.
+- **Timeouts.** HTTP connect and read timeouts default to 30 seconds; retries shorten them to the remaining recovery time limit when one is set. These are not wall-clock deadlines. Bad parameters and rejected credentials fail immediately.
+- **Recovery time limit.** Set `--s2-retry-budget SECONDS`, for example `--s2-retry-budget 60`, to cap the time spent recovering in each section. Failed requests, retries, and recovery waits count toward the limit. Healthy first requests, embedding work, and rendering are excluded. The default `0` leaves only the attempt limit. An in-flight request may run past the time limit.
+
+A request rejected only with HTTP 429 costs about one pacing interval per retry. Persistent server errors can wait about two hours per request before its attempts run out; set a recovery time limit to stop sooner. The measurements behind this policy are in [Semantic Scholar request policy](../internals/semantic-scholar-requests.md).
 
 Common symptoms:
 
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
-- **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a graph containing only the focal paper. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
+- **Partial outage.** Citation and hybrid builds can continue when at least one requested source completes or returns a valid empty result. When a request exhausts its attempts, its section stops making uncached requests. Other sections keep running. Optional enrichment keeps successful results and available cached data. Exports mark each source `complete`, `empty`, or `unavailable`. If all requested sources are unavailable, the build exits nonzero.
 - **Slow first embedding run**: see [hydration and resume](caching.md#corpus-hydration-and-resume).

@@ -1102,8 +1102,8 @@ def _add_build_arguments(
         metavar="SECONDS",
         default=None,
         help=(
-            "Override Semantic Scholar recovery time; 0 disables the elapsed cap "
-            "(default: 90 seconds for anonymous access, no cap with an API key)."
+            "Cap Semantic Scholar recovery time per section. "
+            "0 keeps up to 30 attempts with no recovery time limit (default: 0)."
         ),
     )
     export_group = build_parser.add_argument_group("Output")
@@ -1232,9 +1232,8 @@ def _add_search_arguments(
         metavar="SECONDS",
         default=None,
         help=(
-            "Override Semantic Scholar recovery time when search uses S2; 0 "
-            "disables the elapsed cap (default: 90 seconds for anonymous access, "
-            "no cap with an API key)."
+            "Cap recovery time when search uses Semantic Scholar. "
+            "0 keeps up to 30 attempts with no recovery time limit (default: 0)."
         ),
     )
     search_parser.add_argument(
@@ -1541,7 +1540,7 @@ def _add_config_arguments(
         description=(
             "Manage persistent CiteMesh defaults stored in config.toml under "
             "the cache root. Precedence: explicit CLI flag > config.toml > "
-            "built-in default; S2_API_KEY, when set, overrides api.s2_api_key."
+            "built-in default."
         ),
         epilog=_rich_epilog(
             _help_examples(
